@@ -55,10 +55,11 @@ THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
     description="Number of thinking rounds ThinkingAgent runs before replying. Must be a concrete int >= 0; 0 skips thinking entirely and replies immediately."
 )
 
-# RETURN_VALUE_FIELD is the kwargs key DagAgent/PlanActAgent use for their
-# synthesized RETURN_ALIAS call's resolved value (utils/dag.py's
-# parse_generation/resolve_call_args), and the parameter name return_tool's
-# own real signature uses (agents/tools.py's `_return(val)`).
+# RETURN_VALUE_FIELD is the kwargs key PlanActAgent uses for its
+# synthesized RETURN_ALIAS call's resolved value (utils/sigils.py's
+# parse_generation/utils/agents.py's resolve_statement_args), and the
+# parameter name return_tool's own real signature uses (agents/tools.py's
+# `_return(val)`).
 RETURN_VALUE_FIELD = "val"
 
 
@@ -89,7 +90,7 @@ RETURN_TOOL_FULL_NAME = (
 # ScriptActAgent code-statement reserved literals
 # =============================================================================
 # Used by:
-# - models/agents/blackboard_models.py: CodeStatement.tool default alias
+# - models/agents/blackboard_models.py: ToolStatement.tool default alias
 # - utils/script.py: parse_statement_to_slots hoisting/rhs_assign/return/
 #   task-result-reference logic
 # - agents/toolagent.py: ToolAgent.render_turn cross-invocation result
@@ -107,7 +108,7 @@ RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
 
 PY_BUILTIN_ALIAS = "py_builtin"
-"""Reserved CodeStatement.tool sentinel for a rewritten Python builtin call
+"""Reserved ToolStatement.tool sentinel for a rewritten Python builtin call
 -- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
 alias may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_alias,
 extended by agents/scriptact.py's ScriptActAgent._validate_effective_tool_id).
@@ -116,7 +117,7 @@ those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
 
 ATTR_CALL_ALIAS = "attr_call"
-"""Reserved CodeStatement.tool sentinel for an attribute/method call
+"""Reserved ToolStatement.tool sentinel for an attribute/method call
 (`obj.method(...)`) on a value the plan already holds -- same treatment as
 PY_BUILTIN_ALIAS: reserved from real tool aliases, dispatches through a real
 Tool (agents.tools.attr_call_tool), counts toward tool-call budget
@@ -148,7 +149,7 @@ gate; the parse-time check exists so an excluded name gets a specific
 regen-repair message instead of falling through to the generic
 "unregistered tool" one)."""
 
-# Reserved CodeStatement.kwargs key marking a `**expr` unpack in a real call.
+# Reserved ToolStatement.kwargs key marking a `**expr` unpack in a real call.
 # "**" is never a valid Python identifier, so it can never collide with a
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
@@ -192,141 +193,12 @@ UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
     ast.Lambda: "lambda",
 }
 
-FINAL_ROUND_WARNING = (
-    "This is your FINAL planning round -- you must complete the entire "
-    "task now; you may not defer further."
-)
-"""Appended (space-separated) to a continuation instruction when
-DagAgent._is_final_round(task) is true, in that class's own
-_render_task_messages continuation branch. DagAgent-only since the
-scriptact-repair-rework pass: ScriptActAgent dropped its own voluntary
-`# PAUSE`/_is_final_round mechanism entirely in favor of a strictly
-one-shot planner plus a bounded, framework-only repair-on-failure
-mechanism (see agents/scriptact.py) -- there is no more model-authored
-"final round" concept for it to warn about, so this constant is kept
-(DagAgent, frozen this release, still imports and uses it) but is no
-longer shared across two families. Deliberately grammar-neutral wording
-("you may not defer further" rather than a `# PAUSE`-specific phrasing)
-is a holdover from when it WAS shared -- harmless to keep as-is for
-DagAgent's own sake, just no longer load-bearing for that reason."""
-
-# =============================================================================
-# DagAgent output_structure schema
-# =============================================================================
-# Used by:
-# - utils/dag.py: build_dag_schema deep-copies this template and injects the
-#   dynamic call.enum from the current toolbox.
-# - agents/dag.py (Pass 3): passes the built schema as output_structure on
-#   every planning-round engine call.
-#
-# Field names are plain string literals, not separate per-field-name
-# constants (unlike STEP_FIELD/TOOL_FIELD/etc. above) -- this schema has
-# exactly one producer (this constant) and one consumer (utils/dag.py's
-# parse_generation), so there is no cross-file drift risk a shared constant
-# would guard against. call.enum ships empty -- never sent to a provider
-# as-is; build_dag_schema always populates it first.
-#
-# "summary" is a top-level field, not a per-plan-item "reason" (revised
-# 2026-09-20, during Pass 3's prompt design -- superseding the original
-# per-item reason field this schema shipped with in Pass 2). Only
-# "properties" dict insertion order is load-bearing for constrained
-# decoding (not "required"'s order) -- summary must be declared before
-# plan/remaining_work/return so the model's stated reasoning can
-# causally precede every one of them, the same field-order principle the
-# original per-item reason design was built on, just applied once per
-# round instead of once per call: cheaper (one reasoning blob, not N), and
-# lets the model reason about the whole batch's strategy and its own
-# halt/continue decision, neither of which a per-call reason ever
-# actually informed.
-
-DAG_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "plan", "remaining_work", "return"],
-    "properties": {
-        "summary": {
-            "type": "string",
-            "description": (
-                "Briefly describe the work this round's plan accomplishes, "
-                "and whether the task will be complete after it runs."
-            ),
-        },
-        "plan": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["call", "arguments", "result_name"],
-                "properties": {
-                    "call": {"type": "string", "enum": []},
-                    "arguments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["name", "value"],
-                            "properties": {
-                                "name": {"type": ["string", "null"]},
-                                "value": {
-                                    "type": ["number", "boolean", "null", "string"],
-                                    "description": (
-                                        "A literal value (any JSON scalar), or a "
-                                        "string. A string that is *exactly* '$name' "
-                                        "(nothing else) refers to an earlier "
-                                        "result_name or a K_/task_result_ value, "
-                                        "substituted with its real value and type. "
-                                        "A '$name' appearing inside a longer string "
-                                        "is spliced in as text (stringified) at that "
-                                        "position. A '$name' that doesn't match "
-                                        "anything is left as literal text, sigil "
-                                        "included -- not an error. To build a "
-                                        "list/tuple/set or dict, call "
-                                        "make_sequence/make_dict instead of writing "
-                                        "a container here."
-                                    ),
-                                },
-                            },
-                        },
-                    },
-                    "result_name": {"type": ["string", "null"]},
-                },
-            },
-        },
-        "remaining_work": {
-            "type": ["string", "null"],
-            "description": (
-                "Null (or blank) once this round's plan, together with "
-                "'return', finishes the task. Otherwise, a non-empty "
-                "string describing exactly what still needs to happen "
-                "and what you need to inspect before deciding the next "
-                "steps -- this text is shown back to you, verbatim, at "
-                "the start of the next round, so write it as a note to "
-                "your own future self, not just a status label."
-            ),
-        },
-        "return": {
-            "type": ["number", "boolean", "null", "string"],
-            "description": (
-                "A non-null value follows the same rules as an argument's "
-                "value (literal, or a '$name' reference/interpolation). "
-                "null means nothing is returned this round ('remaining_"
-                "work' governs instead)."
-            ),
-        },
-    },
-}
-
 # PlanActAgent's own output_structure schema (agent-taxonomy `planact-
-# rewrite` design record) -- DAG_OUTPUT_SCHEMA's shape minus
-# `remaining_work` entirely: a one-shot planner has no continuation round
-# to defer to, so there is no field for it. `return` keeps DAG_OUTPUT_
-# SCHEMA's own full value union, `null` included -- presence and
-# nullability are separate concerns: `return` is unconditionally in
-# `required` (always present, exactly like DAG_OUTPUT_SCHEMA's own
-# `return`), but its *value* may still legitimately be `null` when the
-# task has nothing meaningful to hand back. Never a "come back later"
-# signal here, unlike `remaining_work`'s absence might suggest -- there is
-# no later.
+# rewrite` design record) -- a one-shot planner has no continuation round
+# to defer to, so there is no `remaining_work`-style field at all. `return`
+# is unconditionally in `required` (always present), but its *value* may
+# still legitimately be `null` when the task has nothing meaningful to hand
+# back -- presence and nullability are separate concerns.
 PLANACT_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -401,7 +273,7 @@ PLANACT_OUTPUT_SCHEMA: dict[str, Any] = {
 # separate field). Field order matters (constrained decoding assigns zero
 # probability to a token generated for a field declared after the one that
 # would need it) -- `summary` first, same reasoning-before-decision
-# principle as DAG_OUTPUT_SCHEMA/PLANACT_OUTPUT_SCHEMA.
+# principle as PLANACT_OUTPUT_SCHEMA.
 REACT_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -448,15 +320,15 @@ REACT_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Matches a `$`-sigil reference inside a DagAgent-, PlanActAgent-, or
-# ReActAgent-generated `value`/`return` string: `$` followed by an
-# identifier-legal name,
-# captured as group 1. Used two ways by utils/dag.py -- `DAG_REF_PATTERN.fullmatch(s)` (is the
-# WHOLE string one reference?) and `DAG_REF_PATTERN.finditer(s)`/`.sub(s)`
-# (find/splice every embedded occurrence) -- one pattern serves both, no
-# anchors baked into the text itself (fullmatch anchors on its own, exactly
-# like this file's own IDENTIFIER_PATTERN precedent elsewhere).
-DAG_REF_PATTERN: re.Pattern[str] = re.compile(rf"\$({IDENTIFIER_PATTERN_TEXT})")
+# Matches a `$`-sigil reference inside a PlanActAgent-/ReActAgent-generated
+# `value`/`return` string -- used exclusively inside utils/sigils.py's
+# translate_calls (candidate-token scanning during JSON -> ast translation:
+# `SIGIL_REF_PATTERN.fullmatch(s)` for a whole-string reference,
+# `SIGIL_REF_PATTERN.finditer(s)` for every embedded occurrence), not a
+# resolve-time mechanism anymore. No anchors baked into the text itself
+# (fullmatch anchors on its own, exactly like this file's own
+# IDENTIFIER_PATTERN precedent elsewhere).
+SIGIL_REF_PATTERN: re.Pattern[str] = re.compile(rf"\$({IDENTIFIER_PATTERN_TEXT})")
 
 
 __all__ = [
@@ -481,16 +353,13 @@ __all__ = [
     "TRAILING_CODE_FENCE_PATTERN",
     "DUNDER_ATTRIBUTE_PATTERN",
     "UNSUPPORTED_EXPR_LABELS",
-    "FINAL_ROUND_WARNING",
     "RETURN_VALUE_FIELD",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",
     "RETURN_TOOL_DESCRIPTION",
     "RETURN_TOOL_FULL_NAME",
-    # DagAgent output_structure schema
-    "DAG_OUTPUT_SCHEMA",
-    "DAG_REF_PATTERN",
+    "SIGIL_REF_PATTERN",
     # PlanActAgent output_structure schema
     "PLANACT_OUTPUT_SCHEMA",
     # ReActAgent output_structure schema

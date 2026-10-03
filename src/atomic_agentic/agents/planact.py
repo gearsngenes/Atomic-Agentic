@@ -8,16 +8,15 @@ invoke, via provider-native structured output (``LLMEngine.output_structure``,
 then compiled into topologically-sorted concurrent batches and executed
 without further LLM interaction.
 
-Design lineage: this class deliberately mirrors ``DagAgent`` closely --
-``$name``-sigil argument resolution, ``DagToolCall``-based batches,
-``utils/dag.py``'s ``compile_batches``/``resolve_call_args`` reused directly
--- minus everything that exists only to support ``DagAgent``'s multi-round
-continuation (``remaining_work``, ``planning_rounds_limit``, the
-continuation-snapshot render path). A one-shot planner has no second round
-to fall back to, which is also why it needs one thing ``DagAgent`` doesn't:
-cascade-failure handling (``fail_fast=False``) that lets independent
-branches of the same plan keep running when part of it fails, since there's
-no continuation round to hand the problem to instead.
+Design: uses ``$name``-sigil argument resolution, translated into real
+``ast.expr`` nodes on a shared ``ToolStatement`` (``utils/sigils.py``'s
+``translate_calls``), and ``ToolStatement``-based batch compilation
+(``utils/agents.py``'s ``compile_batches``/``resolve_statement_args``,
+reused directly). No multi-round continuation of any kind -- a one-shot
+planner decides everything in a single generation, which
+is also why it needs cascade-failure handling (``fail_fast=False``): with no
+continuation round to hand a failure to, independent branches of the same
+plan must be able to keep running on their own when part of it fails.
 
 Planning Model
 --------------
@@ -33,16 +32,18 @@ calls may reference.
 
 Compilation
 -----------
-``parse_generation`` (``utils/dag.py``) normalizes the validated payload into
-a flat ``DagToolCall`` sequence, synthesizing a trailing ``RETURN_ALIAS`` call
-from the (always-present) ``return`` value. ``compile_batches`` groups that
-sequence into concurrency batches by ``$name`` dependency, with the
-``RETURN_ALIAS`` call always isolated into its own final batch.
+``parse_generation`` (``utils/sigils.py``) normalizes the validated payload
+into a flat list of draft calls; ``translate_calls`` then validates and
+translates those drafts into a flat ``ToolStatement`` sequence (synthesizing
+a trailing ``RETURN_ALIAS`` call from the (always-present) ``return``
+value). ``compile_batches`` groups that sequence into concurrency batches by
+``$name`` dependency, with the ``RETURN_ALIAS`` call always isolated into
+its own final batch.
 
 Execution
 ---------
 Generation and validation happen once, in ``think()``. ``prepare()`` resolves
-each batch's ``$name`` references via ``resolve_call_args`` as it's reached.
+each batch's ``$name`` references via ``resolve_statement_args`` as it's reached.
 ``act()``/``async_act()`` dispatch each batch concurrently and apply results.
 On a resolution or execution failure: ``fail_fast=True`` raises immediately;
 ``fail_fast=False`` (cascade) skips only the calls that transitively depend
@@ -73,20 +74,18 @@ from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
+from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.tasks import PlanActTask
 from ..models.agents.records import AgentRecord, JsonToolAgentRecord, LLMRecord
 from ..models.results.agents import JsonToolAgentResult, ToolUsageRecord
+from ..utils.agents import compile_batches, extract_identifiers, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
-from ..utils.dag import (
+from ..utils.sigils import (
     build_planact_schema,
-    compile_batches,
     find_cascade_failures,
-    find_sigil_refs,
-    is_dispatched_call,
     parse_generation,
     render_failed_as_json,
-    resolve_call_args,
-    validate_calls,
+    translate_calls,
 )
 
 
@@ -99,9 +98,9 @@ class PlanActAgent(ToolAgent):
     ``output_structure``, executes it in concurrent batches, never
     replans.
 
-    **Design**: mirrors ``DagAgent`` closely (see module docstring for the
-    full lineage). The one genuinely new mechanism relative to ``DagAgent``
-    is cascade-failure handling -- see ``_apply_batch_results`` below.
+    **Design**: see the module docstring for the full lineage. Cascade-
+    failure handling (see ``_apply_batch_results`` below) is this class's
+    own distinguishing mechanism.
 
     Advantages
     ~~~~~~~~~~
@@ -114,7 +113,7 @@ class PlanActAgent(ToolAgent):
     - **Schema-guaranteed shape**: ``output_structure`` strict mode makes a
       malformed-shape generation structurally impossible -- the
       regeneration-retry loop only ever fires for semantic issues
-      (``validate_calls``), never a parse failure.
+      (``translate_calls``), never a parse failure.
 
     Limitations
     ~~~~~~~~~~~
@@ -235,8 +234,8 @@ class PlanActAgent(ToolAgent):
         inputs: dict,
     ) -> PlanActTask:
         """
-        Ported from ``DagAgent._initialize_task``: build a bare
-        ``PlanActTask``, seed its ``cache`` with every visible prior turn's
+        Build a bare ``PlanActTask``, seed its ``cache`` with every visible
+        prior turn's
         result under ``task_result_{i}`` (unconditional over whatever
         ``turns`` contains -- every committed turn is definitionally a
         completed success under this model), and seed ``constant_values``
@@ -259,9 +258,8 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _render_current_task_message(self, task: PlanActTask) -> dict[str, str]:
         """
-        The "what is the task" user message. Unlike ``DagAgent``'s own
-        version, this one carries the ``tool_calls_limit`` text -- moved
-        out of the system prompt entirely (see
+        The "what is the task" user message. Carries the ``tool_calls_limit``
+        text -- moved out of the system prompt entirely (see
         ``ToolAgent._render_system_message``) since it's a
         per-invocation fact, not a standing instruction, and showing it
         here avoids spending system-prompt tokens on it every construction
@@ -277,10 +275,9 @@ class PlanActAgent(ToolAgent):
         """
         Build-once contract. No continuation branch exists at all -- this
         family never re-enters ``think()`` after its one real generation
-        call, unlike ``DagAgent``'s own version. Regen-repair feedback (on
-        a semantic validation failure) is injected by the retry loop
-        itself as ``additional_messages``, never through this method --
-        same separation ``DagAgent._run_planning_retry_loop`` keeps.
+        call. Regen-repair feedback (on a semantic validation failure) is
+        injected by the retry loop itself as ``additional_messages``, never
+        through this method.
         """
         if task.task_messages:
             return task.task_messages
@@ -297,29 +294,25 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_output: dict[str, Any], task: PlanActTask,
-    ) -> list[list[Any]] | str:
+    ) -> list[list[ToolStatement]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, validate semantics + remaining tool-call budget, and compile
-        into batches. Returns the compiled batches on success, or a
-        feedback string describing every problem found on failure.
-
-        Ported from ``DagAgent._process_generation_output``, deltas:
-        ``remaining_work`` is discarded (``parse_generation`` always
-        returns ``None`` for it against this schema) and hardcoded ``None``
-        into ``validate_calls`` -- both of that function's
-        ``remaining_work``-keyed checks become permanent no-ops. No
-        final-round-defer check -- there is no rounds concept to bound.
+        parse (``parse_generation``, raw JSON -> drafts), translate
+        (``translate_calls``, drafts -> validated ``ToolStatement``s against
+        the remaining tool-call budget), and compile into batches. Returns
+        the compiled batches on success, or a feedback string describing
+        every problem found on failure. No final-round-defer check -- there
+        is no rounds concept to bound.
         """
-        calls, _ = parse_generation(raw_output)
+        drafts = parse_generation(raw_output)
 
         remaining_budget = self._tool_calls_limit
         known_names = frozenset(task.cache) | frozenset(task.constant_values)
-        issues = validate_calls(calls, None, remaining_budget, known_names)
+        issues, calls = translate_calls(drafts, remaining_budget, known_names)
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            # TODO(smoke-test aid, mirrors DagAgent's own): remove once
+            # TODO(smoke-test aid): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[PlanActAgent DEBUG] plan rejected, issues:\n{issues_msg}")
             return issues_msg
@@ -336,8 +329,7 @@ class PlanActAgent(ToolAgent):
         attempt, validate/compile via ``_process_generation_output``, and
         retry with injected feedback on failure until success or the
         regeneration budget (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Ported from
-        ``DagAgent._run_planning_retry_loop``, including its smoke-test-aid
+        ``task.regenerations_used``) is exhausted. Includes a smoke-test-aid
         debug print of every raw generated plan (see
         ``_process_generation_output`` for the matching rejected-issues
         print).
@@ -351,7 +343,7 @@ class PlanActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors DagAgent's own): remove once
+            # TODO(smoke-test aid): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[PlanActAgent DEBUG] generated plan:\n{json.dumps(raw_output, indent=2)}")
 
@@ -394,7 +386,7 @@ class PlanActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors DagAgent's own): remove once
+            # TODO(smoke-test aid): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[PlanActAgent DEBUG] generated plan:\n{json.dumps(raw_output, indent=2)}")
 
@@ -434,7 +426,7 @@ class PlanActAgent(ToolAgent):
         becomes ``True`` (the return call executed) or ``_check_plan_exhausted``
         already raised -- ``act()`` never returns in an intermediate state
         where ``completed`` is non-empty but ``pending``/``complete`` both
-        say "keep going" (matches ``DagAgent.think``'s identical guard).
+        say "keep going".
         """
         if task.pending or task.complete:
             return task
@@ -457,11 +449,8 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def prepare(self, task: PlanActTask) -> PlanActTask:
         """
-        Resolve the next pending batch's args.
-
-        Ported from ``DagAgent.prepare``, with the failure branch replaced
-        entirely -- ``DagAgent`` has a continuation round to fall back to
-        on a resolution failure; this family doesn't:
+        Resolve the next pending batch's args. This family has no
+        continuation round to fall back to on a resolution failure:
 
         1. If ``task.pending`` is empty: reset ``task.resolved_args`` and
            return unchanged (no ``continue_planning`` branch to check --
@@ -509,7 +498,7 @@ class PlanActAgent(ToolAgent):
         for i, call in enumerate(batch):
             label = call.identifier if call.identifier is not None else "(unassigned)"
             try:
-                positional, keyword = resolve_call_args(call, resolution_namespace)
+                positional, keyword = resolve_statement_args(call, resolution_namespace)
                 if call.tool == RETURN_ALIAS:
                     bound = {RETURN_VALUE_FIELD: keyword[RETURN_VALUE_FIELD]}
                 else:
@@ -538,7 +527,7 @@ class PlanActAgent(ToolAgent):
             # The current batch's own surviving entries may also reference
             # a poisoned name from a sibling failure within this same
             # batch -- filter resolved_by_index accordingly. Given today's
-            # compile_batches/validate_calls invariants (a call depending on
+            # compile_batches/translate_calls invariants (a call depending on
             # another can never land in the same batch as it -- the
             # dependency forces a batch split first), this loop can't
             # currently find a match; kept anyway as cheap insurance against
@@ -547,11 +536,7 @@ class PlanActAgent(ToolAgent):
             for i, call in enumerate(batch):
                 if i not in resolved_by_index:
                     continue
-                refs: set[str] = set()
-                for value in call.args:
-                    refs |= find_sigil_refs(value)
-                for value in call.kwargs.values():
-                    refs |= find_sigil_refs(value)
+                refs = set(extract_identifiers(call.args)) | set(extract_identifiers(call.kwargs))
                 if refs & poisoned:
                     del resolved_by_index[i]
 
@@ -572,22 +557,18 @@ class PlanActAgent(ToolAgent):
         return self.prepare(task)
 
     @staticmethod
-    def _drop_poisoned_calls(pending: list[list[Any]], poisoned: set[str]) -> None:
+    def _drop_poisoned_calls(pending: list[list[ToolStatement]], poisoned: set[str]) -> None:
         """
         Remove, in place, every call from every batch in ``pending`` whose
-        ``args``/``kwargs`` reference (via ``find_sigil_refs``) any name in
-        ``poisoned`` -- named or not. ``poisoned`` is a filter key
+        ``args``/``kwargs`` reference (via ``extract_identifiers``) any name
+        in ``poisoned`` -- named or not. ``poisoned`` is a filter key
         (``find_cascade_failures``'s own return contract), not a list of
         calls to remove directly.
         """
         for batch in pending:
             survivors = []
             for call in batch:
-                refs: set[str] = set()
-                for value in call.args:
-                    refs |= find_sigil_refs(value)
-                for value in call.kwargs.values():
-                    refs |= find_sigil_refs(value)
+                refs = set(extract_identifiers(call.args)) | set(extract_identifiers(call.kwargs))
                 if not (refs & poisoned):
                     survivors.append(call)
             batch[:] = survivors
@@ -598,11 +579,13 @@ class PlanActAgent(ToolAgent):
     async def _gather_batch_results(
         self, batch: list[Any], resolved: list[dict[str, Any]],
     ) -> list[Any]:
-        """Ported verbatim from ``DagAgent._gather_batch_results``."""
+        """Dispatch every dispatched call in ``batch`` concurrently via
+        ``asyncio.gather``; a non-dispatched (``RETURN_ALIAS``) entry's
+        result is already its resolved ``val``, no dispatch needed."""
         coros: list[Any] = []
         dispatch_map: dict[int, int] = {}
         for i, call in enumerate(batch):
-            if is_dispatched_call(call):
+            if is_dispatched(call):
                 dispatch_map[i] = len(coros)
                 tool = self.get_tool(call.tool)
                 coros.append(tool.async_invoke(resolved[i]))
@@ -621,17 +604,13 @@ class PlanActAgent(ToolAgent):
         raw_results: list[Any],
     ) -> PlanActTask:
         """
-        Shared post-gather bookkeeping for ``act``/``async_act``. Ported
-        from ``DagAgent._apply_batch_results``, with the failure branch
-        replaced entirely -- this is the one real behavioral divergence
-        from ``DagAgent``'s own version, since ``DagAgent`` has no
-        fail-fast/cascade fork at all (every failure there triggers a
-        forced continuation; this family has no continuation to fall back
-        to).
+        Shared post-gather bookkeeping for ``act``/``async_act``. This
+        family has no continuation round to fall back to, so a failure here
+        is handled entirely by the ``fail_fast``/cascade fork below rather
+        than ever triggering a forced continuation:
 
         1. Partition ``raw_results`` into successes/failures (same
-           ``is_dispatched_call`` gate, same ``BaseException`` check as
-           ``DagAgent``'s own version).
+           ``is_dispatched`` gate, same ``BaseException`` check).
         2. No failures: apply successes into ``completed``/``cache``; if
            the ``RETURN_ALIAS`` call succeeded, set
            ``generated_response``/``complete``; pop the batch.
@@ -653,11 +632,11 @@ class PlanActAgent(ToolAgent):
         triples = list(zip(batch, resolved, raw_results))
         failures = [
             (call, kwargs, raw) for call, kwargs, raw in triples
-            if is_dispatched_call(call) and isinstance(raw, BaseException)
+            if is_dispatched(call) and isinstance(raw, BaseException)
         ]
         successes = [
             (call, kwargs, raw) for call, kwargs, raw in triples
-            if not (is_dispatched_call(call) and isinstance(raw, BaseException))
+            if not (is_dispatched(call) and isinstance(raw, BaseException))
         ]
 
         if failures:
@@ -719,14 +698,11 @@ class PlanActAgent(ToolAgent):
 
     def act(self, task: PlanActTask) -> PlanActTask:
         """
-        Execute the currently prepared batch, or -- unlike ``DagAgent.act``,
-        which never needs this -- consume a batch that cascade-filtering
-        emptied out entirely before it ever reached dispatch (`DagAgent`
-        always clears the *whole* of `pending` on any failure, never
-        partially filters one batch, so this situation never arises there).
-        Without popping it here, `prepare()` would keep re-processing the
-        same now-empty batch forever -- this is a real bug this
-        implementation found and fixed via live testing, not a
+        Execute the currently prepared batch, or consume a batch that
+        cascade-filtering emptied out entirely before it ever reached
+        dispatch. Without popping it here, `prepare()` would keep
+        re-processing the same now-empty batch forever -- this is a real
+        bug this implementation found and fixed via live testing, not a
         theoretical concern.
         """
         if not task.resolved_args:
@@ -764,8 +740,7 @@ class PlanActAgent(ToolAgent):
         """
         Assemble a completed ``JsonToolAgentRecord`` from a finished
         ``PlanActTask``. No agent-level global blackboard to persist into
-        -- each record owns its own calls outright, mirroring
-        ``DagAgent._build_record_from_task``'s identical shape.
+        -- each record owns its own calls outright.
         """
         prev = turns[-1] if turns else None
         return JsonToolAgentRecord(
@@ -789,11 +764,9 @@ class PlanActAgent(ToolAgent):
     ) -> JsonToolAgentResult:
         """
         Construct this agent's ``JsonToolAgentResult`` envelope directly
-        from a completed ``JsonToolAgentRecord``. No ``DagAgent`` override
-        exists to port from (confirmed -- ``DagAgent`` uses base
-        ``Agent.build_result_from_record``'s plain ``AgentResult``
-        unmodified); follows that base method's own documented contract
-        shape instead (``base.py``'s ``build_result_from_record``).
+        from a completed ``JsonToolAgentRecord``, following the base
+        method's own documented contract shape (``base.py``'s
+        ``build_result_from_record``).
 
         Derives ``tool_usage`` from ``record.statements`` (per-tool call
         counts, ``RETURN_ALIAS`` excluded, ordered by first-call order) and
@@ -804,7 +777,7 @@ class PlanActAgent(ToolAgent):
 
         counts: dict[str, int] = {}
         for call in record.statements:
-            if is_dispatched_call(call):
+            if is_dispatched(call):
                 counts[call.tool] = counts.get(call.tool, 0) + 1
         tool_usage = tuple(
             ToolUsageRecord(tool_name=name, call_count=count)

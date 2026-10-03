@@ -3,18 +3,22 @@ from __future__ import annotations
 import ast
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 
 from ..constants.agents import (
     CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
+    KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
 from ..constants.core import NO_VAL
 from ..exceptions import BlackboardParseError
+from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 
 __all__ = [
@@ -27,6 +31,9 @@ __all__ = [
     "reject_unsupported_forms",
     "stringify_result",
     "strip_code_fence",
+    "is_dispatched",
+    "compile_batches",
+    "resolve_statement_args",
 ]
 
 
@@ -245,7 +252,7 @@ def extract_identifiers(
     Accepts a single parsed expression node, a slot's ``kwargs`` dict, or a
     slot's ``args`` tuple/list -- in the dict/tuple/list forms, only values
     that are still unresolved ``ast.expr`` nodes contribute identifiers; an
-    already-folded raw literal value contributes none. A ``CodeStatement``
+    already-folded raw literal value contributes none. A ``ToolStatement``
     with both containers calls this once per container and merges the
     results -- this function stays single-container. An ``ast.Starred``
     entry (a ``*expr`` unpack in ``args``) is itself an ``ast.expr``
@@ -306,7 +313,7 @@ def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     Raises whatever the evaluation naturally raises (``TypeError``,
     ``ZeroDivisionError``, ``NameError``, ``KeyError``, ...), uncaught --
     callers decide whether to wrap (parse-time constant folding) or let it
-    surface naturally (``resolve_slot_args``/``resolve_call_args``).
+    surface naturally (``resolve_statement_args``).
     """
     expr_wrapper = ast.Expression(body=node)
     ast.fix_missing_locations(expr_wrapper)
@@ -358,3 +365,162 @@ def reject_unsupported_forms(node: ast.expr) -> None:
             raise BlackboardParseError(
                 f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
             )
+
+
+def is_dispatched(call: ToolStatement) -> bool:
+    """
+    True iff ``call`` represents a real dispatched call rather than a
+    non-dispatched sentinel (``RETURN_ALIAS`` or ``RHS_ASSIGN_ALIAS``).
+    Unifies two prior, grammar-specific per-module predicates into one
+    shared implementation -- a ``PlanActAgent``/
+    ``ReActAgent``-sourced statement never has ``tool == RHS_ASSIGN_ALIAS``,
+    so excluding it is a correct no-op for those families; a
+    ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` statement (``ScriptActAgent``-
+    only) is still a real dispatch either way, matching prior behavior
+    exactly.
+    """
+    return call.tool not in (RETURN_ALIAS, RHS_ASSIGN_ALIAS)
+
+
+def compile_batches(
+    calls: list[ToolStatement],
+    max_concurrency: Optional[int] = None,
+    start_batch_index: int = 0,
+) -> list[list[ToolStatement]]:
+    """
+    Group ``calls`` into dependency batches for concurrent execution, and
+    stamp each call's ``.batch_index`` with the batch it landed in. Unifies
+    the prior ``utils/script.py`` and ``utils/sigils.py`` near-identical
+    implementations into one, generic over ``ToolStatement`` regardless of
+    which agent family produced it.
+
+    A call joins the currently-open batch only if none of its dependencies
+    (``extract_identifiers(call.args) | extract_identifiers(call.kwargs)``)
+    were bound by a call already sitting in that same open batch (i.e. every
+    dependency is satisfiable from an earlier, already-closed batch, a
+    registered tool, or a registered constant -- reference validity itself
+    is assumed already checked upstream). Otherwise the open batch closes
+    first and this call starts a new one.
+
+    Additionally, when about to add a *dispatched* call (``is_dispatched``,
+    this module) to a batch that already holds ``max_concurrency`` dispatched
+    calls, the batch closes first -- a purely additive concurrency cap, never
+    replacing the dependency-conflict closure rule above.
+    ``max_concurrency=None`` means no cap (greedy default).
+
+    A ``RETURN_ALIAS`` call is never grouped with anything else -- it always
+    closes the current batch, lands alone in a batch of its own, then closes
+    that batch too. This guarantees a batch-partial failure elsewhere can
+    never suppress an already-resolved return.
+
+    Every call in a batch is stamped with the same ``batch_index`` --
+    ``start_batch_index`` plus that batch's own 0-based position among the
+    batches this call produces -- the moment the batch closes. Lets a caller
+    running multiple generation rounds in one invoke keep indices globally
+    unique across rounds by passing the running total in as
+    ``start_batch_index``.
+    """
+    batches: list[list[ToolStatement]] = []
+    current_batch: list[ToolStatement] = []
+    current_batch_identifiers: set[str] = set()
+    current_batch_dispatched = 0
+
+    def close_current() -> None:
+        nonlocal current_batch, current_batch_identifiers, current_batch_dispatched
+        if not current_batch:
+            return
+        index = start_batch_index + len(batches)
+        for call in current_batch:
+            call.batch_index = index
+        batches.append(current_batch)
+        current_batch = []
+        current_batch_identifiers = set()
+        current_batch_dispatched = 0
+
+    for call in calls:
+        if call.tool == RETURN_ALIAS:
+            # A return is never grouped with anything else -- closing
+            # before AND after guarantees it lands alone in its own batch,
+            # so an unrelated failure elsewhere can never suppress it.
+            close_current()
+            current_batch.append(call)
+            close_current()
+            continue
+
+        deps = (*extract_identifiers(call.args), *extract_identifiers(call.kwargs))
+        if any(name in current_batch_identifiers for name in deps):
+            close_current()
+
+        dispatched = is_dispatched(call)
+        if (
+            dispatched
+            and max_concurrency is not None
+            and current_batch_dispatched >= max_concurrency
+        ):
+            close_current()
+
+        current_batch.append(call)
+        if call.identifier is not None:
+            current_batch_identifiers.add(call.identifier)
+        if dispatched:
+            current_batch_dispatched += 1
+
+    close_current()
+    return batches
+
+
+def resolve_statement_args(
+    call: ToolStatement, resolved: dict[str, Any],
+) -> tuple[list[Any], dict[str, Any]]:
+    """
+    Resolve one statement's ``args``/``kwargs`` into a plain
+    ``(positional, keyword)`` pair ready to splat into
+    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
+    ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
+    directly). Renamed from an earlier, ``ScriptActAgent``-only-module
+    equivalent -- body unchanged verbatim, including
+    ``ast.Starred`` (``*expr`` unpack) and ``KWARGS_UNPACK_KEY``
+    (``**expr`` unpack) handling. Those branches are ``ScriptActAgent``-only
+    grammar features that simply never trigger for a ``PlanActAgent``/
+    ``ReActAgent``-sourced statement (``translate_calls`` never produces a
+    ``Starred`` arg or a ``KWARGS_UNPACK_KEY``-keyed kwarg), so sharing this
+    one function is safe with zero behavior change for either family.
+
+    Substitutes every ``ast.expr`` value with its concrete value from
+    ``resolved`` (identifier -> value) via ``evaluate_expr``, passing
+    through any already-plain (non-``ast.expr``) value unchanged (e.g. the
+    spliced-in builtin name string from ``rewrite_builtin_calls``). Purely
+    transient -- never persisted back onto a ``ToolStatement``.
+
+    Assumes every dependency is already present in ``resolved``; does not
+    itself check readiness. A missing identifier is not defensively guarded
+    against here -- it surfaces as whatever ``evaluate_expr`` naturally
+    raises.
+    """
+
+    def resolve_one(value: Any) -> Any:
+        return evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
+
+    positional: list[Any] = []
+    for entry in call.args:
+        if isinstance(entry, ast.Starred):
+            positional.extend(resolve_one(entry.value))
+        else:
+            positional.append(resolve_one(entry))
+
+    keyword: dict[str, Any] = {}
+    for name, value in call.kwargs.items():
+        if name == KWARGS_UNPACK_KEY:
+            continue
+        keyword[name] = resolve_one(value)
+
+    if KWARGS_UNPACK_KEY in call.kwargs:
+        unpacked = resolve_one(call.kwargs[KWARGS_UNPACK_KEY])
+        overlap = set(unpacked) & set(keyword)
+        if overlap:
+            raise TypeError(
+                f"got multiple values for keyword argument(s): {sorted(overlap)!r}"
+            )
+        keyword.update(unpacked)
+
+    return positional, keyword

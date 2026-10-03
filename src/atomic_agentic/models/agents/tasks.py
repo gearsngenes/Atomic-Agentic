@@ -4,14 +4,13 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import CodeStatement, DagToolCall
+from .blackboard_models import ToolStatement
 from .records import AgentRecord, LLMRecord
 
 __all__ = [
     "AgentTask",
     "JsonToolAgentTask",
     "ScriptActAgentTask",
-    "DagAgentTask",
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
@@ -120,10 +119,9 @@ class JsonToolAgentTask(AgentTask):
         no artifact anywhere else to derive this from (contrast
         ``tool_calls_used``, declared per-subclass now since it's fully
         derivable from whatever call-history fields that subclass's own
-        task shape carries). Renamed from the prior ``retries_used`` to
-        match ``DagAgentTask``'s own terminology, since this family's
-        generation model now mirrors DagAgent's (``output_structure`` +
-        regen-retry loop) rather than the old free-text-JSON retry loop.
+        task shape carries). Renamed from the prior ``retries_used`` since
+        this family's generation model is ``output_structure`` +
+        regen-retry loop, not the old free-text-JSON retry loop.
     """
     regenerations_used: int = 0
 
@@ -141,14 +139,14 @@ class ScriptActAgentTask(AgentTask):
 
     Fields
     ------
-    completed : list[CodeStatement]
+    completed : list[ToolStatement]
         Every slot that executed successfully so far this run, in commit
         order. Purely historical -- nothing here is ever mutated once a
         slot lands in this list. Becomes ScriptActAgentRecord.statements
         verbatim (normalized to a tuple) at commit time. A slot whose
         dispatch raised is never appended here -- see failed_statements.
 
-    pending : list[list[CodeStatement]]
+    pending : list[list[ToolStatement]]
         Every not-yet-executed dependency batch compiled from the current
         generation -- the whole one-shot draft (or, after a granted repair,
         the whole freshly regenerated tail) is parsed and batch-compiled in
@@ -214,7 +212,7 @@ class ScriptActAgentTask(AgentTask):
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
         in sync as slots complete. Shaped to be passed directly as
-        utils/script.py's ``resolve_slot_args(statement, resolved)``'s
+        utils/agents.py's ``resolve_statement_args(statement, resolved)``'s
         ``resolved`` argument -- an O(1) lookup instead of scanning
         ``completed``.
 
@@ -251,10 +249,10 @@ class ScriptActAgentTask(AgentTask):
         generation round -- never reset mid-run. Passed to
         ``compile_batches`` as ``start_batch_index`` each time it's called,
         then advanced by the number of batches that call produced, so
-        ``CodeStatement.batch_index`` values stay globally unique across a
+        ``ToolStatement.batch_index`` values stay globally unique across a
         whole invoke.
 
-    failed_statements : list[CodeStatement]
+    failed_statements : list[ToolStatement]
         Every slot that failed, in the order the failure was observed,
         across every round this invoke -- populated by BOTH
         ``prepare()`` (a resolution/binding failure, ``slot.exception`` set
@@ -268,8 +266,8 @@ class ScriptActAgentTask(AgentTask):
         ScriptActAgentRecord.failed_statements verbatim (normalized to a
         tuple) at commit time.
     """
-    completed: list[CodeStatement] = field(default_factory=list)
-    pending: list[list[CodeStatement]] = field(default_factory=list)
+    completed: list[ToolStatement] = field(default_factory=list)
+    pending: list[list[ToolStatement]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
@@ -279,97 +277,26 @@ class ScriptActAgentTask(AgentTask):
     tool_calls_used: int = 0
     repair_batch_start: int = 0
     batch_counter: int = 0
-    failed_statements: list[CodeStatement] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class DagAgentTask(AgentTask):
-    """
-    DagAgent-flavored task -- a sibling to ScriptAgentTask, not a subclass
-    (DagAgent is a new agent family, not a ScriptAgent subclass, matching
-    ScriptAgentTask's own precedent relative to JsonToolAgentTask).
-
-    Field-for-field structural copy of ScriptAgentTask, CodeStatement
-    swapped for DagToolCall everywhere it appears -- no new fields. (An
-    earlier design draft added a return_value staging field for the round's
-    raw return payload; superseded once return was decided to reuse
-    RETURN_ALIAS/the normal batch pipeline instead of a bespoke
-    resolve-outside-the-batch-compiler mechanism.) No __post_init__ --
-    matches AgentTask's family-wide convention of zero constructor-time
-    validation (an in-flight, internal-only object, not a real boundary).
-
-    Fields
-    ------
-    completed : list[DagToolCall]
-        Every call that executed successfully so far this run, in commit
-        order (the RETURN_ALIAS call, once it executes, lands here too --
-        it is not excluded). Becomes DagAgentRecord.statements verbatim
-        (normalized to a tuple) at commit time.
-
-    pending : list[list[DagToolCall]]
-        Every not-yet-executed dependency batch compiled so far for the
-        current plan. pending[0] is the next batch act() runs.
-
-    continue_planning : bool
-        Unified continuation trigger, set either by the model's own
-        remaining_work schema signal or by the framework itself on a
-        resolution/execution failure -- same single reactive-continuation
-        path either way, no split between "continuation" and "repair"
-        handling. Same role ScriptAgentTask.continue_planning already has.
-
-    cache : dict[str, Any]
-        identifier -> resolved value for every call in completed, kept in
-        sync as calls complete, plus task_result_i entries seeded once at
-        _initialize_task. Precedence on lookup: constant_values and this
-        dict, together, always outrank a plan-local result_name name on a
-        name collision -- though a real collision is structurally
-        impossible by construction, since result_name/task_result_* names can
-        never start with K_ and constant names always do (enforced by
-        validate_calls).
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated once by
-        DagAgent._initialize_task and never touched again after that.
-
-    regenerations_used, resolved_args, planning_rounds_used,
-    tool_calls_used, continuation_note, batch_counter, failed_statements
-        Identical role and shape to ScriptAgentTask's same-named fields --
-        see that class's own docstring for the authoritative description;
-        nothing about them changes for DagAgentTask.
-    """
-    completed: list[DagToolCall] = field(default_factory=list)
-    pending: list[list[DagToolCall]] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
-    regenerations_used: int = 0
-    resolved_args: list[dict[str, Any]] = field(default_factory=list)
-    continue_planning: bool = False
-    planning_rounds_used: int = 0
-    tool_calls_used: int = 0
-    continuation_note: Optional[str] = None
-    batch_counter: int = 0
-    failed_statements: list[DagToolCall] = field(default_factory=list)
+    failed_statements: list[ToolStatement] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class PlanActTask(JsonToolAgentTask):
     """
-    PlanActAgent-flavored task -- ``DagAgentTask``'s batch-execution field
-    shape, minus every field that exists purely to support ``DagAgent``'s
-    multi-round continuation (``continue_planning``/``planning_rounds_used``/
-    ``continuation_note``/``batch_counter``) -- none of that applies to a
-    one-shot planner: ``think()`` runs exactly once, ever, per invoke.
-    ``DagToolCall`` in place of ``CodeStatement``, matching
-    ``DagAgentTask``'s own precedent for the same swap.
+    PlanActAgent-flavored task -- ``ToolStatement``-based batch-execution
+    fields (``completed``/``pending``/``cache``/``constant_values``/
+    ``resolved_args``/``failed_statements``), with no continuation-related
+    fields at all: ``think()`` runs exactly once, ever, per invoke, so there
+    is nothing analogous to a voluntary multi-round continuation flag,
+    round counter, or continuation note to carry.
 
     Fields
     ------
-    completed : list[DagToolCall]
+    completed : list[ToolStatement]
         Every call that executed successfully this run, in commit order
-        (the ``RETURN_ALIAS`` call included once it executes -- same
-        convention as ``DagAgentTask.completed``).
+        (the ``RETURN_ALIAS`` call included once it executes).
 
-    pending : list[list[DagToolCall]]
+    pending : list[list[ToolStatement]]
         Dependency batches compiled once (via ``compile_batches``) from the
         single generated plan. ``pending[0]`` is the next batch ``act()``
         runs. A cascade-failure may remove calls from batches here without
@@ -389,22 +316,22 @@ class PlanActTask(JsonToolAgentTask):
         resolved kwargs ``prepare()`` computed for the batch ``act()`` is
         about to run.
 
-    failed_statements : list[DagToolCall]
+    failed_statements : list[ToolStatement]
         Every call whose dispatch actually raised this run -- not
         cascade-skipped calls, which are never attempted and never appear
         here (see ``find_cascade_failures``'s own contract). Becomes
         ``JsonToolAgentRecord.failed_statements`` verbatim at commit time.
 
     No ``batch_counter`` field -- a single ``compile_batches`` call per
-    invoke needs no cross-round ``DagToolCall.batch_index`` uniqueness
+    invoke needs no cross-round ``ToolStatement.batch_index`` uniqueness
     tracking; a local variable in ``think()`` suffices.
     """
-    completed: list[DagToolCall] = field(default_factory=list)
-    pending: list[list[DagToolCall]] = field(default_factory=list)
+    completed: list[ToolStatement] = field(default_factory=list)
+    pending: list[list[ToolStatement]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     constant_values: dict[str, Any] = field(default_factory=dict)
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
-    failed_statements: list[DagToolCall] = field(default_factory=list)
+    failed_statements: list[ToolStatement] = field(default_factory=list)
 
     @property
     def tool_calls_used(self) -> int:
@@ -419,9 +346,9 @@ class PlanActTask(JsonToolAgentTask):
         this stays correct for free if a future plan-repair mechanism ever
         adds a second generation round to this family.
         """
-        from ...utils.dag import is_dispatched_call
+        from ...utils.agents import is_dispatched
         return (
-            sum(1 for c in self.completed if is_dispatched_call(c))
+            sum(1 for c in self.completed if is_dispatched(c))
             + len(self.failed_statements)
         )
 
@@ -437,9 +364,9 @@ class ReActTask(JsonToolAgentTask):
     No fixed-size preallocated board and no observability-decay window
     (both dropped from the pre-rewrite shape, along with ``next_step_index``/
     ``step_meta``) -- every round renders a full snapshot of ``completed``/
-    ``cache`` instead (``utils.dag.render_completed_as_json``/
+    ``cache`` instead (``utils.sigils.render_completed_as_json``/
     ``render_cache_snapshot``, reused unmodified). No
-    ``pending: list[list[DagToolCall]]`` batch field either -- unlike
+    ``pending: list[list[ToolStatement]]`` batch field either -- unlike
     ``PlanActTask``, this family dispatches exactly one call per round,
     never a concurrency batch. No ``__post_init__`` -- matches every other
     ``*Task`` in this family: an in-flight, internal-only object, not a real
@@ -447,13 +374,13 @@ class ReActTask(JsonToolAgentTask):
 
     Fields
     ------
-    completed : list[DagToolCall]
+    completed : list[ToolStatement]
         Every call actually dispatched and successful so far this run, in
         commit order. Becomes ``JsonToolAgentRecord.statements`` verbatim
         (normalized to a tuple) at commit time -- same convention as
         ``PlanActTask.completed``.
 
-    failed_statements : list[DagToolCall]
+    failed_statements : list[ToolStatement]
         Every call actually dispatched that raised, in the order observed.
         A resolution failure (a ``$name`` reference that doesn't resolve, or
         a resolved value's type mismatching the target tool's parameter
@@ -473,15 +400,15 @@ class ReActTask(JsonToolAgentTask):
         ``ReActAgent._initialize_task`` and never touched again. Same role
         as ``PlanActTask.constant_values``.
 
-    generated_step : DagToolCall | None
+    generated_step : ToolStatement | None
         The one call ``think()`` validated and resolved this round -- set
-        only once both ``utils.dag.validate_calls`` and
-        ``utils.dag.resolve_call_args`` succeed against it, ``None`` before
-        that and after ``act()`` consumes it. Retyped from the pre-rewrite
+        only once both ``utils.sigils.translate_calls`` and
+        ``utils.agents.resolve_statement_args`` succeed against it, ``None``
+        before that and after ``act()`` consumes it. Retyped from the pre-rewrite
         shape's ``Any = NO_VAL`` (which held a ``(BlackboardSlot, int,
         str)`` tuple under the old duration/observability design) --
         ``None`` is the idiomatic "not yet decided" value for a field
-        genuinely typed ``Optional[DagToolCall]``, so no ``NO_VAL``
+        genuinely typed ``Optional[ToolStatement]``, so no ``NO_VAL``
         sentinel is needed here.
 
     resolved_args : dict[str, Any] | None
@@ -506,11 +433,11 @@ class ReActTask(JsonToolAgentTask):
         is always ``task.failed_statements[-1]`` when this is ``True`` --
         no duplicate reference stored.
     """
-    completed: list[DagToolCall] = field(default_factory=list)
-    failed_statements: list[DagToolCall] = field(default_factory=list)
+    completed: list[ToolStatement] = field(default_factory=list)
+    failed_statements: list[ToolStatement] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     constant_values: dict[str, Any] = field(default_factory=dict)
-    generated_step: Optional[DagToolCall] = None
+    generated_step: Optional[ToolStatement] = None
     resolved_args: Optional[dict[str, Any]] = None
     last_call_failed: bool = False
 
@@ -519,7 +446,7 @@ class ReActTask(JsonToolAgentTask):
         """
         Derived, not stored -- ``completed``/``failed_statements`` are
         already the single source of truth. Deliberately gates **both**
-        halves through ``is_dispatched_call``, a real, intentional
+        halves through ``is_dispatched``, a real, intentional
         divergence from ``PlanActTask.tool_calls_used``'s bare
         ``len(self.failed_statements)``: a call to ``return_tool`` is a
         genuine dispatch in this family (never a synthesized,
@@ -531,10 +458,10 @@ class ReActTask(JsonToolAgentTask):
         field's own docstring above), every entry here is guaranteed to be
         a real dispatch attempt regardless.
         """
-        from ...utils.dag import is_dispatched_call
+        from ...utils.agents import is_dispatched
         return (
-            sum(1 for c in self.completed if is_dispatched_call(c))
-            + sum(1 for c in self.failed_statements if is_dispatched_call(c))
+            sum(1 for c in self.completed if is_dispatched(c))
+            + sum(1 for c in self.failed_statements if is_dispatched(c))
         )
 
 

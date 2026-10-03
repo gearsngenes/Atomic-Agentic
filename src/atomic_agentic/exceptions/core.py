@@ -32,21 +32,19 @@ class ToolRegistrationError(ToolAgentError):
 
 
 class BlackboardParseError(RuntimeError):
-    """Raised when parsing one raw statement into CodeStatement object(s)
+    """Raised when parsing one raw statement into ToolStatement object(s)
     fails, or when the shared expression-parsing/rejection helpers in
     utils/agents.py (`evaluate_expr`, `reject_unsupported_forms`) reject an
-    expression -- used by both ScriptActAgent's statement parsing and
-    DagAgent's value-expression parsing, not ScriptActAgent-only.
+    expression -- ScriptActAgent's own statement-parsing mechanism.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,
     MCPError) -- callers doing `except RuntimeError` upstream still catch
     these. Deliberately not rooted in ToolAgentError: ScriptActAgent's own
-    native-statement grammar (shared with DagAgent) is a distinct parsing
-    mechanism from PlanActAgent/ReActAgent's output_structure-based
-    generation, so sharing ToolAgentError's lineage here for this
-    specific error would imply a closer relationship to that mechanism
-    than actually exists.
+    native-statement grammar is a distinct parsing mechanism from
+    PlanActAgent/ReActAgent's output_structure-based generation, so sharing
+    ToolAgentError's lineage here for this specific error would imply a
+    closer relationship to that mechanism than actually exists.
 
     Unifies every rejection category from parse_statement_to_slots under one
     catchable type: genuine ast.parse SyntaxErrors, illegal assignment
@@ -61,7 +59,7 @@ class BlackboardParseError(RuntimeError):
 
 class DependencyFailedError(Exception):
     """Raised (by a future prepare()-phase caller, not by this release's own
-    utils) when a CodeStatement's argument depends on another slot whose
+    utils) when a ToolStatement's argument depends on another slot whose
     own resolution failed.
 
     Does not forward the upstream exception instance verbatim -- wraps it so

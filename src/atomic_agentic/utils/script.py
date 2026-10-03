@@ -16,82 +16,26 @@ from ..constants.agents import (
     TASK_RESULT_PREFIX,
 )
 from ..exceptions import BlackboardParseError
-from ..models.agents.blackboard_models import CodeStatement
-from .agents import evaluate_expr, extract_identifiers, reject_unsupported_forms, strip_code_fence
+from ..models.agents.blackboard_models import ToolStatement
+from .agents import (
+    evaluate_expr,
+    extract_identifiers,
+    is_dispatched,
+    reject_unsupported_forms,
+    strip_code_fence,
+)
 
 __all__ = [
     "parse_statement_to_slots",
-    "resolve_slot_args",
     "parse_generation",
     "rewrite_builtin_calls",
-    "is_dispatched_slot",
     "validate_references",
-    "compile_batches",
     "render_completed_as_python",
     "render_failed_as_python",
     "render_cache_snapshot",
 ]
-
-
-def resolve_slot_args(
-    statement: CodeStatement, resolved: dict[str, Any],
-) -> tuple[list[Any], dict[str, Any]]:
-    """
-    Resolve one statement's ``args``/``kwargs`` into a plain
-    ``(positional, keyword)`` pair ready to splat into
-    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
-    ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
-    directly). Substitutes every unresolved ``ast.expr`` value with its
-    concrete value from ``resolved`` (identifier -> value), passing through
-    any already-plain (non-``ast.expr``) value unchanged (e.g. the
-    spliced-in builtin name string from ``rewrite_builtin_calls``). Purely
-    transient -- never persisted back onto a ``CodeStatement``.
-
-    Assumes every dependency is already present in ``resolved``; does not
-    itself check readiness (a ``prepare()``-phase caller's job, combining
-    ``extract_identifiers`` with an all-dependencies-have-results check
-    before ever calling this). A missing identifier is not defensively
-    guarded against here -- it surfaces as whatever ``evaluate_expr``
-    naturally raises.
-
-    A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) has
-    its ``.value`` resolved and the result spliced into ``positional`` via
-    ``list.extend`` -- raises naturally (``TypeError``) if the resolved
-    value isn't iterable, uncaught here, same "let it surface" precedent
-    as everything else in this function. A keyword entry stored under
-    ``KWARGS_UNPACK_KEY`` (a ``**expr`` unpack) is resolved, checked for a
-    colliding key against the already-resolved named keywords -- raising
-    ``TypeError`` on overlap, matching real Python's own runtime behavior
-    for this exact collision (CPython raises rather than silently
-    favoring one side) -- then merged in.
-    """
-
-    def resolve_one(value: Any) -> Any:
-        return evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
-
-    positional: list[Any] = []
-    for entry in statement.args:
-        if isinstance(entry, ast.Starred):
-            positional.extend(resolve_one(entry.value))
-        else:
-            positional.append(resolve_one(entry))
-
-    keyword: dict[str, Any] = {}
-    for name, value in statement.kwargs.items():
-        if name == KWARGS_UNPACK_KEY:
-            continue
-        keyword[name] = resolve_one(value)
-
-    if KWARGS_UNPACK_KEY in statement.kwargs:
-        unpacked = resolve_one(statement.kwargs[KWARGS_UNPACK_KEY])
-        overlap = set(unpacked) & set(keyword)
-        if overlap:
-            raise TypeError(
-                f"got multiple values for keyword argument(s): {sorted(overlap)!r}"
-            )
-        keyword.update(unpacked)
-
-    return positional, keyword
+# compile_batches, is_dispatched, and resolve_statement_args moved to
+# utils/agents.py -- call sites in agents/scriptact.py import from there now.
 
 
 def _process_call_args(
@@ -99,7 +43,7 @@ def _process_call_args(
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
+    hoisted: list[ToolStatement],
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """
     Build one call's final ``(args, kwargs)`` pair: hoists any nested call
@@ -113,7 +57,7 @@ def _process_call_args(
     A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) is
     never eagerly folded, regardless of whether its own inner expr has
     dependencies -- its Starred-ness must survive to resolve time
-    (``resolve_slot_args``), and an already-folded plain value has no way
+    (``resolve_statement_args``), and an already-folded plain value has no way
     to carry that tag. It still gets the same dependency-free dry-run
     validation as every other argument category, applied to its inner
     expr before it's wrapped back in ``ast.Starred``. A keyword entry whose
@@ -189,10 +133,10 @@ def _build_call_slot(
     identifier: Optional[str],
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
-) -> CodeStatement:
+    hoisted: list[ToolStatement],
+) -> ToolStatement:
     """
-    Build one ``CodeStatement`` for ``call_node``, branching on whether its
+    Build one ``ToolStatement`` for ``call_node``, branching on whether its
     ``func`` is a plain dotted-name chain (a registered tool/builtin id) or
     an ``ast.Attribute`` (a method call on some object). Shared by the
     top-level bare-unassigned-call and assignment (``name = call(...)``)
@@ -238,7 +182,7 @@ def _build_call_slot(
         positional, keyword = _process_call_args(
             call_node, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        return CodeStatement(
+        return ToolStatement(
             identifier=identifier,
             tool=ATTR_CALL_ALIAS,
             args=(obj_expr, method_name, *positional),
@@ -256,7 +200,7 @@ def _build_call_slot(
     positional, keyword = _process_call_args(
         call_node, counter=counter, start_index=start_index, hoisted=hoisted
     )
-    return CodeStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
+    return ToolStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
 
 
 def _reject_await(node: ast.expr) -> None:
@@ -283,14 +227,14 @@ def _hoist_calls(
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
+    hoisted: list[ToolStatement],
 ) -> ast.expr:
     """
     Post-order rewrite: replaces every ``Call`` node found anywhere within
     ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
     value, an f-string's embedded expression, a container literal element,
     ...) with a ``Name`` reference to a newly synthesized, hoisted
-    ``CodeStatement``, appended to ``hoisted`` in discovery order.
+    ``ToolStatement``, appended to ``hoisted`` in discovery order.
 
     ``ast.NodeTransformer.generic_visit`` recurses into a call's own
     children before ``visit_Call`` builds that call's own hoisted slot, so
@@ -346,10 +290,10 @@ def _hoist_calls(
     return _CallHoister().visit(node)
 
 
-def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeStatement]:
+def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[ToolStatement]:
     """
     Parse one raw generated statement string into an ordered list of
-    ``CodeStatement`` objects: any auto-hoisted slots first (in
+    ``ToolStatement`` objects: any auto-hoisted slots first (in
     discovery/post-order), the statement's own slot last.
 
     Three top-level statement shapes are accepted: an assignment (case A/B
@@ -383,7 +327,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     # compile()-to-bytecode time, which this pipeline never does to a whole
     # statement (only to bare expressions, via evaluate_expr).
     if isinstance(stmt, ast.Return):
-        hoisted: list[CodeStatement] = []
+        hoisted: list[ToolStatement] = []
         counter = [0]
         return_value = stmt.value if stmt.value is not None else ast.Constant(value=None)
         processed = _hoist_calls(
@@ -398,7 +342,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
                     f"return expression is a constant that failed to evaluate: {e!r}"
                 ) from e
         val: Any = processed
-        final_slot = CodeStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
+        final_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
         return [*hoisted, final_slot]
 
     # A bare top-level `await ...` never reaches `_hoist_calls` (this
@@ -451,7 +395,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         )
 
     rhs = stmt.value
-    hoisted: list[CodeStatement] = []
+    hoisted: list[ToolStatement] = []
     counter = [0]
 
     if isinstance(rhs, ast.Call):
@@ -486,11 +430,11 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     val: Any = processed
     args, kwargs = (), {"val": val}
 
-    final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
+    final_slot = ToolStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
     return [*hoisted, final_slot]
 
 
-def parse_generation(raw_text: str) -> list[CodeStatement]:
+def parse_generation(raw_text: str) -> list[ToolStatement]:
     """
     Parse one whole generation (a fresh plan, or a repair-triggered
     continuation -- both use this same grammar; there is no separate
@@ -524,7 +468,7 @@ def parse_generation(raw_text: str) -> list[CodeStatement]:
     """
     text = strip_code_fence(raw_text)
 
-    flat_slots: list[CodeStatement] = []
+    flat_slots: list[ToolStatement] = []
     hoist_index = 0
 
     if not text.strip():
@@ -561,7 +505,7 @@ def parse_generation(raw_text: str) -> list[CodeStatement]:
     return flat_slots
 
 
-def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
+def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
     """
     Rewrite eligible builtin-call slots in place to dispatch through the
     ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
@@ -606,21 +550,8 @@ def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
     return issues
 
 
-def is_dispatched_slot(slot: CodeStatement) -> bool:
-    """
-    True iff ``slot`` represents a real dispatched call (a registered tool
-    or an approved Python builtin) rather than an ``rhs_assign``/``return``
-    sentinel, which are never dispatched at all. Shared by
-    ``compile_batches`` (concurrency-batch accounting) and
-    ``validate_references`` (tool-call-budget accounting) -- both use the
-    identical predicate, since builtins count toward the budget the same
-    as registered tools (no per-category exemption).
-    """
-    return slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
-
-
 def validate_references(
-    slots: list[CodeStatement],
+    slots: list[ToolStatement],
     known_tools: frozenset[str],
     known_constants: frozenset[str],
     known_history: frozenset[str],
@@ -653,7 +584,7 @@ def validate_references(
 
     Separately, independent of the per-slot walk: if ``tool_calls_limit``
     is not ``None`` and the count of dispatched slots (registered tool
-    calls and approved-builtin calls combined, via ``is_dispatched_slot``;
+    calls and approved-builtin calls combined, via ``is_dispatched``;
     ``rhs_assign``/``return`` excluded, hoisted calls included) exceeds it,
     that's also collected as an issue -- one regen-repair round can report
     both a bad reference and an excess call count together. Tools and
@@ -708,7 +639,7 @@ def validate_references(
                 )
             bound.add(slot.identifier)
 
-    real_call_count = sum(1 for slot in slots if is_dispatched_slot(slot))
+    real_call_count = sum(1 for slot in slots if is_dispatched(slot))
     if tool_calls_limit is not None and real_call_count > tool_calls_limit:
         issues.append(
             f"the plan calls {real_call_count} tool(s)/builtin(s), "
@@ -718,139 +649,8 @@ def validate_references(
     return issues
 
 
-def compile_batches(
-    slots: list[CodeStatement],
-    max_concurrency: Optional[int] = None,
-    start_batch_index: int = 0,
-) -> list[list[CodeStatement]]:
-    """
-    Group ``slots`` into dependency batches for concurrent execution, and
-    stamp each slot's ``.batch_index`` with the batch it landed in.
-
-    A slot joins the currently-open batch only if none of its dependencies
-    were bound by a slot already sitting in that same open batch (i.e. every
-    dependency is satisfiable from an earlier, already-closed batch, a
-    registered tool, or a registered constant -- reference validity itself
-    is assumed already checked by ``validate_references``). Otherwise the
-    open batch closes first and this slot starts a new one.
-
-    Additionally, when about to add a *dispatched* slot (``is_dispatched_slot``
-    -- the same predicate ``validate_references`` now uses for its own
-    budget accounting) to a batch that already holds ``max_concurrency``
-    dispatched slots, the batch closes first -- a purely additive
-    concurrency cap, never replacing the dependency-conflict closure rule
-    above. ``max_concurrency=None`` means no cap (today's greedy default).
-
-    A ``RETURN_ALIAS`` slot is never grouped with anything else -- it always
-    closes the current batch, lands alone in a batch of its own, then closes
-    that batch too. This guarantees ``_apply_batch_results`` can never see a
-    return slot sharing a batch with an unrelated failing call, which would
-    otherwise let that failure suppress an already-resolved return.
-
-    Every slot in a batch is stamped with the same ``batch_index`` --
-    ``start_batch_index`` plus that batch's own 0-based position among the
-    batches this call produces -- the moment the batch closes. Lets a
-    caller running multiple generation rounds in one invoke
-    (``ScriptActAgentTask.batch_counter``) keep indices globally unique across
-    rounds by passing the running total in as ``start_batch_index``.
-    """
-    batches: list[list[CodeStatement]] = []
-    current_batch: list[CodeStatement] = []
-    current_batch_identifiers: set[str] = set()
-    current_batch_dispatched = 0
-
-    def close_current() -> None:
-        nonlocal current_batch, current_batch_identifiers, current_batch_dispatched
-        if not current_batch:
-            return
-        index = start_batch_index + len(batches)
-        for slot in current_batch:
-            slot.batch_index = index
-        batches.append(current_batch)
-        current_batch = []
-        current_batch_identifiers = set()
-        current_batch_dispatched = 0
-
-    for slot in slots:
-        if slot.tool == RETURN_ALIAS:
-            # A return is never grouped with anything else -- closing
-            # before AND after guarantees it lands alone in its own batch,
-            # so an unrelated failure elsewhere can never suppress it (a
-            # partial-batch failure can only ever apply to slots that were
-            # actually batched alongside the failure).
-            close_current()
-            current_batch.append(slot)
-            close_current()
-            continue
-
-        deps = (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs))
-        if any(name in current_batch_identifiers for name in deps):
-            close_current()
-
-        is_dispatched = is_dispatched_slot(slot)
-        if (
-            is_dispatched
-            and max_concurrency is not None
-            and current_batch_dispatched >= max_concurrency
-        ):
-            close_current()
-
-        current_batch.append(slot)
-        if slot.identifier is not None:
-            current_batch_identifiers.add(slot.identifier)
-        if is_dispatched:
-            current_batch_dispatched += 1
-
-    close_current()
-    return batches
-
-
-def _render_slot_as_python(slot: CodeStatement) -> str:
-    """
-    Render one slot as its single-line Python-source reconstruction -- no
-    batch header, no exception text. Factored out of
-    ``render_completed_as_python`` so ``render_failed_as_python`` can reuse
-    the identical rendering without duplicating it; behavior for every
-    slot this was already applied to is unchanged.
-    """
-
-    def render_value(value: Any) -> str:
-        return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
-
-    if slot.tool == RETURN_ALIAS:
-        return f"return {render_value(slot.kwargs['val'])}"
-
-    prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
-    if slot.tool == RHS_ASSIGN_ALIAS:
-        return f"{prefix}{render_value(slot.kwargs['val'])}"
-
-    # A py_builtin slot renders back as the original natural call syntax
-    # (`len(x)`), never the internal rewritten form (`py_builtin('len',
-    # x)`) -- unsplice the builtin name before falling into the same
-    # generic rendering as any real tool call. An attr_call slot gets the
-    # same treatment: `obj.method(args)`, not the internal (obj, "method",
-    # *args) shape.
-    if slot.tool == PY_BUILTIN_ALIAS:
-        call_name, call_args = slot.args[0], slot.args[1:]
-    elif slot.tool == ATTR_CALL_ALIAS:
-        call_name, call_args = f"{render_value(slot.args[0])}.{slot.args[1]}", slot.args[2:]
-    else:
-        call_name, call_args = slot.tool, slot.args
-
-    positional_tokens = [
-        f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
-        for entry in call_args
-    ]
-    keyword_tokens = [
-        f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
-        for name, value in slot.kwargs.items()
-    ]
-    args_source = ", ".join(positional_tokens + keyword_tokens)
-    return f"{prefix}{call_name}({args_source})"
-
-
 def render_completed_as_python(
-    completed: list[CodeStatement],
+    completed: list[ToolStatement],
     show_batches: bool = False,
 ) -> str:
     """
@@ -888,16 +688,16 @@ def render_completed_as_python(
             lines.append(f"# Batch {slot.batch_index}:")
             current_index = slot.batch_index
 
-        lines.append(_render_slot_as_python(slot))
+        lines.append(slot.to_code())
 
     return "\n".join(lines)
 
 
-def render_failed_as_python(failed: list[CodeStatement]) -> str:
+def render_failed_as_python(failed: list[ToolStatement]) -> str:
     """
-    Mirrors ``utils/dag.py``'s ``render_failed_as_json`` shape exactly,
+    Mirrors ``utils/sigils.py``'s ``render_failed_as_json`` shape exactly,
     translated to this grammar's own source-line vocabulary: one line per
-    failed slot (via ``_render_slot_as_python``), each suffixed with its
+    failed slot (via ``ToolStatement.to_code()``), each suffixed with its
     own exception text. No batch-header grouping -- these are always all
     from the one batch that most recently triggered a repair round, by
     construction of the caller (``ScriptActAgent.prepare``/
@@ -910,12 +710,12 @@ def render_failed_as_python(failed: list[CodeStatement]) -> str:
     if not failed:
         return ""
     return "\n".join(
-        f"{_render_slot_as_python(slot)}  # FAILED: {slot.exception!r}" for slot in failed
+        f"{slot.to_code()}  # FAILED: {slot.exception!r}" for slot in failed
     )
 
 
 def render_cache_snapshot(
-    completed: list[CodeStatement],
+    completed: list[ToolStatement],
     cache: dict[str, Any],
     preview_limit: Optional[int],
 ) -> str:

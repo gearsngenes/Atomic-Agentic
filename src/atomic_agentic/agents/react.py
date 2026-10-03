@@ -5,21 +5,21 @@ Generates, resolves, and dispatches exactly one registered-tool call per
 round via provider-native structured output (``REACT_OUTPUT_SCHEMA``),
 observes the result, and repeats until the model calls the registered
 ``return`` tool. Design lineage: mirrors ``PlanActAgent``'s own
-``$name``-sigil machinery (``utils/dag.py``, reused directly) collapsed to
+``$name``-sigil machinery (``utils/sigils.py``, reused directly) collapsed to
 a single call per round instead of a whole batched plan -- the per-step
 sibling to ``PlanActAgent``'s one-shot multi-call plan. See
 ``agents/planact.py``'s own module docstring for the shared design lineage
 this mirrors.
 
-Distinguishing features relative to ``PlanActAgent``/``DagAgent``:
+Distinguishing features relative to ``PlanActAgent``:
 - ``return`` is an ordinary, really-dispatched tool call (``return_tool``,
   registered under its own bare name) -- never a synthesized,
   non-dispatched ``RETURN_ALIAS`` sentinel, and ``act()``/``async_act()``
-  never gate *dispatch* on ``is_dispatched_call`` (every call, including
+  never gate *dispatch* on ``is_dispatched`` (every call, including
   ``return``, is always actually invoked). That claim is scoped to dispatch
   specifically: ``RETURN_TOOL_NAME`` and ``RETURN_ALIAS`` are the identical
   literal string ``"return"`` (`constants/agents.py`), so anywhere else
-  ``is_dispatched_call`` is consulted for *accounting* purposes (see
+  ``is_dispatched`` is consulted for *accounting* purposes (see
   ``build_result_from_record`` below), a real, successful ``return`` call
   is still indistinguishable from the sentinel and gets excluded --
   correctly, per ``ToolUsageRecord.call_count``'s own "non-return
@@ -48,19 +48,18 @@ from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..models.agents.blackboard_models import DagToolCall
+from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.tasks import ReActTask
 from ..models.agents.records import AgentRecord, JsonToolAgentRecord, LLMRecord
 from ..models.results.agents import JsonToolAgentResult, ToolUsageRecord
-from ..utils.dag import (
+from ..utils.agents import is_dispatched, resolve_statement_args
+from ..utils.sigils import (
     build_react_schema,
-    is_dispatched_call,
     parse_react_call,
     render_cache_snapshot,
     render_completed_as_json,
     render_failed_as_json,
-    resolve_call_args,
-    validate_calls,
+    translate_calls,
 )
 
 
@@ -228,9 +227,9 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _render_current_task_message(self, task: ReActTask) -> dict[str, str]:
         """
-        The "what is the task" user message. Unlike ``DagAgent`` (whose
-        budget is a silent backstop, never shown), this family surfaces a
-        live *remaining* count here -- recomputed fresh every round, since
+        The "what is the task" user message. Unlike a silent backstop never
+        shown to the model, this family surfaces a live *remaining* count
+        here -- recomputed fresh every round, since
         this method is re-invoked each time ``task.task_messages`` is
         rebuilt (every round). Mirrors ``PlanActAgent``'s own
         ``_render_current_task_message`` (which shows a static *total*,
@@ -306,34 +305,36 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_output: dict[str, Any], task: ReActTask,
-    ) -> tuple[DagToolCall, dict[str, Any]] | str:
+    ) -> tuple[ToolStatement, dict[str, Any]] | str:
         """
         Pure-computation validate-and-resolve callback for the step retry
-        loop: parse, validate semantics + remaining tool-call budget, then
-        attempt argument resolution -- the one failure category
-        ``validate_calls`` structurally can't catch (a resolved value's
-        real type mismatching the target tool's parameter contract).
-        Returns ``(call, resolved_kwargs)`` on success, or a feedback
-        string describing the problem on failure.
+        loop: parse (``parse_react_call``, raw JSON -> draft), translate
+        (``translate_calls``, draft -> validated ``ToolStatement`` against
+        the remaining tool-call budget), then attempt argument resolution --
+        the one failure category ``translate_calls`` structurally can't
+        catch (a resolved value's real type mismatching the target tool's
+        parameter contract). Returns ``(call, resolved_kwargs)`` on success,
+        or a feedback string describing the problem on failure.
         """
-        call = parse_react_call(raw_output)
+        draft = parse_react_call(raw_output)
 
         remaining_budget = (
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
         known_names = frozenset(task.cache) | frozenset(task.constant_values)
-        issues = validate_calls([call], None, remaining_budget, known_names)
+        issues, calls = translate_calls([draft], remaining_budget, known_names)
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            # TODO(smoke-test aid, mirrors PlanActAgent's/DagAgent's own): remove once
+            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[ReActAgent DEBUG] step rejected, issues:\n{issues_msg}")
             return issues_msg
 
+        call = calls[0]
         try:
-            positional, keyword = resolve_call_args(call, {**task.cache, **task.constant_values})
+            positional, keyword = resolve_statement_args(call, {**task.cache, **task.constant_values})
             tool = self.get_tool(call.tool)
             resolved = tool._args_kwargs_to_dict(*positional, **keyword)
         except Exception as e:
@@ -342,7 +343,7 @@ class ReActAgent(ToolAgent):
 
         return call, resolved
 
-    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[DagToolCall, dict[str, Any]]:
+    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
         """
         Render, compute the schema's tool set, call the engine (with
         ``output_structure``), record the attempt, validate+resolve via
@@ -373,7 +374,7 @@ class ReActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors PlanActAgent's/DagAgent's own): remove once
+            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[ReActAgent DEBUG] generated step:\n{json.dumps(raw_output, indent=2)}")
 
@@ -403,7 +404,7 @@ class ReActAgent(ToolAgent):
 
             return result
 
-    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[DagToolCall, dict[str, Any]]:
+    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
         """Async mirror of ``_run_step_retry_loop``, using
         ``async_invoke`` for the engine call. Same regeneration-budget
         check, feedback-message construction, and smoke-test-aid debug
@@ -427,7 +428,7 @@ class ReActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors PlanActAgent's/DagAgent's own): remove once
+            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
             # cross-provider output_structure reliability is confirmed.
             print(f"[ReActAgent DEBUG] generated step:\n{json.dumps(raw_output, indent=2)}")
 
@@ -484,10 +485,10 @@ class ReActAgent(ToolAgent):
         """
         Documented no-op -- all validation/resolution already happened
         inside ``think()``'s own retry loop; nothing is deferred to this
-        hook for this family. Unlike ``DagAgent``/``PlanActAgent``, whose
-        ``prepare()`` resolves a batch compiled by an earlier ``think()``
-        call, this family's ``think()`` and ``prepare()`` are logically
-        inseparable -- one call, resolved immediately.
+        hook for this family. Unlike ``PlanActAgent``, whose ``prepare()``
+        resolves a batch compiled by an earlier ``think()`` call, this
+        family's ``think()`` and ``prepare()`` are logically inseparable --
+        one call, resolved immediately.
         """
         return task
 
@@ -500,7 +501,7 @@ class ReActAgent(ToolAgent):
     # Execute (act())
     # ------------------------------------------------------------------ #
     def _apply_call_result(
-        self, task: ReActTask, call: DagToolCall, raw_result: Any,
+        self, task: ReActTask, call: ToolStatement, raw_result: Any,
     ) -> ReActTask:
         """
         Shared post-dispatch bookkeeping for ``act``/``async_act``.
@@ -517,8 +518,8 @@ class ReActAgent(ToolAgent):
         Two identifier normalizations happen on a successful call, before
         it's appended to ``task.completed``: a ``return_tool`` call's
         identifier is always forced to ``None`` (matches ``RETURN_ALIAS``'s
-        own always-``None`` convention on ``PlanActAgent``/``DagAgent`` --
-        a ``return`` call ends the task, so there is no later round for any
+        own always-``None`` convention on ``PlanActAgent`` -- a ``return``
+        call ends the task, so there is no later round for any
         name of its to ever be referenced in); any other call whose
         identifier is still ``None`` and whose real result isn't ``None``
         gets auto-named ``__r{N}__`` (``N`` = count of successful calls
@@ -629,7 +630,7 @@ class ReActAgent(ToolAgent):
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
 
-        # is_dispatched_call excludes a real, successful `return` call here
+        # is_dispatched excludes a real, successful `return` call here
         # too -- correct per ToolUsageRecord.call_count's own "non-return
         # executions" contract (return isn't meant to be counted as tool
         # usage for any family), but note this family's return call is a
@@ -639,7 +640,7 @@ class ReActAgent(ToolAgent):
         # documents, not a second, independent mechanism.
         counts: dict[str, int] = {}
         for call in record.statements:
-            if is_dispatched_call(call):
+            if is_dispatched(call):
                 counts[call.tool] = counts.get(call.tool, 0) + 1
         tool_usage = tuple(
             ToolUsageRecord(tool_name=name, call_count=count)

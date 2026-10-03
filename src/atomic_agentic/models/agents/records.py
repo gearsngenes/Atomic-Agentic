@@ -7,21 +7,21 @@ from typing import Any, Dict, Optional
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from .blackboard_models import CodeStatement, DagToolCall
+from .blackboard_models import ToolStatement
 
-# is_dispatched_slot/render_completed_as_python are imported locally inside
+# is_dispatched/render_completed_as_python are imported locally inside
 # the two methods that use them (render_as_code/tool_usage below), not at
-# module level -- utils.script itself imports CodeStatement from
-# .blackboard_models (a sibling in this same models.agents package), and
-# models/agents/__init__.py imports this module before blackboard_models.
-# A module-level import here would make loading utils.script first (before
-# anything else touches models.agents) deadlock: utils.script's own import
-# of models.agents.blackboard_models triggers this package's __init__.py,
-# which re-enters this module, which would need utils.script to already be
-# fully initialized -- it isn't yet, since we're still inside its own
-# top-level import statement. Deferring to call time breaks the cycle with
-# no behavior change (both functions are only ever invoked well after
-# import time).
+# module level -- utils.agents/utils.script themselves import ToolStatement
+# from .blackboard_models (a sibling in this same models.agents package),
+# and models/agents/__init__.py imports this module before blackboard_models.
+# A module-level import here would make loading utils.agents/utils.script
+# first (before anything else touches models.agents) deadlock: their own
+# import of models.agents.blackboard_models triggers this package's
+# __init__.py, which re-enters this module, which would need utils.agents/
+# utils.script to already be fully initialized -- they aren't yet, since
+# we're still inside their own top-level import statement. Deferring to
+# call time breaks the cycle with no behavior change (both functions are
+# only ever invoked well after import time).
 
 __all__ = [
     "LLMRecord",
@@ -29,7 +29,6 @@ __all__ = [
     "JsonToolAgentRecord",
     "ScriptActAgentRecord",
     "ScriptActAgentToolUsage",
-    "DagAgentRecord",
     "ThinkingAgentRecord",
 ]
 
@@ -266,51 +265,48 @@ class JsonToolAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed JsonToolAgent invocation.
 
-    Field-for-field mirrors ``DagAgentRecord``'s own shape and validation
-    (see that class for the authoritative pattern) -- ``statements``/
-    ``failed_statements`` as ``DagToolCall`` tuples, no blackboard span of
-    any kind. Shared directly by ``JsonToolAgent`` subclasses;
-    ``PlanActAgent`` constructs this class directly, no ``PlanActRecord``
-    subclass needed (would add zero fields beyond what's here).
+    ``statements``/``failed_statements`` as ``ToolStatement`` tuples, no
+    blackboard span of any kind. Shared directly by ``JsonToolAgent``
+    subclasses; ``PlanActAgent`` constructs this class directly, no
+    ``PlanActRecord`` subclass needed (would add zero fields beyond what's
+    here).
 
     Fields
     ------
-    statements : tuple[DagToolCall, ...]
+    statements : tuple[ToolStatement, ...]
         Every call the task's ``completed`` accumulated this run
-        (``RETURN_ALIAS`` included, same convention as
-        ``DagAgentRecord.statements``).
+        (``RETURN_ALIAS`` included once it executes).
 
-    failed_statements : tuple[DagToolCall, ...]
+    failed_statements : tuple[ToolStatement, ...]
         Every call whose dispatch actually raised this run.
 
     regenerations_used : int
         Total regeneration attempts consumed across this run's generation
         call(s) -- carried over from ``task.regenerations_used`` verbatim
-        at commit time. New this pass -- neither this nor
-        ``DagAgentRecord`` surfaced this before; ``DagAgentRecord``'s own
-        version of this gap is left unaddressed (``DagAgent`` stays frozen
-        this release).
+        at commit time.
     """
 
-    statements: tuple[DagToolCall, ...] = ()
-    failed_statements: tuple[DagToolCall, ...] = ()
+    statements: tuple[ToolStatement, ...] = ()
+    failed_statements: tuple[ToolStatement, ...] = ()
     regenerations_used: int = 0
 
     def __post_init__(self) -> None:
-        # Explicit two-argument super() -- same slotted-dataclass-subclass
-        # gotcha DagAgentRecord.__post_init__ already documents.
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (a documented
+        # CPython gotcha for slotted-dataclass inheritance chains).
         super(JsonToolAgentRecord, self).__post_init__()
 
         if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
             raise TypeError(
                 "JsonToolAgentRecord.statements must be a list or tuple of "
-                f"DagToolCall instances; got {type(self.statements).__name__!r}."
+                f"ToolStatement instances; got {type(self.statements).__name__!r}."
             )
         for index, call in enumerate(self.statements):
-            if not isinstance(call, DagToolCall):
+            if not isinstance(call, ToolStatement):
                 raise TypeError(
                     f"JsonToolAgentRecord.statements[{index}] must be a "
-                    f"DagToolCall instance; got {type(call).__name__!r}."
+                    f"ToolStatement instance; got {type(call).__name__!r}."
                 )
 
         if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
@@ -318,13 +314,13 @@ class JsonToolAgentRecord(AgentRecord):
         ):
             raise TypeError(
                 "JsonToolAgentRecord.failed_statements must be a list or "
-                f"tuple of DagToolCall instances; got {type(self.failed_statements).__name__!r}."
+                f"tuple of ToolStatement instances; got {type(self.failed_statements).__name__!r}."
             )
         for index, call in enumerate(self.failed_statements):
-            if not isinstance(call, DagToolCall):
+            if not isinstance(call, ToolStatement):
                 raise TypeError(
                     f"JsonToolAgentRecord.failed_statements[{index}] must be a "
-                    f"DagToolCall instance; got {type(call).__name__!r}."
+                    f"ToolStatement instance; got {type(call).__name__!r}."
                 )
 
         object.__setattr__(self, "statements", tuple(self.statements))
@@ -413,7 +409,7 @@ class ScriptActAgentRecord(AgentRecord):
 
     Fields
     ------
-    statements : tuple[CodeStatement, ...]
+    statements : tuple[ToolStatement, ...]
         Every slot ScriptActAgentTask.completed accumulated this run, carried
         over at commit time (normalized to a tuple here, mirroring
         llm_records' existing list-or-tuple-in, tuple-stored normalization).
@@ -422,7 +418,7 @@ class ScriptActAgentRecord(AgentRecord):
         legal anywhere in a generation) -- there is no separate annotation
         record of it.
 
-    failed_statements : tuple[CodeStatement, ...]
+    failed_statements : tuple[ToolStatement, ...]
         Every slot whose dispatch raised this run, carried over from
         ScriptActAgentTask.failed_statements at commit time (same
         list-or-tuple-in, tuple-stored normalization as statements). Each
@@ -442,8 +438,8 @@ class ScriptActAgentRecord(AgentRecord):
         time. ``0`` means the plan finished without ever needing one.
     """
 
-    statements: tuple[CodeStatement, ...] = ()
-    failed_statements: tuple[CodeStatement, ...] = ()
+    statements: tuple[ToolStatement, ...] = ()
+    failed_statements: tuple[ToolStatement, ...] = ()
     regenerations_used: int = 0
     repair_rounds_used: int = 0
 
@@ -456,33 +452,33 @@ class ScriptActAgentRecord(AgentRecord):
         # type" here).
         super(ScriptActAgentRecord, self).__post_init__()
 
-        # 1. statements must be a list/tuple of CodeStatement instances.
+        # 1. statements must be a list/tuple of ToolStatement instances.
         if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
             raise TypeError(
                 "ScriptActAgentRecord.statements must be a list or tuple of "
-                f"CodeStatement instances; got {type(self.statements).__name__!r}."
+                f"ToolStatement instances; got {type(self.statements).__name__!r}."
             )
         for index, slot in enumerate(self.statements):
-            if not isinstance(slot, CodeStatement):
+            if not isinstance(slot, ToolStatement):
                 raise TypeError(
                     f"ScriptActAgentRecord.statements[{index}] must be a "
-                    f"CodeStatement instance; got {type(slot).__name__!r}."
+                    f"ToolStatement instance; got {type(slot).__name__!r}."
                 )
 
-        # 2. failed_statements must be a list/tuple of CodeStatement
+        # 2. failed_statements must be a list/tuple of ToolStatement
         # instances, same shape as statements above.
         if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
             self.failed_statements, (list, tuple)
         ):
             raise TypeError(
                 "ScriptActAgentRecord.failed_statements must be a list or tuple "
-                f"of CodeStatement instances; got {type(self.failed_statements).__name__!r}."
+                f"of ToolStatement instances; got {type(self.failed_statements).__name__!r}."
             )
         for index, slot in enumerate(self.failed_statements):
-            if not isinstance(slot, CodeStatement):
+            if not isinstance(slot, ToolStatement):
                 raise TypeError(
                     f"ScriptActAgentRecord.failed_statements[{index}] must be a "
-                    f"CodeStatement instance; got {type(slot).__name__!r}."
+                    f"ToolStatement instance; got {type(slot).__name__!r}."
                 )
 
         # 3. normalize both to a tuple -- object.__setattr__ required, the
@@ -511,7 +507,7 @@ class ScriptActAgentRecord(AgentRecord):
         and ``self.failed_statements`` in one pass. Pure/derived -- not
         stored, recomputed on each call.
         """
-        from ...utils.script import is_dispatched_slot
+        from ...utils.agents import is_dispatched
 
         registered_tool_calls = 0
         builtin_calls = 0
@@ -522,7 +518,7 @@ class ScriptActAgentRecord(AgentRecord):
         # One combined pass over both -- a slot's classification doesn't
         # depend on whether it ultimately succeeded or failed. A
         # RHS_ASSIGN_ALIAS slot can fail here too (not just a dispatched
-        # call): resolve_slot_args evaluates its `val` expression against
+        # call): resolve_statement_args evaluates its `val` expression against
         # already-bound names, so e.g. `avg = total / count` fails exactly
         # like a real dispatched call whenever `count` resolves to `0` --
         # it's just as real an rhs-assignment "use" as a successful one.
@@ -545,7 +541,7 @@ class ScriptActAgentRecord(AgentRecord):
                     isinstance(node, ast.BinOp) for node in ast.walk(value)
                 ):
                     binop_count += 1
-            elif is_dispatched_slot(slot):
+            elif is_dispatched(slot):
                 registered_tool_calls += 1
 
         return ScriptActAgentToolUsage(
@@ -566,116 +562,6 @@ class ScriptActAgentRecord(AgentRecord):
             "failed_statements": [s.to_dict() for s in self.failed_statements],
             "regenerations_used": self.regenerations_used,
             "repair_rounds_used": self.repair_rounds_used,
-        })
-        return d
-
-
-@dataclass(frozen=True, slots=True)
-class DagAgentRecord(AgentRecord):
-    """
-    Canonical memory record for one completed DagAgent invocation -- a
-    sibling to ScriptActAgentRecord, not a subclass (DagAgent is a new agent
-    family). Each record owns its own calls outright, same as
-    ScriptActAgentRecord -- no blackboard_start/blackboard_end span to index
-    into.
-
-    Fields
-    ------
-    statements : tuple[DagToolCall, ...]
-        Every call DagAgentTask.completed accumulated this run, carried
-        over at commit time (normalized to a tuple). Includes the
-        RETURN_ALIAS call when the run terminated via return -- not
-        excluded, same as ScriptActAgentRecord.statements includes its own
-        RETURN_ALIAS/CodeStatement entries today.
-
-    failed_statements : tuple[DagToolCall, ...]
-        Every call whose dispatch raised this run, carried over from
-        DagAgentTask.failed_statements at commit time (same
-        list-or-tuple-in, tuple-stored normalization as statements).
-    """
-
-    statements: tuple[DagToolCall, ...] = ()
-    failed_statements: tuple[DagToolCall, ...] = ()
-
-    def __post_init__(self) -> None:
-        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
-        # the class object to add __slots__, which invalidates the
-        # zero-arg super()'s implicit __class__ closure cell (same
-        # slotted-dataclass-subclass gotcha ScriptActAgentRecord.__post_init__
-        # already documents above).
-        super(DagAgentRecord, self).__post_init__()
-
-        # 1. statements must be a list/tuple of DagToolCall instances.
-        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
-            raise TypeError(
-                "DagAgentRecord.statements must be a list or tuple of "
-                f"DagToolCall instances; got {type(self.statements).__name__!r}."
-            )
-        for index, call in enumerate(self.statements):
-            if not isinstance(call, DagToolCall):
-                raise TypeError(
-                    f"DagAgentRecord.statements[{index}] must be a "
-                    f"DagToolCall instance; got {type(call).__name__!r}."
-                )
-
-        # 2. failed_statements must be a list/tuple of DagToolCall
-        # instances, same shape as statements above.
-        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
-            self.failed_statements, (list, tuple)
-        ):
-            raise TypeError(
-                "DagAgentRecord.failed_statements must be a list or tuple "
-                f"of DagToolCall instances; got {type(self.failed_statements).__name__!r}."
-            )
-        for index, call in enumerate(self.failed_statements):
-            if not isinstance(call, DagToolCall):
-                raise TypeError(
-                    f"DagAgentRecord.failed_statements[{index}] must be a "
-                    f"DagToolCall instance; got {type(call).__name__!r}."
-                )
-
-        # 3. normalize both to a tuple -- object.__setattr__ required, the
-        # dataclass is frozen (mirrors ScriptActAgentRecord's identical
-        # normalization).
-        object.__setattr__(self, "statements", tuple(self.statements))
-        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
-
-    def serialize_statements(self) -> list[dict[str, Any]]:
-        """
-        Return this run's statements as a list of wire-shape dicts, each
-        produced by DagToolCall.serialize() -- the model's own
-        call/arguments/result_name vocabulary, not to_dict()'s internal-field
-        shape. Scoped to statements only, never failed_statements,
-        mirroring ScriptActAgentRecord.render_as_code()'s own scope. No
-        batch-grouping parameter needed (unlike render_as_code
-        (show_batches=True)'s formatting need) -- each entry already
-        carries its own batch_index, so a caller can group by that
-        directly.
-        """
-        return [s.serialize() for s in self.statements]
-
-    def render_as_code(self) -> str:
-        """
-        Reconstruct this run's statements as source-formatted text, grouped
-        by concurrent batch -- mirrors ScriptActAgentRecord.render_as_code()
-        exactly (same show_batches=True, standalone-human-inspection-only
-        scope; DagAgent's own live continuation-message path never shows
-        batch grouping to the model, matching that method's own rationale).
-        Meaningful now that DagToolCall's values are genuinely parsed
-        Python expressions rather than plain JSON scalars.
-        """
-        from ...utils.dag import render_completed_as_code
-
-        return render_completed_as_code(self.statements, show_batches=True)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the explicit serialized dictionary representation."""
-        # Explicit two-argument super() -- same slotted-dataclass gotcha
-        # __post_init__ documents above; bare super() raises here too.
-        d = super(DagAgentRecord, self).to_dict()
-        d.update({
-            "statements": [s.to_dict() for s in self.statements],
-            "failed_statements": [s.to_dict() for s in self.failed_statements],
         })
         return d
 

@@ -14,7 +14,7 @@ from .prompts import ONESHOT_PLANNER_PROMPT
 from .tools import attr_call_tool, builtin_call_tool
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..models.agents.blackboard_models import CodeStatement
+from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.records import AgentRecord, LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
@@ -32,15 +32,13 @@ from ..exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
+from ..utils.agents import compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
-    compile_batches,
-    is_dispatched_slot,
     parse_generation,
     render_cache_snapshot,
     render_completed_as_python,
     render_failed_as_python,
-    resolve_slot_args,
     rewrite_builtin_calls,
     validate_references,
 )
@@ -446,7 +444,7 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ScriptActAgentTask,
-    ) -> list[list[CodeStatement]] | str:
+    ) -> list[list[ToolStatement]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
         parse, validate references + remaining tool-call budget, and
@@ -506,7 +504,7 @@ class ScriptActAgent(ToolAgent):
 
     def _run_planning_retry_loop(
         self, *, task: ScriptActAgentTask,
-    ) -> list[list[CodeStatement]]:
+    ) -> list[list[ToolStatement]]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -552,7 +550,7 @@ class ScriptActAgent(ToolAgent):
 
     async def _arun_planning_retry_loop(
         self, *, task: ScriptActAgentTask,
-    ) -> list[list[CodeStatement]]:
+    ) -> list[list[ToolStatement]]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -700,7 +698,7 @@ class ScriptActAgent(ToolAgent):
 
         batch = task.pending[0]
         resolved: list[dict[str, Any]] = []
-        failed_slots: list[CodeStatement] = []
+        failed_slots: list[ToolStatement] = []
         # Constants are validated as known references (validate_references'
         # known_constants) and rendered to the model (constants_context()),
         # but their actual runtime values live in task.constant_values --
@@ -717,7 +715,7 @@ class ScriptActAgent(ToolAgent):
             label = slot.identifier if slot.identifier is not None else "(unassigned)"
 
             try:
-                positional, keyword = resolve_slot_args(slot, resolution_namespace)
+                positional, keyword = resolve_statement_args(slot, resolution_namespace)
             except Exception as e:
                 slot.exception = ToolAgentError(
                     f"{label}: could not resolve argument value(s): {e!r}"
@@ -784,11 +782,11 @@ class ScriptActAgent(ToolAgent):
     # Execute prepared batch
     # ------------------------------------------------------------------ #
     async def _gather_batch_results(
-        self, batch: list[CodeStatement], resolved: list[dict[str, Any]],
+        self, batch: list[ToolStatement], resolved: list[dict[str, Any]],
     ) -> list[Any]:
         """
         Dispatch every dispatched-call slot in ``batch`` (registered tool
-        or approved builtin, via ``is_dispatched_slot``) concurrently;
+        or approved builtin, via ``is_dispatched``) concurrently;
         ``rhs_assign``/``return`` slots need no dispatch, their result is
         already the resolved ``"val"`` value. Shared by ``act``/
         ``async_act`` -- both differ only in how the resulting coroutine is
@@ -797,7 +795,7 @@ class ScriptActAgent(ToolAgent):
         coros: list[Any] = []
         dispatch_map: dict[int, int] = {}
         for i, slot in enumerate(batch):
-            if is_dispatched_slot(slot):
+            if is_dispatched(slot):
                 dispatch_map[i] = len(coros)
                 tool = self._resolve_dispatch_tool(slot.tool)
                 coros.append(tool.async_invoke(resolved[i]))
@@ -811,7 +809,7 @@ class ScriptActAgent(ToolAgent):
     def _apply_batch_results(
         self,
         task: ScriptActAgentTask,
-        batch: list[CodeStatement],
+        batch: list[ToolStatement],
         resolved: list[dict[str, Any]],
         raw_results: list[Any],
     ) -> ScriptActAgentTask:
@@ -825,12 +823,12 @@ class ScriptActAgent(ToolAgent):
         resolution-failure branch).
 
         Every dispatched call in ``batch`` (registered tool or approved
-        builtin, via ``is_dispatched_slot``) was actually dispatched via
+        builtin, via ``is_dispatched``) was actually dispatched via
         ``asyncio.gather`` regardless of whether any of them failed, so all
         of them count against ``tool_calls_used`` unconditionally, before
         checking for failures.
         """
-        real_call_count = sum(1 for slot in batch if is_dispatched_slot(slot))
+        real_call_count = sum(1 for slot in batch if is_dispatched(slot))
         task.tool_calls_used += real_call_count
 
         # A raised exception only ever appears here for a slot that was
@@ -840,12 +838,12 @@ class ScriptActAgent(ToolAgent):
         # resolved value (see _gather_batch_results), which may itself
         # legitimately BE a BaseException instance (e.g. a registered
         # constant holding an exception object as data). Gating on
-        # is_dispatched_slot prevents misclassifying that legitimate value
+        # is_dispatched prevents misclassifying that legitimate value
         # as an execution failure.
-        failed_slots: list[CodeStatement] = []
+        failed_slots: list[ToolStatement] = []
 
         for slot, value in zip(batch, raw_results):
-            if is_dispatched_slot(slot) and isinstance(value, BaseException):
+            if is_dispatched(slot) and isinstance(value, BaseException):
                 slot.exception = value
                 failed_slots.append(slot)
                 continue

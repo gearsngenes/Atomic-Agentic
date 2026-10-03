@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import ast
-from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from ...constants.agents import RETURN_ALIAS
-from ...constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ...constants.agents import (
+    ATTR_CALL_ALIAS,
+    KWARGS_UNPACK_KEY,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+)
+from ...constants.core import IDENTIFIER_PATTERN
 from ..results import AtomicResult
 
 __all__ = [
     "ConstantSpec",
-    "CallSlot",
-    "CodeStatement",
-    "DagToolCall",
+    "ToolStatement",
 ]
 
 
@@ -90,26 +93,25 @@ class ConstantSpec:
 
 
 @dataclass(slots=True)
-class CallSlot(ABC):
+class ToolStatement:
     """
-    Shared ancestor for ``CodeStatement`` (``ScriptActAgent``'s Python-
-    statement grammar) and ``DagToolCall`` (``PlanActAgent``/``ReActAgent``/
-    ``DagAgent``'s JSON-wire grammar) -- one slot in a per-invocation
-    call/statement sequence.
+    One slot in a per-invocation call/statement sequence -- the single,
+    unified representation shared by ``ScriptActAgent`` (built directly from
+    real ``ast.parse`` output), ``PlanActAgent``, and ``ReActAgent`` (built
+    by ``utils/sigils.py``'s ``translate_calls`` from a JSON wire payload).
+    Supersedes the prior per-grammar subclass split
+    (``toolstatement-rename`` pass) -- there is now exactly one concrete
+    representation, no ABC, no per-grammar hook.
 
-    Owns the field shape and validation the two grammars already share
-    identically: the seven fields below, and the ``tool``/``args``/
-    ``kwargs`` checks in ``__post_init__``. What genuinely differs between
-    the two -- identifier-legality strictness (``CodeStatement``'s
-    identifiers are always ast-sourced and therefore already
-    grammar-legal; ``DagToolCall``'s come from a free-form wire string with
-    no such guarantee) and how an ``args``/``kwargs`` value renders for
-    ``to_dict()`` (``CodeStatement`` may still hold an unresolved
-    ``ast.expr``; ``DagToolCall``'s are always already JSON-plain) -- stays
-    on two small per-subclass hooks. Resolution, compilation, and
-    prompt-rendering logic stay entirely in ``utils/dag.py``/
-    ``utils/script.py``, untouched by this shared ancestor -- this class
-    unifies *data shape* only, never grammar-specific behavior.
+    ``args``/``kwargs`` are always real ``ast.expr`` nodes, regardless of
+    origin: for ``ScriptActAgent`` that's unchanged (its parser already
+    builds real ast nodes directly); for ``PlanActAgent``/``ReActAgent`` the
+    JSON wire payload's plain scalars are translated into ``ast.Constant``/
+    ``ast.Name``/``ast.JoinedStr`` nodes by ``translate_calls`` before a
+    ``ToolStatement`` is ever constructed. No ``.dependencies``/
+    ``.resolved_refs`` field exists here, ever -- dependencies are always
+    derived on demand via ``extract_identifiers`` (``utils/agents.py``) over
+    the real ``ast.expr`` tree.
 
     Mutable (not frozen) -- ``result``/``exception`` are populated after
     construction by a future ``act()``-phase caller.
@@ -118,31 +120,35 @@ class CallSlot(ABC):
     ------
     identifier : str | None
         This slot's bound name. ``None`` for a bare (unassigned) call or a
-        terminal ``return``. Subclass-specific legality/normalization rules
-        apply via ``_validate_identifier()``.
+        terminal ``return``. A JSON-sourced identifier has already been
+        normalized (stripped, ``$``-prefix removed, blank-collapsed to
+        ``None``) by ``translate_calls`` *before* this constructor ever
+        runs; a ``ScriptActAgent``-sourced identifier is always already
+        ast-sourced-legal. One uniform legality check applies here either
+        way -- no per-grammar leniency hook.
 
     tool : str
         The call's identity -- a dotted call name, a registered tool's
-        alias/``full_name``, or a grammar-specific sentinel (e.g.
-        ``RHS_ASSIGN_ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/
-        ``ATTR_CALL_ALIAS`` for ``CodeStatement``; ``RETURN_ALIAS`` for
-        ``DagToolCall``). Must be a non-empty string.
+        alias/``full_name``, or a grammar-specific sentinel (``RHS_ASSIGN_
+        ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` for
+        a ``ScriptActAgent``-sourced statement; ``RETURN_ALIAS`` is the only
+        sentinel a ``PlanActAgent``/``ReActAgent``-sourced statement ever
+        carries). Must be a non-empty string.
 
-    args : tuple[Any, ...]
+    args : tuple[ast.expr, ...]
         Positional call arguments, in source order. Normalized to a tuple
-        from whatever tuple/list was supplied. Element type is
-        subclass-specific (``ast.expr``/``ast.Starred`` nodes for
-        ``CodeStatement``; already-typed JSON scalars for ``DagToolCall``).
+        from whatever tuple/list was supplied. Always real ``ast.expr``
+        (or ``ast.Starred``, itself an ``ast.expr`` subtype) nodes.
 
-    kwargs : dict[str, Any]
-        Keyword call arguments. Element type is subclass-specific, same
-        split as ``args``.
+    kwargs : dict[str, ast.expr]
+        Keyword call arguments. Same element-type guarantee as ``args``.
 
     batch_index : int | None
         Which concurrently-dispatched batch this slot belongs to, stamped
-        once by the owning family's batch compiler when the batch closes.
-        ``None`` until then. Not defensively validated -- set internally by
-        framework lifecycle code, not derived from external/LLM input.
+        once by the shared batch compiler (``utils/agents.py``'s
+        ``compile_batches``) when the batch closes. ``None`` until then. Not
+        defensively validated -- set internally by framework lifecycle code,
+        not derived from external/LLM input.
 
     result : AtomicResult | None
         Full result envelope from a future ``act()``-phase caller. ``None``
@@ -162,24 +168,33 @@ class CallSlot(ABC):
     exception: Exception | None = None
 
     def __post_init__(self) -> None:
-        # 1. identifier legality/normalization is entirely subclass-owned --
-        # called first, matching both current classes' own field order.
-        self._validate_identifier()
-
-        # 2. tool must be a non-empty string -- identical check, both
-        # subclasses today; type(self).__name__ substitution produces the
-        # exact same message text either concrete class already hardcodes.
-        if not isinstance(self.tool, str) or not self.tool.strip():
+        # 1. identifier: if not None, must be a non-empty, IDENTIFIER_
+        # PATTERN-legal string -- hard raise otherwise. Safe unconditionally
+        # now: a ScriptActAgent-sourced identifier is always already
+        # ast-sourced-legal; a JSON-sourced identifier has already been
+        # normalized (stripped, $-prefix removed, blank-collapsed to None)
+        # by translate_calls before this constructor ever runs -- no
+        # leniency needed here.
+        if self.identifier is not None and (
+            not isinstance(self.identifier, str)
+            or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
+        ):
             raise ValueError(
-                f"{type(self).__name__}.tool must be a non-empty string; got {self.tool!r}."
+                "ToolStatement.identifier must be None or a non-empty, "
+                f"Python-identifier-legal string; got {self.identifier!r}."
             )
 
-        # 3. args must be a tuple or list (no per-element validation --
-        # values may be anything, including raw ast nodes or plain
-        # scalars). Normalized to a tuple below.
+        # 2. tool must be a non-empty string.
+        if not isinstance(self.tool, str) or not self.tool.strip():
+            raise ValueError(
+                f"ToolStatement.tool must be a non-empty string; got {self.tool!r}."
+            )
+
+        # 3. args must be a tuple or list (no per-element validation).
+        # Normalized to a tuple below.
         if isinstance(self.args, (str, bytes)) or not isinstance(self.args, (tuple, list)):
             raise TypeError(
-                f"{type(self).__name__}.args must be a tuple or list; "
+                f"ToolStatement.args must be a tuple or list; "
                 f"got {type(self.args).__name__!r}."
             )
         self.args = tuple(self.args)
@@ -187,7 +202,7 @@ class CallSlot(ABC):
         # 4. kwargs must be a dict.
         if not isinstance(self.kwargs, dict):
             raise TypeError(
-                f"{type(self).__name__}.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
+                f"ToolStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
             )
 
         # 5. batch_index/result/exception are set internally by framework
@@ -195,187 +210,70 @@ class CallSlot(ABC):
         # defensively validated here, per 01-overview.md Section 4's
         # boundary-only-validation rule.
 
-    @abstractmethod
-    def _validate_identifier(self) -> None:
-        """
-        Validate (and, if the subclass's rules call for it, normalize in
-        place) ``self.identifier``. Required, no shared default -- the two
-        concrete grammars disagree on how strict this should be, and a
-        future third grammar must decide this explicitly rather than
-        silently inherit either one's answer.
-        """
-        ...
-
-    def _render_value(self, value: Any) -> Any:
-        """
-        Render one ``args``/``kwargs`` value for ``to_dict()``. Default:
-        identity passthrough -- correct for ``DagToolCall``, whose values
-        are already JSON-plain scalars from construction onward.
-        ``CodeStatement`` overrides this to unparse a still-unresolved
-        ``ast.expr``/``ast.Starred`` back to source text.
-        """
-        return value
-
     def to_dict(self) -> dict[str, Any]:
         """
         Return the explicit serialized dictionary representation, for
         debugging/observability only -- never used to reconstruct or
-        re-plan. Shared shape for both subclasses; only the per-value
-        rendering (``_render_value``) differs.
+        re-plan. Inlines the old per-subclass ``_render_value`` hook (only
+        one behavior exists now that args/kwargs are always ``ast.expr``):
+        render a value via ``ast.unparse(value)`` if it's an ``ast.expr``,
+        else pass it through unchanged.
         """
+        def render_value(value: Any) -> Any:
+            return ast.unparse(value) if isinstance(value, ast.expr) else value
+
         return {
             "identifier": self.identifier,
             "tool": self.tool,
-            "args": [self._render_value(value) for value in self.args],
-            "kwargs": {key: self._render_value(value) for key, value in self.kwargs.items()},
+            "args": [render_value(value) for value in self.args],
+            "kwargs": {key: render_value(value) for key, value in self.kwargs.items()},
             "batch_index": self.batch_index,
             "result": self.result.to_dict() if self.result is not None else None,
             "exception": repr(self.exception) if self.exception is not None else None,
         }
 
-
-@dataclass(slots=True)
-class CodeStatement(CallSlot):
-    """
-    One slot in a ScriptActAgent subtask's per-invocation statement
-    sequence.
-
-    Every generated statement normalizes to this one call-shaped record --
-    a real tool call (``tool`` = the call's dotted name, optionally a bare
-    unassigned call with ``identifier=None``), a bare expression (``tool``
-    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), a terminal
-    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``),
-    or a rewritten Python builtin call (``tool`` = ``PY_BUILTIN_ALIAS``,
-    structurally a real tool call with the builtin's name spliced into
-    ``args[0]`` as a plain ``str`` by ``rewrite_builtin_calls`` -- the one
-    exception to the rule below, since it's a post-parse rewrite, not
-    something the model itself wrote as an expression). Every other
-    ``args``/``kwargs`` value is always the original ``ast.expr`` node the
-    model wrote, whether or not the expression has a dependency on
-    another slot's identifier -- a dependency-free expression is only
-    dry-run evaluated at parse time (catching a guaranteed-bad constant
-    expression early), never folded into a plain value; the sole
-    ``resolve_slot_args`` call at prepare time is where every such value,
-    dependency-bearing or not, actually resolves to a plain Python value.
-
-    No new fields beyond ``CallSlot``'s own seven -- only
-    ``_validate_identifier``/``_render_value`` are overridden below.
-    """
-
-    def _validate_identifier(self) -> None:
-        # identifier, if not None, must be a non-empty, Python-identifier-
-        # legal string. None means a bare call or return. Always already
-        # ast-sourced by the time a real CodeStatement is constructed, so a
-        # hard raise here is safe -- never a correctable regen-repair issue
-        # the way DagToolCall's free-form wire string is.
-        if self.identifier is not None and (
-            not isinstance(self.identifier, str)
-            or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
-        ):
-            raise ValueError(
-                "CodeStatement.identifier must be None or a non-empty, "
-                f"Python-identifier-legal string; got {self.identifier!r}."
-            )
-
-    def _render_value(self, value: Any) -> Any:
-        return ast.unparse(value) if isinstance(value, ast.expr) else value
-
-
-@dataclass(slots=True)
-class DagToolCall(CallSlot):
-    """
-    One slot in a ``PlanActAgent``/``ReActAgent``/``DagAgent`` round's
-    per-invocation call sequence.
-
-    ``args``/``kwargs`` entries here are always plain, already-typed
-    scalars (``str | int | float | bool | None``) straight from the wire
-    payload, from construction onward -- never an ``ast.expr``, and never a
-    "parse pending/failed" half-state. A ``str`` entry may carry zero or
-    more ``$name`` sigil references (whole-string or embedded); resolving
-    those happens once, at prepare time, via ``utils.dag.resolve_call_args``
-    -- never here, never at construction, never more than once.
-
-    Every ``DagToolCall`` represents a real registered-tool call authored by
-    the model, or the framework-synthesized call representing a round's
-    resolved ``return`` value (``tool == RETURN_ALIAS``) -- there is no
-    other kind. No ``rhs_assign``/builtin/attribute-call branch: this
-    format has no inline-computation grammar at all.
-
-    No new fields beyond ``CallSlot``'s own seven -- only
-    ``_validate_identifier`` is overridden below; ``_render_value`` uses
-    ``CallSlot``'s default identity passthrough, since every value here is
-    already JSON-plain.
-    """
-
-    def _validate_identifier(self) -> None:
-        # 1. type-check only -- content-level legality (pattern match,
-        # reserved-prefix collision, dunder-shape) is deliberately left to
-        # utils.dag.validate_calls as a regen-repair-eligible issue, not a
-        # construction-time crash, since this string comes straight from a
-        # free-form wire payload with no grammatical guarantee.
-        if self.identifier is not None:
-            if not isinstance(self.identifier, str):
-                raise TypeError(
-                    "DagToolCall.identifier must be None or a string; got "
-                    f"{type(self.identifier).__name__!r}."
-                )
-            stripped = self.identifier.strip()
-            # 1c. Exactly one leading '$' is stripped, silently -- no legal
-            # identifier can start with '$', so this is pure recovery from
-            # a model blending reference-syntax ("$total") with
-            # definition-syntax ("total"), never a collision with an
-            # intended name. Not repeated: "$$total" becomes "$total",
-            # still pattern-illegal, left for validate_calls to catch.
-            if stripped.startswith("$"):
-                stripped = stripped[1:].strip()
-            # 1d. Blank after both strips (originally "", whitespace-only,
-            # or a lone "$") collapses to None -- indistinguishable from no
-            # name supplied at all, rather than surviving as "" to be
-            # rejected downstream as an invalid identifier.
-            self.identifier = stripped or None
-
-    def serialize(self) -> dict[str, Any]:
+    def to_code(self) -> str:
         """
-        Return this call reconstructed in the **wire schema's own shape**
-        (``call``/``arguments: [{"name", "value"}, ...]``/``result_name``),
-        the model's own generation vocabulary -- distinct from
-        ``to_dict()``'s internal-field debug view. This is the one
-        authoritative home for that reconstruction:
-        ``utils.dag.render_completed_as_json`` is a thin wrapper calling
-        this once per call, rather than rebuilding the shape itself.
+        Render this statement as one line of real Python source -- verbatim
+        port of the prior per-grammar ``to_code()`` body. No behavior
+        change for any ``ScriptActAgent``-sourced statement. For a
+        ``PlanActAgent``/``ReActAgent``-sourced statement (``tool`` is a
+        real registered tool or ``RETURN_ALIAS``, ``args``/``kwargs`` are
+        ``Name``/``Constant``/``JoinedStr`` only), this produces real Python
+        source with zero extra code -- the renderer only ever inspects
+        ``ast.expr``-ness, never which grammar produced the node.
+        """
 
-        Every args/kwargs value is already JSON-plain -- used directly, no
-        rendering step needed.
-        """
-        return {
-            "call": self.tool,
-            "arguments": (
-                [{"name": None, "value": value} for value in self.args]
-                + [{"name": key, "value": value} for key, value in self.kwargs.items()]
-            ),
-            "result_name": self.identifier,
-        }
+        def render_value(value: Any) -> str:
+            return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
 
-    def to_python_code(self) -> str:
-        """
-        Reconstruct this call as one line of real Python source, via
-        ``repr()`` on each value (a value is already the real Python object
-        it represents -- there is no ``ast.expr`` left to unparse). A
-        ``RETURN_ALIAS`` call renders as ``return <val!r>``; any other call
-        renders as ``<identifier> = <tool>(<args>)`` (bare ``<tool>(<args>)``
-        when ``identifier`` is ``None``). Still produces one line of real,
-        syntactically valid Python per call -- an unresolved ``$name``-
-        bearing string just repr's as an ordinary quoted string (e.g.
-        ``x = '$total'``), which is exactly what it is pre-resolution.
-        ``repr()`` never raises for any value this class's own
-        ``__post_init__`` already accepted.
-        """
         if self.tool == RETURN_ALIAS:
-            return f"return {self.kwargs['val']!r}"
+            return f"return {render_value(self.kwargs['val'])}"
 
         prefix = f"{self.identifier} = " if self.identifier is not None else ""
-        args_source = ", ".join(
-            [repr(value) for value in self.args]
-            + [f"{key}={value!r}" for key, value in self.kwargs.items()]
-        )
-        return f"{prefix}{self.tool}({args_source})"
+        if self.tool == RHS_ASSIGN_ALIAS:
+            return f"{prefix}{render_value(self.kwargs['val'])}"
+
+        # A py_builtin slot renders back as the original natural call syntax
+        # (`len(x)`), never the internal rewritten form (`py_builtin('len',
+        # x)`) -- unsplice the builtin name before falling into the same
+        # generic rendering as any real tool call. An attr_call slot gets the
+        # same treatment: `obj.method(args)`, not the internal (obj, "method",
+        # *args) shape.
+        if self.tool == PY_BUILTIN_ALIAS:
+            call_name, call_args = self.args[0], self.args[1:]
+        elif self.tool == ATTR_CALL_ALIAS:
+            call_name, call_args = f"{render_value(self.args[0])}.{self.args[1]}", self.args[2:]
+        else:
+            call_name, call_args = self.tool, self.args
+
+        positional_tokens = [
+            f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
+            for entry in call_args
+        ]
+        keyword_tokens = [
+            f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
+            for name, value in self.kwargs.items()
+        ]
+        args_source = ", ".join(positional_tokens + keyword_tokens)
+        return f"{prefix}{call_name}({args_source})"

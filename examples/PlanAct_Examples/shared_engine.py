@@ -2,9 +2,8 @@
 
 One shared ``llm_engine`` for every example in this folder, so switching
 providers doesn't mean editing each example file by hand. Mirrors this
-repo's established pattern (``examples/ScriptAct_Examples/shared_engine.py``,
-``examples/DagAgent_Examples`` if/when it exists) -- one cheap/small default
-model per provider.
+repo's established pattern (``examples/ScriptAct_Examples/shared_engine.py``)
+-- one cheap/small default model per provider.
 
 Provider selection: set the ``PLANACT_AGENT_PROVIDER`` env var to one of
 ``o``/``g``/``m``/``a``/``p``/``3``/``4``/``t`` (openai/gemini/mistral/
