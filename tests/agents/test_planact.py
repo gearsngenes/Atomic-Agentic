@@ -1,861 +1,372 @@
 from __future__ import annotations
 
-import pytest
-import json
 import asyncio
+import json
+from typing import Any
+
+import pytest
+
+from atomic_agentic.agents.planact import PlanActAgent
+from atomic_agentic.exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
 
 from .conftest import (
     FakeLLMEngine,
+    arg,
     make_planact_agent,
-    make_react_agent,
-    register_math_tools,
-    react_step_json,
+    planact_plan_json,
 )
 
-from atomic_agentic.agents.toolagent import return_tool
-from atomic_agentic.agents.planact import PlanActAgent
-from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.exceptions import (
-    ToolAgentError,
-    ToolInvocationError,
-)
-from atomic_agentic.constants.core import NO_VAL
+
+def scripted(*, plan: list[dict[str, Any]], return_value: Any = None, summary: str = "Running the plan.") -> dict[str, Any]:
+    """Build one scripted FakeLLMEngine response as a real dict.
+
+    ``FakeLLMEngine`` never parses its scripted responses -- whatever object
+    sits in its ``responses`` list becomes ``LLMResult.result`` verbatim (a
+    real engine's own ``_extract_result`` does the ``json.loads`` when
+    ``output_structure`` was requested; the fake intentionally does not
+    reproduce that). ``conftest.planact_plan_json`` builds the correct
+    wire-shaped payload as JSON *text*; this helper round-trips it back into
+    a plain dict so it can be handed to ``FakeLLMEngine`` directly.
+    """
+    return json.loads(planact_plan_json(plan=plan, return_value=return_value, summary=summary))
 
 
-class TestPlanActAgent:
-    def test_invokes_planned_tools_and_returns_value(self) -> None:
+# --------------------------------------------------------------------------- #
+# Construction
+# --------------------------------------------------------------------------- #
+class TestPlanActConstruction:
+    def test_fail_fast_defaults_true(self) -> None:
+        agent = make_planact_agent([])
+        assert agent.fail_fast is True
+
+    def test_fail_fast_forwarded_false(self) -> None:
+        agent = make_planact_agent([], fail_fast=False)
+        assert agent.fail_fast is False
+
+    def test_fail_fast_must_be_bool(self) -> None:
+        with pytest.raises(ToolAgentError):
+            PlanActAgent(
+                name="tests",
+                namespace="tests",
+                description=".",
+                llm_engine=FakeLLMEngine([]),
+                fail_fast="yes",  # type: ignore[arg-type]
+            )
+
+    def test_tool_calls_limit_and_regeneration_limit_forwarded(self) -> None:
+        agent = make_planact_agent([], tool_calls_limit=3, regeneration_limit=2)
+        assert agent.tool_calls_limit == 3
+        assert agent.regeneration_limit == 2
+
+    def test_reserved_tools_registered_on_construction(self) -> None:
+        agent = make_planact_agent([])
+        assert agent.has_tool("make_sequence")
+        assert agent.has_tool("make_dict")
+
+    def test_reserved_tool_names_cannot_be_registered_through_public_api(self) -> None:
+        def dummy() -> None:
+            return None
+
+        agent = make_planact_agent([])
+        with pytest.raises(ToolRegistrationError):
+            agent.register_tool(dummy, alias="make_sequence")
+
+
+# --------------------------------------------------------------------------- #
+# Full invoke() round trip
+# --------------------------------------------------------------------------- #
+class TestPlanActInvokeRoundTrip:
+    def test_multi_step_plan_with_dependencies_and_concurrency(self) -> None:
+        plan = [
+            {"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"},
+            {"call": "multiply", "arguments": [arg("x", 4), arg("y", 5)], "result_name": "b"},
+            {"call": "add", "arguments": [arg("x", "$a"), arg("y", "$b")], "result_name": "c"},
+        ]
         agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
-                ]
-                """
-            ]
-        )
-
-        result = agent.invoke({"prompt": "run plan"})
-
-        assert result.result == 50
-
-    def test_auto_appends_return_none_when_plan_has_no_return(self) -> None:
-        agent = make_planact_agent(
-            [
-                """
-                [
-                  {"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}
-                ]
-                """
-            ]
-        )
-
-        result = agent.invoke({"prompt": "run plan"})
-
-        assert result.result is None
-
-    def test_moves_return_step_to_end(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}},
-                  {{"step": 1, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}}
-                ]
-                """
-            ]
-        )
-
-        result = agent.invoke({"prompt": "run plan"})
-
-        assert result.result == 3
-
-    def test_executes_independent_steps_in_same_batch(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": ["<<__s0__>>", "<<__s1__>>"]}}}}
-                ]
-                """
-            ]
-        )
-
-        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
-        task = agent.think(task)
-        task = agent.prepare(task)
-
-        assert task.batches == [[0, 1], [2]]
-
-    def test_rejects_multiple_return_steps(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 1}}}},
-                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": 2}}}}
-                ]
-                """
-            ]
-        )
-
-        with pytest.raises(ToolAgentError, match="multiple return"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_plan_output_that_is_not_a_json_array(self) -> None:
-        agent = make_planact_agent(['{"not": "a list"}'])
-
-        with pytest.raises(ToolAgentError, match="plan must be a non-empty JSON array"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_plan_item_that_is_not_a_json_object(self) -> None:
-        agent = make_planact_agent(["[1, 2, 3]"])
-
-        with pytest.raises(ToolAgentError, match="must be a JSON object"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_unknown_tool_in_plan(self) -> None:
-        agent = make_planact_agent(
-            [
-                """
-                [
-                  {"step": 0, "tool": "Tool.tests.missing", "args": {}}
-                ]
-                """
-            ]
-        )
-
-        with pytest.raises(ToolAgentError, match="unknown tool"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_plan_exceeding_tool_calls_limit(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
-                ]
-                """
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="tool_calls_limit"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_out_of_range_cache_reference(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
-                ]
-                """
-            ]
-        )
-
-        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_rejects_future_step_dependency(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": "<<__s1__>>", "y": 2}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
-                ]
-                """
-            ]
-        )
-
-        with pytest.raises(ToolAgentError, match="invalid step dependencies"):
-            agent.invoke({"prompt": "run plan"})
-
-    def test_context_enabled_can_reference_cached_result_on_next_invoke(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
-                ]
-                """,
-                f"""
-                [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
-                ]
-                """,
-            ],
+            [scripted(plan=plan, return_value="$c")],
             context_enabled=True,
         )
 
-        assert agent.invoke({"prompt": "first"}).result == 5
-        assert agent.invoke({"prompt": "second"}).result == 5
+        result = agent.invoke({"prompt": "run plan"})
 
-    def test_compile_batches_isolates_return_step(self) -> None:
-        agent = make_planact_agent(["[]"])
-        planned_slots = [
-            BlackboardSlot(
-                step=0,
-                tool="Tool.tests.add",
-                args={"x": 1, "y": 2},
-                status="planned",
-                step_dependencies=(),
-            ),
-            BlackboardSlot(
-                step=1,
-                tool="Tool.tests.multiply",
-                args={"x": 3, "y": 4},
-                status="planned",
-                step_dependencies=(),
-            ),
-            BlackboardSlot(
-                step=2,
-                tool=return_tool.full_name,
-                args={"val": "<<__s1__>>"},
-                status="planned",
-                step_dependencies=(0, 1),
-            ),
-        ]
+        assert result.result == 25
 
-        batches = agent._compile_batches_from_deps(
-            planned_slots=planned_slots,
-            return_idx=2,
-        )
+        record = agent.get_conversation()[-1]
+        by_identifier = {s.identifier: s.batch_index for s in record.statements if s.identifier is not None}
+        # a and b are independent -- same concurrency batch.
+        assert by_identifier["a"] == by_identifier["b"]
+        # c depends on both -- a strictly later batch.
+        assert by_identifier["c"] > by_identifier["a"]
 
-        assert batches == [[0, 1], [2]]
+    def test_single_call_plan_returns_value(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"}]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$a")])
 
-    def test_think_generates_planned_slot_metadata(self) -> None:
-        # think() generates + validates the whole plan onto
-        # task.generated_plan; running_blackboard/batches don't exist yet --
-        # those are prepare()'s job (compiled on its first call).
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 4}}, "await": 0}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
-                ]
-                """
-            ]
-        )
+        result = agent.invoke({"prompt": "run"})
 
-        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
-        task = agent.think(task)
-        plan = task.generated_plan
-
-        assert plan[0].status == "planned"
-        assert plan[0].step_dependencies == ()
-        assert plan[1].status == "planned"
-        assert plan[1].step_dependencies == (0,)
-        assert plan[1].await_step == 0
-        assert plan[2].tool == return_tool.full_name
-        assert plan[2].step_dependencies == (0, 1)
-
-    def test_prepare_marks_batch_zero_prepared(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
-                ]
-                """
-            ]
-        )
-        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
-        task = agent.think(task)
-
-        updated = agent.prepare(task)
-
-        assert updated.prepared_steps == [0]
-        assert updated.running_blackboard[0].status == "prepared"
-        assert updated.running_blackboard[0].is_prepared() is True
-        assert updated.running_blackboard[0].resolved_args == {"x": 1, "y": 2}
-
-    def test_accepts_plan_missing_step_key_and_normalizes(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
-                ]
-                """
-            ]
-        )
-
-        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
-        task = agent.think(task)
-        plan = task.generated_plan
-
-        assert [slot.step for slot in plan] == [0, 1]
-        assert plan[0].tool == "Tool.tests.add"
-        assert plan[1].tool == return_tool.full_name
-
-    def test_accepts_non_sequential_plan_step_and_normalizes(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 99, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 42, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
-                ]
-                """
-            ]
-        )
-
-        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
-        task = agent.think(task)
-        plan = task.generated_plan
-
-        assert [slot.step for slot in plan] == [0, 1]
-        assert plan[0].tool == "Tool.tests.add"
-        assert plan[1].tool == return_tool.full_name
-
-    def test_rejects_await_on_return_step(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 1}}, "await": 0}}
-                ]
-                """
-            ]
-        )
-
-        with pytest.raises(ToolAgentError, match="return step and must not include"):
-            agent.invoke({"prompt": "run plan"})
+        assert result.result == 3
 
     def test_async_invoke_executes_plan_and_returns_value(self) -> None:
-        agent = make_planact_agent(
-            [
-                f"""
-                [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
-                ]
-                """
-            ]
-        )
+        plan = [
+            {"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"},
+            {"call": "multiply", "arguments": [arg("x", "$a"), arg("y", 10)], "result_name": "b"},
+        ]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$b")])
 
         result = asyncio.run(agent.async_invoke({"prompt": "run plan"}))
 
         assert result.result == 50
 
-    def test_llm_record_system_prompt_name_is_plan_first(self) -> None:
+
+# --------------------------------------------------------------------------- #
+# $name sigil resolution
+# --------------------------------------------------------------------------- #
+class TestPlanActSigilResolution:
+    def test_whole_match_substitutes_real_typed_value(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
+        # "$a" used as a real int operand downstream -- proves the real type
+        # (not a stringified form) was substituted.
+        plan.append({"call": "multiply", "arguments": [arg("x", "$a"), arg("y", 2)], "result_name": "b"})
+        agent = make_planact_agent([scripted(plan=plan, return_value="$b")])
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 10
+
+    def test_embedded_reference_interpolates_as_text(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
+        agent = make_planact_agent([scripted(plan=plan, return_value="sum is $a")])
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == "sum is 5"
+
+    def test_unmatched_embedded_sigil_is_left_as_literal_text(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value="nothing here: $ghost")])
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == "nothing here: $ghost"
+
+    def test_unmatched_whole_sigil_is_rejected_not_silently_literal(self) -> None:
+        # Contrast with the embedded case: a *whole*-string unresolved
+        # reference is a real validation issue (caught by validate/translate
+        # via the regeneration loop), not treated as literal text.
+        agent = make_planact_agent(
+            [scripted(plan=[], return_value="$ghost")],
+            regeneration_limit=0,
+        )
+
+        with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
+            agent.invoke({"prompt": "run"})
+
+
+# --------------------------------------------------------------------------- #
+# Constant (K_*) and cross-turn (task_result_N) references
+# --------------------------------------------------------------------------- #
+class TestPlanActConstantAndCrossTurnReferences:
+    def test_registered_constant_resolves_by_wire_name(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value="$K_LIMIT")])
+        agent.register_constant(10, alias="limit")
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 10
+
+    def test_cross_turn_task_result_reference_resolves(self) -> None:
+        first_plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
         agent = make_planact_agent(
             [
-                f'[{{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 42}}}}]'
+                scripted(plan=first_plan, return_value="$a"),
+                scripted(plan=[], return_value="$task_result_0"),
             ],
             context_enabled=True,
         )
 
-        agent.invoke({"prompt": "run"})
+        first = agent.invoke({"prompt": "first"})
+        second = agent.invoke({"prompt": "second"})
 
-        for rec in agent.get_conversation()[-1].llm_records:
-            assert rec.system_prompt_name == "plan_first"
-
-
-class TestPlanActThinkPrepareHandoff:
-    """New 1f coverage: think() generates+validates the plan once (no-op on
-    later calls), storing it on task.generated_plan; prepare()'s first call
-    compiles it into batches (task.batches), later calls just resolve/
-    advance the cursor -- compilation itself never repeats."""
-
-    def test_think_populates_generated_plan_and_is_no_op_after(self) -> None:
-        agent = make_planact_agent(
-            [f'[{{"tool": "{return_tool.full_name}", "args": {{"val": 1}}}}]']
-        )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
-        assert task.generated_plan is NO_VAL
-
-        task = agent.think(task)
-        first_plan = task.generated_plan
-        assert first_plan is not NO_VAL
-
-        task = agent.think(task)  # second call: no-op, same object
-        assert task.generated_plan is first_plan
-
-    def test_prepare_compiles_batches_only_on_first_call(self) -> None:
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
-                ])
-            ]
-        )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
-        task = agent.think(task)
-        assert task.batches == []
-
-        task = agent.prepare(task)
-        first_batches = task.batches
-        assert first_batches
-
-        task = agent.act(task)
-        task = agent.prepare(task)  # second batch -- compile not repeated
-        assert task.batches is first_batches
+        assert first.result == 5
+        assert second.result == 5
 
 
-class TestPlanActBlackboardInvariants:
-    """New 1f coverage: across a multi-batch run, running_blackboard[i].step
-    == i holds for every persisted slot and no slot is written twice --
-    under both fail_fast settings."""
-
-    def test_step_matches_index_and_no_double_write_fail_fast_true(self) -> None:
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 3}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ])
-            ]
-        )
-
-        result = agent.invoke({"prompt": "run"})
-
-        assert result.result == 9
-        board = agent.blackboard
-        assert len(board) == 3
-        for i, slot in enumerate(board):
-            assert slot.step == i
-            assert slot.status == BlackboardSlot.EXECUTED
-
-    def test_step_matches_index_and_no_double_write_fail_fast_false(self) -> None:
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "run"})
-
-        assert result.result == 3
-        board = agent.blackboard
-        assert len(board) == 3
-        for i, slot in enumerate(board):
-            assert slot.step == i
-        assert board[0].status == BlackboardSlot.FAILED
-        assert board[1].status == BlackboardSlot.EXECUTED
-        assert board[2].status == BlackboardSlot.EXECUTED
-
-    def test_double_prepare_without_act_is_unreachable_via_the_loop_and_breaks_by_hand(self) -> None:
-        """Demonstrates why the base loop's fixed think -> prepare -> act
-        ordering is what actually prevents double-prepare-without-act, not
-        a guard inside prepare() itself (the old re-entry check was dropped
-        in 1c as dead -- the base loop's external sequencing makes this call
-        shape unreachable through normal invoke()/async_invoke() execution).
-        A hand-rolled re-entry doesn't silently corrupt state -- it breaks
-        loudly, because the second batch's return step depends on the first
-        batch's results, which were never actually executed (act() never
-        ran in between): _resolve_placeholders raises "not executed"."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": "Tool.tests.multiply", "args": {"x": 3, "y": 4}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ])
-            ]
-        )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
-        task = agent.think(task)
-
-        task = agent.prepare(task)  # batch 0 prepared: steps [0, 1]
-        first_batch_prepared = list(task.prepared_steps)
-        assert first_batch_prepared == [0, 1]
-
-        with pytest.raises(ToolAgentError, match="not executed"):
-            agent.prepare(task)  # hand-rolled re-entry, no intervening act()
-
-
-# ── TestPlanActGenerationRetry ─────────────────────────────────────────────────
-
+# --------------------------------------------------------------------------- #
+# Generation retry loop (within-round regeneration on validation failure)
+# --------------------------------------------------------------------------- #
 class TestPlanActGenerationRetry:
-    """Retry loop in _generate_plan/_agenerate_plan: budget, feedback, LLMRecord accumulation."""
-
-    VALID_PLAN = json.dumps([
-        {"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-        {"step": 1, "tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
-    ])
-
-    VALID_PLAN_RETURN_ONLY = json.dumps([
-        {"step": 0, "tool": return_tool.full_name, "args": {"val": 42}},
-    ])
-
-    INVALID_JSON = "this is not json at all"
-
-    INVALID_PLAN_WRONG_TOOL = json.dumps([
-        {"step": 0, "tool": "Tool.tests.nonexistent", "args": {}},
-        {"step": 1, "tool": return_tool.full_name, "args": {"val": 0}},
-    ])
-
-    def test_zero_retries_raises_on_first_bad_json(self) -> None:
-        agent = make_planact_agent([self.INVALID_JSON])
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-
-    def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_JSON])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=0,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-        assert len(engine.calls) == 1
-
-    def test_json_error_retry_succeeds_on_second_call(self) -> None:
+    def test_undefined_reference_triggers_regeneration_then_succeeds(self) -> None:
+        invalid = scripted(plan=[], return_value="$missing")
+        valid = scripted(plan=[], return_value=7)
         agent = make_planact_agent(
-            [self.INVALID_JSON, self.VALID_PLAN],
-            generation_retries=1,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 3
-
-    def test_json_error_retry_stores_two_llm_records(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
+            [invalid, valid],
+            regeneration_limit=1,
             context_enabled=True,
         )
-        agent.invoke({"prompt": "run"})
-        llm_records = agent.get_conversation()[-1].llm_records
-        assert len(llm_records) == 2
-        assert len(llm_records[0].messages) == 1
-        # Self-contained convention: retry's messages = full task_messages so
-        # far (1 original decompose-instruction + 2 injected feedback), not
-        # just the 2 new ones.
-        assert len(llm_records[1].messages) == 3
 
-    def test_spec_error_retry_succeeds_on_second_call(self) -> None:
-        agent = make_planact_agent(
-            [self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN],
-            generation_retries=1,
-        )
         result = agent.invoke({"prompt": "run"})
-        assert result.result == 3
-
-    def test_spec_error_retry_stores_two_llm_records(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-            context_enabled=True,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        llm_records = agent.get_conversation()[-1].llm_records
-        assert len(llm_records) == 2
-        assert len(llm_records[0].messages) == 1
-        # Self-contained convention: retry's messages = full task_messages so
-        # far (1 original decompose-instruction + 2 injected feedback), not
-        # just the 2 new ones.
-        assert len(llm_records[1].messages) == 3
-
-    def test_budget_exhausted_raises_after_all_attempts(self) -> None:
-        agent = make_planact_agent(
-            [self.INVALID_JSON, self.INVALID_JSON],
-            generation_retries=1,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-
-    def test_budget_exhausted_records_all_llm_calls_before_raise(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-        assert len(engine.calls) == 2
-
-    def test_json_feedback_appended_to_working_messages(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        agent.invoke({"prompt": "run"})
-        assert len(engine.calls[1]) > len(engine.calls[0])
-        last_msg = engine.calls[1][-1]
-        assert last_msg["role"] == "user"
-        assert "could not be parsed" in last_msg["content"]
-
-    def test_spec_feedback_contains_reserialised_plan_not_resolved_args(self) -> None:
-        engine = FakeLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
-        agent = PlanActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        last_msg = engine.calls[1][-1]
-        assert last_msg["role"] == "user"
-        assert "unknown tool" in last_msg["content"]
-        assert "resolved_args" not in last_msg["content"]
-
-
-class TestCascadeFailedPropagation:
-    """
-    Integration tests for cascade FAILED propagation in PlanActAgent.
-
-    When a tool step fails (fail_fast=False), any later step whose args
-    reference it via <<__sN__>> placeholders is cascade-marked FAILED
-    instead of raising. The return tool always raises when any of its
-    arg dependencies failed.
-    """
-
-    def test_dependent_step_is_cascade_failed_not_raised(self) -> None:
-        """Non-return step with a failed dep is cascade-marked FAILED; run succeeds."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": 99}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "cascade test"})
-
-        assert result.result == 99
-        board = agent.blackboard
-        assert board[0].status == BlackboardSlot.FAILED
-        assert board[1].status == BlackboardSlot.FAILED
-        assert "dependency" in str(board[1].error).lower() or "skipped" in str(board[1].error).lower()
-        assert board[2].status == BlackboardSlot.EXECUTED
-
-    def test_cascade_exception_records_includes_both_slots(self) -> None:
-        """exception_records captures the execution failure and the cascade failure."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": 99}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "cascade exception_records"})
-
-        assert result.result == 99
-        assert len(result.exception_records) == 2
-        indices = [idx for idx, _ in result.exception_records]
-        assert 0 in indices
-        assert 1 in indices
-
-    def test_return_step_with_failed_dep_raises(self) -> None:
-        """Return step depending on a FAILED step raises ToolAgentError."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        with pytest.raises(ToolAgentError, match="return step"):
-            agent.invoke({"prompt": "return cascade raise"})
-
-    def test_chain_cascade_return_raises(self) -> None:
-        """Cascade chain: step 0 fails -> step 1 cascade FAILED -> return depends on step 1 -> raises."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        with pytest.raises(ToolAgentError, match="return step"):
-            agent.invoke({"prompt": "chain cascade"})
-
-    def test_cascade_does_not_affect_independent_steps(self) -> None:
-        """Steps with no dep on the failed step execute normally; run succeeds."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": 3, "y": 4}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ])
-            ],
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "independent step"})
 
         assert result.result == 7
-        board = agent.blackboard
-        assert board[0].status == BlackboardSlot.FAILED
-        assert board[1].status == BlackboardSlot.EXECUTED
-        assert board[2].status == BlackboardSlot.EXECUTED
+        record = agent.get_conversation()[-1]
+        assert record.regenerations_used == 1
+        assert len(record.llm_records) == 2
 
-    def test_fail_fast_true_does_not_cascade_raises_immediately(self) -> None:
-        """With fail_fast=True (default), any failure raises ToolInvocationError immediately."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": 99}},
-                ])
+    def test_undefined_reference_budget_exhausted_raises(self) -> None:
+        invalid = scripted(plan=[], return_value="$missing")
+        agent = make_planact_agent([invalid], regeneration_limit=0)
+
+        with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
+            agent.invoke({"prompt": "run"})
+
+    def test_tool_calls_limit_exceeded_triggers_regeneration_then_succeeds(self) -> None:
+        too_many = scripted(
+            plan=[
+                {"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"},
+                {"call": "multiply", "arguments": [arg("x", 3), arg("y", 4)], "result_name": "b"},
             ],
+            return_value="$b",
+        )
+        ok = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent(
+            [too_many, ok],
+            tool_calls_limit=1,
+            regeneration_limit=1,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        assert agent.get_conversation()[-1].regenerations_used == 1
+
+    def test_tool_calls_limit_exceeded_budget_exhausted_raises(self) -> None:
+        too_many = scripted(
+            plan=[
+                {"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"},
+                {"call": "multiply", "arguments": [arg("x", 3), arg("y", 4)], "result_name": "b"},
+            ],
+            return_value="$b",
+        )
+        agent = make_planact_agent([too_many], tool_calls_limit=1, regeneration_limit=0)
+
+        with pytest.raises(ToolAgentError, match="exceeding the configured limit"):
+            agent.invoke({"prompt": "run"})
+
+
+# --------------------------------------------------------------------------- #
+# Cascade failure propagation (fail_fast=False) vs. immediate raise (True)
+# --------------------------------------------------------------------------- #
+class TestPlanActCascadeFailures:
+    def _cascade_plan(self) -> list[dict]:
+        return [
+            {"call": "fail_tool", "arguments": [], "result_name": "f"},
+            {"call": "add", "arguments": [arg("x", "$f"), arg("y", 1)], "result_name": "dep"},
+            {"call": "multiply", "arguments": [arg("x", 3), arg("y", 4)], "result_name": "indep"},
+        ]
+
+    def test_cascade_skips_dependents_independent_calls_still_run(self) -> None:
+        agent = make_planact_agent(
+            [scripted(plan=self._cascade_plan(), return_value="$indep")],
+            fail_fast=False,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "cascade"})
+
+        assert result.result == 12
+        record = agent.get_conversation()[-1]
+        assert [s.identifier for s in record.failed_statements] == ["f"]
+        identifiers = [s.identifier for s in record.statements]
+        assert "indep" in identifiers
+        assert "dep" not in identifiers
+
+    def test_return_depending_on_failed_call_raises(self) -> None:
+        plan = [{"call": "fail_tool", "arguments": [], "result_name": "f"}]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$f")],
+            fail_fast=False,
+        )
+
+        with pytest.raises(ToolAgentError, match="return value"):
+            agent.invoke({"prompt": "run"})
+
+    def test_fail_fast_true_raises_immediately_no_cascade(self) -> None:
+        agent = make_planact_agent(
+            [scripted(plan=self._cascade_plan(), return_value="$indep")],
             fail_fast=True,
         )
 
         with pytest.raises(ToolInvocationError):
-            agent.invoke({"prompt": "fail_fast=True raises"})
+            agent.invoke({"prompt": "cascade"})
 
 
-# ── TestFailedCacheRefValidation ───────────────────────────────────────────────
+# --------------------------------------------------------------------------- #
+# return-value handling: reference / literal / null
+# --------------------------------------------------------------------------- #
+class TestPlanActReturnValueHandling:
+    def test_return_resolves_name_reference(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$a")])
 
-class TestFailedCacheRefValidation:
-    """
-    Tests for FAILED cache-ref detection in _validate_planned_slots (PlanAct)
-    and _process_next_step_output (ReAct).
+        assert agent.invoke({"prompt": "run"}).result == 5
 
-    Requires two-invoke sequences: first invoke leaves a FAILED slot in the
-    persisted cache (fail_fast=False, context_enabled=True), then a second
-    invoke's plan/step references that FAILED cache slot.
-    """
+    def test_return_literal_value_with_empty_plan(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=42)])
 
-    def test_validate_planned_slots_rejects_failed_cache_ref(self) -> None:
-        """PlanAct: plan referencing a FAILED cache slot raises at validation time."""
+        assert agent.invoke({"prompt": "run"}).result == 42
+
+    def test_return_null(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=None)])
+
+        assert agent.invoke({"prompt": "run"}).result is None
+
+
+# --------------------------------------------------------------------------- #
+# Record / result shape
+# --------------------------------------------------------------------------- #
+class TestPlanActRecordAndResultShape:
+    def test_successful_run_statements_and_usage_report(self) -> None:
+        plan = [
+            {"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"},
+            {"call": "add", "arguments": [arg("x", "$a"), arg("y", 1)], "result_name": "b"},
+        ]
         agent = make_planact_agent(
-            [
-                # First invoke: step 0 fails; return is independent.
-                json.dumps([
-                    {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": return_tool.full_name, "args": {"val": 1}},
-                ]),
-                # Second invoke: plan references <<__c0__>> which is FAILED.
-                json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}},
-                ]),
-            ],
+            [scripted(plan=plan, return_value="$b")],
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 6
+
+        record = agent.get_conversation()[-1]
+        assert len(record.statements) == 3  # a, b, return
+        assert record.failed_statements == ()
+        assert record.regenerations_used == 0
+
+        by_tool = {u.tool_name: u.call_count for u in result.usage_report.by_tool}
+        assert by_tool == {"add": 2}
+        assert result.usage_report.total_dispatched == 2
+        assert result.usage_report.total_failed == 0
+        assert result.failed_call_count == 0
+        assert result.regenerations_used == 0
+
+    def test_cascade_run_records_failed_statement_and_usage(self) -> None:
+        plan = [
+            {"call": "fail_tool", "arguments": [], "result_name": "f"},
+            {"call": "add", "arguments": [arg("x", "$f"), arg("y", 1)], "result_name": "dep"},
+            {"call": "multiply", "arguments": [arg("x", 3), arg("y", 4)], "result_name": "indep"},
+        ]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$indep")],
             fail_fast=False,
             context_enabled=True,
         )
-        # First invoke succeeds (fail_fast=False, return is independent of failed step).
-        result1 = agent.invoke({"prompt": "first run"})
-        assert result1.result == 1
-        # Second invoke: plan references a FAILED cache slot -> raises at validation.
-        with pytest.raises(ToolAgentError, match="failed in this conversation"):
-            agent.invoke({"prompt": "second run"})
 
-    def test_validate_planned_slots_rejects_stale_step_ref_in_return(self) -> None:
-        """PlanAct: return step using <<__sN__>> where N >= plan length raises at validation.
+        result = agent.invoke({"prompt": "run"})
 
-        Reproduces the bug where _normalize_planned_slots overwrites return-slot
-        step_dependencies to all-prior-steps, masking a stale global step index
-        in the args that then blows up at _resolve_placeholders during execution.
-        """
-        # First invoke produces step 0 in the blackboard (global index 0).
-        # Second invoke's return step mistakenly references <<__s1__>> (index 1 in
-        # a 1-step plan -- out of range; only <<__s0__>> is valid).
-        agent = make_planact_agent(
-            [
-                # First invoke: one real step + return.
-                json.dumps([
-                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
-                ]),
-                # Second invoke: single return step uses stale index 1 (out of range).
-                json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
-                ]),
-            ],
-            context_enabled=True,
-        )
-        result1 = agent.invoke({"prompt": "first run"})
-        assert result1.result == 3
-        # Second invoke: return step has <<__s1__>> in a 1-slot plan (only index 0 valid).
-        with pytest.raises(ToolAgentError, match="return step has invalid step references"):
-            agent.invoke({"prompt": "second run"})
-
-    def test_process_next_step_output_rejects_failed_cache_ref(self) -> None:
-        """ReAct: a step referencing a FAILED cache slot raises at validation time."""
-        agent = make_react_agent(
-            [
-                # First invoke: step 0 fails; step 1 is return with independent val.
-                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": 1}, duration=0),
-                # Second invoke: step references <<__c0__>> (FAILED cache slot).
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}),
-            ],
-            tool_calls_limit=2,
-            fail_fast=False,
-            context_enabled=True,
-        )
-        result1 = agent.invoke({"prompt": "first run"})
-        assert result1.result == 1
-        with pytest.raises(ToolAgentError, match="failed in this conversation"):
-            agent.invoke({"prompt": "second run"})
-
-
-class TestAwaitFieldKeyInErrors:
-    """B-5: _validate_tool_step_dict uses the LLM-facing 'await' key, not internal 'await_step'."""
-
-    def test_invalid_await_type_error_uses_await_key(self) -> None:
-        """_validate_tool_step_dict error for bad 'await' value names 'await', not 'await_step'."""
-        agent = make_planact_agent([], context_enabled=False)
-        # _process_plan_output calls _validate_tool_step_dict; the await type error
-        # fires before tool-existence lookup so no tools need to be registered.
-        plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
-        result = agent._process_plan_output(
-            parsed=plan,
-            cache_blackboard=[],
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
-        assert isinstance(result, str)
-        assert "'await'" in result
-        assert "'await_step'" not in result
+        assert result.result == 12
+        assert result.failed_call_count == 1
+        assert result.usage_report.total_failed == 1

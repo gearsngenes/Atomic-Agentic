@@ -11,6 +11,7 @@ from atomic_agentic.models.results.agents import (
     ThinkingAgentResult,
     ToolAgentResult,
     ToolUsageRecord,
+    ToolUsageReport,
 )
 from atomic_agentic.models.results.llm import LLMModelData, LLMResult, TokenUsage
 
@@ -181,7 +182,13 @@ class TestAgentResult:
 # ── TestToolAgentResult ───────────────────────────────────────────────────────
 
 class TestToolAgentResult:
-    def _make_result(self, tool_usage=(), exception_records=()) -> ToolAgentResult:
+    def _make_result(
+        self,
+        *,
+        usage_report: ToolUsageReport | None = None,
+        failed_call_count: int = 0,
+        regenerations_used: int = 0,
+    ) -> ToolAgentResult:
         started_at = datetime.now(timezone.utc)
         return ToolAgentResult(
             result="done",
@@ -190,36 +197,45 @@ class TestToolAgentResult:
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(make_token_usage(),),
             llm_model_data=make_model_data(),
-            tool_usage=tool_usage,
-            exception_records=exception_records,
+            usage_report=usage_report
+            if usage_report is not None
+            else ToolUsageReport(by_tool=(), total_dispatched=0, total_failed=0),
+            failed_call_count=failed_call_count,
+            regenerations_used=regenerations_used,
         )
 
     def test_is_agent_result(self) -> None:
         result = self._make_result()
         assert isinstance(result, AgentResult)
 
-    def test_empty_tool_usage_accepted(self) -> None:
-        result = self._make_result(tool_usage=())
-        assert result.tool_usage == ()
+    def test_empty_usage_report_accepted(self) -> None:
+        result = self._make_result()
+        assert result.usage_report.by_tool == ()
+        assert result.usage_report.total_dispatched == 0
 
-    def test_tool_usage_stored_as_tuple(self) -> None:
+    def test_usage_report_stored_verbatim(self) -> None:
         rec = ToolUsageRecord(tool_name="Tool.x", call_count=2)
-        result = self._make_result(tool_usage=[rec])
-        assert isinstance(result.tool_usage, tuple)
-        assert result.tool_usage == (rec,)
+        report = ToolUsageReport(by_tool=(rec,), total_dispatched=2, total_failed=0)
+        result = self._make_result(usage_report=report)
+        assert result.usage_report is report
 
-    def test_to_dict_includes_tool_usage(self) -> None:
+    def test_to_dict_includes_usage_report(self) -> None:
         rec = ToolUsageRecord(tool_name="Tool.x", call_count=1)
-        result = self._make_result(tool_usage=(rec,))
+        report = ToolUsageReport(by_tool=(rec,), total_dispatched=1, total_failed=0)
+        result = self._make_result(usage_report=report, failed_call_count=0, regenerations_used=2)
         d = result.to_dict()
-        assert d["tool_usage"] == [{"tool_name": "Tool.x", "call_count": 1}]
+        assert d["usage_report"] == {
+            "by_tool": [{"tool_name": "Tool.x", "call_count": 1}],
+            "total_dispatched": 1,
+            "total_failed": 0,
+        }
         assert "llm_token_usage" in d
-        assert "exception_records" in d
-        assert d["exception_records"] == []
+        assert d["failed_call_count"] == 0
+        assert d["regenerations_used"] == 2
 
-    def test_rejects_non_tool_usage_record_items(self) -> None:
+    def test_rejects_non_usage_report(self) -> None:
         started_at = datetime.now(timezone.utc)
-        with pytest.raises(TypeError, match="ToolUsageRecord"):
+        with pytest.raises(TypeError, match="ToolUsageReport"):
             ToolAgentResult(
                 result="done",
                 invoker_id="agent-1",
@@ -227,55 +243,29 @@ class TestToolAgentResult:
                 ended_at=started_at + timedelta(seconds=1),
                 llm_token_usage=(make_token_usage(),),
                 llm_model_data=make_model_data(),
-                tool_usage=("not a record",),  # type: ignore[arg-type]
+                usage_report="not a report",  # type: ignore[arg-type]
             )
 
     def test_is_frozen(self) -> None:
         result = self._make_result()
         with pytest.raises(FrozenInstanceError):
-            result.tool_usage = ()  # type: ignore[misc]
+            result.usage_report = ToolUsageReport(by_tool=(), total_dispatched=0, total_failed=0)  # type: ignore[misc]
 
-    def test_exception_records_default_is_empty_tuple(self) -> None:
+    def test_failed_call_count_defaults_to_zero(self) -> None:
         result = self._make_result()
-        assert result.exception_records == ()
+        assert result.failed_call_count == 0
 
-    def test_exception_records_accepts_list_and_normalizes_to_tuple(self) -> None:
-        err = ValueError("test error")
-        result = self._make_result(exception_records=[(0, err)])
-        assert isinstance(result.exception_records, tuple)
-        assert result.exception_records == ((0, err),)
+    def test_failed_call_count_stored(self) -> None:
+        result = self._make_result(failed_call_count=3)
+        assert result.failed_call_count == 3
 
-    def test_exception_records_to_dict_serializes_correctly(self) -> None:
-        err = RuntimeError("boom")
-        result = self._make_result(exception_records=[(2, err)])
-        d = result.to_dict()
-        assert d["exception_records"] == [{"blackboard_index": 2, "error": "boom"}]
+    def test_regenerations_used_defaults_to_zero(self) -> None:
+        result = self._make_result()
+        assert result.regenerations_used == 0
 
-    def test_exception_records_rejects_non_sequence(self) -> None:
-        with pytest.raises(TypeError, match="exception_records"):
-            self._make_result(exception_records=42)  # type: ignore[arg-type]
-
-    def test_exception_records_rejects_non_tuple_item(self) -> None:
-        with pytest.raises(TypeError, match="exception_records"):
-            self._make_result(exception_records=[[0, ValueError("x")]])  # type: ignore[arg-type]
-
-    def test_exception_records_rejects_wrong_length_item(self) -> None:
-        with pytest.raises(TypeError, match="exception_records"):
-            self._make_result(exception_records=[(0, ValueError("x"), "extra")])  # type: ignore[arg-type]
-
-    def test_exception_records_rejects_non_int_index(self) -> None:
-        with pytest.raises(TypeError, match="exception_records"):
-            self._make_result(exception_records=[("0", ValueError("x"))])  # type: ignore[arg-type]
-
-    def test_exception_records_rejects_non_exception_value(self) -> None:
-        with pytest.raises(TypeError, match="exception_records"):
-            self._make_result(exception_records=[(0, "not an exception")])  # type: ignore[arg-type]
-
-    def test_exception_records_is_frozen(self) -> None:
-        err = RuntimeError("e")
-        result = self._make_result(exception_records=[(0, err)])
-        with pytest.raises(FrozenInstanceError):
-            result.exception_records = ()  # type: ignore[misc]
+    def test_regenerations_used_stored(self) -> None:
+        result = self._make_result(regenerations_used=4)
+        assert result.regenerations_used == 4
 
 
 # ── TestThinkingAgentResult ───────────────────────────────────────────────────

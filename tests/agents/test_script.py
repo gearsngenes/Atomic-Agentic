@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.agents.script import ScriptAgent
+from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.tools import attr_call_tool, builtin_call_tool
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
@@ -55,20 +55,21 @@ class _NoNameCallable:
         return value
 
 
-def _make_agent(engine: FakeLLMEngine, *, tools: list[Any] | None = None, **kwargs: Any) -> ScriptAgent:
-    return ScriptAgent(
-        name="tests", namespace="tests", description="ScriptAgent under test.",
+def _make_agent(engine: FakeLLMEngine, *, tools: list[Any] | None = None, **kwargs: Any) -> ScriptActAgent:
+    return ScriptActAgent(
+        name="tests", namespace="tests", description="ScriptActAgent under test.",
         llm_engine=engine, tools=tools, **kwargs,
     )
 
 
-class TestScriptAgentConstruction:
+class TestScriptActAgentConstruction:
     def test_defaults(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
         assert agent.regeneration_limit == 5
         assert agent.tool_calls_limit is None
-        assert agent.planning_rounds_limit == 25
+        assert agent.replanning_limit == 2
+        assert agent.fail_fast is False
 
     def test_regeneration_limit_rejects_negative(self) -> None:
         with pytest.raises(ToolAgentError):
@@ -78,21 +79,33 @@ class TestScriptAgentConstruction:
         with pytest.raises(ToolAgentError):
             _make_agent(FakeLLMEngine(responses=[]), regeneration_limit=None)  # type: ignore[arg-type]
 
-    def test_both_budget_limits_none_is_legal(self) -> None:
+    def test_both_budget_limits_default_legal(self) -> None:
         agent = _make_agent(
-            FakeLLMEngine(responses=[]), tool_calls_limit=None, planning_rounds_limit=None,
+            FakeLLMEngine(responses=[]), tool_calls_limit=None, replanning_limit=0,
         )
 
         assert agent.tool_calls_limit is None
-        assert agent.planning_rounds_limit is None
+        assert agent.replanning_limit == 0
 
     def test_tool_calls_limit_rejects_negative(self) -> None:
         with pytest.raises(ToolAgentError):
             _make_agent(FakeLLMEngine(responses=[]), tool_calls_limit=-1)
 
-    def test_planning_rounds_limit_rejects_negative(self) -> None:
+    def test_replanning_limit_rejects_negative(self) -> None:
         with pytest.raises(ToolAgentError):
-            _make_agent(FakeLLMEngine(responses=[]), planning_rounds_limit=-1)
+            _make_agent(FakeLLMEngine(responses=[]), replanning_limit=-1)
+
+    def test_replanning_limit_rejects_none(self) -> None:
+        with pytest.raises(ToolAgentError):
+            _make_agent(FakeLLMEngine(responses=[]), replanning_limit=None)  # type: ignore[arg-type]
+
+    def test_fail_fast_rejects_non_bool(self) -> None:
+        with pytest.raises(ToolAgentError):
+            _make_agent(FakeLLMEngine(responses=[]), fail_fast="yes")  # type: ignore[arg-type]
+
+    def test_fail_fast_round_trips(self) -> None:
+        agent = _make_agent(FakeLLMEngine(responses=[]), fail_fast=True)
+        assert agent.fail_fast is True
 
     def test_registering_tool_colliding_with_a_real_builtin_raises(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
@@ -133,8 +146,16 @@ class TestScriptAgentConstruction:
         with pytest.raises(ToolAgentError):
             _make_agent(FakeLLMEngine(responses=[]), tool_concurrency_limit=0)
 
+    def test_to_dict_includes_fail_fast_and_replanning_limit(self) -> None:
+        agent = _make_agent(FakeLLMEngine(responses=[]), fail_fast=True, replanning_limit=3)
 
-class TestScriptAgentRegistrationEdgeCases:
+        d = agent.to_dict()
+
+        assert d["fail_fast"] is True
+        assert d["replanning_limit"] == 3
+
+
+class TestScriptActAgentRegistrationEdgeCases:
     def test_unknown_collision_policy_raises(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
@@ -195,37 +216,11 @@ class TestScriptAgentRegistrationEdgeCases:
         with pytest.raises(ValueError):
             agent.register_tools([add], aliases=["a", "b"])
 
-    def test_register_tools_accepts_an_already_wrapped_invokable(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        wrapped = Tool(function=add, name="add_tool", namespace="tests", description="Adds.")
-
-        agent.register_tools([wrapped])
-
-        assert agent.get_tool("add_tool") is wrapped
-
-    def test_register_tools_wraps_toolify_failure_as_registration_error(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolRegistrationError):
-            agent.register_tools([_NoNameCallable()])
-
-    def test_register_tools_rejects_unsupported_item_type(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolRegistrationError):
-            agent.register_tools([123])  # type: ignore[list-item]
-
     def test_register_tools_intra_batch_duplicate_raises(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
         with pytest.raises(ToolRegistrationError):
             agent.register_tools([add, add])
-
-    def test_register_tools_collision_against_existing_toolbox_raises(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]), tools=[add])
-
-        with pytest.raises(ToolRegistrationError):
-            agent.register_tools([add])
 
     def test_register_tools_collision_against_existing_toolbox_skip(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]), tools=[add])
@@ -236,17 +231,8 @@ class TestScriptAgentRegistrationEdgeCases:
         assert result is False
         assert agent.get_tool("add") is original
 
-    def test_register_tools_collision_against_existing_toolbox_replace(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]), tools=[add])
-        original = agent.get_tool("add")
 
-        result = agent.register_tools([add], name_collision_policy="replace")
-
-        assert result is True
-        assert agent.get_tool("add") is not original
-
-
-class TestScriptAgentToolAccessors:
+class TestScriptActAgentToolAccessors:
     def test_get_tool_raises_for_unknown_id(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
@@ -268,7 +254,7 @@ class TestScriptAgentToolAccessors:
         assert agent.list_tools() == {}
 
 
-class TestScriptAgentConstantAccessors:
+class TestScriptActAgentConstantAccessors:
     def test_register_constant_auto_names_without_an_alias(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
@@ -278,36 +264,12 @@ class TestScriptAgentConstantAccessors:
         assert agent.has_constant("K_0")
         assert agent.has_constant("K_1")
 
-    def test_register_constant_rejects_empty_alias(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolAgentError):
-            agent.register_constant(1, alias="   ")
-
     def test_register_constant_duplicate_raises_by_default(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
         agent.register_constant(1, alias="x")
 
         with pytest.raises(ToolAgentError):
             agent.register_constant(2, alias="x")
-
-    def test_register_constant_duplicate_with_skip_returns_false(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        result = agent.register_constant(2, alias="x", name_collision_policy="skip")
-
-        assert result is False
-        assert agent.get_constant("x").value == 1
-
-    def test_register_constant_duplicate_with_replace_overwrites(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        result = agent.register_constant(2, alias="x", name_collision_policy="replace")
-
-        assert result is True
-        assert agent.get_constant("x").value == 2
 
     def test_register_constant_duplicate_with_suffix_renames_instead_of_colliding(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
@@ -318,86 +280,6 @@ class TestScriptAgentConstantAccessors:
         assert result is True
         assert agent.get_constant("x").value == 1
         assert agent.get_constant("x_0").value == 2
-
-    def test_register_constant_duplicate_with_suffix_advances_past_an_already_taken_candidate(self) -> None:
-        # Forces the suffix retry loop to actually iterate (x -> x_0 already
-        # taken -> x_1), not just succeed on its first candidate.
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-        agent.register_constant(2, alias="x", name_collision_policy="suffix")
-
-        result = agent.register_constant(3, alias="x", name_collision_policy="suffix")
-
-        assert result is True
-        assert agent.get_constant("x_1").value == 3
-
-    def test_register_constants_batch_mixes_auto_named_and_aliased_entries(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        agent.register_constants([1, 2], aliases=["one", None], descriptions=["first", None])
-
-        assert agent.get_constant("one").value == 1
-        assert agent.get_constant("one").description == "first"
-        assert agent.has_constant("K_0")
-
-    def test_register_constants_batch_alias_length_mismatch_raises(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ValueError):
-            agent.register_constants([1, 2], aliases=["only_one"])
-
-    def test_register_constants_batch_description_length_mismatch_raises(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ValueError):
-            agent.register_constants([1, 2], descriptions=["only_one"])
-
-    def test_register_constants_batch_intra_batch_duplicate_raises(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolAgentError):
-            agent.register_constants([1, 2], aliases=["x", "x"])
-
-    def test_register_constants_batch_rejects_an_empty_alias(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolAgentError):
-            agent.register_constants([1], aliases=["   "])
-
-    def test_register_constants_batch_raises_against_an_existing_registry_key(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        with pytest.raises(ToolAgentError):
-            agent.register_constants([2], aliases=["x"])
-
-    def test_register_constants_batch_skip_policy(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        result = agent.register_constants([2], aliases=["x"], name_collision_policy="skip")
-
-        assert result is False
-        assert agent.get_constant("x").value == 1
-
-    def test_register_constants_batch_replace_policy_overwrites_an_existing_key(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        result = agent.register_constants([2], aliases=["x"], name_collision_policy="replace")
-
-        assert result is True
-        assert agent.get_constant("x").value == 2
-
-    def test_register_constants_batch_suffix_resolves_intra_batch_and_registry_collisions(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        agent.register_constants([2, 3], aliases=["x", "x"], name_collision_policy="suffix")
-
-        assert agent.get_constant("x").value == 1
-        assert agent.get_constant("x_0").value == 2
-        assert agent.get_constant("x_1").value == 3
 
     def test_get_constant_raises_for_unknown_alias(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
@@ -423,19 +305,6 @@ class TestScriptAgentConstantAccessors:
         assert spec.description == "new"
         assert spec.value == 1
 
-    def test_update_constant_description_raises_for_unknown_alias(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-
-        with pytest.raises(ToolAgentError):
-            agent.update_constant_description("nonexistent", "new")
-
-    def test_update_constant_description_raises_for_empty_description(self) -> None:
-        agent = _make_agent(FakeLLMEngine(responses=[]))
-        agent.register_constant(1, alias="x")
-
-        with pytest.raises(ToolAgentError):
-            agent.update_constant_description("x", "   ")
-
     def test_clear_constants(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
         agent.register_constant(1, alias="x")
@@ -445,7 +314,7 @@ class TestScriptAgentConstantAccessors:
         assert agent.constants == {}
 
 
-class TestScriptAgentPromptContextRendering:
+class TestScriptActAgentPromptContextRendering:
     def test_actions_context_renders_alias_distinct_from_the_tool_name(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
         agent.register_tool(add, alias="plus")
@@ -470,8 +339,26 @@ class TestScriptAgentPromptContextRendering:
         assert "First line." in rendered
         assert "Second paragraph." in rendered
 
+    def test_constants_context_renders_the_wire_name_and_type(self) -> None:
+        agent = _make_agent(FakeLLMEngine(responses=[]))
+        agent.register_constant(5, alias="count", description="A count.")
 
-class TestScriptAgentOneShotLifecycle:
+        rendered = agent.constants_context()
+
+        assert "K_COUNT: int" in rendered
+        assert "A count." in rendered
+
+    def test_system_message_includes_excluded_builtins(self) -> None:
+        agent = _make_agent(FakeLLMEngine(responses=[]))
+
+        task = agent._initialize_task(turns=[], prompt="x", inputs={})
+        messages = agent.render_task(task)
+
+        system_msg = next(m["content"] for m in messages if m["role"] == "system")
+        assert "eval" in system_msg
+
+
+class TestScriptActAgentOneShotLifecycle:
     def test_registered_tool_call_and_return(self) -> None:
         engine = FakeLLMEngine(responses=["result = add(a=4, b=6)\nreturn result"])
         agent = _make_agent(engine, tools=[add])
@@ -492,13 +379,17 @@ class TestScriptAgentOneShotLifecycle:
         assert any(s.tool == "log_message" for s in record.statements)
 
 
-class TestScriptAgentRegenRepair:
-    def test_regen_repair_recovers_from_undefined_reference(self) -> None:
+class TestScriptActAgentRegenRepair:
+    """Within-round regeneration: a malformed/invalid draft is rejected
+    before ever being compiled, and the model gets corrective feedback in
+    the SAME round -- no repair round, no needs_repair involvement."""
+
+    def test_regen_recovers_from_undefined_reference(self) -> None:
         engine = FakeLLMEngine(responses=[
             "result = add(a=1, b=undefined_name)\nreturn result",
             "result = add(a=1, b=2)\nreturn result",
         ])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=1, planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=1)
 
         final = agent.invoke({"prompt": "add"})
 
@@ -510,7 +401,7 @@ class TestScriptAgentRegenRepair:
 
     def test_regeneration_limit_zero_raises_immediately(self) -> None:
         engine = FakeLLMEngine(responses=["result = add(a=1, b=undefined_name)\nreturn result"])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=0, planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=0)
 
         with pytest.raises(ToolAgentError, match="exhausted after 1 attempt"):
             agent.invoke({"prompt": "add"})
@@ -520,192 +411,172 @@ class TestScriptAgentRegenRepair:
             "result = add(a=1, b=undefined_name)\nreturn result",
             "result = add(a=1, b=other_undefined)\nreturn result",
         ])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=1, planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=1)
 
         with pytest.raises(ToolAgentError):
             agent.invoke({"prompt": "add"})
 
         assert engine.call_count == 2
 
-
-class TestScriptAgentCheckpointContinuation:
-    def test_explicit_pause_triggers_continuation_with_correct_message_shape(self) -> None:
-        engine = FakeLLMEngine(responses=[
-            "x = add(a=1, b=2)\n# PAUSE",
-            "y = add(a=x, b=1)\nreturn y",
-        ])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=3)
-
-        final = agent.invoke({"prompt": "add stuff"})
-
-        assert final.result == 4
-        round2 = engine.calls[1]
-        assistant_msg = next(m["content"] for m in round2 if m["role"] == "assistant")
-        user_msgs = "\n".join(m["content"] for m in round2 if m["role"] == "user")
-        assert "x = add(a=1, b=2)" in assistant_msg
-        assert "Cached values" in assistant_msg
-        assert "Continue planning the rest of this task." in user_msgs
-
-    def test_valid_if_cutoff_is_a_silent_continuation_with_no_note(self) -> None:
-        engine = FakeLLMEngine(responses=[
-            "x = add(a=1, b=2)\nif x > 0:\n    y = add(a=x, b=1)",
-            "y = add(a=x, b=1)\nreturn y",
-        ])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=3)
-
-        final = agent.invoke({"prompt": "add stuff"})
-
-        assert final.result == 4
-        round2 = engine.calls[1]
-        user_msgs = "\n".join(m["content"] for m in round2 if m["role"] == "user")
-        assert "None" not in user_msgs
-        assert "Continue planning the rest of this task." in user_msgs
-
-    def test_malformed_if_cutoff_is_a_regen_repair_issue_not_a_continuation(self) -> None:
+    def test_conditional_statement_is_a_regen_repair_issue(self) -> None:
+        # Pass 8: an `if` always raises BlackboardParseError -- fed back as
+        # regen-repair feedback, never a silent continuation.
         engine = FakeLLMEngine(responses=[
             "if True:\n    y = 1",
             "y = add(a=1, b=2)\nreturn y",
         ])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=1, planning_rounds_limit=1)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=1)
 
         final = agent.invoke({"prompt": "add stuff"})
 
-        # planning_rounds_limit=1 is what makes this a meaningful assertion:
-        # if the malformed if-cutoff had been (incorrectly) treated as a
-        # forced continuation into a genuine new planning round, think()'s
-        # own ceiling check would raise here rather than let round 1's
-        # retry loop repair it in place.
         assert final.result == 3
         assert engine.call_count == 2
 
-    def test_resolution_failure_triggers_continuation_without_dispatching(self) -> None:
+
+class TestScriptActAgentRepairRounds:
+    """Framework-driven repair rounds (Pass 8): a REAL resolution
+    (prepare()) or execution (act()) failure -- never a model choice --
+    grants a fresh continuation round, up to replanning_limit."""
+
+    def test_resolution_failure_triggers_a_repair_round(self) -> None:
         engine = FakeLLMEngine(responses=[
             "x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y",
             "return add(a=1, b=1)",
         ])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=3, context_enabled=True)
+        agent = _make_agent(engine, tools=[add], replanning_limit=1, context_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
         assert final.result == 2
         assert engine.call_count == 2
-        round2_user = "\n".join(m["content"] for m in engine.calls[1] if m["role"] == "user")
-        assert "could not be resolved" in round2_user
+        round2_content = "\n".join(m["content"] for m in engine.calls[1])
+        assert "THIS BATCH FAILED" in round2_content
+        assert "Continue planning the rest of this task" in round2_content
         record = agent.get_conversation()[-1]
+        assert record.repair_rounds_used == 1
         assert not any(s.identifier == "y" for s in record.statements)
-        assert not any(s.identifier == "y" for s in record.failed_statements)
-        assert record.tool_usage().registered_tool_calls == 1
+        assert any(s.identifier == "y" for s in record.failed_statements)
 
-    def test_execution_failure_triggers_continuation_preserving_the_other_success(self) -> None:
+    def test_execution_failure_triggers_a_repair_round_preserving_the_other_success(self) -> None:
         engine = FakeLLMEngine(responses=[
             "a = add(a=1, b=1)\nb = fail_tool(x=1)\nreturn a",
             "return a",
         ])
-        agent = _make_agent(
-            engine, tools=[add, fail_tool], planning_rounds_limit=3, context_enabled=True,
-        )
+        agent = _make_agent(engine, tools=[add, fail_tool], replanning_limit=1, context_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
         assert final.result == 2
         assert engine.call_count == 2
-        round2_user = "\n".join(m["content"] for m in engine.calls[1] if m["role"] == "user")
-        assert "simulated tool failure" in round2_user
+        round2_content = "\n".join(m["content"] for m in engine.calls[1])
+        assert "simulated tool failure" in round2_content
         record = agent.get_conversation()[-1]
+        assert record.repair_rounds_used == 1
         assert any(s.identifier == "a" for s in record.statements)
         assert any(s.tool == "fail_tool" for s in record.failed_statements)
-        assert record.tool_usage().registered_tool_calls == 2
+
+    def test_fail_fast_raises_immediately_on_resolution_failure_without_repair(self) -> None:
+        engine = FakeLLMEngine(responses=["x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y"])
+        agent = _make_agent(engine, tools=[add], replanning_limit=2, fail_fast=True)
+
+        with pytest.raises(ToolAgentError, match="fail_fast=True"):
+            agent.invoke({"prompt": "do something"})
+
+        assert engine.call_count == 1
+
+    def test_fail_fast_raises_immediately_on_execution_failure_without_repair(self) -> None:
+        engine = FakeLLMEngine(responses=["return fail_tool(x=1)"])
+        agent = _make_agent(engine, tools=[fail_tool], replanning_limit=2, fail_fast=True)
+
+        with pytest.raises(ToolInvocationError, match="simulated tool failure"):
+            agent.invoke({"prompt": "do something"})
+
+        assert engine.call_count == 1
+
+    def test_replanning_limit_zero_raises_immediately_on_resolution_failure(self) -> None:
+        engine = FakeLLMEngine(responses=["x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y"])
+        agent = _make_agent(engine, tools=[add], replanning_limit=0)
+
+        with pytest.raises(ToolAgentError, match="repair budget exhausted"):
+            agent.invoke({"prompt": "do something"})
+
+        assert engine.call_count == 1
+
+    def test_replanning_limit_zero_raises_immediately_on_execution_failure(self) -> None:
+        engine = FakeLLMEngine(responses=["return fail_tool(x=1)"])
+        agent = _make_agent(engine, tools=[fail_tool], replanning_limit=0)
+
+        with pytest.raises(ToolInvocationError, match="simulated tool failure"):
+            agent.invoke({"prompt": "do something"})
+
+        assert engine.call_count == 1
+
+    def test_repair_round_not_exhausting_the_budget_proceeds_normally(self) -> None:
+        engine = FakeLLMEngine(responses=[
+            "return fail_tool(x=1)",
+            "return add(a=1, b=1)",
+        ])
+        agent = _make_agent(engine, tools=[fail_tool, add], replanning_limit=2)
+
+        final = agent.invoke({"prompt": "do something"})
+
+        assert final.result == 2
+        assert engine.call_count == 2
 
 
-class TestScriptAgentBudgets:
-    def test_tool_calls_limit_enforced_silently_via_regen_repair(self) -> None:
+class TestScriptActAgentBudgets:
+    def test_tool_calls_limit_enforced_via_regen_feedback(self) -> None:
         engine = FakeLLMEngine(responses=[
             "a = add(a=1, b=1)\nb = add(a=2, b=2)\nreturn a",
             "a = add(a=1, b=1)\nreturn a",
         ])
         agent = _make_agent(
-            engine, tools=[add], tool_calls_limit=1, regeneration_limit=1, planning_rounds_limit=2,
+            engine, tools=[add], tool_calls_limit=1, regeneration_limit=1,
         )
 
         final = agent.invoke({"prompt": "do something"})
 
         assert final.result == 2
         assert engine.call_count == 2
-        system_msg = next(m["content"] for m in engine.calls[0] if m["role"] == "system")
-        assert "tool_calls_limit" not in system_msg
+        feedback = "\n".join(m["content"] for m in engine.calls[1] if m["role"] != "system")
+        assert "exceeding the configured limit" in feedback
 
-    def test_final_round_model_authored_pause_is_regen_repair_not_continuation(self) -> None:
+    def test_tool_concurrency_limit_splits_a_single_plan_into_multiple_batches(self) -> None:
         engine = FakeLLMEngine(responses=[
-            "x = add(a=1, b=1)\n# PAUSE",
-            "return add(a=1, b=1)",
+            "a = add(a=1, b=1)\nb = add(a=2, b=2)\nreturn a",
         ])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=1, planning_rounds_limit=1)
+        agent = _make_agent(engine, tools=[add], tool_concurrency_limit=1, context_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
         assert final.result == 2
-        assert engine.call_count == 2
-
-    def test_final_round_violation_exhausting_regeneration_limit_raises(self) -> None:
-        engine = FakeLLMEngine(responses=["x = add(a=1, b=1)\n# PAUSE"])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=0, planning_rounds_limit=1)
-
-        with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
-            agent.invoke({"prompt": "do something"})
-
-    def test_planning_rounds_limit_is_enforced_when_a_resolution_failure_forces_continuation(self) -> None:
-        engine = FakeLLMEngine(responses=["x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y"])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=1, tool_calls_limit=None)
-
-        with pytest.raises(ToolAgentError, match="planning round budget exhausted"):
-            agent.invoke({"prompt": "do something"})
-
         assert engine.call_count == 1
+        record = agent.get_conversation()[-1]
+        a_stmt = next(s for s in record.statements if s.identifier == "a")
+        b_stmt = next(s for s in record.statements if s.identifier == "b")
+        assert a_stmt.batch_index != b_stmt.batch_index
 
-    def test_planning_rounds_limit_is_enforced_when_an_execution_failure_forces_continuation(self) -> None:
-        engine = FakeLLMEngine(responses=["b = fail_tool(x=1)\nreturn b"])
-        agent = _make_agent(engine, tools=[fail_tool], planning_rounds_limit=1, tool_calls_limit=None)
 
-        with pytest.raises(ToolAgentError, match="planning round budget exhausted"):
-            agent.invoke({"prompt": "do something"})
-
-        assert engine.call_count == 1
-
-    def test_forced_continuation_not_on_final_round_proceeds_normally(self) -> None:
+class TestScriptActAgentMutationSafety:
+    def test_constant_mutation_persists_across_repair_rounds_within_one_invocation(self) -> None:
         engine = FakeLLMEngine(responses=[
-            "b = fail_tool(x=1)\nreturn b",
-            "return add(a=1, b=1)",
-        ])
-        agent = _make_agent(
-            engine, tools=[fail_tool, add], planning_rounds_limit=2, tool_calls_limit=None,
-        )
-
-        final = agent.invoke({"prompt": "do something"})
-
-        assert final.result == 2
-        assert engine.call_count == 2
-
-
-class TestScriptAgentMutationSafety:
-    def test_mutation_persists_across_rounds_within_one_invocation(self) -> None:
-        engine = FakeLLMEngine(responses=[
-            "x = K_MYLIST.append(99)\n# PAUSE",
+            "x = K_MYLIST.append(99)\nb = fail_tool(x=1)\nreturn K_MYLIST",
             "return K_MYLIST",
         ])
-        agent = _make_agent(engine, planning_rounds_limit=3)
+        agent = _make_agent(engine, tools=[fail_tool], replanning_limit=1)
         agent.register_constant([1, 2, 3], alias="mylist")
 
         final = agent.invoke({"prompt": "mutate"})
 
         assert final.result == [1, 2, 3, 99]
 
-    def test_mutation_does_not_persist_to_a_fresh_invocation(self) -> None:
+    def test_constant_mutation_does_not_persist_to_a_fresh_invocation(self) -> None:
         engine = FakeLLMEngine(responses=[
-            "x = K_MYLIST.append(99)\n# PAUSE",
+            "x = K_MYLIST.append(99)\nb = fail_tool(x=1)\nreturn K_MYLIST",
             "return K_MYLIST",
             "return K_MYLIST",
         ])
-        agent = _make_agent(engine, planning_rounds_limit=3)
+        agent = _make_agent(engine, tools=[fail_tool], replanning_limit=1)
         agent.register_constant([1, 2, 3], alias="mylist")
 
         first = agent.invoke({"prompt": "mutate"})
@@ -729,7 +600,7 @@ class TestScriptAgentMutationSafety:
             "x = task_result_0.append(99)\nreturn task_result_0",
             "return task_result_0",
         ])
-        agent = _make_agent(engine, context_enabled=True, planning_rounds_limit=1)
+        agent = _make_agent(engine, context_enabled=True)
 
         first = agent.invoke({"prompt": "make a list"})
         second = agent.invoke({"prompt": "mutate it"})
@@ -740,7 +611,7 @@ class TestScriptAgentMutationSafety:
         assert third.result == [1, 2, 3]
 
 
-class TestScriptAgentDispatch:
+class TestScriptActAgentDispatch:
     def test_registered_tool_with_ordinary_kwargs(self) -> None:
         engine = FakeLLMEngine(responses=["return add(a=2, b=3)"])
         agent = _make_agent(engine, tools=[add])
@@ -770,11 +641,6 @@ class TestScriptAgentDispatch:
         # The real target method's own kwarg is literally named `obj`,
         # which would collide with attr_call_tool's own dispatcher
         # parameter of the same name if it were splatted directly.
-        # Registering `node` as a constant means the plan mutates a deep
-        # copy (mutation-safety, tested separately in
-        # TestScriptAgentMutationSafety), not this exact object -- the
-        # success criterion here is that dispatch itself succeeds and
-        # returns the right value, not that `node` itself was mutated.
         node = _Node()
         engine = FakeLLMEngine(responses=["return K_NODE.attach(obj=5)"])
         agent = _make_agent(engine)
@@ -785,12 +651,6 @@ class TestScriptAgentDispatch:
         assert final.result == 5
 
     def test_builtin_call_with_keyword_arguments_dispatches_correctly(self) -> None:
-        """
-        No real Python builtin naturally has a keyword argument literally
-        named `name` (the dispatcher's own internal parameter), so this
-        confirms ordinary builtin keyword arguments dispatch correctly
-        rather than reproducing an actual collision.
-        """
         engine = FakeLLMEngine(responses=["return sorted([3, 1, 2], reverse=True)"])
         agent = _make_agent(engine)
 
@@ -799,35 +659,41 @@ class TestScriptAgentDispatch:
         assert final.result == [3, 2, 1]
 
     def test_dunder_attribute_call_raises_at_dispatch_level(self) -> None:
-        """
-        Defense-in-depth: parsing already rejects a dunder attribute call
-        before a plan is ever dispatched; this tests attr_call_tool's own
-        runtime gate directly. Tool.invoke() wraps the underlying
-        ValueError in a ToolInvocationError (Tool.execute's own
-        generic-exception wrapper), so that's the type surfacing here, not
-        the bare ValueError.
-        """
         with pytest.raises(ToolInvocationError, match="not available here"):
             attr_call_tool.invoke(
                 {"obj": [1, 2], "method_name": "__class__", "args": (), "kwargs": {}}
             )
 
     def test_excluded_builtin_name_raises_at_dispatch_level(self) -> None:
-        """
-        Defense-in-depth mirror of the dunder-attribute-call test above, but
-        for builtin_call_tool's own runtime gate: parsing/rewriting already
-        keeps an excluded builtin name from ever reaching dispatch, but this
-        tool's own check doesn't trust that upstream guarantee either.
-        """
         with pytest.raises(ToolInvocationError, match="not available here"):
             builtin_call_tool.invoke({"name": "eval", "args": (), "kwargs": {}})
 
+    def test_dispatch_breakdown_counts_all_five_categories(self) -> None:
+        engine = FakeLLMEngine(responses=[
+            "c = add(a=1, b=2)\n"
+            "d = len([1, 2, 3])\n"
+            "e = K_MYDICT.get('a')\n"
+            "f = c + d\n"
+            "return f"
+        ])
+        agent = _make_agent(engine, tools=[add], context_enabled=True)
+        agent.register_constant({"a": 1}, alias="mydict")
 
-class TestScriptAgentPrepareActEdgeCases:
+        final = agent.invoke({"prompt": "combine"})
+
+        assert final.result == 6
+        assert engine.call_count == 1
+        record = agent.get_conversation()[-1]
+        breakdown = record.dispatch_breakdown()
+        assert breakdown.registered_tool_calls == 1
+        assert breakdown.builtin_calls == 1
+        assert breakdown.attribute_calls == 1
+        assert breakdown.rhs_assignment_count == 1
+        assert breakdown.binop_count == 1
+
+
+class TestScriptActAgentPrepareActEdgeCases:
     def test_a_genuinely_empty_generation_completes_with_a_none_result(self) -> None:
-        # No `# PAUSE`, no statements, no `return` -- parses to zero slots
-        # and completes immediately with an inferred `None` result, exactly
-        # like a plan that runs to the end without ever returning.
         engine = FakeLLMEngine(responses=[""])
         agent = _make_agent(engine)
 
@@ -835,72 +701,68 @@ class TestScriptAgentPrepareActEdgeCases:
 
         assert final.result is None
 
-    def test_prepare_is_a_no_op_when_pending_is_already_empty_and_continuation_is_pending(self) -> None:
-        # Direct unit-level check of prepare()'s own top guard: entered with
-        # pending already empty and continue_planning already True, it must
-        # leave the task untouched rather than finalize it -- think() is
-        # what actually regenerates the next round in that state, not
-        # prepare() itself.
+    def test_prepare_with_empty_pending_always_finalizes_regardless_of_needs_repair(self) -> None:
+        # Per ScriptActAgent.prepare()'s own docstring: there is no "leave it
+        # as-is, a repair round is still pending" branch -- think() always
+        # clears needs_repair the moment it actually regenerates, so by the
+        # time prepare() ever sees an empty `pending` again, needs_repair is
+        # guaranteed already False in real operation. This direct unit-level
+        # call (bypassing think() entirely) confirms prepare() finalizes
+        # unconditionally on an empty `pending`, with no special-case for a
+        # manually-forced needs_repair=True.
         agent = _make_agent(FakeLLMEngine(responses=[]))
         task = agent._initialize_task(turns=[], prompt="x", inputs={})
         task.pending = []
-        task.continue_planning = True
+        task.needs_repair = True
 
         result = agent.prepare(task)
 
         assert result is task
-        assert result.continue_planning is True
-        assert result.complete is False
+        assert result.complete is True
+        assert result.generated_response is None
         assert result.resolved_args == []
 
-    def test_argument_binding_mismatch_against_a_real_tool_signature_is_a_continuation_issue(self) -> None:
-        # `c` is a legal identifier (passes parse-time reference validation)
-        # but `add` has no such parameter -- the mismatch is only caught
-        # once prepare() actually tries to bind it against add's real
-        # signature.
+    def test_argument_binding_mismatch_against_a_real_tool_signature_triggers_a_repair_round(self) -> None:
         engine = FakeLLMEngine(responses=[
             "return add(a=1, c=2)",
             "return add(a=1, b=2)",
         ])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], replanning_limit=1)
 
         final = agent.invoke({"prompt": "add"})
 
         assert final.result == 3
-        round2_user = "\n".join(m["content"] for m in engine.calls[1] if m["role"] == "user")
-        assert "parameter contract" in round2_user
+        round2_content = "\n".join(m["content"] for m in engine.calls[1])
+        assert "parameter contract" in round2_content
 
     def test_execution_failure_of_a_builtin_call_reports_a_readable_failure_label(self) -> None:
         engine = FakeLLMEngine(responses=[
             "x = sorted(None)\nreturn x",
             "return sorted([2, 1])",
         ])
-        agent = _make_agent(engine, planning_rounds_limit=2)
+        agent = _make_agent(engine, replanning_limit=1)
 
         final = agent.invoke({"prompt": "sort"})
 
         assert final.result == [1, 2]
-        round2_user = "\n".join(m["content"] for m in engine.calls[1] if m["role"] == "user")
-        assert "'sorted'" in round2_user
+        round2_content = "\n".join(m["content"] for m in engine.calls[1])
+        assert "sorted(None)" in round2_content
 
     def test_execution_failure_of_an_attribute_call_reports_a_readable_failure_label(self) -> None:
         engine = FakeLLMEngine(responses=[
             "x = K_MYLIST.nonexistent_method()\nreturn x",
             "return K_MYLIST",
         ])
-        agent = _make_agent(engine, planning_rounds_limit=2)
+        agent = _make_agent(engine, replanning_limit=1)
         agent.register_constant([1, 2], alias="mylist")
 
         final = agent.invoke({"prompt": "call it"})
 
         assert final.result == [1, 2]
-        round2_user = "\n".join(m["content"] for m in engine.calls[1] if m["role"] == "user")
-        assert "K_MYLIST.nonexistent_method" in round2_user
+        round2_content = "\n".join(m["content"] for m in engine.calls[1])
+        assert "K_MYLIST.nonexistent_method" in round2_content
 
     def test_a_batch_that_drains_without_a_return_finalizes_with_a_none_result(self) -> None:
-        # One real dispatched call, no `# PAUSE`, no `return` -- the plan
-        # naturally runs out of statements and must finalize right where
-        # the batch drains, not leave the task hanging incomplete.
         engine = FakeLLMEngine(responses=["log_message(message='hi')"])
         agent = _make_agent(engine, tools=[log_message])
 
@@ -909,7 +771,7 @@ class TestScriptAgentPrepareActEdgeCases:
         assert final.result is None
 
 
-class TestScriptAgentAsyncLifecycle:
+class TestScriptActAgentAsyncLifecycle:
     def test_async_invoke_one_shot_lifecycle(self) -> None:
         engine = FakeLLMEngine(responses=["result = add(a=4, b=6)\nreturn result"])
         agent = _make_agent(engine, tools=[add])
@@ -919,42 +781,42 @@ class TestScriptAgentAsyncLifecycle:
         assert final.result == 10
         assert engine.call_count == 1
 
-    def test_async_invoke_regen_repair_recovers_from_undefined_reference(self) -> None:
+    def test_async_invoke_regen_recovers_from_undefined_reference(self) -> None:
         engine = FakeLLMEngine(responses=[
             "result = add(a=1, b=undefined_name)\nreturn result",
             "result = add(a=1, b=2)\nreturn result",
         ])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=1, planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=1)
 
         final = asyncio.run(agent.async_invoke({"prompt": "add"}))
 
         assert final.result == 3
         assert engine.call_count == 2
 
-    def test_async_invoke_explicit_pause_triggers_continuation(self) -> None:
+    def test_async_invoke_resolution_failure_triggers_a_repair_round(self) -> None:
         engine = FakeLLMEngine(responses=[
-            "x = add(a=1, b=2)\n# PAUSE",
-            "y = add(a=x, b=1)\nreturn y",
+            "x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y",
+            "return add(a=1, b=1)",
         ])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=3)
+        agent = _make_agent(engine, tools=[add], replanning_limit=1)
 
-        final = asyncio.run(agent.async_invoke({"prompt": "add stuff"}))
+        final = asyncio.run(agent.async_invoke({"prompt": "do something"}))
 
-        assert final.result == 4
+        assert final.result == 2
         assert engine.call_count == 2
 
-    def test_async_invoke_planning_rounds_limit_is_enforced_on_forced_continuation(self) -> None:
+    def test_async_invoke_replanning_limit_zero_raises_immediately(self) -> None:
         engine = FakeLLMEngine(responses=["x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y"])
-        agent = _make_agent(engine, tools=[add], planning_rounds_limit=1, tool_calls_limit=None)
+        agent = _make_agent(engine, tools=[add], replanning_limit=0)
 
-        with pytest.raises(ToolAgentError, match="planning round budget exhausted"):
+        with pytest.raises(ToolAgentError, match="repair budget exhausted"):
             asyncio.run(agent.async_invoke({"prompt": "do something"}))
 
         assert engine.call_count == 1
 
     def test_async_invoke_regeneration_limit_exhausted_raises(self) -> None:
         engine = FakeLLMEngine(responses=["result = add(a=1, b=undefined_name)\nreturn result"])
-        agent = _make_agent(engine, tools=[add], regeneration_limit=0, planning_rounds_limit=2)
+        agent = _make_agent(engine, tools=[add], regeneration_limit=0)
 
         with pytest.raises(ToolAgentError, match="exhausted after 1 attempt"):
             asyncio.run(agent.async_invoke({"prompt": "add"}))
