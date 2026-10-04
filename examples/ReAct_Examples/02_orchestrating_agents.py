@@ -3,8 +3,24 @@
 ReActAgent iteratively orchestrating two BasicAgent sub-agents (a code
 builder and a code reviewer) through a build -> review -> revise loop --
 deciding one tool call per round rather than a fixed upfront sequence, so
-it can stop as soon as the reviewer approves instead of always running a
-fixed number of cycles.
+it can stop as soon as the reviewer's grade clears the bar instead of
+always running a fixed number of cycles.
+
+Live-tested against gpt-4o-mini. The structured dict return
+({"approval_status": ..., "feedback": ...}) isn't the problem it first
+looked like -- the actual root cause of unreliable "$name" forwarding was
+that `AgenticOrchestrator` had no `response_preview_limit` set, so the full
+draft code and full review dict were always fully visible in "Cached
+values" every round, giving the model no real incentive to reference
+instead of retype. Setting `response_preview_limit` below closed that gap
+completely; the structured return stays exactly as it was.
+
+"approval_status" is deliberately the first key in CodeReviewer's schema,
+before "feedback": OpenAI's structured output fills object fields in
+declared order, so this also means the model commits to a grade before
+writing the critique prose -- and, since previews now truncate hard, a
+partially-visible preview shows the grade first rather than being eaten
+entirely by critique text.
 """
 import json
 import logging
@@ -25,28 +41,28 @@ logging.basicConfig(level=logging.INFO)
 sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
 
 
-def builder_prestep(initial_task_prompt: str | None = None, *, feedback_prompt: dict | None = None) -> str:
-    if feedback_prompt is not None:
+def builder_prestep(task_description: str | None = None, *, review_feedback: dict | None = None) -> str:
+    if review_feedback is not None:
         return (
-            "Read and internalize the following feedback on your last draft, then use your "
-            f"best judgement to re-build it: {json.dumps(feedback_prompt)}\n\n"
+            "Read and internalize the following review feedback on your last draft, then use "
+            f"your best judgement to rebuild it: {json.dumps(review_feedback)}\n\n"
             "Provide the updated code."
         )
-    elif initial_task_prompt:
-        return f"Implement code so that it meets the user's request:\n{initial_task_prompt}"
+    elif task_description:
+        return f"Implement code so that it meets the user's request:\n{task_description}"
     else:
-        raise ValueError("Either initial_task_prompt or feedback_prompt must be provided.")
+        raise ValueError("Either task_description or review_feedback must be provided.")
 
 
 builder = BasicAgent(
     name="CodeBuilderAgent",
     namespace="examples",
     description="""
-    Returns: code string based on the task or feedback provided.
-    First draft: give "initial_task_prompt" positionally ("name": null).
+    Returns: code string based on the task or review feedback provided.
+    First draft: give "task_description" positionally ("name": null).
     Revision: give the reviewer's entire result dict as the KEYWORD argument
-    "feedback_prompt" (that is, "name": "feedback_prompt") -- "feedback_prompt" comes after a "*"
-    in this tool's signature, so it can ONLY be filled by name, never by a
+    "review_feedback" (that is, "name": "review_feedback") -- "review_feedback" comes
+    after a "*" in this tool's signature, so it can ONLY be filled by name, never by a
     positional argument. Reference the reviewer's result whole, by its
     "$name" -- never retype or rewrite its content.
     """,
@@ -69,21 +85,23 @@ reviewer = BasicAgent(
     name="CodeReviewer",
     namespace="examples",
     description="""
-    Returns a dict: {"feedback": <critique string>, "approval_status": "Approved" or "Rebuild"}.
-    Pass this whole result straight back to CodeBuilderAgent's "feedback" keyword
-    argument for the next revision, by "$name" -- never read it apart or retype it.
+    Returns a dict: {"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique string>}.
+    On "Rebuild", pass this whole result straight back to CodeBuilderAgent's "review_feedback"
+    keyword argument for the next revision, by "$name" -- never read it apart or retype it.
+    "Acceptable" and "Outstanding" both mean: stop and return the latest draft, no rebuild.
     """,
     llm_engine=sub_agent_llm,
     role_prompt=(
         "You are an expert Python code analyst. Thoroughly and brutally evaluate the code for "
-        "accuracy, readability, and overall design optimization. Return ONLY revision critiques "
-        "that you deem critical or necessary for the code to be ready to hand off to a "
-        "professional developer. Focus on:\n"
+        "accuracy, readability, and overall design optimization. Focus on:\n"
         "- Syntax or semantic errors in the code (high priority fixes)\n"
         "- Redundant or duplicate code that could be refactored into reusable chunks\n"
         "- Overly complex or irrelevant/unused code that isn't needed for the task\n\n"
-        "If the code is clean enough and lacks these issues to a significant degree, set "
-        "the approval status to 'Approved'. Otherwise, set it to 'Rebuild'."
+        "Grade the code on a three-tier scale, then write your critique:\n"
+        "- 'Rebuild': a real issue above remains -- not ready to ship.\n"
+        "- 'Acceptable': no blocking issues -- ready to ship, though not polished or exceptional.\n"
+        "- 'Outstanding': clean and idiomatic, free of the issues above -- nothing left to fix.\n"
+        "In 'feedback', return ONLY the revision critiques that justify the grade -- no rewriting."
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
@@ -91,13 +109,46 @@ reviewer = BasicAgent(
     response_schema={
         "type": "object",
         "properties": {
+            "approval_status": {"type": "string", "enum": ["Rebuild", "Acceptable", "Outstanding"]},
             "feedback": {"type": "string"},
-            "approval_status": {"type": "string", "enum": ["Approved", "Rebuild"]},
         },
-        "required": ["feedback", "approval_status"],
+        "required": ["approval_status", "feedback"],
         "additionalProperties": False,
     }
 )
+
+# Standing orchestration rules, lifted out of the per-invocation task prompt
+# and into tool_instructions -- the builder/reviewer interaction contract
+# (strict alternation, how to branch on the three-tier grade, when to stop,
+# what to return) is reusable agent behavior, not one-off task text
+# repeated on every call. Keeps `task` below down to just the content request.
+ORCHESTRATION_INSTRUCTIONS = """
+You use the provided tools to perform a multi-step code-building process.
+
+Step 1:
+CodeBuilderAgent(task_description = user's task) -> latest_draft
+
+Step 2:
+CodeReviewer(draft_code = latest_draft) -> review_result
+# {{"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique text>}}
+
+Step 3, branch on review_result["approval_status"]:
+- "Rebuild": your very next call must be CodeBuilderAgent, passing review_result as the
+  KEYWORD argument "review_feedback" -- reference it by its bound "$name", never retyped,
+  never read apart into pieces. Then repeat from Step 2.
+- "Acceptable" or "Outstanding": stop now -- both mean the code is ready to ship. There is
+  no difference in what you do next, only in how good the result turned out.
+
+Strictly alternate: builder, reviewer, builder, reviewer, ... -- never call CodeReviewer
+twice in a row, and never call CodeBuilderAgent twice in a row.
+
+Step N:
+Return CodeBuilderAgent's FINAL latest_draft once review_result["approval_status"] is
+"Acceptable" or "Outstanding". If you are ever forced to stop before that (the tool-call
+budget runs out), still return the most recent builder draft -- never return null or nothing.
+
+ONLY approval_status decides whether to continue the loop -- never judge the code yourself.
+""".strip()
 
 orchestrator = ReActAgent(
     name="AgenticOrchestrator",
@@ -106,6 +157,8 @@ orchestrator = ReActAgent(
     llm_engine=llm_engine,
     tool_calls_limit=10,
     context_enabled=True,
+    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
+    response_preview_limit=10,
 )
 
 # Register both agents as tools -- each reachable by its own bare name
@@ -115,22 +168,12 @@ orchestrator.register_tool(reviewer)
 
 task = (
     "Write a Python module that scaffolds an agentic AI design with clean OOP and provider-agnostic "
-    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python).\n\n"
-    "Strictly alternate: builder, reviewer, builder, reviewer, ... -- never call the reviewer twice "
-    "in a row, and never call the builder twice in a row.\n\n"
-    "Decide immediately after every reviewer call, before doing anything else: check its "
-    "approval_status. If it is 'Approved', stop now and return the most recent builder draft as "
-    "the final answer. Otherwise, your very next call must be the builder, passing the reviewer's "
-    "entire result as the builder's 'feedback' keyword argument -- reference it by its bound name, "
-    "never rewritten or retyped.\n\n"
-    "Do NOT use the entire number of tool calls you have -- stop the moment the reviewer approves. "
-    "If you are ever forced to stop before approval (the tool-call budget runs out), still return "
-    "the most recent builder draft as the final answer -- never return null or nothing."
+    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python)."
 )
 
 result = orchestrator.invoke({"prompt": task}).result
-record = orchestrator.get_conversation()[-1].to_dict()
-serialized_record = json.dumps(record, indent=2)
+record = orchestrator.get_conversation()[-1]
+serialized_record = json.dumps(record.to_dict(), indent=2)
 
 out_dir = Path("examples/output_markdowns")
 out_dir.mkdir(exist_ok=True)
@@ -143,7 +186,7 @@ else:
     print(f"\n>> WARNING: orchestrator did not return code (got {result!r}) -- nothing to save.")
 
 filepath = out_dir / "ReAct_statements.txt"
-filepath.write_text(pformat(record["statements"]), encoding="utf-8")
+filepath.write_text(record.render_as_code(), encoding="utf-8")
 print(f">> Executed calls saved to: {filepath.resolve()}")
 
 filepath = out_dir / "ReAct_Record.json"
