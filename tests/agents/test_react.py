@@ -45,6 +45,10 @@ class TestReActConstruction:
         agent = make_react_agent([], fail_fast=True)
         assert agent.fail_fast is True
 
+    def test_tool_instructions_forwarded(self) -> None:
+        agent = make_react_agent([], tool_instructions="Be terse.")
+        assert agent.tool_instructions == "Be terse."
+
     def test_fail_fast_must_be_bool(self) -> None:
         with pytest.raises(ToolAgentError):
             ReActAgent(

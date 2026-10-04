@@ -58,6 +58,10 @@ class TestPlanActConstruction:
         assert agent.tool_calls_limit == 3
         assert agent.regeneration_limit == 2
 
+    def test_tool_instructions_forwarded(self) -> None:
+        agent = make_planact_agent([], tool_instructions="Be terse.")
+        assert agent.tool_instructions == "Be terse."
+
     def test_reserved_tools_registered_on_construction(self) -> None:
         agent = make_planact_agent([])
         assert agent.has_tool("make_sequence")

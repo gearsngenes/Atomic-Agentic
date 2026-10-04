@@ -15,6 +15,7 @@ from .tools import attr_call_tool, builtin_call_tool
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
+from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import AgentRecord, LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
@@ -117,6 +118,7 @@ class ScriptActAgent(ToolAgent):
         constants: Optional[list[Any]] = None,
         constant_aliases: Optional[list[Optional[str]]] = None,
         constant_descriptions: Optional[list[Optional[str]]] = None,
+        tool_instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         ``super().__init__`` reaches ``ToolAgent`` (tool/constant registry
@@ -150,6 +152,7 @@ class ScriptActAgent(ToolAgent):
             constants=constants,
             constant_aliases=constant_aliases,
             constant_descriptions=constant_descriptions,
+            tool_instructions=tool_instructions,
         )
 
         self.replanning_limit = replanning_limit

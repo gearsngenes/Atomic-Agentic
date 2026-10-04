@@ -6,6 +6,7 @@ import json
 
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from ..fake_engines import FakeLLMEngine
@@ -49,6 +50,7 @@ def make_planact_agent(
     fail_fast: bool = True,
     post_invoke: Any = None,
     post_result_key: str | None = None,
+    tool_instructions: str | PromptConfig | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
@@ -61,6 +63,7 @@ def make_planact_agent(
         fail_fast=fail_fast,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
+        tool_instructions=tool_instructions,
     )
     register_math_tools(agent)
     return agent
@@ -75,6 +78,7 @@ def make_react_agent(
     fail_fast: bool = False,
     post_invoke: Any = None,
     post_result_key: str | None = None,
+    tool_instructions: str | PromptConfig | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
@@ -87,6 +91,7 @@ def make_react_agent(
         fail_fast=fail_fast,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
+        tool_instructions=tool_instructions,
     )
     register_math_tools(agent)
     return agent

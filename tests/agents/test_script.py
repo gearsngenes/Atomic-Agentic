@@ -70,6 +70,11 @@ class TestScriptActAgentConstruction:
         assert agent.tool_calls_limit is None
         assert agent.replanning_limit == 2
         assert agent.fail_fast is False
+        assert agent.tool_instructions is None
+
+    def test_tool_instructions_forwarded(self) -> None:
+        agent = _make_agent(FakeLLMEngine(responses=[]), tool_instructions="Be terse.")
+        assert agent.tool_instructions == "Be terse."
 
     def test_regeneration_limit_rejects_negative(self) -> None:
         with pytest.raises(ToolAgentError):

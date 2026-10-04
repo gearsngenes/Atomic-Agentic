@@ -27,8 +27,7 @@ __all__ = [
     "evaluate_expr",
     "extract_identifiers",
     "extract_json_object",
-    "normalize_role_prompt",
-    "normalize_thinking_instructions",
+    "normalize_prompt_config",
     "reject_unsupported_forms",
     "stringify_result",
     "strip_code_fence",
@@ -39,48 +38,45 @@ __all__ = [
 ]
 
 
-def normalize_role_prompt(
+def normalize_prompt_config(
     value: str | PromptConfig | None,
-    default_template: str,
-) -> PromptConfig:
-    """Coerce a role-prompt value to a ``PromptConfig``."""
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return PromptConfig(
-            template=default_template,
-            description="Default assistant role prompt",
-        )
-    if isinstance(value, str):
-        return PromptConfig(template=value.strip(), description="Role prompt")
-    if isinstance(value, PromptConfig):
-        return value
-    raise TypeError(
-        f"role_prompt must be str, PromptConfig, or None; got {type(value).__name__}."
-    )
+    *,
+    default_template: str | None,
+    provided_description: str,
+    error_label: str,
+    default_description: str | None = None,
+) -> PromptConfig | None:
+    """Coerce a prompt-shaped construction value to a ``PromptConfig``, or
+    ``None``.
 
+    Unifies what were three near-identical coercion functions (role prompt,
+    thinking instructions, tool instructions) into one, parameterized per
+    call site rather than derived from a generic label, so existing callers
+    get byte-identical ``PromptConfig``/error text.
 
-def normalize_thinking_instructions(
-    value: str | PromptConfig | None,
-    default_template: str,
-) -> PromptConfig:
-    """Coerce a thinking-instructions value to a ``PromptConfig``.
-
-    Mirrors ``normalize_role_prompt`` exactly, including now taking a
-    caller-supplied ``default_template`` -- ``None``/blank resolves to
-    that default (``ThinkingAgent.DEFAULT_THINKING_PROMPT``) rather than a
-    hardcoded empty string, matching how ``normalize_role_prompt`` always
-    resolved to a real default persona sentence.
+    ``value`` is ``None`` or an all-whitespace ``str``:
+        - ``default_template`` is ``None`` -- returns ``None``. The one
+          branch a role prompt or thinking instructions never take (an
+          agent always needs *some* version of either); a caller with no
+          sensible generic fallback (e.g. tool instructions) passes
+          ``None`` here to get real absence back instead of boilerplate.
+        - ``default_template`` is a ``str`` -- returns
+          ``PromptConfig(template=default_template, description=default_description)``.
+    ``value`` is a non-blank ``str`` -- returns
+        ``PromptConfig(template=value.strip(), description=provided_description)``.
+    ``value`` is already a ``PromptConfig`` -- returned unchanged.
+    Anything else -- raises ``TypeError``.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
-        return PromptConfig(
-            template=default_template,
-            description="Default thinking instructions.",
-        )
+        if default_template is None:
+            return None
+        return PromptConfig(template=default_template, description=default_description)
     if isinstance(value, str):
-        return PromptConfig(template=value.strip(), description="Thinking instructions")
+        return PromptConfig(template=value.strip(), description=provided_description)
     if isinstance(value, PromptConfig):
         return value
     raise TypeError(
-        f"thinking_instructions must be str, PromptConfig, or None; got {type(value).__name__}."
+        f"{error_label} must be str, PromptConfig, or None; got {type(value).__name__}."
     )
 
 

@@ -9,7 +9,7 @@ from ..llm.base import LLMEngine
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
-from ..utils.agents import normalize_role_prompt
+from ..utils.agents import normalize_prompt_config
 from .base import Agent
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,13 @@ class BasicAgent(Agent):
         response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
-        config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
+        config = normalize_prompt_config(
+            role_prompt,
+            default_template=self.DEFAULT_ROLE_PROMPT,
+            provided_description="Role prompt",
+            default_description="Default assistant role prompt",
+            error_label="role_prompt",
+        )
         role_params = list(config.parameters)
 
         # 2. Delegate to Agent base; role placeholders are the sole

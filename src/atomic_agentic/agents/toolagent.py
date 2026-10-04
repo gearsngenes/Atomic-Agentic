@@ -53,6 +53,9 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
+from ..models.agents.prompts import PromptConfig
+from ..utils.agents import normalize_prompt_config
+from .prompts import TOOL_INSTRUCTIONS_BANNER
 
 
 class ToolAgent(Agent, ABC):
@@ -73,6 +76,9 @@ class ToolAgent(Agent, ABC):
     - Constant registration (``register_constant``/``register_constants``,
       construction-time only, alias-named wire names) and its own
       accessors.
+    - Tool-usage guidance (``tool_instructions``, construction-time only,
+      read-only property) rendered as a trailing system-message section via
+      ``_render_system_message``, appended only when set.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
     - Shared rendering: ``actions_context``/``constants_context``/
@@ -88,6 +94,7 @@ class ToolAgent(Agent, ABC):
 
     TOOLS_FIELD: ClassVar[str] = "TOOLS"
     CONSTANTS_FIELD: ClassVar[str] = "CONSTANTS"
+    TOOL_INSTRUCTIONS_KEY: ClassVar[str] = "tool_instructions"
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
     _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
@@ -124,6 +131,7 @@ class ToolAgent(Agent, ABC):
         constants: Optional[list[Any]] = None,
         constant_aliases: Optional[list[Optional[str]]] = None,
         constant_descriptions: Optional[list[Optional[str]]] = None,
+        tool_instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Parameters
@@ -152,6 +160,22 @@ class ToolAgent(Agent, ABC):
             ``constant_descriptions``.
         constant_aliases, constant_descriptions
             Positionally aligned with ``constants``. See ``register_constant``.
+        tool_instructions : str | PromptConfig | None
+            Optional standing tool-usage guidance (e.g. "always call the
+            outliner first," "alternate writer/reviewer"), rendered as a
+            trailing system-message section appended only when set -- no
+            effect on the rendered system message otherwise. A plain
+            ``str`` is free-form prose (empty/whitespace-only normalizes to
+            "not provided"); a ``PromptConfig`` is accepted directly for a
+            caller who wants discovered template fields of their own (e.g.
+            referencing ``{TOOLS}``/``{CONSTANTS}``, already in the same
+            render context). Frozen at construction -- read-only via the
+            ``tool_instructions`` property, matching
+            ``BasicAgent.role_prompt``'s own precedent; construct a new
+            agent for different instructions. Guidance only, not a
+            guarantee: a malformed draft it causes is still caught by the
+            existing generation-retry/repair loop, same as any other
+            malformed draft.
 
         ``fail_fast`` is intentionally not a parameter here -- each concrete
         subclass that needs it declares and validates its own.
@@ -192,6 +216,15 @@ class ToolAgent(Agent, ABC):
                 constants, aliases=constant_aliases, descriptions=constant_descriptions
             )
 
+        normalized_tool_instructions = normalize_prompt_config(
+            tool_instructions,
+            default_template=None,
+            provided_description="Tool instructions",
+            error_label="tool_instructions",
+        )
+        if normalized_tool_instructions is not None:
+            self._system_prompts[self.TOOL_INSTRUCTIONS_KEY] = normalized_tool_instructions
+
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
     # ------------------------------------------------------------------ #
@@ -230,6 +263,16 @@ class ToolAgent(Agent, ABC):
                 f"must be None or an int >= 1; got {value!r}."
             )
         self._tool_concurrency_limit = value
+
+    @property
+    def tool_instructions(self) -> Optional[str]:
+        """
+        Standing tool-usage guidance rendered as a trailing system-message
+        section, or ``None`` if never set. Frozen at construction -- matches
+        ``BasicAgent.role_prompt``'s own read-only precedent; no setter.
+        """
+        config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
+        return config.template if config is not None else None
 
     # ------------------------------------------------------------------ #
     # Shared helpers
@@ -912,10 +955,12 @@ class ToolAgent(Agent, ABC):
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """
         Render this agent's active system prompt with tool/constant context
-        injected. Returns ``[]`` when ``task.system_prompt_name`` is
-        ``None``. Deliberately carries no budget content — ``tool_calls_limit``
-        is a per-invocation fact, not a standing instruction, so each family
-        surfaces it in its own task-message banner instead.
+        injected, then append a trailing ``tool_instructions`` section if
+        one was registered. Returns ``[]`` when ``task.system_prompt_name``
+        is ``None``. Deliberately carries no budget content —
+        ``tool_calls_limit`` is a per-invocation fact, not a standing
+        instruction, so each family surfaces it in its own task-message
+        banner instead.
         """
         if task.system_prompt_name is None:
             return []
@@ -925,6 +970,16 @@ class ToolAgent(Agent, ABC):
             **self._extra_system_context(),
         }
         rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+
+        # Appended post-render, never templated into the family prompts
+        # above -- zero added tokens for an agent that never set
+        # tool_instructions, and the same render_context (TOOLS/CONSTANTS/
+        # extra) is reused so a power-user PromptConfig can reference them.
+        tool_instructions_config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
+        if tool_instructions_config is not None:
+            rendered_instructions = tool_instructions_config.render(render_context)
+            rendered += TOOL_INSTRUCTIONS_BANNER.format(instructions=rendered_instructions)
+
         return [{"role": "system", "content": rendered}]
 
     # ------------------------------------------------------------------ #

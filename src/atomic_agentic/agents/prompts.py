@@ -477,3 +477,35 @@ the exception and cached values say what's actually wrong; fix that
 """,
     description="ScriptActAgent one-shot native-grammar planning prompt.",
 )
+
+
+# =============================================================================
+# Shared tool_instructions banner
+# =============================================================================
+# Used by:
+# - agents/toolagent.py: ToolAgent._render_system_message (shared by every
+#   concrete family -- PlanAct/ReAct/ScriptAct)
+#
+# Appended only when an agent was constructed with tool_instructions set --
+# never part of PLANNER_PROMPT/REACT_PROMPT/ONESHOT_PLANNER_PROMPT's own
+# template text, so an agent without tool_instructions renders a
+# byte-identical system message to today's, at zero added token cost. Plain
+# str, not a PromptConfig -- the only variable content is the rendered
+# tool_instructions text itself, substituted programmatically via
+# .format(instructions=...), never a user-facing template field a caller
+# supplies inputs for. Appended at the END of the fully-rendered system
+# message (after whichever section currently renders last in each template
+# above) -- avoids "lost in the middle" without requiring any edits to the
+# three existing, prompt-reviewer-approved templates.
+#
+# The leading single "\n" (not two) is deliberate: every rendered template
+# above already ends with a trailing newline from its own closing content
+# line, so one more produces exactly the single blank-line gap every other
+# "# HEADER" section transition in these templates already uses.
+TOOL_INSTRUCTIONS_BANNER = (
+    "\n# ADDITIONAL TOOL INSTRUCTIONS\n"
+    "Use the following as guidance for how to use the tools and constants "
+    "above when handling the task below -- it refines how you act, never "
+    "replaces the required output format.\n\n"
+    "{instructions}"
+)

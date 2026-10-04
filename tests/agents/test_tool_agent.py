@@ -11,6 +11,7 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.constants.agents import RETURN_TOOL_NAME, RETURN_VALUE_FIELD
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.blackboard_models import ConstantSpec
+from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.a2a import A2AClientHub
@@ -179,6 +180,32 @@ class TestToolAgentConstruction:
         )
         assert agent.get_constant("A").value == 1
         assert agent.get_constant("B").description == "Second."
+
+    def test_tool_instructions_defaults_to_none(self) -> None:
+        agent = _plain_agent()
+        assert agent.tool_instructions is None
+
+    def test_tool_instructions_string_normalized(self) -> None:
+        agent = _plain_agent(tool_instructions="Always say hi.")
+        assert agent.tool_instructions == "Always say hi."
+
+    def test_tool_instructions_whitespace_only_normalizes_to_none(self) -> None:
+        agent = _plain_agent(tool_instructions="   ")
+        assert agent.tool_instructions is None
+
+    def test_tool_instructions_promptconfig_passthrough(self) -> None:
+        config = PromptConfig(template="Static guidance.", description="d")
+        agent = _plain_agent(tool_instructions=config)
+        assert agent.tool_instructions == "Static guidance."
+
+    def test_tool_instructions_invalid_type_raises(self) -> None:
+        with pytest.raises(TypeError, match="tool_instructions"):
+            _plain_agent(tool_instructions=123)  # type: ignore[arg-type]
+
+    def test_tool_instructions_has_no_setter(self) -> None:
+        agent = _plain_agent()
+        with pytest.raises(AttributeError):
+            agent.tool_instructions = "x"  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #
@@ -786,6 +813,35 @@ class TestSystemMessageRendering:
         task.system_prompt_name = None
 
         assert agent._render_system_message(task) == []
+
+    def test_render_system_message_omits_banner_when_tool_instructions_unset(self) -> None:
+        agent = _plain_agent()
+        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
+
+        content = agent._render_system_message(task)[0]["content"]
+
+        assert "ADDITIONAL TOOL INSTRUCTIONS" not in content
+
+    def test_render_system_message_appends_tool_instructions_banner_when_set(self) -> None:
+        agent = _plain_agent(tool_instructions="Always say hi.")
+        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
+
+        content = agent._render_system_message(task)[0]["content"]
+
+        assert "ADDITIONAL TOOL INSTRUCTIONS" in content
+        assert "Always say hi." in content
+        assert content.index("ADDITIONAL TOOL INSTRUCTIONS") > content.index("AVAILABLE TOOLS")
+
+    def test_render_system_message_tool_instructions_promptconfig_shares_render_context(self) -> None:
+        config = PromptConfig(template="See: {TOOLS}", description="d")
+        agent = _plain_agent(tool_instructions=config)
+        agent.register_tool(add)
+        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
+
+        content = agent._render_system_message(task)[0]["content"]
+
+        banner = content[content.index("ADDITIONAL TOOL INSTRUCTIONS"):]
+        assert "add(" in banner
 
 
 class TestRenderTurnAndTurnPosition:

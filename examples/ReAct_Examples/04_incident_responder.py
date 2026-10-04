@@ -153,7 +153,7 @@ print(f"\nIncident summary: {final_result.result}")
 
 record = responder.get_conversation()[-1]
 print("\nCalls made:")
-pprint(record.statements)
+print(record.render_as_code())
 
 if record.failed_statements:
     print("\nCalls that failed (and were reacted to, not retried):")

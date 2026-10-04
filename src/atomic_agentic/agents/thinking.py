@@ -25,7 +25,7 @@ from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
-from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions, stringify_result
+from ..utils.agents import normalize_prompt_config, stringify_result
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
@@ -162,10 +162,22 @@ class ThinkingAgent(BasicAgent):
         parameter ``thinking_rounds`` (default ``1``, no ceiling here),
         validated in ``_initialize_task``.
         """
-        role_config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
+        role_config = normalize_prompt_config(
+            role_prompt,
+            default_template=self.DEFAULT_ROLE_PROMPT,
+            provided_description="Role prompt",
+            default_description="Default assistant role prompt",
+            error_label="role_prompt",
+        )
         role_params = list(role_config.parameters)
 
-        thinking_config = normalize_thinking_instructions(thinking_instructions, self.DEFAULT_THINKING_PROMPT)
+        thinking_config = normalize_prompt_config(
+            thinking_instructions,
+            default_template=self.DEFAULT_THINKING_PROMPT,
+            provided_description="Thinking instructions",
+            default_description="Default thinking instructions.",
+            error_label="thinking_instructions",
+        )
         thinking_params = list(thinking_config.parameters)
 
         # Reconcile role_prompt vs thinking_instructions BEFORE combining --

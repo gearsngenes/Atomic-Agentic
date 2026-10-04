@@ -75,6 +75,7 @@ from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
+from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import PlanActTask
 from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
 from ..models.results.agents import ToolAgentResult
@@ -159,6 +160,7 @@ class PlanActAgent(ToolAgent):
         constants: Optional[list[Any]] = None,
         constant_aliases: Optional[list[Optional[str]]] = None,
         constant_descriptions: Optional[list[Optional[str]]] = None,
+        tool_instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Every parameter except ``fail_fast`` forwards verbatim to
@@ -187,6 +189,7 @@ class PlanActAgent(ToolAgent):
             constants=constants,
             constant_aliases=constant_aliases,
             constant_descriptions=constant_descriptions,
+            tool_instructions=tool_instructions,
         )
 
         if not isinstance(fail_fast, bool):
