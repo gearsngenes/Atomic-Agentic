@@ -42,7 +42,7 @@ from typing import Any, Callable, ClassVar, Optional
 from .toolagent import ToolAgent
 from .prompts import REACT_PROMPT
 from .tools import make_dict, make_sequence, return_tool
-from ..constants.agents import RETURN_TOOL_NAME
+from ..constants.agents import RETURN_TOOL_NAME, TASK_RESULT_PREFIX
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
@@ -322,8 +322,14 @@ class ReActAgent(ToolAgent):
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
-        known_names = frozenset(task.cache) | frozenset(task.constant_values)
-        issues, calls = translate_calls([draft], remaining_budget, known_names)
+        constant_names = frozenset(task.constant_values)
+        task_result_names = frozenset(
+            name for name in task.cache if name.startswith(TASK_RESULT_PREFIX)
+        )
+        known_names = frozenset(task.cache) | constant_names
+        issues, calls = translate_calls(
+            [draft], remaining_budget, known_names, constant_names, task_result_names
+        )
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))

@@ -14,7 +14,6 @@ from ..constants.agents import (
     RETURN_VALUE_FIELD,
     RHS_ASSIGN_ALIAS,
     SIGIL_REF_PATTERN,
-    TASK_RESULT_PREFIX,
 )
 from ..constants.core import IDENTIFIER_PATTERN
 from ..models.agents.blackboard_models import ToolStatement
@@ -163,11 +162,23 @@ def translate_calls(
     drafts: list[_DraftCall],
     tool_calls_limit: Optional[int],
     known_names: frozenset[str],
+    constant_names: frozenset[str],
+    task_result_names: frozenset[str],
 ) -> tuple[list[str], list[ToolStatement]]:
     """
     Combines what used to be a separate construction+validation pass into
     one walk that does both validation and ast-translation, since both need
     the identical growing "available names" set.
+
+    ``known_names`` is the full reference-*resolution* seed -- everything
+    bound before this call/plan starts (for ``ReActAgent``, this includes
+    prior rounds' own plan-local result names, which accumulate in
+    ``task.cache`` across rounds, not just constants/task-results).
+    ``constant_names``/``task_result_names`` are narrower subsets of
+    ``known_names``, supplied separately and used ONLY for categorizing a
+    *new* result_name collision for rejection purposes (is it specifically a
+    registered constant, specifically a cross-invocation task-result label,
+    or something else) -- never a substitute for ``known_names`` itself.
 
     1. ``available = set(known_names)``. ``issues = []``. ``statements = []``.
     2. For each draft, in order:
@@ -176,10 +187,11 @@ def translate_calls(
           ``None`` (the earlier free-form-wire-string identifier leniency,
           relocated here verbatim).
        b. If normalized identifier is not ``None``: check
-          ``IDENTIFIER_PATTERN`` legality, then (only if legal) reserved-
-          prefix (``K_``/``TASK_RESULT_PREFIX``) and dunder-shape
-          (``__...__``) checks -- same three checks and message text the
-          earlier semantic-validation pass used.
+          ``IDENTIFIER_PATTERN`` legality, then (only if legal) real
+          membership checks against ``constant_names``/``task_result_names``,
+          then dunder-shape (``__...__``) checks -- replaces the earlier
+          reserved-*prefix*-shape check with real collision checks against
+          what's actually registered/bound this invocation.
        c. Translate every arg/kwarg value (see "Value translation" below),
           using ``available`` as it stands *before* this draft's own
           identifier is added to it (a call can never reference its own
@@ -236,7 +248,7 @@ def translate_calls(
                 return ast.Name(id=name, ctx=ast.Load())
             local_names = sorted(
                 n for n in available
-                if not n.startswith("K_") and not n.startswith(TASK_RESULT_PREFIX)
+                if n not in constant_names and n not in task_result_names
             )
             bound_desc = (
                 f"Currently bound this run: {local_names!r}. "
@@ -247,7 +259,7 @@ def translate_calls(
                 "earlier result_name, constant, or cross-invocation "
                 "result (only checked for a value that is *entirely* one "
                 "'$name' token -- a '$name' embedded in a longer string is "
-                f"never flagged). {bound_desc}A registered K_* constant or "
+                f"never flagged). {bound_desc}A registered constant or "
                 "an earlier turn's task_result_N is also valid if shown to "
                 "you."
             )
@@ -310,7 +322,8 @@ def translate_calls(
             normalized_identifier = stripped or None
 
         # 2b. Identifier legality -- pattern first, then (only if legal)
-        # reserved-prefix/dunder-shape checks.
+        # real membership checks against constant_names/task_result_names,
+        # then dunder-shape.
         identifier_legal = True
         if normalized_identifier is not None:
             if not IDENTIFIER_PATTERN.fullmatch(normalized_identifier):
@@ -318,13 +331,17 @@ def translate_calls(
                     f"result_name {normalized_identifier!r} is not a valid identifier."
                 )
                 identifier_legal = False
-            elif normalized_identifier.startswith("K_") or normalized_identifier.startswith(
-                TASK_RESULT_PREFIX
-            ):
+            elif normalized_identifier in constant_names:
                 issues.append(
-                    f"result_name {normalized_identifier!r} uses a reserved prefix "
-                    "('K_' is reserved for constants, "
-                    f"{TASK_RESULT_PREFIX!r} for cross-invocation results)."
+                    f"result_name {normalized_identifier!r} is already a registered "
+                    "constant name; constants are read-only and cannot be "
+                    "reassigned."
+                )
+            elif normalized_identifier in task_result_names:
+                issues.append(
+                    f"result_name {normalized_identifier!r} is already a "
+                    "cross-invocation result label (task_result_N) this run; "
+                    "choose a different name."
                 )
             elif normalized_identifier.startswith("__") and normalized_identifier.endswith("__"):
                 issues.append(

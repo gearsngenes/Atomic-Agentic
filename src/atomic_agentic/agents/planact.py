@@ -68,7 +68,7 @@ from typing import Any, Callable, ClassVar, Optional
 from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
-from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
+from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, TASK_RESULT_PREFIX
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
@@ -307,8 +307,14 @@ class PlanActAgent(ToolAgent):
         drafts = parse_generation(raw_output)
 
         remaining_budget = self._tool_calls_limit
-        known_names = frozenset(task.cache) | frozenset(task.constant_values)
-        issues, calls = translate_calls(drafts, remaining_budget, known_names)
+        constant_names = frozenset(task.constant_values)
+        task_result_names = frozenset(
+            name for name in task.cache if name.startswith(TASK_RESULT_PREFIX)
+        )
+        known_names = frozenset(task.cache) | constant_names
+        issues, calls = translate_calls(
+            drafts, remaining_budget, known_names, constant_names, task_result_names
+        )
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))

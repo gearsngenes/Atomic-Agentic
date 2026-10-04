@@ -42,5 +42,5 @@ from pprint import pprint
 print("\n=== FINAL AGENT RESULT ===")
 pprint(result)
 print("EXECUTED CALLS AFTER MATH DEMO:")
-pprint(agent.get_conversation()[-1].statements)
+print(agent.get_conversation()[-1].render_as_code())
 agent.clear_memory()

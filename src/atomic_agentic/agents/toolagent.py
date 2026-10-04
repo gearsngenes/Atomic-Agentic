@@ -5,8 +5,8 @@ Agent family.
 Owns the surface that ``PlanActAgent``/``ReActAgent`` (formerly unified
 under the now-removed ``JsonToolAgent``) and ``ScriptActAgent`` already
 shared byte-for-byte or near-identically: tool registration (alias-based,
-``register_tool``/``register_tools``), constant registration (``K_``-
-prefixed, construction-time only), shared rendering
+``register_tool``/``register_tools``), constant registration (alias-named,
+construction-time only), shared rendering
 (``actions_context``/``constants_context``/``render_turn``), and the
 execution knobs common to both grammars (``tool_calls_limit``,
 ``regeneration_limit``, ``tool_concurrency_limit``).
@@ -71,7 +71,7 @@ class ToolAgent(Agent, ABC):
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
     - Constant registration (``register_constant``/``register_constants``,
-      construction-time only, ``K_``-prefixed wire names) and its own
+      construction-time only, alias-named wire names) and its own
       accessors.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
@@ -605,8 +605,8 @@ class ToolAgent(Agent, ABC):
         Register one named runtime constant. ``alias`` is optional: given,
         stored under ``alias.upper()`` (wire-facing ``ConstantSpec.name`` is
         ``f"K_{alias.upper()}"``); omitted, auto-named from
-        ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict key
-        and ``ConstantSpec.name`` are this same string, then the counter
+        ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict
+        key and ``ConstantSpec.name`` are this same string, then the counter
         increments). The counter never decrements, so a retired auto-name is
         never reissued.
 
@@ -832,11 +832,12 @@ class ToolAgent(Agent, ABC):
     def constants_context(self) -> str:
         """
         Render every registered constant for prompt injection, one block
-        per constant (a ``K_NAME: type`` annotation line + a 4-space-indented
+        per constant (a ``NAME: type`` annotation line + a 4-space-indented
         triple-quoted docstring description, via ``_render_docstring_block``),
         matching ``actions_context``'s own docstring-style rendering. Names
-        print exactly as stored (``K_``-prefixed) — no prefix synthesized
-        here. Empty registry renders a "no constants" message.
+        print exactly as stored (``K_<ALIAS>`` when aliased, or ``K_i`` when
+        auto-named) — no prefix synthesized here. Empty
+        registry renders a "no constants" message.
         """
         if not self._constants:
             return "No constants registered."

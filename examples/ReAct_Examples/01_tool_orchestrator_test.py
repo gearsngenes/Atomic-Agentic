@@ -35,7 +35,7 @@ orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below need
 
 orchestrator.register_constant(
     math.pi, "PI",
-    "Use ONLY THIS constant in place of a literal or float for any calculations that involve it.",
+    "Mathematical constant `pi` placeholder",
 )
 
 task = """
@@ -53,4 +53,4 @@ final_result = orchestrator.invoke({"prompt": task})
 print(f"\nFinal Result: {final_result.result}")
 
 print("\nExecuted calls:\n")
-pprint(orchestrator.get_conversation()[-1].statements)
+print(orchestrator.get_conversation()[-1].render_as_code())

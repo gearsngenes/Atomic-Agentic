@@ -9,6 +9,7 @@ from ...constants.agents import (
     KWARGS_UNPACK_KEY,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
+    RETURN_VALUE_FIELD,
     RHS_ASSIGN_ALIAS,
 )
 from ...constants.core import IDENTIFIER_PATTERN
@@ -242,13 +243,25 @@ class ToolStatement:
         ``Name``/``Constant``/``JoinedStr`` only), this produces real Python
         source with zero extra code -- the renderer only ever inspects
         ``ast.expr``-ness, never which grammar produced the node.
+
+        ``RETURN_ALIAS`` needs its value read from either ``kwargs`` or
+        ``args``, not ``kwargs`` alone: ``RETURN_TOOL_NAME`` (``ReActAgent``'s
+        real, dispatched ``return`` tool) and ``RETURN_ALIAS``
+        (``PlanActAgent``'s synthesized, non-dispatched sentinel) are the
+        identical string ``"return"`` (see ``agents/react.py``'s own module
+        docstring). ``PlanActAgent``'s sentinel is always framework-built
+        with ``kwargs={"val": ...}``, but ``ReActAgent``'s real call is
+        model-authored like any other tool call -- its one argument may be
+        given positionally (``"name": null``) just as legally as by keyword,
+        landing in ``args`` instead.
         """
 
         def render_value(value: Any) -> str:
             return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
 
         if self.tool == RETURN_ALIAS:
-            return f"return {render_value(self.kwargs['val'])}"
+            value = self.kwargs[RETURN_VALUE_FIELD] if RETURN_VALUE_FIELD in self.kwargs else self.args[0]
+            return f"return {render_value(value)}"
 
         prefix = f"{self.identifier} = " if self.identifier is not None else ""
         if self.tool == RHS_ASSIGN_ALIAS:

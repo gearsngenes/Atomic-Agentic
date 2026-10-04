@@ -408,9 +408,11 @@ argument needs that exact value.
    `task_result_i` -- instead of hand-writing an equivalent value
    (`3.14159` is never `K_PI`); unnamed literals are still written
    directly.
-4. Never assign to `task_result_*`/`_SUB_*` names -- `task_result_i:
-   Type = value` labels a prior invocation's read-only result, used
-   directly; `_SUB_` names are auto-generated nested-call bindings.
+4. Never assign to `task_result_*`/`_SUB_*` names, or to a registered
+   constant's own name -- `task_result_i: Type = value` labels a prior
+   invocation's read-only result, used directly; `_SUB_` names are
+   auto-generated nested-call bindings; a constant is a fixed, read-only
+   value (see AVAILABLE CONSTANTS).
 5. At most one `return`, only as the true last statement you write.
 6. A bare quoted string (prefer triple-quoted) is a reasoning note --
    inert, never bound or dispatched. Write as many as help you think,

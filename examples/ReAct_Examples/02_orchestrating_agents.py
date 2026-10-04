@@ -25,17 +25,17 @@ logging.basicConfig(level=logging.INFO)
 sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
 
 
-def builder_prestep(task_prompt: str | None = None, *, feedback: dict | None = None) -> str:
-    if feedback is not None:
+def builder_prestep(initial_task_prompt: str | None = None, *, feedback_prompt: dict | None = None) -> str:
+    if feedback_prompt is not None:
         return (
             "Read and internalize the following feedback on your last draft, then use your "
-            f"best judgement to re-build it: {json.dumps(feedback)}\n\n"
+            f"best judgement to re-build it: {json.dumps(feedback_prompt)}\n\n"
             "Provide the updated code."
         )
-    elif task_prompt:
-        return f"Implement code so that it meets the user's request:\n{task_prompt}"
+    elif initial_task_prompt:
+        return f"Implement code so that it meets the user's request:\n{initial_task_prompt}"
     else:
-        raise ValueError("Either task_prompt or feedback must be provided.")
+        raise ValueError("Either initial_task_prompt or feedback_prompt must be provided.")
 
 
 builder = BasicAgent(
@@ -43,9 +43,9 @@ builder = BasicAgent(
     namespace="examples",
     description="""
     Returns: code string based on the task or feedback provided.
-    First draft: give "task_prompt" positionally ("name": null).
+    First draft: give "initial_task_prompt" positionally ("name": null).
     Revision: give the reviewer's entire result dict as the KEYWORD argument
-    "feedback" (that is, "name": "feedback") -- "feedback" comes after a "*"
+    "feedback_prompt" (that is, "name": "feedback_prompt") -- "feedback_prompt" comes after a "*"
     in this tool's signature, so it can ONLY be filled by name, never by a
     positional argument. Reference the reviewer's result whole, by its
     "$name" -- never retype or rewrite its content.
@@ -104,8 +104,7 @@ orchestrator = ReActAgent(
     namespace="examples",
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm_engine,
-    records_window=10,
-    tool_calls_limit=7,
+    tool_calls_limit=10,
     context_enabled=True,
 )
 

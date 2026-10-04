@@ -470,13 +470,13 @@ class ScriptActAgent(ToolAgent):
         # here with a specific message instead of validate_references'
         # generic "unregistered tool" one.
         builtin_issues = rewrite_builtin_calls(flat_slots)
-        # Derived from each ConstantSpec's own .name (already correctly
-        # K_-prefixed exactly once for both the auto-named and aliased
-        # registration paths -- see register_constant/register_constants),
-        # never reconstructed by re-prefixing the internal dict key itself:
-        # an auto-named key is already "K_0"-shaped, so blindly prepending
-        # "K_" again would double-prefix it ("K_K_0"), silently mismatching
-        # the name actually shown to the model via constants_context().
+        # Derived from each ConstantSpec's own .name (always already
+        # K_-prefixed -- "K_i" auto-named, "K_{ALIAS}" aliased; see
+        # register_constant/register_constants), never reconstructed via a
+        # fresh f"K_{...}" here -- that would double-prefix an aliased name,
+        # whose own internal dict key is never K_-prefixed itself: .name is
+        # already exactly the identifier shown to the model via
+        # constants_context().
         known_constants = frozenset(spec.name for spec in self._constants.values())
         # Every key already in task.cache is safe to reference by name here:
         # cross-invocation task_result_i entries (seeded in
@@ -712,8 +712,8 @@ class ScriptActAgent(ToolAgent):
         # live, shared constant object fresh every batch, defeating the
         # "a mutation stays visible for the rest of this invocation, never
         # leaks to another" guarantee). Merged in here, once per batch, so
-        # a correct K_NAME reference actually resolves instead of raising
-        # NameError; task.cache last so a real bound/history name would win
+        # a correct constant-name reference actually resolves instead of
+        # raising NameError; task.cache last so a real bound/history name would win
         # on the (never expected) collision.
         resolution_namespace = {**task.constant_values, **task.cache}
         for slot in batch:
