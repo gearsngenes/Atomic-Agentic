@@ -3,15 +3,15 @@
 Prebuilt Tool Collections
 =========================
 
-This module exposes *prebuilt lists of Tools* that you can register on a JsonToolAgent
-(e.g., PlanActAgent / ReActAgent) via `register_tools(...)`.
+This module exposes *prebuilt lists of Tools* that you can register on a ToolAgent
+subclass (e.g., PlanActAgent / ReActAgent / ScriptActAgent) via `register_tools(...)`.
 
 Example
 -------
 >>> from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
->>> agent.batch_register(BASIC_MATH_TOOLS)
->>> agent.batch_register(CONSOLE_TOOLS)
->>> agent.batch_register(PARSER_TOOLS)
+>>> agent.register_tools(BASIC_MATH_TOOLS)
+>>> agent.register_tools(CONSOLE_TOOLS)
+>>> agent.register_tools(PARSER_TOOLS)
 
 Design
 ------
@@ -37,7 +37,8 @@ __all__ = ["BASIC_MATH_TOOLS",
            "TRIG_TOOLS",
            "STAT_TOOLS",
            "CONSOLE_TOOLS",
-           "PARSER_TOOLS"]
+           "PARSER_TOOLS",
+           "COLLECTION_TOOLS"]
 
 # ────────────────────────── Basic Math Tools ──────────────────────────
 
@@ -255,13 +256,6 @@ PARSER_TOOLS: List[Tool] = [
     Tool(function=regex_match, name="regex_match", namespace="Parser", description="Check if a string matches a regex pattern."),
     Tool(function=regex_replace, name="regex_replace", namespace="Parser", description="Replace occurrences of a regex pattern in a string."),
 ]
-
-# ─────────────────────────  Conditional Tools  ─────────────────────────
-def is_in(x: Any, y: Any) -> bool:
-    """returns boolean value of 'x in y'"""
-    return x in y
-def if_else_select(condition: bool, true_val: Any, false_val: Any) -> Any:
-    return true_val if condition else false_val
 
 # ─────────────────────────  Collection Tools  ─────────────────────────
 def has_key(d: dict, key: Any) -> bool:
