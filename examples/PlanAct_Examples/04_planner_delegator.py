@@ -11,7 +11,7 @@ Updated to use PlanActAgent (ReWOO-style: plan once, then execute).
 import logging
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, EXPONENT_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, EXPONENT_TOOLS, STAT_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
 from shared_engine import llm_engine
@@ -66,6 +66,7 @@ batch_math_planner = PlanActAgent(
 )
 batch_math_planner.register_tools(BASIC_MATH_TOOLS)
 batch_math_planner.register_tools(EXPONENT_TOOLS)
+batch_math_planner.register_tools(STAT_TOOLS)
 
 def print_math_solution(problem: str, solution: str) -> None:
     print(f"Question: {problem}\nAnswer: {solution}")

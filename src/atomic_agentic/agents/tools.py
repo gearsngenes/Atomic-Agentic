@@ -207,46 +207,49 @@ def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
     return fn(*args, **kwargs)
 
 
-def make_sequence(*items: Any, kind: Literal["list", "tuple", "set"]) -> list | tuple | set:
+def make_sequence(*items: Any, sequence_type: Literal["list", "tuple", "set"] = "list") -> list | tuple | set:
     """
-    Build a list, tuple, or set from the given items.
+    Builds a list, tuple, or set from the given items. ALWAYS call this tool if a future
+    tool requires one of these container types as input that was not already built by a previous tool call.
+    Each item from items becomes one element of the container, in the order given.
 
-    "kind" selects the container type -- exactly "list", "tuple", or "set"
+    "sequence_type" selects the container type -- exactly "list", "tuple", or "set"
     (case-sensitive) -- and must always be given as its own keyword
     argument. Each remaining value becomes one element of the container,
     in the order given, and must always be given positionally, never as a
     keyword argument.
 
-    Raises ValueError if "kind" is not one of the three allowed values.
+    Raises ValueError if "sequence_type" is not one of the three allowed values.
     """
-    # kind is deliberately keyword-only (*items precedes it) -- live
+    # sequence_type is deliberately keyword-only (*items precedes it) -- live
     # cross-provider smoke testing (OpenAI and Anthropic, independently, in
-    # different concrete ways) confirmed a (kind, *items) ordering is a real
-    # footgun, not just a theoretical one: naming kind by its own parameter
+    # different concrete ways) confirmed a (sequence_type, *items) ordering is a real
+    # footgun, not just a theoretical one: naming sequence_type by its own parameter
     # name while leaving items positional collides under Python's own
-    # calling convention (the first positional value binds to kind, by
+    # calling convention (the first positional value binds to sequence_type, by
     # left-to-right declared position, before the explicit keyword is ever
-    # applied) -- TypeError: got multiple values for argument 'kind'. Making
-    # kind keyword-only removes the ambiguity structurally: items can only
-    # ever be positional, kind can only ever be a keyword.
-    if kind == "list":
+    # applied) -- TypeError: got multiple values for argument 'sequence_type'. Making
+    # sequence_type keyword-only removes the ambiguity structurally: items can only
+    # ever be positional, sequence_type can only ever be a keyword.
+    if sequence_type == "list":
         return list(items)
-    elif kind == "tuple":
+    elif sequence_type == "tuple":
         return tuple(items)
-    elif kind == "set":
+    elif sequence_type == "set":
         return set(items)
     else:
         raise ValueError(
-            f"make_sequence: kind must be 'list', 'tuple', or 'set'; got {kind!r}."
+            f"make_sequence: sequence_type must be 'list', 'tuple', or 'set'; got {sequence_type!r}."
         )
 
 
 def make_dict(**pairs: Any) -> dict:
     """
-    Build a dict from the given keyword arguments.
-
-    Each keyword argument becomes one dict entry -- the keyword is the
-    key, its value is that key's value -- in the order given.
+    Builds a dict from the given keyword arguments. ALWAYS call this tool if a future
+    tool or return value requires a dict as input that was not already built by a 
+    previous tool call. Each pair in pairs contains the key and value for one entry
+    in the dict. The keyword is the key, and its value is that key's value. The order
+    of the entries in the dict is the order the keyword arguments were given in the call.
     """
     # Split into its own tool along calling-convention lines (**kwargs, not
     # *args) rather than folding into one make_collection(kind, *items,

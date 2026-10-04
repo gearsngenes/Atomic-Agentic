@@ -7,10 +7,12 @@ from typing import Any, Optional
 
 
 from ..constants.agents import (
+    ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
+    PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     TRAILING_CODE_FENCE_PATTERN,
@@ -32,6 +34,7 @@ __all__ = [
     "stringify_result",
     "strip_code_fence",
     "is_dispatched",
+    "tool_identity",
     "compile_batches",
     "resolve_statement_args",
 ]
@@ -380,6 +383,31 @@ def is_dispatched(call: ToolStatement) -> bool:
     exactly.
     """
     return call.tool not in (RETURN_ALIAS, RHS_ASSIGN_ALIAS)
+
+
+def tool_identity(call: ToolStatement) -> str:
+    """
+    Resolve ``call``'s real, human-meaningful tool identity -- correctly
+    unsplicing ``ScriptActAgent``'s two sentinel dispatch forms, which
+    otherwise hide the real identity behind a fixed sentinel string in
+    ``call.tool``.
+
+    A ``PY_BUILTIN_ALIAS`` call's real builtin name lives in ``call.args[0]``
+    (spliced in as a plain ``str`` by ``rewrite_builtin_calls``, not an ast
+    node). An ``ATTR_CALL_ALIAS`` call's real method name lives in
+    ``call.args[1]`` (also a plain ``str``, from ``_build_call_slot``'s own
+    ``args=(obj_expr, method_name, *positional)`` construction). Any other
+    call (a real registered tool's alias/full_name, or ``RETURN_ALIAS``)
+    returns ``call.tool`` directly -- callers are expected to have already
+    filtered to ``is_dispatched(call)`` before calling this, so
+    ``RETURN_ALIAS``/``RHS_ASSIGN_ALIAS`` never actually reach this function
+    in practice, but it is not itself responsible for that filtering.
+    """
+    if call.tool == PY_BUILTIN_ALIAS:
+        return call.args[0]
+    if call.tool == ATTR_CALL_ALIAS:
+        return call.args[1]
+    return call.tool
 
 
 def compile_batches(

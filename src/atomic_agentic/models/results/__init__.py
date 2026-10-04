@@ -5,10 +5,11 @@ from .commands import CommandResult
 from .structured import StructuredResult
 from .agents import (
     AgentResult,
-    JsonToolAgentResult,
+    ToolAgentResult,
     ScriptActAgentResult,
     ThinkingAgentResult,
     ToolUsageRecord,
+    ToolUsageReport,
 )
 from .llm import (
     AnthropicTokenUsage,
@@ -55,8 +56,9 @@ __all__ = [
     "LlamaCppModelData",
     "LLMResult",
     "ToolUsageRecord",
+    "ToolUsageReport",
     "AgentResult",
-    "JsonToolAgentResult",
+    "ToolAgentResult",
     "ScriptActAgentResult",
     "ThinkingAgentResult",
     "WorkflowResult",

@@ -688,7 +688,7 @@ class Agent(AtomicInvokable, ABC):
         ``BasicAgent`` uses this base implementation as-is; ``PlanActAgent``/
         ``ReActAgent``/``ScriptActAgent`` each override it directly (not via
         a shared ``ToolAgent`` implementation) to return their own richer
-        ``JsonToolAgentRecord``-family (or, for ``ScriptActAgent``,
+        ``ToolAgentRecord``-family (or, for ``ScriptActAgent``,
         ``ScriptActAgentRecord``) subclass. ``final_result`` is
         deliberately left at its dataclass default (``None``) — it is not
         knowable until

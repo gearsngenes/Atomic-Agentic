@@ -9,7 +9,7 @@ from .records import AgentRecord, LLMRecord
 
 __all__ = [
     "AgentTask",
-    "JsonToolAgentTask",
+    "ToolAgentTask",
     "ScriptActAgentTask",
     "PlanActTask",
     "ReActTask",
@@ -93,45 +93,87 @@ class AgentTask:
 
 
 @dataclass(slots=True)
-class JsonToolAgentTask(AgentTask):
+class ToolAgentTask(AgentTask):
     """
-    JsonToolAgent-flavored task -- narrowed to the one field genuinely
-    shared across every JsonToolAgent family regardless of execution shape
-    (batch-cursor vs. step-cursor). Everything else this class used to
-    carry (``running_blackboard``/``executed_steps``/``prepared_steps``/
-    ``valid_cache_indices``/``failed_cache_indices``/``tool_calls_used``)
-    was blackboard/placeholder-grammar-era and is removed outright, not
-    adapted -- see the `json-tool-agent-rename` design record's
-    lifecycle-slimming addendum for the base-class side of this same cut.
+    Base task shape shared by every concrete ``ToolAgent`` family
+    (``ScriptActAgent``/``PlanActAgent``/``ReActAgent``), renamed from this
+    class's prior name -- that class tier was removed from the agent
+    hierarchy in an earlier pass (``ScriptActAgent`` is a direct
+    ``ToolAgent`` sibling now, not a separate family), so the model name
+    never caught up until this pass. Promotes every field genuinely shared
+    by all three concrete agents today, closing the gap where
+    ``ScriptActAgentTask`` used to independently redeclare these same six
+    fields as a bare ``AgentTask`` sibling instead of inheriting them.
 
     Fields
     ------
-    llm_records : list[LLMRecord]
-        Inherited from ``AgentTask``. Seeded at construction time —
-        non-empty for subclasses that generate up front (e.g. PlanAct's
-        one-shot plan), empty for subclasses that generate lazily during the
-        loop (e.g. ReAct's per-step planning) — and appended to as further
-        generations occur.
+    completed : list[ToolStatement]
+        Every call that executed successfully so far this run, in commit
+        order. Becomes the owning record's ``statements`` tuple verbatim at
+        commit time.
+
+    failed_statements : list[ToolStatement]
+        Every call whose dispatch (or, for ``ScriptActAgent``, resolution)
+        actually failed this run, in the order observed.
+
+    cache : dict[str, Any]
+        identifier -> resolved value for every call in ``completed``, plus
+        ``task_result_i`` entries seeded once at ``_initialize_task``.
+
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated once by each concrete
+        agent's own ``_initialize_task`` and never touched again.
 
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
         call this run -- irreducible; a rejected/regenerated draft leaves
         no artifact anywhere else to derive this from (contrast
-        ``tool_calls_used``, declared per-subclass now since it's fully
-        derivable from whatever call-history fields that subclass's own
-        task shape carries). Renamed from the prior ``retries_used`` since
-        this family's generation model is ``output_structure`` +
-        regen-retry loop, not the old free-text-JSON retry loop.
+        ``tool_calls_used``, fully derivable from ``completed``/
+        ``failed_statements``). Renamed from the prior ``retries_used``
+        since this family's generation model is ``output_structure`` (or,
+        for ``ScriptActAgent``, free-form source) plus a regen-retry loop,
+        not the old free-text-JSON retry loop.
     """
+    completed: list[ToolStatement] = field(default_factory=list)
+    failed_statements: list[ToolStatement] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
+
+    @property
+    def tool_calls_used(self) -> int:
+        """
+        Derived, not stored -- ``completed``/``failed_statements`` are the
+        single source of truth for every concrete subclass. Counts every
+        dispatched (non-``RETURN_ALIAS``/``RHS_ASSIGN_ALIAS``) call in
+        either list, whether it ultimately succeeded or raised.
+
+        This is the one deliberate behavior change in this pass: previously
+        ``ScriptActAgentTask`` manually incremented a counter only in
+        ``_apply_batch_results`` (a real dispatch attempt), excluding a
+        resolution failure caught earlier in ``prepare()`` from the budget
+        count. This shared formula counts it instead -- ``is_dispatched`` is
+        purely a function of ``call.tool``, not of whether dispatch was ever
+        actually attempted -- harmonizing onto ``PlanActTask``'s/
+        ``ReActTask``'s already-existing rule: a call the plan committed to
+        spends budget whether or not the tool itself ever ran.
+        """
+        from ...utils.agents import is_dispatched
+        return (
+            sum(1 for c in self.completed if is_dispatched(c))
+            + sum(1 for c in self.failed_statements if is_dispatched(c))
+        )
 
 
 @dataclass(slots=True)
-class ScriptActAgentTask(AgentTask):
+class ScriptActAgentTask(ToolAgentTask):
     """
-    ScriptActAgent-flavored task -- a sibling to JsonToolAgentTask, not a
-    subclass (ScriptActAgent is a new agent family, not a JsonToolAgent
-    subclass, per this branch's established convention).
+    ScriptActAgent-flavored task -- now a real ``ToolAgentTask`` subclass
+    (was a bare ``AgentTask`` sibling independently redeclaring the same six
+    fields ``ToolAgentTask`` now owns). ``completed``/``failed_statements``/
+    ``cache``/``constant_values``/``regenerations_used``/``tool_calls_used``
+    are all inherited; only genuinely ``ScriptActAgent``-specific fields
+    remain declared here.
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
     zero constructor-time validation (an in-flight, internal-only object,
@@ -139,13 +181,6 @@ class ScriptActAgentTask(AgentTask):
 
     Fields
     ------
-    completed : list[ToolStatement]
-        Every slot that executed successfully so far this run, in commit
-        order. Purely historical -- nothing here is ever mutated once a
-        slot lands in this list. Becomes ScriptActAgentRecord.statements
-        verbatim (normalized to a tuple) at commit time. A slot whose
-        dispatch raised is never appended here -- see failed_statements.
-
     pending : list[list[ToolStatement]]
         Every not-yet-executed dependency batch compiled from the current
         generation -- the whole one-shot draft (or, after a granted repair,
@@ -181,19 +216,6 @@ class ScriptActAgentTask(AgentTask):
         ``self._replanning_limit`` at those same two sites before granting
         another.
 
-    tool_calls_used : int
-        Cumulative count of dispatched (non-``rhs_assign``/``return``)
-        calls actually dispatched so far this invoke, across every
-        generation round -- registered-tool and approved-builtin calls
-        counted identically (no per-category exemption), never decremented.
-        Incremented only in ``_apply_batch_results`` (a real dispatch
-        happened, whether it succeeded or failed); never in ``prepare()``
-        (a resolution failure means nothing was ever dispatched). Read by
-        ``_process_generation_output`` to compute the remaining budget
-        passed into ``validate_references``, and by
-        ``_render_task_messages`` to show the model its own remaining
-        ``tool_calls_limit`` on a repair round.
-
     repair_batch_start : int
         Index into ``failed_statements`` marking where the batch that most
         recently triggered (or attempted to trigger) a repair round began.
@@ -209,34 +231,6 @@ class ScriptActAgentTask(AgentTask):
         derives everything from this slice plus each slot's own
         ``.exception``.
 
-    cache : dict[str, Any]
-        identifier -> resolved value for every slot in ``completed``, kept
-        in sync as slots complete. Shaped to be passed directly as
-        utils/agents.py's ``resolve_statement_args(statement, resolved)``'s
-        ``resolved`` argument -- an O(1) lookup instead of scanning
-        ``completed``.
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated exactly once by
-        ``ScriptActAgent._initialize_task`` (deep-copied per constant except
-        for known atomic-immutable types) and never touched again after
-        that. Every batch's resolution namespace reads this instead of
-        re-deriving values from the agent's own ``self._constants`` each
-        time, so a mutating attribute/method call in one round is visible
-        to a later round of the *same* invocation (same copy, shared for
-        this task's lifetime) but never reaches a different invocation (a
-        fresh task gets a fresh copy).
-
-    regenerations_used : int
-        Cumulative regeneration attempts consumed across every generation
-        call this run (initial plan, planner repair calls) -- structural/
-        syntax/validation failures only. Unlike tool-call budget
-        accounting, not derivable from ``completed`` (regenerations are
-        generation attempts, not slots), so this stays an explicit counter.
-        Checked against ``self._regeneration_limit`` (always a plain
-        non-negative ``int``, never ``None``) before permitting another
-        attempt within one round.
-
     resolved_args : list[dict[str, Any]]
         Positionally matched to ``pending[0]``'s slots -- the resolved
         kwargs ``prepare()`` computed for the batch ``act()`` is about to
@@ -250,52 +244,40 @@ class ScriptActAgentTask(AgentTask):
         ``compile_batches`` as ``start_batch_index`` each time it's called,
         then advanced by the number of batches that call produced, so
         ``ToolStatement.batch_index`` values stay globally unique across a
-        whole invoke.
-
-    failed_statements : list[ToolStatement]
-        Every slot that failed, in the order the failure was observed,
-        across every round this invoke -- populated by BOTH
+        whole invoke. Note: ``failed_statements`` -- populated by BOTH
         ``prepare()`` (a resolution/binding failure, ``slot.exception`` set
         to a synthesized ``ToolAgentError``, mirroring ``PlanActTask``'s
-        own resolution-failure pattern) and ``_apply_batch_results``
-        (a real dispatch failure, ``slot.exception`` set to the actual
-        raised value) -- unlike the old shape, where only
-        ``_apply_batch_results`` ever appended here. Never cleared or
-        mutated once appended; ``repair_batch_start`` marks where each
-        triggering batch's own slice begins. Becomes
-        ScriptActAgentRecord.failed_statements verbatim (normalized to a
-        tuple) at commit time.
+        own resolution-failure pattern) and ``_apply_batch_results`` (a
+        real dispatch failure, ``slot.exception`` set to the actual raised
+        value) -- is now inherited from ``ToolAgentTask``; see that class's
+        own docstring. ``repair_batch_start`` marks where each triggering
+        batch's own slice into it begins.
     """
-    completed: list[ToolStatement] = field(default_factory=list)
     pending: list[list[ToolStatement]] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
-    regenerations_used: int = 0
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
     needs_repair: bool = False
     repair_rounds_used: int = 0
-    tool_calls_used: int = 0
     repair_batch_start: int = 0
     batch_counter: int = 0
-    failed_statements: list[ToolStatement] = field(default_factory=list)
+    # REMOVED: completed, failed_statements, cache, constant_values,
+    # regenerations_used, tool_calls_used -- all now inherited from
+    # ToolAgentTask.
 
 
 @dataclass(slots=True)
-class PlanActTask(JsonToolAgentTask):
+class PlanActTask(ToolAgentTask):
     """
     PlanActAgent-flavored task -- ``ToolStatement``-based batch-execution
-    fields (``completed``/``pending``/``cache``/``constant_values``/
-    ``resolved_args``/``failed_statements``), with no continuation-related
-    fields at all: ``think()`` runs exactly once, ever, per invoke, so there
-    is nothing analogous to a voluntary multi-round continuation flag,
-    round counter, or continuation note to carry.
+    fields, with no continuation-related fields at all: ``think()`` runs
+    exactly once, ever, per invoke, so there is nothing analogous to a
+    voluntary multi-round continuation flag, round counter, or continuation
+    note to carry. ``completed``/``failed_statements``/``cache``/
+    ``constant_values``/``tool_calls_used`` are all inherited from
+    ``ToolAgentTask`` -- only ``pending``/``resolved_args`` are genuinely
+    ``PlanActAgent``-specific.
 
     Fields
     ------
-    completed : list[ToolStatement]
-        Every call that executed successfully this run, in commit order
-        (the ``RETURN_ALIAS`` call included once it executes).
-
     pending : list[list[ToolStatement]]
         Dependency batches compiled once (via ``compile_batches``) from the
         single generated plan. ``pending[0]`` is the next batch ``act()``
@@ -303,63 +285,36 @@ class PlanActTask(JsonToolAgentTask):
         popping them (see ``find_cascade_failures``) -- only ``act()``
         pops a batch once it's been executed.
 
-    cache : dict[str, Any]
-        identifier -> resolved value for every call in ``completed``, plus
-        ``task_result_i`` entries seeded once at ``_initialize_task``.
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated once by
-        ``PlanActAgent._initialize_task``.
-
     resolved_args : list[dict[str, Any]]
         Positionally matched to ``pending[0]``'s surviving calls -- the
         resolved kwargs ``prepare()`` computed for the batch ``act()`` is
         about to run.
 
-    failed_statements : list[ToolStatement]
-        Every call whose dispatch actually raised this run -- not
-        cascade-skipped calls, which are never attempted and never appear
-        here (see ``find_cascade_failures``'s own contract). Becomes
-        ``JsonToolAgentRecord.failed_statements`` verbatim at commit time.
-
     No ``batch_counter`` field -- a single ``compile_batches`` call per
     invoke needs no cross-round ``ToolStatement.batch_index`` uniqueness
-    tracking; a local variable in ``think()`` suffices.
+    tracking; a local variable in ``think()`` suffices. The inherited
+    ``tool_calls_used`` formula (``ToolAgentTask``) already matches this
+    class's own prior override for every real case here: a cascade-skipped
+    call is never dispatched, so it never enters ``completed`` or
+    ``failed_statements`` either way.
     """
-    completed: list[ToolStatement] = field(default_factory=list)
     pending: list[list[ToolStatement]] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
-    failed_statements: list[ToolStatement] = field(default_factory=list)
-
-    @property
-    def tool_calls_used(self) -> int:
-        """
-        Derived, not stored: every dispatched (non-``RETURN_ALIAS``) call in
-        ``completed``, plus every call that was actually attempted and
-        raised (``failed_statements``) -- ``completed``/``failed_statements``
-        are already the single source of truth, so a separate incrementing
-        counter would just be a second, driftable copy of the same fact.
-        Cascade-skipped calls (never dispatched at all) are correctly
-        excluded, since they never enter either list. As a side benefit,
-        this stays correct for free if a future plan-repair mechanism ever
-        adds a second generation round to this family.
-        """
-        from ...utils.agents import is_dispatched
-        return (
-            sum(1 for c in self.completed if is_dispatched(c))
-            + len(self.failed_statements)
-        )
+    # REMOVED: completed, failed_statements, cache, constant_values (now
+    # inherited), and the tool_calls_used @property override (now
+    # inherited -- same formula).
 
 
 @dataclass(slots=True)
-class ReActTask(JsonToolAgentTask):
+class ReActTask(ToolAgentTask):
     """
     ReActAgent-flavored task: one registered-tool call generated, resolved,
     and dispatched per round, via provider-native structured output
     (``REACT_OUTPUT_SCHEMA``) -- the per-step sibling to ``PlanActTask``'s
-    one-shot multi-call plan.
+    one-shot multi-call plan. ``completed``/``failed_statements``/``cache``/
+    ``constant_values``/``tool_calls_used`` are all inherited from
+    ``ToolAgentTask`` -- only ``generated_step``/``resolved_args``/
+    ``last_call_failed`` are genuinely ``ReActAgent``-specific.
 
     No fixed-size preallocated board and no observability-decay window
     (both dropped from the pre-rewrite shape, along with ``next_step_index``/
@@ -372,34 +327,20 @@ class ReActTask(JsonToolAgentTask):
     ``*Task`` in this family: an in-flight, internal-only object, not a real
     construction-time boundary.
 
+    A resolution failure (a ``$name`` reference that doesn't resolve, or a
+    resolved value's type mismatching the target tool's parameter contract)
+    never reaches ``failed_statements`` at all under this family's design --
+    both are caught and fed back for regeneration inside ``think()``'s own
+    retry loop, before a call is ever accepted as this round's decision.
+    Only a real dispatch failure (the tool itself raised once actually
+    invoked) lands there -- which is also why the inherited
+    ``tool_calls_used`` formula (gating both ``completed`` and
+    ``failed_statements`` through ``is_dispatched``) already matches this
+    class's own prior override for every real case here: every entry in
+    either list is guaranteed to be a real dispatch attempt regardless.
+
     Fields
     ------
-    completed : list[ToolStatement]
-        Every call actually dispatched and successful so far this run, in
-        commit order. Becomes ``JsonToolAgentRecord.statements`` verbatim
-        (normalized to a tuple) at commit time -- same convention as
-        ``PlanActTask.completed``.
-
-    failed_statements : list[ToolStatement]
-        Every call actually dispatched that raised, in the order observed.
-        A resolution failure (a ``$name`` reference that doesn't resolve, or
-        a resolved value's type mismatching the target tool's parameter
-        contract) never reaches this list at all under this family's
-        design -- both are caught and fed back for regeneration inside
-        ``think()``'s own retry loop, before a call is ever accepted as
-        this round's decision. Only a real dispatch failure (the tool
-        itself raised once actually invoked) lands here.
-
-    cache : dict[str, Any]
-        identifier -> resolved value for every call in ``completed``, plus
-        ``task_result_i`` entries seeded once at ``_initialize_task`` from
-        prior turns. Same role as ``PlanActTask.cache``.
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated once by
-        ``ReActAgent._initialize_task`` and never touched again. Same role
-        as ``PlanActTask.constant_values``.
-
     generated_step : ToolStatement | None
         The one call ``think()`` validated and resolved this round -- set
         only once both ``utils.sigils.translate_calls`` and
@@ -433,36 +374,13 @@ class ReActTask(JsonToolAgentTask):
         is always ``task.failed_statements[-1]`` when this is ``True`` --
         no duplicate reference stored.
     """
-    completed: list[ToolStatement] = field(default_factory=list)
-    failed_statements: list[ToolStatement] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
     generated_step: Optional[ToolStatement] = None
     resolved_args: Optional[dict[str, Any]] = None
     last_call_failed: bool = False
-
-    @property
-    def tool_calls_used(self) -> int:
-        """
-        Derived, not stored -- ``completed``/``failed_statements`` are
-        already the single source of truth. Deliberately gates **both**
-        halves through ``is_dispatched``, a real, intentional
-        divergence from ``PlanActTask.tool_calls_used``'s bare
-        ``len(self.failed_statements)``: a call to ``return_tool`` is a
-        genuine dispatch in this family (never a synthesized,
-        non-dispatched ``RETURN_ALIAS`` sentinel the way ``PlanActTask``'s
-        return call is), so a *failed* return call should be exempt from
-        the budget count the same way a successful one already is, for
-        symmetry. Since a resolution failure never reaches
-        ``failed_statements`` at all under this family's design (see that
-        field's own docstring above), every entry here is guaranteed to be
-        a real dispatch attempt regardless.
-        """
-        from ...utils.agents import is_dispatched
-        return (
-            sum(1 for c in self.completed if is_dispatched(c))
-            + sum(1 for c in self.failed_statements if is_dispatched(c))
-        )
+    # REMOVED: completed, failed_statements, cache, constant_values (now
+    # inherited), and the tool_calls_used @property override (now
+    # inherited -- same formula, this class's own version was already
+    # byte-for-byte the formula being promoted).
 
 
 @dataclass(slots=True)
@@ -501,7 +419,7 @@ class ThinkingTask(AgentTask):
         only because Python dataclass field ordering requires every field
         following ``AgentTask``'s own defaulted fields to carry one too —
         the real value is always passed explicitly at construction
-        (mirrors ``JsonToolAgentTask.tool_calls_used: int = 0``'s identical
+        (mirrors ``ToolAgentTask.regenerations_used: int = 0``'s identical
         precedent). ``think()``/``async_think()`` read this field directly
         instead of any agent-level attribute — there is no construction-time
         equivalent left; the round budget is purely per-invocation now.

@@ -50,9 +50,9 @@ from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.tasks import ReActTask
-from ..models.agents.records import AgentRecord, JsonToolAgentRecord, LLMRecord
-from ..models.results.agents import JsonToolAgentResult, ToolUsageRecord
-from ..utils.agents import is_dispatched, resolve_statement_args
+from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
+from ..models.results.agents import ToolAgentResult
+from ..utils.agents import resolve_statement_args
 from ..utils.sigils import (
     build_react_schema,
     parse_react_call,
@@ -596,14 +596,14 @@ class ReActAgent(ToolAgent):
         self,
         task: ReActTask,
         turns: list[AgentRecord],
-    ) -> JsonToolAgentRecord:
+    ) -> ToolAgentRecord:
         """
-        Assemble a completed ``JsonToolAgentRecord`` from a finished
+        Assemble a completed ``ToolAgentRecord`` from a finished
         ``ReActTask``. Mirrors ``PlanActAgent._build_record_from_task``
         exactly -- no agent-level global blackboard to persist into.
         """
         prev = turns[-1] if turns else None
-        return JsonToolAgentRecord(
+        return ToolAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
             inputs=task.inputs,
@@ -616,45 +616,30 @@ class ReActAgent(ToolAgent):
 
     def build_result_from_record(
         self,
-        record: JsonToolAgentRecord,
+        record: ToolAgentRecord,
         *,
         result: Any,
         started_at: datetime,
         ended_at: datetime,
-    ) -> JsonToolAgentResult:
+    ) -> ToolAgentResult:
         """
-        Construct this agent's ``JsonToolAgentResult`` envelope directly
-        from a completed ``JsonToolAgentRecord``. Mirrors
+        Construct this agent's ``ToolAgentResult`` envelope directly
+        from a completed ``ToolAgentRecord``. Mirrors
         ``PlanActAgent.build_result_from_record`` exactly.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
 
-        # is_dispatched excludes a real, successful `return` call here
-        # too -- correct per ToolUsageRecord.call_count's own "non-return
-        # executions" contract (return isn't meant to be counted as tool
-        # usage for any family), but note this family's return call is a
-        # genuine dispatch, excluded only because RETURN_TOOL_NAME and
-        # RETURN_ALIAS are the identical string "return" -- the same
-        # collision ReActTask.tool_calls_used's own docstring already
-        # documents, not a second, independent mechanism.
-        counts: dict[str, int] = {}
-        for call in record.statements:
-            if is_dispatched(call):
-                counts[call.tool] = counts.get(call.tool, 0) + 1
-        tool_usage = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in counts.items()
-        )
+        usage_report = record.usage_report()
 
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
-            result_cls=JsonToolAgentResult,
+            result_cls=ToolAgentResult,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            tool_usage=tool_usage,
+            usage_report=usage_report,
             failed_call_count=len(record.failed_statements),
             regenerations_used=record.regenerations_used,
         )

@@ -281,9 +281,12 @@ class ScriptActAgent(ToolAgent):
         from a completed ``ScriptActAgentRecord`` -- surfaces
         ``regenerations_used``/``repair_rounds_used`` past the ephemeral
         task, mirroring ``PlanActAgent.build_result_from_record``'s own
-        pattern for ``regenerations_used``. ``ScriptActAgent`` had no
-        override of this hook at all before now (a plain ``AgentResult``
-        was returned, with neither counter visible past the task).
+        pattern for ``regenerations_used``. Also populates ``usage_report``
+        (via the new shared ``record.usage_report()``) and
+        ``failed_call_count`` (via ``len(record.failed_statements)``) --
+        ``ScriptActAgentResult`` now inherits both as required fields from
+        ``ToolAgentResult``, closing the gap where ``ScriptActAgent`` had
+        neither visible past the task before this pass.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
@@ -295,6 +298,8 @@ class ScriptActAgent(ToolAgent):
             result_cls=ScriptActAgentResult,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
+            usage_report=record.usage_report(),
+            failed_call_count=len(record.failed_statements),
             regenerations_used=record.regenerations_used,
             repair_rounds_used=record.repair_rounds_used,
         )
@@ -824,13 +829,12 @@ class ScriptActAgent(ToolAgent):
 
         Every dispatched call in ``batch`` (registered tool or approved
         builtin, via ``is_dispatched``) was actually dispatched via
-        ``asyncio.gather`` regardless of whether any of them failed, so all
-        of them count against ``tool_calls_used`` unconditionally, before
-        checking for failures.
+        ``asyncio.gather`` regardless of whether any of them failed --
+        ``task.tool_calls_used`` (``ToolAgentTask``'s shared derived
+        property) reflects this automatically off ``completed``/
+        ``failed_statements`` below, with no manual counter to maintain here
+        anymore.
         """
-        real_call_count = sum(1 for slot in batch if is_dispatched(slot))
-        task.tool_calls_used += real_call_count
-
         # A raised exception only ever appears here for a slot that was
         # actually dispatched (asyncio.gather(..., return_exceptions=True)
         # is the only source of a bare BaseException in raw_results) -- an

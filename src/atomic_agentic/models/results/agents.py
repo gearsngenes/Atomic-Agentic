@@ -9,8 +9,9 @@ from .llm import LLMModelData, TokenUsage
 
 __all__ = [
     "ToolUsageRecord",
+    "ToolUsageReport",
     "AgentResult",
-    "JsonToolAgentResult",
+    "ToolAgentResult",
     "ScriptActAgentResult",
     "ThinkingAgentResult",
 ]
@@ -19,7 +20,7 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class ToolUsageRecord:
     """
-    Aggregate usage record for one tool across one JsonToolAgent invocation.
+    Aggregate usage record for one tool across one ToolAgent invocation.
 
     Fields
     ------
@@ -27,7 +28,7 @@ class ToolUsageRecord:
         Full registered tool name (e.g. ``"Tool.math.add"``).
     call_count:
         Number of non-return executions of this tool during the invocation.
-        Always >= 1 for any entry present in a JsonToolAgentResult.
+        Always >= 1 for any entry present in a ToolAgentResult.
     """
 
     tool_name: str
@@ -50,6 +51,74 @@ class ToolUsageRecord:
         return {
             "tool_name": self.tool_name,
             "call_count": self.call_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUsageReport:
+    """
+    Per-invocation tool-usage report, shared identically by every concrete
+    ToolAgent (ScriptActAgent/PlanActAgent/ReActAgent). Replaces the prior
+    flat ``tuple[ToolUsageRecord, ...]`` shape -- ``by_tool`` is unchanged in
+    content/ordering, now alongside two summary counts.
+
+    Fields
+    ------
+    by_tool:
+        One entry per distinct real tool identity actually dispatched,
+        ordered by first-call order, ``call_count >= 1`` each. Identical
+        content/derivation to the prior ``ToolAgentRecord.tool_usage()``'s
+        return value.
+
+    total_dispatched:
+        Sum of every ``by_tool`` entry's ``call_count`` -- every dispatched
+        call this run, successful or failed, across every tool identity.
+
+    total_failed:
+        Count of dispatched calls that actually raised this run (the subset
+        of ``total_dispatched`` that failed). ``total_dispatched -
+        total_failed`` is the successful-dispatch count.
+    """
+
+    by_tool: tuple[ToolUsageRecord, ...]
+    total_dispatched: int
+    total_failed: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.by_tool, Sequence) or isinstance(self.by_tool, (str, bytes, bytearray)):
+            raise TypeError(
+                "ToolUsageReport.by_tool must be a sequence of ToolUsageRecord "
+                f"instances, got {type(self.by_tool).__name__}."
+            )
+
+        normalized = tuple(self.by_tool)
+
+        for index, record in enumerate(normalized):
+            if not isinstance(record, ToolUsageRecord):
+                raise TypeError(
+                    "ToolUsageReport.by_tool must contain only ToolUsageRecord "
+                    f"instances; item {index} is {type(record).__name__}."
+                )
+
+        object.__setattr__(self, "by_tool", normalized)
+
+        if isinstance(self.total_dispatched, bool) or not isinstance(self.total_dispatched, int) or self.total_dispatched < 0:
+            raise ValueError(
+                "ToolUsageReport.total_dispatched must be a non-negative int, "
+                f"got {self.total_dispatched!r}."
+            )
+        if isinstance(self.total_failed, bool) or not isinstance(self.total_failed, int) or self.total_failed < 0:
+            raise ValueError(
+                "ToolUsageReport.total_failed must be a non-negative int, "
+                f"got {self.total_failed!r}."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        return {
+            "by_tool": [r.to_dict() for r in self.by_tool],
+            "total_dispatched": self.total_dispatched,
+            "total_failed": self.total_failed,
         }
 
 
@@ -118,21 +187,24 @@ class AgentResult(AtomicResult):
 
 
 @dataclass(frozen=True, slots=True)
-class JsonToolAgentResult(AgentResult):
+class ToolAgentResult(AgentResult):
     """
-    Successful JsonToolAgent invocation result.
+    Successful ToolAgent invocation result -- renamed from this class's
+    prior name (that class tier was removed from the agent hierarchy in an
+    earlier pass; the model name never caught up). Shared
+    directly by ``PlanActAgent``/``ReActAgent``, and now the real base class
+    of ``ScriptActAgentResult`` too.
 
     Extends ``AgentResult`` with per-tool call-count accounting and a
     lightweight failure summary when the agent ran with ``fail_fast=False``.
 
     Fields
     ------
-    tool_usage:
-        Ordered tuple of per-tool usage records, ordered by first-call order
-        within the invocation. May be empty if no non-return tools executed.
-        Re-derived (by the caller, e.g. ``PlanActAgent.build_result_from_record``)
-        from ``record.statements`` rather than a blackboard span -- same
-        field, new derivation source.
+    usage_report:
+        ``ToolUsageReport`` summarizing per-tool call counts plus
+        ``total_dispatched``/``total_failed`` for the invocation. Re-derived
+        (by the caller, e.g. ``PlanActAgent.build_result_from_record``) from
+        ``record.usage_report()`` rather than a blackboard span.
 
     failed_call_count:
         Count of calls whose dispatch actually raised this run. Replaces
@@ -148,67 +220,43 @@ class JsonToolAgentResult(AgentResult):
         Threaded from ``record.regenerations_used`` verbatim.
     """
 
-    tool_usage: tuple[ToolUsageRecord, ...]
+    usage_report: ToolUsageReport
     failed_call_count: int = 0
     regenerations_used: int = 0
 
     def __post_init__(self) -> None:
-        normalized_tool_usage = self._normalize_tool_usage(self.tool_usage)
-        object.__setattr__(self, "tool_usage", normalized_tool_usage)
-        AgentResult.__post_init__(self)
-
-    @staticmethod
-    def _normalize_tool_usage(value: Any) -> tuple[ToolUsageRecord, ...]:
-        """Validate and normalize the invocation's tool usage records."""
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        if not isinstance(self.usage_report, ToolUsageReport):
             raise TypeError(
-                "JsonToolAgentResult.tool_usage must be a sequence of ToolUsageRecord "
-                f"instances, got {type(value).__name__}."
+                "ToolAgentResult.usage_report must be a ToolUsageReport instance, "
+                f"got {type(self.usage_report).__name__}."
             )
-
-        normalized = tuple(value)
-
-        for index, record in enumerate(normalized):
-            if not isinstance(record, ToolUsageRecord):
-                raise TypeError(
-                    "JsonToolAgentResult.tool_usage must contain only ToolUsageRecord "
-                    f"instances; item {index} is {type(record).__name__}."
-                )
-
-        return normalized
+        AgentResult.__post_init__(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
-        data["tool_usage"] = [r.to_dict() for r in self.tool_usage]
+        data["usage_report"] = self.usage_report.to_dict()
         data["failed_call_count"] = self.failed_call_count
         data["regenerations_used"] = self.regenerations_used
         return data
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptActAgentResult(AgentResult):
+class ScriptActAgentResult(ToolAgentResult):
     """
-    Successful ScriptActAgent invocation result.
-
-    Extends ``AgentResult`` with the two generation-budget counters a
-    caller needs to tell "finished cleanly" apart from "finished only after
-    spending some of its retry/repair budget" -- neither was surfaced past
-    the ephemeral ``ScriptActAgentTask`` before this, unlike
-    ``JsonToolAgentResult.regenerations_used`` for ``PlanActAgent``/
-    ``ReActAgent``. No ``tool_usage``/``failed_call_count`` here --
-    ``ScriptActAgentRecord.tool_usage()``/``len(record.failed_statements)``
-    already answer those directly off the record; this class is scoped to
-    exactly the two counters requested, not a full ``JsonToolAgentResult``
-    parity pass.
+    Successful ScriptActAgent invocation result -- now a real
+    ``ToolAgentResult`` subclass (was an ``AgentResult`` subclass). The
+    gap this closes: ``usage_report``/``failed_call_count`` are now real,
+    inherited, required fields (``ScriptActAgent`` previously had neither at
+    all -- ``agents/scriptact.py``'s ``build_result_from_record`` now
+    populates both via ``record.usage_report()``/
+    ``len(record.failed_statements)``, mirroring ``PlanActAgent``'s/
+    ``ReActAgent``'s own long-standing pattern). ``regenerations_used`` is
+    also now inherited rather than redeclared as a sibling. Only
+    ``repair_rounds_used`` remains genuinely ``ScriptActAgent``-specific.
 
     Fields
     ------
-    regenerations_used:
-        Threaded from ``record.regenerations_used`` verbatim -- malformed/
-        invalid-generation retries consumed across this run's planning
-        generation(s), same meaning as ``JsonToolAgentResult``'s own field.
-
     repair_rounds_used:
         Threaded from ``record.repair_rounds_used`` verbatim -- framework-
         granted repair rounds actually consumed after a resolution or
@@ -216,13 +264,19 @@ class ScriptActAgentResult(AgentResult):
         ``0`` means the plan finished without ever needing one.
     """
 
-    regenerations_used: int = 0
     repair_rounds_used: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the explicit serialized dictionary representation."""
-        data = AgentResult.to_dict(self)
-        data["regenerations_used"] = self.regenerations_used
+        """Return the explicit serialized dictionary representation --
+        extends the inherited ``ToolAgentResult.to_dict()`` (already
+        includes ``usage_report``/``failed_call_count``/``regenerations_used``)
+        with just ``repair_rounds_used``."""
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (the same
+        # slotted-dataclass-subclass gotcha records.py's own __post_init__
+        # methods already document and work around).
+        data = super(ScriptActAgentResult, self).to_dict()
         data["repair_rounds_used"] = self.repair_rounds_used
         return data
 

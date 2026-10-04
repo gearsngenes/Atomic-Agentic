@@ -82,13 +82,15 @@ The same holds for "return" itself: "$final_draft", never bare "final_draft".
   fails silently, left as literal text, sigil included -- double-check
   the name.
 
-A list, tuple, set, or dict is never written directly as a "value" --
-build one with make_sequence/make_dict (always available among AVAILABLE
-TOOLS, whose own docstrings there give the exact calling convention), then
-reference it whole by its bound name wherever the whole container is
-needed. There is no tool to pull a single element back out of one -- only
-build a container when the whole thing, not one piece of it, is what a
-later step actually needs.
+A tool call -- including make_sequence/make_dict (always available) --
+can never appear as or be embedded inside another call's "value": every
+call is its own separate plan entry, its result referenced afterward by
+"$name". A call-shaped string follows the same "$name" rules above: it
+either fails as an unbound whole-match reference, or silently survives as
+literal text passed straight to the tool. This is also why a list, tuple,
+set, or dict is never written directly as a "value" -- building one is
+itself a call. There is no tool to pull one element back out -- only
+build a container when the whole thing, not one piece, is needed.
 
 # INTERPRETING THE TASK
 Before writing "plan", decide which of these applies to the task:
@@ -263,13 +265,15 @@ Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a
   fails silently, left as literal text, sigil included -- double-check
   the name.
 
-A list, tuple, set, or dict is never written directly as a "value" --
-build one with make_sequence/make_dict (always available among AVAILABLE
-TOOLS, whose own docstrings there give the exact calling convention), then
-reference it whole by its bound name wherever the whole container is
-needed. There is no tool to pull a single element back out of one -- only
-build a container when the whole thing, not one piece of it, is what a
-later call actually needs.
+A tool call -- including make_sequence/make_dict (always available) --
+can never appear as or be embedded inside another call's "value": every
+call is its own separate round, its result referenced afterward by
+"$name". A call-shaped string follows the same "$name" rules above: it
+either fails as an unbound whole-match reference, or silently survives as
+literal text passed straight to the tool. This is also why a list, tuple,
+set, or dict is never written directly as a "value" -- building one is
+itself a call. There is no tool to pull one element back out -- only
+build a container when the whole thing, not one piece, is needed.
 
 # CHOOSING YOUR NEXT CALL
 Decide this round's one call from three things, in this order: "# STEPS

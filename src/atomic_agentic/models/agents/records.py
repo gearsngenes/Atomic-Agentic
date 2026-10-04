@@ -5,28 +5,32 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
-from ..results.agents import AgentResult
+from ..results.agents import AgentResult, ToolUsageRecord, ToolUsageReport
 from ..results.llm import LLMResult
 from .blackboard_models import ToolStatement
 
-# is_dispatched/render_completed_as_python are imported locally inside
-# the two methods that use them (render_as_code/tool_usage below), not at
-# module level -- utils.agents/utils.script themselves import ToolStatement
-# from .blackboard_models (a sibling in this same models.agents package),
-# and models/agents/__init__.py imports this module before blackboard_models.
+# is_dispatched/tool_identity/render_completed_as_python are imported
+# locally inside the methods that use them (ToolAgentRecord.render_as_code/
+# usage_report, ScriptActAgentRecord.dispatch_breakdown below), not at module
+# level -- utils.agents/utils.script themselves import ToolStatement from
+# .blackboard_models (a sibling in this same models.agents package), and
+# models/agents/__init__.py imports this module before blackboard_models.
 # A module-level import here would make loading utils.agents/utils.script
 # first (before anything else touches models.agents) deadlock: their own
 # import of models.agents.blackboard_models triggers this package's
 # __init__.py, which re-enters this module, which would need utils.agents/
 # utils.script to already be fully initialized -- they aren't yet, since
 # we're still inside their own top-level import statement. Deferring to
-# call time breaks the cycle with no behavior change (both functions are
-# only ever invoked well after import time).
+# call time breaks the cycle with no behavior change (every such function is
+# only ever invoked well after import time). ToolUsageRecord (imported at
+# module level above) is a different, proven-safe case -- it comes from
+# ..results.agents, which never imports back into models.agents at all, so
+# no cycle exists for it.
 
 __all__ = [
     "LLMRecord",
     "AgentRecord",
-    "JsonToolAgentRecord",
+    "ToolAgentRecord",
     "ScriptActAgentRecord",
     "ScriptActAgentToolUsage",
     "ThinkingAgentRecord",
@@ -51,7 +55,7 @@ class LLMRecord:
         immediately before this LLM call — the delta that is new for this
         specific generation. The system message and rendered prior turns are
         excluded; they are already captured by the enclosing AgentRecord /
-        JsonToolAgentRecord.
+        ToolAgentRecord.
 
         For base Agent: a one-element tuple containing the current user
         prompt message. For PlanActAgent: the same — one new user message.
@@ -261,15 +265,17 @@ class AgentRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class JsonToolAgentRecord(AgentRecord):
+class ToolAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed JsonToolAgent invocation.
+    Canonical memory record for one completed ToolAgent invocation --
+    renamed from this class's prior name (that class tier was removed from
+    the agent hierarchy in an earlier pass; the model name never caught up).
 
     ``statements``/``failed_statements`` as ``ToolStatement`` tuples, no
-    blackboard span of any kind. Shared directly by ``JsonToolAgent``
-    subclasses; ``PlanActAgent`` constructs this class directly, no
-    ``PlanActRecord`` subclass needed (would add zero fields beyond what's
-    here).
+    blackboard span of any kind. Shared directly by ``PlanActAgent``/
+    ``ReActAgent`` (constructed directly, no further subclass needed -- would
+    add zero fields beyond what's here); ``ScriptActAgentRecord`` is now a
+    real subclass of this class too.
 
     Fields
     ------
@@ -295,17 +301,17 @@ class JsonToolAgentRecord(AgentRecord):
         # the class object to add __slots__, which invalidates the
         # zero-arg super()'s implicit __class__ closure cell (a documented
         # CPython gotcha for slotted-dataclass inheritance chains).
-        super(JsonToolAgentRecord, self).__post_init__()
+        super(ToolAgentRecord, self).__post_init__()
 
         if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
             raise TypeError(
-                "JsonToolAgentRecord.statements must be a list or tuple of "
+                "ToolAgentRecord.statements must be a list or tuple of "
                 f"ToolStatement instances; got {type(self.statements).__name__!r}."
             )
         for index, call in enumerate(self.statements):
             if not isinstance(call, ToolStatement):
                 raise TypeError(
-                    f"JsonToolAgentRecord.statements[{index}] must be a "
+                    f"ToolAgentRecord.statements[{index}] must be a "
                     f"ToolStatement instance; got {type(call).__name__!r}."
                 )
 
@@ -313,13 +319,13 @@ class JsonToolAgentRecord(AgentRecord):
             self.failed_statements, (list, tuple)
         ):
             raise TypeError(
-                "JsonToolAgentRecord.failed_statements must be a list or "
+                "ToolAgentRecord.failed_statements must be a list or "
                 f"tuple of ToolStatement instances; got {type(self.failed_statements).__name__!r}."
             )
         for index, call in enumerate(self.failed_statements):
             if not isinstance(call, ToolStatement):
                 raise TypeError(
-                    f"JsonToolAgentRecord.failed_statements[{index}] must be a "
+                    f"ToolAgentRecord.failed_statements[{index}] must be a "
                     f"ToolStatement instance; got {type(call).__name__!r}."
                 )
 
@@ -328,13 +334,66 @@ class JsonToolAgentRecord(AgentRecord):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
-        d = super(JsonToolAgentRecord, self).to_dict()
+        d = super(ToolAgentRecord, self).to_dict()
         d.update({
             "statements": [s.to_dict() for s in self.statements],
             "failed_statements": [s.to_dict() for s in self.failed_statements],
             "regenerations_used": self.regenerations_used,
         })
         return d
+
+    def render_as_code(self) -> str:
+        """
+        Reconstruct this run's statements as source-formatted text, grouped
+        by concurrent batch (``show_batches=True`` -- a standalone,
+        human-only view). Promoted here from ``ScriptActAgentRecord`` --
+        works correctly for any origin now that ``ToolStatement.to_code()``
+        is shared, no grammar-specific branching needed. Named generically
+        ("code", not "python") since the underlying grammar isn't guaranteed
+        to stay Python-syntax-specific forever.
+        """
+        from ...utils.script import render_completed_as_python
+
+        return render_completed_as_python(self.statements, show_batches=True)
+
+    def usage_report(self) -> ToolUsageReport:
+        """
+        Compute per-tool call-count accounting for this run -- one
+        ``ToolUsageRecord`` per distinct real tool identity actually
+        dispatched, ordered by first-call order, ``call_count >= 1`` each
+        (an identity with zero dispatched calls never produces an entry) --
+        plus ``total_dispatched``/``total_failed`` summary counts, bundled
+        into a single ``ToolUsageReport``.
+
+        Walks ``self.statements`` then ``self.failed_statements``, in that
+        order, counting only dispatched calls (``is_dispatched``) under
+        their real identity (``tool_identity`` -- correctly unsplices
+        ``ScriptActAgent``'s ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``
+        sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
+        statement, whose ``tool`` is already the real identity). Gives every
+        agent, including ``ScriptActAgent``, real per-tool-name usage
+        accounting for the first time.
+        """
+        from ...utils.agents import is_dispatched, tool_identity
+
+        counts: dict[str, int] = {}
+        for call in (*self.statements, *self.failed_statements):
+            if is_dispatched(call):
+                identity = tool_identity(call)
+                counts[identity] = counts.get(identity, 0) + 1
+
+        by_tool = tuple(
+            ToolUsageRecord(tool_name=name, call_count=count)
+            for name, count in counts.items()
+        )
+        total_dispatched = sum(r.call_count for r in by_tool)
+        total_failed = sum(1 for call in self.failed_statements if is_dispatched(call))
+
+        return ToolUsageReport(
+            by_tool=by_tool,
+            total_dispatched=total_dispatched,
+            total_failed=total_failed,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,56 +450,28 @@ class ScriptActAgentToolUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptActAgentRecord(AgentRecord):
+class ScriptActAgentRecord(ToolAgentRecord):
     """
-    Canonical memory record for one completed ScriptActAgent invocation -- a
-    sibling to JsonToolAgentRecord, not a subclass (ScriptActAgent is a new agent
-    family, not a JsonToolAgent subclass).
-
-    Unlike the Task family, Record types in this codebase validate at
-    construction (AgentRecord.__post_init__ already checks user_prompt/
-    llm_records/prev) -- a persisted/serialized/rendered record sits closer
-    to a real boundary than an in-flight task does. This class's own
-    __post_init__ follows that precedent for its own new fields.
+    Canonical memory record for one completed ScriptActAgent invocation --
+    now a real ``ToolAgentRecord`` subclass (was an ``AgentRecord`` sibling).
+    ``statements``/``failed_statements``/``regenerations_used``/
+    ``render_as_code()`` are all inherited; only ``repair_rounds_used`` and
+    the 5-category dispatch-mechanism breakdown (``dispatch_breakdown()``)
+    remain genuinely ``ScriptActAgent``-specific.
 
     No more agent-level global blackboard for this family -- each record
     owns its own slots outright. There is no blackboard_start/
-    blackboard_end span to index into, unlike JsonToolAgentRecord (v1).
+    blackboard_end span to index into, unlike the pre-``toolstatement-
+    unification`` blackboard-era record shape (v1).
 
     Fields
     ------
-    statements : tuple[ToolStatement, ...]
-        Every slot ScriptActAgentTask.completed accumulated this run, carried
-        over at commit time (normalized to a tuple here, mirroring
-        llm_records' existing list-or-tuple-in, tuple-stored normalization).
-        A bare reasoning string the model wrote is never a slot in its own
-        right (parse_generation treats it as an inert, unstored no-op,
-        legal anywhere in a generation) -- there is no separate annotation
-        record of it.
-
-    failed_statements : tuple[ToolStatement, ...]
-        Every slot whose dispatch raised this run, carried over from
-        ScriptActAgentTask.failed_statements at commit time (same
-        list-or-tuple-in, tuple-stored normalization as statements). Each
-        entry's ``.exception`` is the raised value. The permanent record of
-        what failed during this invocation -- unlike ``repair_batch_start``
-        (a marker into this same list, consulted fresh each repair round),
-        this list is never cleared.
-
-    regenerations_used : int
-        Total regeneration attempts consumed across this run's generation
-        call(s) -- carried over from ``task.regenerations_used`` verbatim
-        at commit time. Same meaning as ``JsonToolAgentRecord``'s own field.
-
     repair_rounds_used : int
         Total framework-granted repair rounds actually consumed this run --
         carried over from ``task.repair_rounds_used`` verbatim at commit
         time. ``0`` means the plan finished without ever needing one.
     """
 
-    statements: tuple[ToolStatement, ...] = ()
-    failed_statements: tuple[ToolStatement, ...] = ()
-    regenerations_used: int = 0
     repair_rounds_used: int = 0
 
     def __post_init__(self) -> None:
@@ -449,63 +480,20 @@ class ScriptActAgentRecord(AgentRecord):
         # zero-arg super()'s implicit __class__ closure cell (a documented
         # CPython gotcha for slotted-dataclass inheritance chains; confirmed
         # live: bare super() raises "obj must be an instance or subtype of
-        # type" here).
+        # type" here). Targets ToolAgentRecord now -- it already validates/
+        # normalizes statements/failed_statements, inherited unchanged.
         super(ScriptActAgentRecord, self).__post_init__()
 
-        # 1. statements must be a list/tuple of ToolStatement instances.
-        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
-            raise TypeError(
-                "ScriptActAgentRecord.statements must be a list or tuple of "
-                f"ToolStatement instances; got {type(self.statements).__name__!r}."
-            )
-        for index, slot in enumerate(self.statements):
-            if not isinstance(slot, ToolStatement):
-                raise TypeError(
-                    f"ScriptActAgentRecord.statements[{index}] must be a "
-                    f"ToolStatement instance; got {type(slot).__name__!r}."
-                )
-
-        # 2. failed_statements must be a list/tuple of ToolStatement
-        # instances, same shape as statements above.
-        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
-            self.failed_statements, (list, tuple)
-        ):
-            raise TypeError(
-                "ScriptActAgentRecord.failed_statements must be a list or tuple "
-                f"of ToolStatement instances; got {type(self.failed_statements).__name__!r}."
-            )
-        for index, slot in enumerate(self.failed_statements):
-            if not isinstance(slot, ToolStatement):
-                raise TypeError(
-                    f"ScriptActAgentRecord.failed_statements[{index}] must be a "
-                    f"ToolStatement instance; got {type(slot).__name__!r}."
-                )
-
-        # 3. normalize both to a tuple -- object.__setattr__ required, the
-        # dataclass is frozen (mirrors llm_records/inputs normalization
-        # above).
-        object.__setattr__(self, "statements", tuple(self.statements))
-        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
-
-    def render_as_code(self) -> str:
-        """
-        Reconstruct this run's statements as source-formatted text, grouped
-        by concurrent batch (``show_batches=True`` -- a standalone,
-        human-only view; the live continuation-message path this mirrors,
-        ``ScriptActAgent._render_task_messages``, deliberately never shows
-        batch grouping to the model itself). Named generically ("code",
-        not "python") since the underlying grammar isn't guaranteed to
-        stay Python-syntax-specific forever.
-        """
-        from ...utils.script import render_completed_as_python
-
-        return render_completed_as_python(self.statements, show_batches=True)
-
-    def tool_usage(self) -> ScriptActAgentToolUsage:
+    def dispatch_breakdown(self) -> ScriptActAgentToolUsage:
         """
         Compute a ``ScriptActAgentToolUsage`` snapshot from ``self.statements``
         and ``self.failed_statements`` in one pass. Pure/derived -- not
-        stored, recomputed on each call.
+        stored, recomputed on each call. Renamed verbatim from this class's
+        former ``tool_usage()`` -- body unchanged, renamed only so it
+        doesn't collide with the newly-shared, differently-shaped
+        ``ToolAgentRecord.usage_report()`` it now inherits: this measures
+        dispatch *mechanism* (5 categories), that measures *tool identity*
+        -- genuinely different things, both kept.
         """
         from ...utils.agents import is_dispatched
 
@@ -553,16 +541,14 @@ class ScriptActAgentRecord(AgentRecord):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the explicit serialized dictionary representation."""
+        """Return the explicit serialized dictionary representation --
+        extends the inherited ``ToolAgentRecord.to_dict()`` (already
+        includes ``statements``/``failed_statements``/``regenerations_used``)
+        with just ``repair_rounds_used``."""
         # Explicit two-argument super() -- same slotted-dataclass gotcha
         # __post_init__ documents above; bare super() raises here too.
         d = super(ScriptActAgentRecord, self).to_dict()
-        d.update({
-            "statements": [s.to_dict() for s in self.statements],
-            "failed_statements": [s.to_dict() for s in self.failed_statements],
-            "regenerations_used": self.regenerations_used,
-            "repair_rounds_used": self.repair_rounds_used,
-        })
+        d["repair_rounds_used"] = self.repair_rounds_used
         return d
 
 

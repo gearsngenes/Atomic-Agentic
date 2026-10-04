@@ -76,8 +76,8 @@ from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.tasks import PlanActTask
-from ..models.agents.records import AgentRecord, JsonToolAgentRecord, LLMRecord
-from ..models.results.agents import JsonToolAgentResult, ToolUsageRecord
+from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
+from ..models.results.agents import ToolAgentResult
 from ..utils.agents import compile_batches, extract_identifiers, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.sigils import (
@@ -736,14 +736,14 @@ class PlanActAgent(ToolAgent):
         self,
         task: PlanActTask,
         turns: list[AgentRecord],
-    ) -> JsonToolAgentRecord:
+    ) -> ToolAgentRecord:
         """
-        Assemble a completed ``JsonToolAgentRecord`` from a finished
+        Assemble a completed ``ToolAgentRecord`` from a finished
         ``PlanActTask``. No agent-level global blackboard to persist into
         -- each record owns its own calls outright.
         """
         prev = turns[-1] if turns else None
-        return JsonToolAgentRecord(
+        return ToolAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
             inputs=task.inputs,
@@ -756,42 +756,35 @@ class PlanActAgent(ToolAgent):
 
     def build_result_from_record(
         self,
-        record: JsonToolAgentRecord,
+        record: ToolAgentRecord,
         *,
         result: Any,
         started_at: datetime,
         ended_at: datetime,
-    ) -> JsonToolAgentResult:
+    ) -> ToolAgentResult:
         """
-        Construct this agent's ``JsonToolAgentResult`` envelope directly
-        from a completed ``JsonToolAgentRecord``, following the base
+        Construct this agent's ``ToolAgentResult`` envelope directly
+        from a completed ``ToolAgentRecord``, following the base
         method's own documented contract shape (``base.py``'s
         ``build_result_from_record``).
 
-        Derives ``tool_usage`` from ``record.statements`` (per-tool call
-        counts, ``RETURN_ALIAS`` excluded, ordered by first-call order) and
-        ``failed_call_count`` from ``len(record.failed_statements)``.
+        Derives ``usage_report`` from ``record.usage_report()`` (see that
+        method's own docstring) and ``failed_call_count`` from
+        ``len(record.failed_statements)``.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
 
-        counts: dict[str, int] = {}
-        for call in record.statements:
-            if is_dispatched(call):
-                counts[call.tool] = counts.get(call.tool, 0) + 1
-        tool_usage = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in counts.items()
-        )
+        usage_report = record.usage_report()
 
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
-            result_cls=JsonToolAgentResult,
+            result_cls=ToolAgentResult,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            tool_usage=tool_usage,
+            usage_report=usage_report,
             failed_call_count=len(record.failed_statements),
             regenerations_used=record.regenerations_used,
         )
