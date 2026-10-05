@@ -47,14 +47,13 @@ from ..utils.script import (
 
 class ScriptActAgent(ToolAgent):
     """
-    One-shot-planning tool-invoking agent (renamed from ``ScriptAgent`` --
-    now a direct ``ToolAgent`` sibling of ``PlanActAgent``/``ReActAgent``,
-    closing the naming asymmetry now that all three sit at the same tier).
-    Writes native-grammar, Python-style statements toward a task from a
-    single generated plan. There is no separate decomposition,
-    orchestration, or synthesis call, and no construction-time mode knob.
+    One-shot-planning tool-invoking agent -- a direct ``ToolAgent`` sibling
+    of ``PlanActAgent``/``ReActAgent``. Writes native-grammar, Python-style
+    statements toward a task from a single generated plan. There is no
+    separate decomposition, orchestration, or synthesis call, and no
+    construction-time mode knob.
 
-    Failure-triggered repair only (Pass 8): a generation always terminates
+    Failure-triggered repair only: a generation always terminates
     at the first of a ``return`` or a defensively-pruned ``if`` statement
     (the grammar forbids conditionals outright; a model that writes one
     anyway always has its generation rejected as a regen-repair issue, fed
@@ -127,9 +126,8 @@ class ScriptActAgent(ToolAgent):
         all happen there) -- this ``__init__`` only handles what's
         genuinely local to this class: ``replanning_limit``, ``fail_fast``,
         and the ``"planner"`` system prompt. ``replanning_limit`` defaults
-        to ``2`` (not the old ``planning_rounds_limit``'s ``25`` -- a
-        repairs-only budget doesn't need anywhere near that many chances,
-        now that it no longer also has to cover the free initial plan).
+        to ``2`` -- a repairs-only budget never has to cover the free
+        initial plan, so it doesn't need a large ceiling.
         ``fail_fast`` defaults to ``False`` -- repair is the normal path
         this class exists to offer; ``True`` is the opt-out for strict
         one-shot-or-die behavior.
@@ -206,8 +204,7 @@ class ScriptActAgent(ToolAgent):
 
     def to_dict(self) -> dict[str, Any]:
         """Extends ``ToolAgent.to_dict()`` with this class's own
-        ``fail_fast``/``replanning_limit`` -- ``ScriptActAgent`` had no
-        override at all before this pass."""
+        ``fail_fast``/``replanning_limit``."""
         d = super().to_dict()
         d["fail_fast"] = self._fail_fast
         d["replanning_limit"] = self._replanning_limit
@@ -254,7 +251,7 @@ class ScriptActAgent(ToolAgent):
         """
         Assemble a completed ``ScriptActAgentRecord`` from a finished
         ``ScriptActAgentTask``. No agent-level global blackboard to persist
-        into (unlike v1 ``JsonToolAgent``'s span-tracking
+        into (unlike the legacy v1 blackboard agent's span-tracking
         ``update_blackboard`` append) -- each record owns its own slots
         outright, so this is a direct field copy.
         """
@@ -285,11 +282,9 @@ class ScriptActAgent(ToolAgent):
         ``regenerations_used``/``repair_rounds_used`` past the ephemeral
         task, mirroring ``PlanActAgent.build_result_from_record``'s own
         pattern for ``regenerations_used``. Also populates ``usage_report``
-        (via the new shared ``record.usage_report()``) and
-        ``failed_call_count`` (via ``len(record.failed_statements)``) --
-        ``ScriptActAgentResult`` now inherits both as required fields from
-        ``ToolAgentResult``, closing the gap where ``ScriptActAgent`` had
-        neither visible past the task before this pass.
+        (via ``record.usage_report()``) and ``failed_call_count`` (via
+        ``len(record.failed_statements)``), both required fields inherited
+        from ``ToolAgentResult``.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
@@ -356,12 +351,10 @@ class ScriptActAgent(ToolAgent):
 
     def _render_current_task_message(self, task: ScriptActAgentTask) -> dict[str, str]:
         """Bare "what is the task" user message -- reused verbatim for
-        round 1 and every repair round's opening message. Mirrors the old
-        ``JsonToolAgent._render_task_banner``'s role (dedup a repeated
-        banner across every round) scoped to this family's own established
-        wording (no ``===== ... =====`` markers -- that's JsonToolAgent-
-        family styling, this family never used it). No "translate this
-        into a plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE
+        round 1 and every repair round's opening message, deduping a
+        repeated banner across rounds. No ``===== ... =====`` markers --
+        this family's own established wording never used that styling. No
+        "translate this into a plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE
         section already states that once; repeating it every round would
         be redundant. Deliberately carries no ``tool_calls_limit`` text of
         its own -- round 1 and a repair round need different wording
@@ -392,12 +385,12 @@ class ScriptActAgent(ToolAgent):
         A repair round: banner, then an assistant-role state message with
         three sections -- the completed-work snapshot (reconstructed code,
         flat, no batch grouping, via ``render_completed_as_python``), the
-        cache snapshot (``render_cache_snapshot``), and (new this pass)
-        exactly what failed in the triggering batch, sliced from
+        cache snapshot (``render_cache_snapshot``), and exactly what failed
+        in the triggering batch, sliced from
         ``task.failed_statements[task.repair_batch_start:]`` and rendered
         via ``render_failed_as_python`` -- never the whole accumulated
-        failure history, mirroring ``ReActTask.last_call_failed``'s own
-        "show what you're reacting to" precedent. Then a fixed user
+        failure history, mirroring ``ReActTask.last_call_failed``'s "show
+        what you're reacting to" precedent. Then a fixed user
         instruction, with a ``tool_calls_limit``-*remaining* line appended
         when set (recomputed fresh each round, since it depletes -- unlike
         round 1's static total)."""

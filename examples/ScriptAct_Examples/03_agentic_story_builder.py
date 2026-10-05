@@ -18,18 +18,17 @@ it costs 0 against tool_calls_limit. So the budget here is
 `2*loops + 2` (outline + first draft + loops*(review + write)), one less
 than PlanAct's `2*loops + 3`.
 
-Task prompt is deliberately terse (tool names + loop count only, no
-explanation of *why* the calls chain) -- there's no ordering ambiguity to
-hand-hold here the way there was in 02, since a data dependency isn't
-optional/discoverable, it's just present in the args or not.
-
-Mirrors PlanAct_Examples/03_agentic_story_builder.py's `tool_instructions`
-treatment: the outliner-first/alternate-reviewer-writer/always-return-latest-
-draft process is standing orchestration behavior, not one-off task text, so
-it lives in `ORCHESTRATION_INSTRUCTIONS` and the sub-agent descriptions stay
-sparse. `ORCHESTRATION_INSTRUCTIONS` now templates `{loops}` directly,
-matching PlanAct exactly, now that `tool_instructions` renders against
-per-invocation task inputs in addition to TOOLS/CONSTANTS.
+Mirrors PlanAct_Examples/03_agentic_story_builder.py's split exactly: the
+task prompt (`planner_prestep`) states only the idea -- no tool names, no
+loop count, no explanation of *why* the calls chain (there's no ordering
+ambiguity to hand-hold here the way there was in 02, since a data
+dependency isn't optional/discoverable, it's just present in the args or
+not). Every process mechanic -- outliner-first, alternate reviewer/writer,
+always return the writer's latest draft, and the loop count itself via
+`{loops}` -- lives in `ORCHESTRATION_INSTRUCTIONS` instead, standing
+orchestration behavior rather than one-off task text repeated on every
+call. `tool_instructions` renders `{loops}` against this invocation's own
+`task.inputs`, never baked into the task prompt.
 """
 from pathlib import Path
 import logging
@@ -152,13 +151,11 @@ reviewer = BasicAgent(
     pre_invoke=reviewer_pre,
 )
 
-def planner_prestep(story_idea: str, loops: int) -> str:
-    task_prompt = (
-            f"Write a story based on the following idea: {idea!r}\n"
-            f"After outlining and drafting, critique and rewrite the draft {loops} times."
-            "Return the final draft as output."
-        )
-    return task_prompt
+def planner_prestep(story_idea: str) -> str:
+    return (
+        f"Write a story based on the following idea: {story_idea!r}\n"
+        "Return the final draft as output."
+    )
 
 orch = ScriptActAgent(
     name="StoryPlanner",

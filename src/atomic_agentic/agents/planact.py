@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 from typing import Any, Callable, ClassVar, Optional
 
@@ -88,6 +89,8 @@ from ..utils.sigils import (
     render_failed_as_json,
     translate_calls,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -130,11 +133,10 @@ class PlanActAgent(ToolAgent):
     # composite-value-building utility tools this family's schema text
     # tells the model to use. No return_tool entry -- PlanActAgent never
     # registers a real return tool (its return value comes from the
-    # synthesized RETURN_ALIAS call instead). No get_item entry -- dropped
-    # (2026-09-26, user call): too niche relative to make_sequence/
-    # make_dict/return, and its presence in AVAILABLE TOOLS was observed
-    # distracting live generations in agent-orchestrating-agent examples
-    # toward container-shaped detours a flat call sequence didn't need.
+    # synthesized RETURN_ALIAS call instead). No get_item entry: too niche
+    # relative to make_sequence/make_dict/return, and its presence in
+    # AVAILABLE TOOLS pulls live generations toward container-shaped
+    # detours a flat call sequence doesn't need.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {"make_sequence", "make_dict"}
     )
@@ -321,9 +323,7 @@ class PlanActAgent(ToolAgent):
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            # TODO(smoke-test aid): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[PlanActAgent DEBUG] plan rejected, issues:\n{issues_msg}")
+            logger.debug(f"PlanActAgent.{self.name}: plan rejected, issues:\n{issues_msg}")
             return issues_msg
 
         return compile_batches(
@@ -338,10 +338,9 @@ class PlanActAgent(ToolAgent):
         attempt, validate/compile via ``_process_generation_output``, and
         retry with injected feedback on failure until success or the
         regeneration budget (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Includes a smoke-test-aid
-        debug print of every raw generated plan (see
-        ``_process_generation_output`` for the matching rejected-issues
-        print).
+        ``task.regenerations_used``) is exhausted. Logs every raw generated
+        plan at ``DEBUG`` level (see ``_process_generation_output`` for the
+        matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -352,9 +351,9 @@ class PlanActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[PlanActAgent DEBUG] generated plan:\n{json.dumps(raw_output, indent=2)}")
+            logger.debug(
+                f"PlanActAgent.{self.name}: generated plan:\n{json.dumps(raw_output, indent=2)}"
+            )
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
@@ -384,8 +383,8 @@ class PlanActAgent(ToolAgent):
 
     async def _arun_planning_retry_loop(self, *, task: PlanActTask) -> list[list[Any]]:
         """Async mirror of ``_run_planning_retry_loop``, using
-        ``async_invoke`` for the engine call. Same smoke-test-aid debug
-        print of every raw generated plan."""
+        ``async_invoke`` for the engine call. Same ``DEBUG``-level logging of
+        every raw generated plan."""
         additional_messages: list[dict[str, str]] = []
 
         while True:
@@ -395,9 +394,9 @@ class PlanActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[PlanActAgent DEBUG] generated plan:\n{json.dumps(raw_output, indent=2)}")
+            logger.debug(
+                f"PlanActAgent.{self.name}: generated plan:\n{json.dumps(raw_output, indent=2)}"
+            )
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
@@ -710,9 +709,7 @@ class PlanActAgent(ToolAgent):
         Execute the currently prepared batch, or consume a batch that
         cascade-filtering emptied out entirely before it ever reached
         dispatch. Without popping it here, `prepare()` would keep
-        re-processing the same now-empty batch forever -- this is a real
-        bug this implementation found and fixed via live testing, not a
-        theoretical concern.
+        re-processing the same now-empty batch forever.
         """
         if not task.resolved_args:
             if task.pending and not task.pending[0]:

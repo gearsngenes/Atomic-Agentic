@@ -36,6 +36,7 @@ Distinguishing features relative to ``PlanActAgent``:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any, Callable, ClassVar, Optional
 
@@ -62,6 +63,8 @@ from ..utils.sigils import (
     render_failed_as_json,
     translate_calls,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,11 +95,9 @@ class ReActAgent(ToolAgent):
     # two composite-value-building utility tools this family's schema text
     # tells the model to use. Reserved so no caller can register a different
     # tool under any of these ids, or remove/replace them once seeded. No
-    # get_item entry -- dropped (2026-09-26, user call): too niche relative
-    # to make_sequence/make_dict/return, and its presence in AVAILABLE TOOLS
-    # was observed distracting live generations in agent-orchestrating-agent
-    # examples toward container-shaped detours a flat call sequence didn't
-    # need.
+    # get_item entry: too niche relative to make_sequence/make_dict/return,
+    # and its presence in AVAILABLE TOOLS pulls live generations toward
+    # container-shaped detours a flat call sequence doesn't need.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
     )
@@ -336,9 +337,7 @@ class ReActAgent(ToolAgent):
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[ReActAgent DEBUG] step rejected, issues:\n{issues_msg}")
+            logger.debug(f"ReActAgent.{self.name}: step rejected, issues:\n{issues_msg}")
             return issues_msg
 
         call = calls[0]
@@ -360,9 +359,8 @@ class ReActAgent(ToolAgent):
         failure until success or the regeneration budget
         (``self._regeneration_limit``, tracked via
         ``task.regenerations_used``) is exhausted. Mirrors ``PlanActAgent``'s
-        own smoke-test-aid debug print of every raw generated step (see
-        ``_process_generation_output`` for the matching rejected-issues
-        print).
+        own ``DEBUG``-level logging of every raw generated step (see
+        ``_process_generation_output`` for the matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -383,9 +381,9 @@ class ReActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[ReActAgent DEBUG] generated step:\n{json.dumps(raw_output, indent=2)}")
+            logger.debug(
+                f"ReActAgent.{self.name}: generated step:\n{json.dumps(raw_output, indent=2)}"
+            )
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
@@ -416,8 +414,8 @@ class ReActAgent(ToolAgent):
     async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
         """Async mirror of ``_run_step_retry_loop``, using
         ``async_invoke`` for the engine call. Same regeneration-budget
-        check, feedback-message construction, and smoke-test-aid debug
-        print of every raw generated step."""
+        check, feedback-message construction, and ``DEBUG``-level logging
+        of every raw generated step."""
         additional_messages: list[dict[str, str]] = []
 
         while True:
@@ -437,9 +435,9 @@ class ReActAgent(ToolAgent):
                 {"messages": messages, "output_structure": schema}
             )
             raw_output: dict[str, Any] = engine_result.result
-            # TODO(smoke-test aid, mirrors PlanActAgent's own): remove once
-            # cross-provider output_structure reliability is confirmed.
-            print(f"[ReActAgent DEBUG] generated step:\n{json.dumps(raw_output, indent=2)}")
+            logger.debug(
+                f"ReActAgent.{self.name}: generated step:\n{json.dumps(raw_output, indent=2)}"
+            )
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),

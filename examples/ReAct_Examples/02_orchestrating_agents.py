@@ -6,19 +6,15 @@ deciding one tool call per round rather than a fixed upfront sequence, so
 it can stop as soon as the reviewer's grade clears the bar instead of
 always running a fixed number of cycles.
 
-Live-tested against gpt-4o-mini. The structured dict return
-({"approval_status": ..., "feedback": ...}) isn't the problem it first
-looked like -- the actual root cause of unreliable "$name" forwarding was
-that `AgenticOrchestrator` had no `response_preview_limit` set, so the full
-draft code and full review dict were always fully visible in "Cached
-values" every round, giving the model no real incentive to reference
-instead of retype. Setting `response_preview_limit` below closed that gap
-completely; the structured return stays exactly as it was.
+`AgenticOrchestrator` sets `response_preview_limit` below so draft code and
+review dicts truncate in "Cached values" each round -- without it, the
+full values are always visible, leaving the model no real incentive to
+reference an earlier result by "$name" instead of retyping it.
 
 "approval_status" is deliberately the first key in CodeReviewer's schema,
 before "feedback": OpenAI's structured output fills object fields in
 declared order, so this also means the model commits to a grade before
-writing the critique prose -- and, since previews now truncate hard, a
+writing the critique prose -- and, since previews truncate hard, a
 partially-visible preview shows the grade first rather than being eaten
 entirely by critique text.
 """
@@ -91,7 +87,7 @@ reviewer = BasicAgent(
     Inputs: draft_code (project source) and criteria (string acceptance criteria).
     Returns a dict: {"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique string>}.
     On "Rebuild", pass this whole result straight back to CodeBuilderAgent's "review_feedback"
-    keyword argument for the next revision, by "$name" -- never read it apart or retype it.
+    keyword argument for the next revision -- never read it apart or retype it.
     "Acceptable" and "Outstanding" both mean: stop and return the latest draft, no rebuild.
     """,
     llm_engine=sub_agent_llm,
@@ -136,7 +132,7 @@ RULES:
 1. NEVER call CodeBuilderAgent or CodeReviewer twice in a row -- strictly alternate: builder, reviewer, builder, reviewer, ...
 2. Call CodeReviewer with the latest draft as "draft_code" and a "criteria" string that captures all material requirements and constraints from the user's original task. Keep the criteria consistent across review rounds.
 3. If "approval_status" is "Acceptable" or "Outstanding", return the latest CodeBuilderAgent draft.
-4. Otherwise, call CodeBuilderAgent with the reviewer's entire result dictionary as the "review_feedback" keyword argument, referenced by its bound "$name".
+4. Otherwise, call CodeBuilderAgent with the reviewer's entire result dictionary as the "review_feedback" keyword-bound argument.
 
 ONLY approval_status decides whether to continue the loop -- never judge the code yourself.
 """.strip()

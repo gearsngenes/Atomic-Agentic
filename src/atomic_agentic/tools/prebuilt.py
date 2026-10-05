@@ -210,10 +210,6 @@ def log_debug(message: str) -> None:
     """Log a message at DEBUG level."""
     logging.debug(message)
 
-def log_trace(message: str) -> None:
-    """Log a message at TRACE level."""
-    logging.log(logging.TRACE, message)
-
 CONSOLE_TOOLS: List[Tool] = [
     Tool(function=print_tool, namespace="Console"),
     Tool(function=user_input, namespace="Console"),
@@ -224,7 +220,6 @@ CONSOLE_TOOLS: List[Tool] = [
     Tool(function=log_error, namespace="Console"),
     Tool(function=log_critical, namespace="Console"),
     Tool(function=log_debug, namespace="Console"),
-    Tool(function=log_trace, namespace="Console"),
 ]
 
 # ───────────────────────── Parser Tools ─────────────────────────

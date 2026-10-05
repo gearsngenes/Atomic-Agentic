@@ -58,17 +58,13 @@ class ToolUsageRecord:
 class ToolUsageReport:
     """
     Per-invocation tool-usage report, shared identically by every concrete
-    ToolAgent (ScriptActAgent/PlanActAgent/ReActAgent). Replaces the prior
-    flat ``tuple[ToolUsageRecord, ...]`` shape -- ``by_tool`` is unchanged in
-    content/ordering, now alongside two summary counts.
+    ToolAgent (ScriptActAgent/PlanActAgent/ReActAgent).
 
     Fields
     ------
     by_tool:
         One entry per distinct real tool identity actually dispatched,
-        ordered by first-call order, ``call_count >= 1`` each. Identical
-        content/derivation to the prior ``ToolAgentRecord.tool_usage()``'s
-        return value.
+        ordered by first-call order, ``call_count >= 1`` each.
 
     total_dispatched:
         Sum of every ``by_tool`` entry's ``call_count`` -- every dispatched
@@ -189,11 +185,9 @@ class AgentResult(AtomicResult):
 @dataclass(frozen=True, slots=True)
 class ToolAgentResult(AgentResult):
     """
-    Successful ToolAgent invocation result -- renamed from this class's
-    prior name (that class tier was removed from the agent hierarchy in an
-    earlier pass; the model name never caught up). Shared
-    directly by ``PlanActAgent``/``ReActAgent``, and now the real base class
-    of ``ScriptActAgentResult`` too.
+    Successful ToolAgent invocation result. Shared directly by
+    ``PlanActAgent``/``ReActAgent``, and the base class of
+    ``ScriptActAgentResult`` too.
 
     Extends ``AgentResult`` with per-tool call-count accounting and a
     lightweight failure summary when the agent ran with ``fail_fast=False``.
@@ -207,14 +201,11 @@ class ToolAgentResult(AgentResult):
         ``record.usage_report()`` rather than a blackboard span.
 
     failed_call_count:
-        Count of calls whose dispatch actually raised this run. Replaces
-        the former ``exception_records: tuple[tuple[int, Exception], ...]``
-        -- the rich per-failure detail (identifier, tool, args, the actual
-        exception) already lives on ``record.failed_statements``, richer
-        than the old index+exception tuple ever was; this field is a cheap
-        "did anything fail, how much" summary only. ``0`` when
-        ``fail_fast=True`` (failures raise immediately) or when nothing
-        failed.
+        Count of calls whose dispatch actually raised this run -- a cheap
+        "did anything fail, how much" summary only; the rich per-failure
+        detail (identifier, tool, args, the actual exception) lives on
+        ``record.failed_statements`` instead. ``0`` when ``fail_fast=True``
+        (failures raise immediately) or when nothing failed.
 
     regenerations_used:
         Threaded from ``record.regenerations_used`` verbatim.
@@ -244,16 +235,14 @@ class ToolAgentResult(AgentResult):
 @dataclass(frozen=True, slots=True)
 class ScriptActAgentResult(ToolAgentResult):
     """
-    Successful ScriptActAgent invocation result -- now a real
-    ``ToolAgentResult`` subclass (was an ``AgentResult`` subclass). The
-    gap this closes: ``usage_report``/``failed_call_count`` are now real,
-    inherited, required fields (``ScriptActAgent`` previously had neither at
-    all -- ``agents/scriptact.py``'s ``build_result_from_record`` now
-    populates both via ``record.usage_report()``/
+    Successful ScriptActAgent invocation result, a ``ToolAgentResult``
+    subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
+    are all real, inherited, required fields -- ``agents/scriptact.py``'s
+    ``build_result_from_record`` populates ``usage_report``/
+    ``failed_call_count`` via ``record.usage_report()``/
     ``len(record.failed_statements)``, mirroring ``PlanActAgent``'s/
-    ``ReActAgent``'s own long-standing pattern). ``regenerations_used`` is
-    also now inherited rather than redeclared as a sibling. Only
-    ``repair_rounds_used`` remains genuinely ``ScriptActAgent``-specific.
+    ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
+    genuinely ``ScriptActAgent``-specific.
 
     Fields
     ------

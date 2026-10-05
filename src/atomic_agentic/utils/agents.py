@@ -94,17 +94,12 @@ def extract_json_object(raw_text: str, *, source_label: str) -> Any:
     """
     Extract the largest decodable JSON array/object from a possibly noisy string.
 
-    Originally promoted from the old ``ToolAgent._extract_from_json_string``
-    — shared by any caller that needs to pull structured output out of
-    free-form LLM text. That original method has since been removed
-    entirely (see `json-tool-agent-rename`'s lifecycle-slimming addendum —
-    ``output_structure`` strict mode makes free-text JSON extraction
-    unnecessary for the current ``PlanActAgent``/``ReActAgent`` family), but this
-    promoted utility remains available to any other caller that still
-    needs it. Behavior is unchanged from the original method except that
-    the non-string-input case raises a plain ``TypeError`` (an
-    internal-contract violation, not caller-specific) instead of
-    ``ToolAgentError``.
+    Shared by any caller that needs to pull structured output out of
+    free-form LLM text -- not used by ``PlanActAgent``/``ReActAgent``
+    themselves (``output_structure`` strict mode makes free-text JSON
+    extraction unnecessary for that family), but available to any other
+    caller that still needs it. Raises a plain ``TypeError`` for a
+    non-string input (an internal-contract violation, not caller-specific).
 
     This helper is intentionally shape-neutral:
     - It does not require the decoded value to be a list.
@@ -305,13 +300,11 @@ def is_dispatched(call: ToolStatement) -> bool:
     """
     True iff ``call`` represents a real dispatched call rather than a
     non-dispatched sentinel (``RETURN_ALIAS`` or ``RHS_ASSIGN_ALIAS``).
-    Unifies two prior, grammar-specific per-module predicates into one
-    shared implementation -- a ``PlanActAgent``/
+    Shared across every ``ToolAgent`` family: a ``PlanActAgent``/
     ``ReActAgent``-sourced statement never has ``tool == RHS_ASSIGN_ALIAS``,
     so excluding it is a correct no-op for those families; a
     ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` statement (``ScriptActAgent``-
-    only) is still a real dispatch either way, matching prior behavior
-    exactly.
+    only) is still a real dispatch either way.
     """
     return call.tool not in (RETURN_ALIAS, RHS_ASSIGN_ALIAS)
 
@@ -348,10 +341,8 @@ def compile_batches(
 ) -> list[list[ToolStatement]]:
     """
     Group ``calls`` into dependency batches for concurrent execution, and
-    stamp each call's ``.batch_index`` with the batch it landed in. Unifies
-    the prior ``utils/script.py`` and ``utils/sigils.py`` near-identical
-    implementations into one, generic over ``ToolStatement`` regardless of
-    which agent family produced it.
+    stamp each call's ``.batch_index`` with the batch it landed in. Generic
+    over ``ToolStatement`` regardless of which agent family produced it.
 
     A call joins the currently-open batch only if none of its dependencies
     (``extract_identifiers(call.args) | extract_identifiers(call.kwargs)``)
@@ -436,8 +427,7 @@ def resolve_statement_args(
     ``(positional, keyword)`` pair ready to splat into
     ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
     ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
-    directly). Renamed from an earlier, ``ScriptActAgent``-only-module
-    equivalent -- body unchanged verbatim, including
+    directly). Shared across every ``ToolAgent`` family, including
     ``ast.Starred`` (``*expr`` unpack) and ``KWARGS_UNPACK_KEY``
     (``**expr`` unpack) handling. Those branches are ``ScriptActAgent``-only
     grammar features that simply never trigger for a ``PlanActAgent``/

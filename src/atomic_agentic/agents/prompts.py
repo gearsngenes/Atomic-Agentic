@@ -150,7 +150,7 @@ call contributes anything new:
 
 
 # =============================================================================
-# REACT_PROMPT -- Pass 6d
+# REACT_PROMPT
 # =============================================================================
 # Used by:
 # - agents/react.py: ReActAgent's per-round, single-tool-call prompt.
@@ -170,31 +170,12 @@ call contributes anything new:
 # budget figure is a per-invocation fact, rendered into the task message
 # banner instead (ReActAgent._render_current_task_message).
 #
-# Replaces the minimal, deliberately unpolished ORCHESTRATOR_PROMPT stopgap
-# this constant used to be named -- that stopgap described the pre-rewrite
-# wire protocol only just accurately enough not to mislead the model or
-# crash (it had declared a required {{TOOL_CALLS_LIMIT}} placeholder
-# _render_system_message never supplied, crashing every think() call
-# outright); this is the real prompt-writer/prompt-reviewer-reviewed
-# replacement (one FAIL/fix/PASS cycle: a non-schema-valid inline example,
-# a stale conditional on always-available utility tools, a dead tool-call-
-# budget rejection reason, and a missing worked round-render example were
-# all found and fixed before this version passed).
-#
-# 2026-09-26 refinement pass (CHOOSING YOUR NEXT CALL only, everything else
-# byte-identical): a live multi-agent run showed the model fabricating a
-# plausible-sounding long text value as a fresh literal argument instead of
-# referencing an already-bound result by "$name" -- worse than plain non-
-# compliance, since the fabricated text wasn't even a real copy of anything
-# the model had fully seen (only a truncated Cached-values preview). Fixed
-# by: disclosing that a preview can be truncated while "$name" still
-# resolves the complete value; completing the lookup_user/"user" walkthrough
-# with the "$name"-as-ordinary-argument call it previously omitted; and one
-# sentence covering both "holds for long values too" and "holds even when
-# the task calls it passing along/forwarding/summarizing". One prompt-writer
-# draft, one prompt-reviewer PASS (recommended trimming a redundant
-# parenthetical for token-margin safety, applied). 1494 -> 1591 tokens
-# (tiktoken cl100k_base, raw template), 9 tokens under the 1600 ceiling.
+# CHOOSING YOUR NEXT CALL explicitly discloses that a Cached-values preview
+# can be truncated while "$name" still resolves the complete value, and
+# walks through a full lookup_user/"user" round including the "$name"-as-
+# ordinary-argument call -- both needed to keep the model referencing an
+# already-bound result by name instead of retyping a plausible-looking copy
+# of a value it only saw in truncated preview.
 REACT_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE

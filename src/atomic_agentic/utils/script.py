@@ -34,8 +34,9 @@ __all__ = [
     "render_failed_as_python",
     "render_cache_snapshot",
 ]
-# compile_batches, is_dispatched, and resolve_statement_args moved to
-# utils/agents.py -- call sites in agents/scriptact.py import from there now.
+# compile_batches, is_dispatched, and resolve_statement_args live in
+# utils/agents.py, shared with agents/planact.py and agents/react.py --
+# agents/scriptact.py imports them from there.
 
 
 def _process_call_args(

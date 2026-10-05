@@ -100,9 +100,7 @@ class ToolStatement:
     unified representation shared by ``ScriptActAgent`` (built directly from
     real ``ast.parse`` output), ``PlanActAgent``, and ``ReActAgent`` (built
     by ``utils/sigils.py``'s ``translate_calls`` from a JSON wire payload).
-    Supersedes the prior per-grammar subclass split
-    (``toolstatement-rename`` pass) -- there is now exactly one concrete
-    representation, no ABC, no per-grammar hook.
+    Exactly one concrete representation, no ABC, no per-grammar hook.
 
     ``args``/``kwargs`` are always real ``ast.expr`` nodes, regardless of
     origin: for ``ScriptActAgent`` that's unchanged (its parser already
@@ -215,10 +213,9 @@ class ToolStatement:
         """
         Return the explicit serialized dictionary representation, for
         debugging/observability only -- never used to reconstruct or
-        re-plan. Inlines the old per-subclass ``_render_value`` hook (only
-        one behavior exists now that args/kwargs are always ``ast.expr``):
-        render a value via ``ast.unparse(value)`` if it's an ``ast.expr``,
-        else pass it through unchanged.
+        re-plan. Renders a value via ``ast.unparse(value)`` if it's an
+        ``ast.expr``, else passes it through unchanged -- the one rendering
+        rule needed now that args/kwargs are always ``ast.expr``.
         """
         def render_value(value: Any) -> Any:
             return ast.unparse(value) if isinstance(value, ast.expr) else value
@@ -235,9 +232,7 @@ class ToolStatement:
 
     def to_code(self) -> str:
         """
-        Render this statement as one line of real Python source -- verbatim
-        port of the prior per-grammar ``to_code()`` body. No behavior
-        change for any ``ScriptActAgent``-sourced statement. For a
+        Render this statement as one line of real Python source. For a
         ``PlanActAgent``/``ReActAgent``-sourced statement (``tool`` is a
         real registered tool or ``RETURN_ALIAS``, ``args``/``kwargs`` are
         ``Name``/``Constant``/``JoinedStr`` only), this produces real Python

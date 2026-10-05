@@ -221,16 +221,15 @@ def make_sequence(*items: Any, sequence_type: Literal["list", "tuple", "set"] = 
 
     Raises ValueError if "sequence_type" is not one of the three allowed values.
     """
-    # sequence_type is deliberately keyword-only (*items precedes it) -- live
-    # cross-provider smoke testing (OpenAI and Anthropic, independently, in
-    # different concrete ways) confirmed a (sequence_type, *items) ordering is a real
-    # footgun, not just a theoretical one: naming sequence_type by its own parameter
-    # name while leaving items positional collides under Python's own
-    # calling convention (the first positional value binds to sequence_type, by
-    # left-to-right declared position, before the explicit keyword is ever
-    # applied) -- TypeError: got multiple values for argument 'sequence_type'. Making
-    # sequence_type keyword-only removes the ambiguity structurally: items can only
-    # ever be positional, sequence_type can only ever be a keyword.
+    # sequence_type is deliberately keyword-only (*items precedes it): a
+    # (sequence_type, *items) ordering is a real footgun -- naming
+    # sequence_type by its own parameter name while leaving items
+    # positional collides under Python's own calling convention (the first
+    # positional value binds to sequence_type, by left-to-right declared
+    # position, before the explicit keyword is ever applied) -- TypeError:
+    # got multiple values for argument 'sequence_type'. Making sequence_type
+    # keyword-only removes the ambiguity structurally: items can only ever
+    # be positional, sequence_type can only ever be a keyword.
     if sequence_type == "list":
         return list(items)
     elif sequence_type == "tuple":
@@ -254,9 +253,9 @@ def make_dict(**pairs: Any) -> dict:
     # Split into its own tool along calling-convention lines (**kwargs, not
     # *args) rather than folding into one make_collection(kind, *items,
     # **pairs) tool, since a single tool whose correct calling convention
-    # depends on a runtime kind value would reintroduce exactly the kind of
-    # implicit-contract ambiguity make_sequence's own kind/items ordering
-    # bug demonstrated live.
+    # depends on a runtime kind value would reintroduce the same
+    # implicit-contract ambiguity make_sequence's own sequence_type/items
+    # ordering avoids structurally (see its own comment).
     return dict(**pairs)
 
 

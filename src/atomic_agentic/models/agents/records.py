@@ -44,9 +44,9 @@ class LLMRecord:
     Agent invocation.
 
     An Agent invocation may involve one or more LLM generations (e.g. a
-    JsonToolAgent's planning loop). Each generation is preserved here so that
-    future rendering, debugging, and accounting are not constrained by what
-    an earlier pass chose to keep.
+    ``PlanActAgent``'s planning loop). Each generation is preserved here so
+    that rendering, debugging, and accounting aren't constrained by what's
+    kept.
 
     Fields
     ------
@@ -267,9 +267,7 @@ class AgentRecord:
 @dataclass(frozen=True, slots=True)
 class ToolAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed ToolAgent invocation --
-    renamed from this class's prior name (that class tier was removed from
-    the agent hierarchy in an earlier pass; the model name never caught up).
+    Canonical memory record for one completed ToolAgent invocation.
 
     ``statements``/``failed_statements`` as ``ToolStatement`` tuples, no
     blackboard span of any kind. Shared directly by ``PlanActAgent``/
@@ -346,11 +344,10 @@ class ToolAgentRecord(AgentRecord):
         """
         Reconstruct this run's statements as source-formatted text, grouped
         by concurrent batch (``show_batches=True`` -- a standalone,
-        human-only view). Promoted here from ``ScriptActAgentRecord`` --
-        works correctly for any origin now that ``ToolStatement.to_code()``
-        is shared, no grammar-specific branching needed. Named generically
-        ("code", not "python") since the underlying grammar isn't guaranteed
-        to stay Python-syntax-specific forever.
+        human-only view). Works for any origin since ``ToolStatement.to_code()``
+        is shared, with no grammar-specific branching needed. Named
+        generically ("code", not "python") since the underlying grammar
+        isn't guaranteed to stay Python-syntax-specific forever.
         """
         from ...utils.script import render_completed_as_python
 
@@ -370,9 +367,7 @@ class ToolAgentRecord(AgentRecord):
         their real identity (``tool_identity`` -- correctly unsplices
         ``ScriptActAgent``'s ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``
         sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
-        statement, whose ``tool`` is already the real identity). Gives every
-        agent, including ``ScriptActAgent``, real per-tool-name usage
-        accounting for the first time.
+        statement, whose ``tool`` is already the real identity).
         """
         from ...utils.agents import is_dispatched, tool_identity
 
@@ -452,17 +447,15 @@ class ScriptActAgentToolUsage:
 @dataclass(frozen=True, slots=True)
 class ScriptActAgentRecord(ToolAgentRecord):
     """
-    Canonical memory record for one completed ScriptActAgent invocation --
-    now a real ``ToolAgentRecord`` subclass (was an ``AgentRecord`` sibling).
-    ``statements``/``failed_statements``/``regenerations_used``/
-    ``render_as_code()`` are all inherited; only ``repair_rounds_used`` and
-    the 5-category dispatch-mechanism breakdown (``dispatch_breakdown()``)
-    remain genuinely ``ScriptActAgent``-specific.
+    Canonical memory record for one completed ScriptActAgent invocation, a
+    ``ToolAgentRecord`` subclass. ``statements``/``failed_statements``/
+    ``regenerations_used``/``render_as_code()`` are all inherited; only
+    ``repair_rounds_used`` and the 5-category dispatch-mechanism breakdown
+    (``dispatch_breakdown()``) remain genuinely ``ScriptActAgent``-specific.
 
-    No more agent-level global blackboard for this family -- each record
-    owns its own slots outright. There is no blackboard_start/
-    blackboard_end span to index into, unlike the pre-``toolstatement-
-    unification`` blackboard-era record shape (v1).
+    No agent-level global blackboard for this family -- each record owns
+    its own slots outright, with no blackboard_start/blackboard_end span to
+    index into.
 
     Fields
     ------
@@ -488,12 +481,10 @@ class ScriptActAgentRecord(ToolAgentRecord):
         """
         Compute a ``ScriptActAgentToolUsage`` snapshot from ``self.statements``
         and ``self.failed_statements`` in one pass. Pure/derived -- not
-        stored, recomputed on each call. Renamed verbatim from this class's
-        former ``tool_usage()`` -- body unchanged, renamed only so it
-        doesn't collide with the newly-shared, differently-shaped
-        ``ToolAgentRecord.usage_report()`` it now inherits: this measures
-        dispatch *mechanism* (5 categories), that measures *tool identity*
-        -- genuinely different things, both kept.
+        stored, recomputed on each call. Named apart from the inherited
+        ``ToolAgentRecord.usage_report()`` because the two measure different
+        things: this measures dispatch *mechanism* (5 categories), that
+        measures *tool identity* -- genuinely different things, both kept.
         """
         from ...utils.agents import is_dispatched
 
@@ -511,12 +502,10 @@ class ScriptActAgentRecord(ToolAgentRecord):
         # like a real dispatched call whenever `count` resolves to `0` --
         # it's just as real an rhs-assignment "use" as a successful one.
         # RETURN_ALIAS is excluded from every count on both sides -- it's
-        # the plan's terminal, not a use of any of these five categories,
-        # matching the (unchanged) treatment a successful return already
-        # got before this pass. tool_calls_used counts a dispatched call
-        # whether it succeeded or raised, so this snapshot must too, or its
-        # own sum-equals-budget claim would be false whenever any call
-        # failed.
+        # the plan's terminal, not a use of any of these five categories.
+        # tool_calls_used counts a dispatched call whether it succeeded or
+        # raised, so this snapshot must too, or its own sum-equals-budget
+        # claim would be false whenever any call failed.
         for slot in (*self.statements, *self.failed_statements):
             if slot.tool == PY_BUILTIN_ALIAS:
                 builtin_calls += 1

@@ -166,8 +166,7 @@ def translate_calls(
     task_result_names: frozenset[str],
 ) -> tuple[list[str], list[ToolStatement]]:
     """
-    Combines what used to be a separate construction+validation pass into
-    one walk that does both validation and ast-translation, since both need
+    Does both validation and ast-translation in one walk, since both need
     the identical growing "available names" set.
 
     ``known_names`` is the full reference-*resolution* seed -- everything
@@ -425,10 +424,8 @@ def serialize_call(call: ToolStatement) -> dict[str, Any]:
     Reconstruct ``call`` in the **wire schema's own shape**
     (``call``/``arguments: [{"name", "value"}, ...]``/``result_name``), the
     model's own generation vocabulary -- distinct from ``to_dict()``'s
-    internal-field debug view. Replaces the earlier per-class ``.serialize()``
-    method with a standalone function, usable on any ``ToolStatement``
-    regardless of origin -- the general-purpose "every tool call, JSON or Python"
-    symmetry goal.
+    internal-field debug view. A standalone function, usable on any
+    ``ToolStatement`` regardless of origin.
 
     1. If ``call.tool`` is a ``ScriptActAgent``-only sentinel form with no
        wire-call-shape equivalent at all (``RHS_ASSIGN_ALIAS``/
@@ -537,7 +534,7 @@ def render_cache_snapshot(
     preview_limit: Optional[int],
 ) -> str:
     """
-    Retyped port of ``utils/script.py``'s ``render_cache_snapshot`` over
+    Mirrors ``utils/script.py``'s ``render_cache_snapshot`` over
     ``ToolStatement`` -- structurally identical (same ordering, same fenced
     block, same ``name: type = value`` line shape, same truncation
     semantics), except for the value serialization itself. Renders the
@@ -546,18 +543,17 @@ def render_cache_snapshot(
     latest value), as its own fenced ``"Cached values:"`` block.
     ``preview_limit`` truncates each rendered value (``None`` means no
     truncation). Returns ``""`` when ``completed`` binds no identifiers at
-    all.
+    all. ``cache`` only ever holds fully-resolved plain Python values,
+    never ``ast.expr`` nodes, regardless of how a value's source was
+    written.
 
-    Unaffected by the expression-value grammar redesign -- ``cache`` only
-    ever holds fully-resolved plain Python values, never ``ast.expr``
-    nodes, regardless of how a value's source was written.
-
-    Value serialization deliberately diverges from ``ScriptAgent``'s
-    ``repr()``-based preview: this agent's whole continuation context is
-    JSON-styled (see ``render_completed_as_json``, rendered directly above
-    this block at the call site), so a ``repr()`` preview (Python's
-    ``True``/``None``/single-quoted strings) would be a real vocabulary
-    clash sitting next to valid JSON. ``json.dumps()`` is tried first;
+    Value serialization deliberately diverges from ``ScriptActAgent``'s own
+    ``render_cache_snapshot``, which uses a ``repr()``-based preview: this
+    agent's whole continuation context is JSON-styled (see
+    ``render_completed_as_json``, rendered directly above this block at the
+    call site), so a ``repr()`` preview (Python's ``True``/``None``/
+    single-quoted strings) would be a real vocabulary clash sitting next to
+    valid JSON. ``json.dumps()`` is tried first;
     ``cache``'s values aren't guaranteed JSON-safe (a tool may legitimately
     return an arbitrary Python object, not just JSON primitives), so a
     ``TypeError`` falls back to ``repr()`` rather than propagating. The
