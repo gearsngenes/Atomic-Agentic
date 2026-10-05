@@ -169,7 +169,15 @@ class ToolAgent(Agent, ABC):
             "not provided"); a ``PromptConfig`` is accepted directly for a
             caller who wants discovered template fields of their own (e.g.
             referencing ``{TOOLS}``/``{CONSTANTS}``, already in the same
-            render context). Frozen at construction -- read-only via the
+            render context). A discovered ``{name}`` field other than
+            ``{TOOLS}``/``{CONSTANTS}`` becomes a real declared parameter of
+            this agent -- validated/defaulted by the normal
+            ``invoke(inputs)`` pipeline, the same mechanism
+            ``BasicAgent.role_prompt``/``ThinkingAgent.thinking_instructions``
+            already use -- and is rendered against ``task.inputs`` merged
+            with ``{TOOLS}``/``{CONSTANTS}``/``_extra_system_context()``
+            (``task.inputs`` first, so it can never shadow those framework
+            fields). Frozen at construction -- read-only via the
             ``tool_instructions`` property, matching
             ``BasicAgent.role_prompt``'s own precedent; construct a new
             agent for different instructions. Guidance only, not a
@@ -180,6 +188,23 @@ class ToolAgent(Agent, ABC):
         ``fail_fast`` is intentionally not a parameter here -- each concrete
         subclass that needs it declares and validates its own.
         """
+        # Normalized before super().__init__() (unlike every other
+        # ToolAgent construction-time field) so a {name} field discovered
+        # inside the template can be declared as a real extra_parameters
+        # entry -- the same precedent ThinkingAgent's role_prompt/
+        # thinking_instructions already establishes.
+        normalized_tool_instructions = normalize_prompt_config(
+            tool_instructions,
+            default_template=None,
+            provided_description="Tool instructions",
+            error_label="tool_instructions",
+        )
+        tool_instructions_params = (
+            list(normalized_tool_instructions.parameters)
+            if normalized_tool_instructions is not None
+            else []
+        )
+
         super().__init__(
             name=name,
             namespace=namespace,
@@ -191,6 +216,7 @@ class ToolAgent(Agent, ABC):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
+            extra_parameters=tool_instructions_params,
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
@@ -216,12 +242,6 @@ class ToolAgent(Agent, ABC):
                 constants, aliases=constant_aliases, descriptions=constant_descriptions
             )
 
-        normalized_tool_instructions = normalize_prompt_config(
-            tool_instructions,
-            default_template=None,
-            provided_description="Tool instructions",
-            error_label="tool_instructions",
-        )
         if normalized_tool_instructions is not None:
             self._system_prompts[self.TOOL_INSTRUCTIONS_KEY] = normalized_tool_instructions
 
@@ -268,8 +288,13 @@ class ToolAgent(Agent, ABC):
     def tool_instructions(self) -> Optional[str]:
         """
         Standing tool-usage guidance rendered as a trailing system-message
-        section, or ``None`` if never set. Frozen at construction -- matches
-        ``BasicAgent.role_prompt``'s own read-only precedent; no setter.
+        section, or ``None`` if never set. The stored template string is
+        frozen at construction -- matches ``BasicAgent.role_prompt``'s own
+        read-only precedent; no setter -- but its *rendered* content can
+        vary per invocation if it references a declared field beyond
+        ``{TOOLS}``/``{CONSTANTS}``, resolved from ``task.inputs`` at render
+        time. Not a contradiction: the template text never changes, only
+        what it renders to.
         """
         config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
         return config.template if config is not None else None
@@ -973,11 +998,15 @@ class ToolAgent(Agent, ABC):
 
         # Appended post-render, never templated into the family prompts
         # above -- zero added tokens for an agent that never set
-        # tool_instructions, and the same render_context (TOOLS/CONSTANTS/
-        # extra) is reused so a power-user PromptConfig can reference them.
+        # tool_instructions. Rendered against task.inputs merged with
+        # render_context (TOOLS/CONSTANTS/extra spread last) so a declared
+        # {name} field resolves from the invocation while TOOLS/CONSTANTS
+        # can never be shadowed by a caller-supplied input of the same name.
         tool_instructions_config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
         if tool_instructions_config is not None:
-            rendered_instructions = tool_instructions_config.render(render_context)
+            rendered_instructions = tool_instructions_config.render(
+                {**task.inputs, **render_context}
+            )
             rendered += TOOL_INSTRUCTIONS_BANNER.format(instructions=rendered_instructions)
 
         return [{"role": "system", "content": rendered}]

@@ -27,10 +27,9 @@ Mirrors PlanAct_Examples/03_agentic_story_builder.py's `tool_instructions`
 treatment: the outliner-first/alternate-reviewer-writer/always-return-latest-
 draft process is standing orchestration behavior, not one-off task text, so
 it lives in `ORCHESTRATION_INSTRUCTIONS` and the sub-agent descriptions stay
-sparse. Unlike the PlanAct version, the cycle count isn't templated into the
-instructions text -- `tool_instructions` renders from TOOLS/CONSTANTS context
-only, never per-invocation task inputs -- so the instructions point at
-whatever count the task prompt itself states instead.
+sparse. `ORCHESTRATION_INSTRUCTIONS` now templates `{loops}` directly,
+matching PlanAct exactly, now that `tool_instructions` renders against
+per-invocation task inputs in addition to TOOLS/CONSTANTS.
 """
 from pathlib import Path
 import logging
@@ -102,8 +101,7 @@ Step 3:
 reviewer(draft=latest_draft) -> feedback
 writer(revision_notes=feedback) -> latest_draft
 
-Repeat step 3's review/rewrite the exact number of cycles the task prompt
-states -- no more, no fewer.
+Repeat step 3's review/rewrite EXACTLY {loops} TIMES.
 
 Step N:
 return latest_draft as the final answer, verbatim.

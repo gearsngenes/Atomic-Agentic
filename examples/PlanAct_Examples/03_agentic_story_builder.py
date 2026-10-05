@@ -74,7 +74,7 @@ Step 3:
 reviewer (draft = latest_draft) -> feedback
 writer (revision_notes = feedback) -> latest_draft
 
-Repeat step 3's review/rewrite EXACTLY {loop} TIMES.
+Repeat step 3's review/rewrite EXACTLY {loops} TIMES.
 ...
 
 Step N:

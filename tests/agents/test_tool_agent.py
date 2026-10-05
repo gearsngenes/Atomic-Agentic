@@ -843,6 +843,62 @@ class TestSystemMessageRendering:
         banner = content[content.index("ADDITIONAL TOOL INSTRUCTIONS"):]
         assert "add(" in banner
 
+    def test_tool_instructions_field_becomes_declared_parameter(self) -> None:
+        agent = _plain_agent(tool_instructions="Repeat {loops} times.")
+        assert "loops" in {p.name for p in agent.parameters}
+
+    def test_render_system_message_tool_instructions_renders_against_task_inputs(self) -> None:
+        agent = _plain_agent(tool_instructions="Repeat {loops} times.")
+        task = agent._initialize_task(
+            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
+        )
+
+        content = agent._render_system_message(task)[0]["content"]
+
+        banner = content[content.index("ADDITIONAL TOOL INSTRUCTIONS"):]
+        assert "Repeat 3 times." in banner
+
+    def test_invoke_missing_tool_instructions_field_raises_from_render_not_entry(self) -> None:
+        """Declaring a `tool_instructions` field as an `extra_parameters`
+        entry (this fix) only widens `filter_inputs` to retain a
+        caller-supplied value under that name -- `filter_inputs` (and
+        `Agent.invoke` generally) injects declared defaults but never raises
+        for a declared, non-defaulted parameter the caller simply omits.
+        A field with no explicit default (the case here -- a bare
+        `tool_instructions` string never attaches `field_specs`) is
+        therefore still *discovered* missing only once rendering actually
+        needs it, exactly like the already-shipped
+        `BasicAgent.role_prompt`/`ThinkingAgent.thinking_instructions`
+        precedent behaves today for the same scenario (confirmed by direct
+        reproduction, not assumed). So omitting `loops` still raises
+        `PromptConfig.render`'s `ValueError` -- this test pins down that
+        real, current behavior rather than a hoped-for distinct entry-level
+        error that no code path in this codebase actually produces."""
+        agent = _plain_agent(tool_instructions="Repeat {loops} times.")
+
+        with pytest.raises(ValueError, match=r"PromptConfig\.render.*loops"):
+            agent.invoke({"prompt": "do work"})
+
+    def test_render_system_message_base_prompt_unaffected_by_task_inputs(self) -> None:
+        agent = _plain_agent(tool_instructions="Repeat {loops} times.")
+        task = agent._initialize_task(
+            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
+        )
+        content = agent._render_system_message(task)[0]["content"]
+
+        baseline_agent = _plain_agent()
+        baseline_task = baseline_agent._initialize_task(
+            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
+        )
+        baseline_content = baseline_agent._render_system_message(baseline_task)[0]["content"]
+
+        # The base prompt's own rendering (TOOLS/CONSTANTS only) is a
+        # byte-identical prefix of the tool_instructions-bearing render --
+        # the banner is appended after, never templated in. No stray "3"
+        # leaks into that shared prefix.
+        assert content.startswith(baseline_content)
+        assert "3" not in baseline_content
+
 
 class TestRenderTurnAndTurnPosition:
     def test_render_turn_labels_turns_by_position(self) -> None:
