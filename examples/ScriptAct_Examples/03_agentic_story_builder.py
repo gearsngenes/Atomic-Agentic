@@ -22,6 +22,15 @@ Task prompt is deliberately terse (tool names + loop count only, no
 explanation of *why* the calls chain) -- there's no ordering ambiguity to
 hand-hold here the way there was in 02, since a data dependency isn't
 optional/discoverable, it's just present in the args or not.
+
+Mirrors PlanAct_Examples/03_agentic_story_builder.py's `tool_instructions`
+treatment: the outliner-first/alternate-reviewer-writer/always-return-latest-
+draft process is standing orchestration behavior, not one-off task text, so
+it lives in `ORCHESTRATION_INSTRUCTIONS` and the sub-agent descriptions stay
+sparse. Unlike the PlanAct version, the cycle count isn't templated into the
+instructions text -- `tool_instructions` renders from TOOLS/CONSTANTS context
+only, never per-invocation task inputs -- so the instructions point at
+whatever count the task prompt itself states instead.
 """
 from pathlib import Path
 import logging
@@ -44,9 +53,10 @@ Output: **JSON only** with keys:
 
 WRITER_PROMPT = """
 You are the *Story Writer*.
-Required arg: outline_json (from Outliner, though only for the first draft).
-Afterwards, you may instead get revision notes from the reviewer, which
-you will use to apply changes to your last draft with.
+Write a coherent, engaging story with purposeful scenes, believable
+characters, controlled pacing, clear and vivid prose, and an earned ending.
+When revising, preserve what works and maintain continuity. Avoid distracting
+repetition, clichés, and unnecessary exposition.
 
 Return ONLY markdown for the story draft.
 Break the story up into sections, where logical, with ## headings.
@@ -56,7 +66,47 @@ Max 1000 words. Never include the outline or revision notes verbatim.
 REVIEWER_PROMPT = """
 You are the *Reviewer* / test audience.
 Input: draft_md (markdown).
+Assess coherence and payoff, character motivation and change, scene purpose
+and pacing, prose and dialogue, and emotional impact and resolution. Judge
+only the draft; don't assume an unseen brief or outline.
+
+Prioritize useful strengths to preserve and the biggest issues to fix. Tie
+each suggested revision to a specific moment, its reader impact, and a concise
+action. Don't force criticism when something works.
+
 Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
+""".strip()
+
+# Standing orchestration rules, lifted out of the per-invocation task prompt
+# and into tool_instructions -- the process itself (outliner-first, then
+# alternate reviewer/writer, always return the writer's latest draft) is now
+# reusable agent behavior, not one-off task text repeated on every call.
+ORCHESTRATION_INSTRUCTIONS = """
+You use the provided tools to perform a multi-step story-building process.
+Always call the outliner first, exactly once, before any drafting begins.
+After the outline is ready, call the writer for the first draft using the
+outline. For every subsequent draft, alternate reviewer -> writer: send the
+latest draft to the reviewer, then pass ONLY the reviewer's notes to the
+writer. NEVER pass the outline, story idea, or draft itself to the writer
+again. Always finish by returning the writer's latest draft verbatim -- never
+the outline, reviewer's critique, or a summary of the process.
+
+So in other words:
+Step 1:
+outliner(story_idea) -> outline
+
+Step 2:
+writer(outline=outline) -> latest_draft
+
+Step 3:
+reviewer(draft=latest_draft) -> feedback
+writer(revision_notes=feedback) -> latest_draft
+
+Repeat step 3's review/rewrite the exact number of cycles the task prompt
+states -- no more, no fewer.
+
+Step N:
+return latest_draft as the final answer, verbatim.
 """.strip()
 
 sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
@@ -82,7 +132,7 @@ def writer_pre(outline: str | None = None, revision_notes: str | None = None) ->
 writer = BasicAgent(
     name="StoryWriter",
     namespace="examples",
-    description="Writes drafts based on the outline or reviewer notes (exclusive, do NOT send both).",
+    description="Writes a first draft from an outline, then revises using only reviewer notes.",
     llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
     context_enabled=True,
@@ -97,7 +147,7 @@ def reviewer_pre(draft: str) -> str:
 reviewer = BasicAgent(
     name="DraftReviewer",
     namespace="examples",
-    description="Reviews a writer's draft and returns revision notes to send back to the writer.",
+    description="Reviews drafts and provides revision notes.",
     llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
     context_enabled=True,
@@ -120,6 +170,7 @@ orch = ScriptActAgent(
     context_enabled=True,
     replanning_limit=1,
     pre_invoke=planner_prestep,
+    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
 )
 
 # Registered under each agent's own bare name -- no id capture needed, the

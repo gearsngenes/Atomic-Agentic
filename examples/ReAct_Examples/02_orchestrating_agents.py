@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.INFO)
 # from `llm_engine` -- switching the provider under test (the ReActAgent
 # orchestrator below) should never also silently switch what these
 # delegation targets run on.
-sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
+sub_agent_llm = OpenAIEngine(model="gpt-5-mini")
 
 
 def builder_prestep(task_description: str | None = None, *, review_feedback: dict | None = None) -> str:
@@ -58,18 +58,17 @@ builder = BasicAgent(
     name="CodeBuilderAgent",
     namespace="examples",
     description="""
-    Returns: code string based on the task or review feedback provided.
-    First draft: give "task_description" positionally ("name": null).
-    Revision: give the reviewer's entire result dict as the KEYWORD argument
-    "review_feedback" (that is, "name": "review_feedback") -- "review_feedback" comes
-    after a "*" in this tool's signature, so it can ONLY be filled by name, never by a
-    positional argument. Reference the reviewer's result whole, by its
-    "$name" -- never retype or rewrite its content.
+    Returns complete Python module source, joined with "#- path/to/module.py" headers.
     """,
     llm_engine=sub_agent_llm,
     role_prompt=(
-        "You are a senior software engineer who writes Python code for requested tasks.\n"
-        "Return ONLY the code, with no explanations."
+        "You are a senior software engineer. Produce complete, cohesive Python module(s) "
+        "that fulfill the task, with consistent names, imports, and interfaces. Avoid "
+        "stubs or omitted implementation unless explicitly requested.\n"
+        "Return ONLY source code: no explanation, prose, or Markdown fences. For multiple "
+        "modules, output each module in full, preceded by its own standalone header in "
+        "the form '#- path/to/module.py' (including the first module). Put each module's "
+        "source after its header, then begin the next module with the next header."
     ),
     context_enabled=True,
     pre_invoke=builder_prestep,
@@ -77,14 +76,19 @@ builder = BasicAgent(
 )
 
 
-def reviewer_prestep(draft_code: str) -> str:
-    return f"Please review and provide feedback for the following code: ```python\n{draft_code}\n```"
+def reviewer_prestep(draft_code: str, criteria: str) -> str:
+    return (
+        "Review the project against the following criteria:\n"
+        f"{criteria}\n\n"
+        f"Project source:\n```python\n{draft_code}\n```"
+    )
 
 
 reviewer = BasicAgent(
     name="CodeReviewer",
     namespace="examples",
     description="""
+    Inputs: draft_code (project source) and criteria (string acceptance criteria).
     Returns a dict: {"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique string>}.
     On "Rebuild", pass this whole result straight back to CodeBuilderAgent's "review_feedback"
     keyword argument for the next revision, by "$name" -- never read it apart or retype it.
@@ -92,16 +96,19 @@ reviewer = BasicAgent(
     """,
     llm_engine=sub_agent_llm,
     role_prompt=(
-        "You are an expert Python code analyst. Thoroughly and brutally evaluate the code for "
-        "accuracy, readability, and overall design optimization. Focus on:\n"
+        "You are an expert Python project reviewer. Inputs: draft_code (the project source) "
+        "and criteria (a string of acceptance requirements). Judge the project primarily "
+        "against every stated criterion; identify unmet or ambiguous requirements, and check "
+        "correctness, integration across modules, readability, and design. Focus on:\n"
         "- Syntax or semantic errors in the code (high priority fixes)\n"
         "- Redundant or duplicate code that could be refactored into reusable chunks\n"
         "- Overly complex or irrelevant/unused code that isn't needed for the task\n\n"
+        "- Overly simple or underdeveloped code that doesn't fully meet the task requirements\n"
         "Grade the code on a three-tier scale, then write your critique:\n"
-        "- 'Rebuild': a real issue above remains -- not ready to ship.\n"
+        "- 'Rebuild': one or more criteria are unmet, or a significant issue remains -- not ready to ship.\n"
         "- 'Acceptable': no blocking issues -- ready to ship, though not polished or exceptional.\n"
         "- 'Outstanding': clean and idiomatic, free of the issues above -- nothing left to fix.\n"
-        "In 'feedback', return ONLY the revision critiques that justify the grade -- no rewriting."
+        "In 'feedback', return ONLY specific revision critiques that justify the grade -- no rewriting."
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
@@ -125,27 +132,11 @@ reviewer = BasicAgent(
 ORCHESTRATION_INSTRUCTIONS = """
 You use the provided tools to perform a multi-step code-building process.
 
-Step 1:
-CodeBuilderAgent(task_description = user's task) -> latest_draft
-
-Step 2:
-CodeReviewer(draft_code = latest_draft) -> review_result
-# {{"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique text>}}
-
-Step 3, branch on review_result["approval_status"]:
-- "Rebuild": your very next call must be CodeBuilderAgent, passing review_result as the
-  KEYWORD argument "review_feedback" -- reference it by its bound "$name", never retyped,
-  never read apart into pieces. Then repeat from Step 2.
-- "Acceptable" or "Outstanding": stop now -- both mean the code is ready to ship. There is
-  no difference in what you do next, only in how good the result turned out.
-
-Strictly alternate: builder, reviewer, builder, reviewer, ... -- never call CodeReviewer
-twice in a row, and never call CodeBuilderAgent twice in a row.
-
-Step N:
-Return CodeBuilderAgent's FINAL latest_draft once review_result["approval_status"] is
-"Acceptable" or "Outstanding". If you are ever forced to stop before that (the tool-call
-budget runs out), still return the most recent builder draft -- never return null or nothing.
+RULES:
+1. NEVER call CodeBuilderAgent or CodeReviewer twice in a row -- strictly alternate: builder, reviewer, builder, reviewer, ...
+2. Call CodeReviewer with the latest draft as "draft_code" and a "criteria" string that captures all material requirements and constraints from the user's original task. Keep the criteria consistent across review rounds.
+3. If "approval_status" is "Acceptable" or "Outstanding", return the latest CodeBuilderAgent draft.
+4. Otherwise, call CodeBuilderAgent with the reviewer's entire result dictionary as the "review_feedback" keyword argument, referenced by its bound "$name".
 
 ONLY approval_status decides whether to continue the loop -- never judge the code yourself.
 """.strip()
@@ -167,8 +158,15 @@ orchestrator.register_tool(builder)
 orchestrator.register_tool(reviewer)
 
 task = (
-    "Write a Python module that scaffolds an agentic AI design with clean OOP and provider-agnostic "
-    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python)."
+    "Write a Python joined list of modules that scaffold an agentic AI design with clean OOP and provider-agnostic "
+    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python). It should have minimally five tiers:\n"
+    "1) a base LLM interface class with abstract methods for sending prompts and receiving responses,"
+    "including structured schema output\n"
+    "2) a concrete implementation of that interface for at least one provider (e.g., OpenAI, bedrock, anthropic, etc.)\n"
+    "3) a higher-level agent class that uses the LLM interface to perform tasks, with methods for planning, acting, and reviewing\n"
+    "4) an agent class capable of orchestrating multiple sub-agents AND registerable tools (python methods) to perform complex multi-step tasks, "
+    "including delegation and result aggregation\n"
+    "5) a main module that accurately demonstrates the usage of the above classes, including a sample multi-step task that requires both planning and review\n"
 )
 
 result = orchestrator.invoke({"prompt": task}).result
