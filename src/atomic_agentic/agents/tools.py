@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import builtins
-from typing import Any
+from typing import Any, Literal
 
 from ..tools import Tool
 from ..constants.agents import (
@@ -22,10 +22,14 @@ __all__ = [
     "return_tool",
     "builtin_call_tool",
     "attr_call_tool",
+    "call_python_builtin",
+    "make_sequence",
+    "make_dict",
+    "get_item",
 ]
 
 
-def identity_pre(*, prompt: str) -> str:
+def identity_pre(prompt: str) -> str:
     """
     Default pre-invoke identity function.
 
@@ -45,7 +49,7 @@ identity_pre_tool = Tool(
 )
 
 
-def identity_post(*, result: Any) -> Any:
+def identity_post(result: Any) -> Any:
     """
     Default post-invoke identity function.
 
@@ -92,7 +96,7 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
 
 def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptAgent's approved-Python-builtin calls.
+    Dispatch body for ScriptActAgent's approved-Python-builtin calls.
 
     ``args``/``kwargs`` are the real target call's own positional/keyword
     arguments, passed as opaque packed values (a tuple and a dict) rather
@@ -115,18 +119,18 @@ def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
+# ScriptActAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
 # sentinel, never through get_tool(). No return_tool-style identity assert
 # needed: nothing references this Tool by a full_name string, only by
-# direct object reference from agents/script.py.
+# direct object reference from agents/scriptact.py.
 builtin_call_tool = Tool(
     function=_call_py_builtin,
     name=PY_BUILTIN_ALIAS,
-    namespace="script_agent",
+    namespace="scriptact_agent",
     description=(
-        "Internal ScriptAgent dispatcher for approved Python builtin calls. "
+        "Internal ScriptActAgent dispatcher for approved Python builtin calls. "
         "Never registered into any agent's toolbox -- resolved directly by "
-        "ScriptAgent.prepare()/_gather_batch_results() via the "
+        "ScriptActAgent.prepare()/_gather_batch_results() via the "
         "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
     ),
 )
@@ -134,7 +138,7 @@ builtin_call_tool = Tool(
 
 def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptAgent's attribute/method-call slots
+    Dispatch body for ScriptActAgent's attribute/method-call slots
     (``obj.method(...)``).
 
     ``args``/``kwargs`` are the real target method's own positional/keyword
@@ -160,17 +164,116 @@ def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> 
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
+# ScriptActAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
 # sentinel, never through get_tool(). Same treatment as builtin_call_tool.
 attr_call_tool = Tool(
     function=_call_attr_method,
     name=ATTR_CALL_ALIAS,
-    namespace="script_agent",
+    namespace="scriptact_agent",
     description=(
-        "Internal ScriptAgent dispatcher for attribute/method calls on a "
+        "Internal ScriptActAgent dispatcher for attribute/method calls on a "
         "value the plan already holds. Never registered into any agent's "
-        "toolbox -- resolved directly by ScriptAgent.prepare()/"
+        "toolbox -- resolved directly by ScriptActAgent.prepare()/"
         "_gather_batch_results() via the ATTR_CALL_ALIAS sentinel, never "
         "through get_tool()."
     ),
 )
+
+
+def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
+    """
+    Call a Python builtin function by name and return its result.
+
+    "name" must be the exact name of an available Python builtin (e.g.
+    "len", "round", "sorted") -- never free-form text, and never another
+    expression to evaluate. Any remaining positional and keyword arguments
+    are passed through to that builtin exactly as given.
+
+    Raises ValueError if "name" is not the name of an available builtin.
+    """
+    # A plain *args/**kwargs splat is safe here -- deliberately not the
+    # packed-tuple/dict signature ScriptActAgent's own builtin_call_tool/
+    # attr_call_tool dispatch bodies use. Those needed packing because their
+    # own fixed identifying parameters (name+args+kwargs as one unit;
+    # obj/method_name) sit in the same positional/keyword namespace as the
+    # real wrapped call's own arguments, and a wrapped call's own keyword
+    # genuinely could collide with "obj"/"method_name" in ordinary usage.
+    # This function has only one fixed leading parameter (name), and no
+    # real Python builtin's own call needs a keyword literally named "name"
+    # passed through it, so the same collision risk doesn't apply.
+    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
+        raise ValueError(f"python builtin {name!r} is not available here")
+    fn = getattr(builtins, name)
+    return fn(*args, **kwargs)
+
+
+def make_sequence(*items: Any, sequence_type: Literal["list", "tuple", "set"] = "list") -> list | tuple | set:
+    """
+    Builds a list, tuple, or set from the given items. ALWAYS call this tool if a future
+    tool requires one of these container types as input that was not already built by a previous tool call.
+    Each item from items becomes one element of the container, in the order given.
+
+    "sequence_type" selects the container type -- exactly "list", "tuple", or "set"
+    (case-sensitive) -- and must always be given as its own keyword
+    argument. Each remaining value becomes one element of the container,
+    in the order given, and must always be given positionally, never as a
+    keyword argument.
+
+    Raises ValueError if "sequence_type" is not one of the three allowed values.
+    """
+    # sequence_type is deliberately keyword-only (*items precedes it): a
+    # (sequence_type, *items) ordering is a real footgun -- naming
+    # sequence_type by its own parameter name while leaving items
+    # positional collides under Python's own calling convention (the first
+    # positional value binds to sequence_type, by left-to-right declared
+    # position, before the explicit keyword is ever applied) -- TypeError:
+    # got multiple values for argument 'sequence_type'. Making sequence_type
+    # keyword-only removes the ambiguity structurally: items can only ever
+    # be positional, sequence_type can only ever be a keyword.
+    if sequence_type == "list":
+        return list(items)
+    elif sequence_type == "tuple":
+        return tuple(items)
+    elif sequence_type == "set":
+        return set(items)
+    else:
+        raise ValueError(
+            f"make_sequence: sequence_type must be 'list', 'tuple', or 'set'; got {sequence_type!r}."
+        )
+
+
+def make_dict(**pairs: Any) -> dict:
+    """
+    Builds a dict from the given keyword arguments. ALWAYS call this tool if a future
+    tool or return value requires a dict as input that was not already built by a 
+    previous tool call. Each pair in pairs contains the key and value for one entry
+    in the dict. The keyword is the key, and its value is that key's value. The order
+    of the entries in the dict is the order the keyword arguments were given in the call.
+    """
+    # Split into its own tool along calling-convention lines (**kwargs, not
+    # *args) rather than folding into one make_collection(kind, *items,
+    # **pairs) tool, since a single tool whose correct calling convention
+    # depends on a runtime kind value would reintroduce the same
+    # implicit-contract ambiguity make_sequence's own sequence_type/items
+    # ordering avoids structurally (see its own comment).
+    return dict(**pairs)
+
+
+def get_item(container: Any, key: Any) -> Any:
+    """
+    Return one element from a container -- container[key].
+
+    For a list or tuple, "key" is an integer index. For a dict, "key" is
+    one of its keys. (A set has no positional or key-based access at all,
+    so it cannot be used here.)
+
+    Raises whatever error the container itself raises for an invalid key
+    or index (e.g. IndexError, KeyError, TypeError).
+    """
+    # No defensive wrapping -- a KeyError/IndexError/TypeError this raises
+    # naturally surfaces as-is, per this codebase's "let natural exceptions
+    # surface" discipline. No get_attr sibling tool exists (kept the tool
+    # surface smaller; revisit only if live testing shows a real need) --
+    # get_item alone covers both list/tuple-by-index and dict-by-key access,
+    # the two shapes make_sequence/make_dict actually produce.
+    return container[key]

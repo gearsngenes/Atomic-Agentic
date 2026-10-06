@@ -1,65 +1,119 @@
 from __future__ import annotations
 
-import pytest
-import json
 import asyncio
+import json
 from typing import Any
 
+import pytest
+
+from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.tools import return_tool
+from atomic_agentic.exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
+
 from .conftest import (
-    make_react_agent,
-    make_planact_agent,
-    react_step_json,
-    register_math_tools,
-    executed_slot,
     FakeLLMEngine,
+    arg,
+    make_react_agent,
+    react_step_json,
 )
 
-from atomic_agentic.agents.toolagent import return_tool
-from atomic_agentic.agents.react import ReActAgent
-from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.models.agents.tasks import ReActStepMeta
-from atomic_agentic.exceptions import ToolAgentError
-from atomic_agentic.constants.core import NO_VAL
+
+def rstep(**kwargs: Any) -> dict[str, Any]:
+    """Build one scripted FakeLLMEngine response as a real dict.
+
+    ``FakeLLMEngine`` never parses its scripted responses -- whatever object
+    sits in its ``responses`` list becomes ``LLMResult.result`` verbatim (a
+    real engine's own ``_extract_result`` does the ``json.loads`` when
+    ``output_structure`` was requested; the fake intentionally does not
+    reproduce that). ``conftest.react_step_json`` builds the correct
+    wire-shaped payload as JSON *text*; this helper round-trips it back into
+    a plain dict so it can be handed to ``FakeLLMEngine`` directly. Mirrors
+    ``test_planact.py``'s own ``scripted()`` helper.
+    """
+    return json.loads(react_step_json(**kwargs))
 
 
-class TestReActAgent:
-    def test_requires_concrete_non_negative_tool_calls_limit(self) -> None:
+# --------------------------------------------------------------------------- #
+# Construction
+# --------------------------------------------------------------------------- #
+class TestReActConstruction:
+    def test_fail_fast_defaults_false(self) -> None:
+        agent = make_react_agent([])
+        assert agent.fail_fast is False
+
+    def test_fail_fast_forwarded_true(self) -> None:
+        agent = make_react_agent([], fail_fast=True)
+        assert agent.fail_fast is True
+
+    def test_tool_instructions_forwarded(self) -> None:
+        agent = make_react_agent([], tool_instructions="Be terse.")
+        assert agent.tool_instructions == "Be terse."
+
+    def test_fail_fast_must_be_bool(self) -> None:
+        with pytest.raises(ToolAgentError):
+            ReActAgent(
+                name="tests",
+                namespace="tests",
+                description=".",
+                llm_engine=FakeLLMEngine([]),
+                fail_fast="yes",  # type: ignore[arg-type]
+            )
+
+    def test_tool_calls_limit_defaults_to_25(self) -> None:
+        # ReActAgent's own divergent default from ToolAgent's None -- this
+        # family has no second round-ceiling knob, so an unbounded default
+        # would have zero structural backstop.
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=FakeLLMEngine([]),
+        )
+        assert agent.tool_calls_limit == 25
+
+    def test_tool_calls_limit_rejects_negative(self) -> None:
         with pytest.raises(ToolAgentError, match="tool_calls_limit"):
             ReActAgent(
-                name="bad_react",
+                name="tests",
                 namespace="tests",
-                description="Bad ReAct agent.",
+                description=".",
                 llm_engine=FakeLLMEngine([]),
                 tool_calls_limit=-1,
             )
 
-    def test_rejects_next_step_output_that_is_not_a_json_object(self) -> None:
-        agent = make_react_agent(["[1, 2, 3]"], tool_calls_limit=1)
+    def test_tool_calls_limit_and_regeneration_limit_forwarded(self) -> None:
+        agent = make_react_agent([], tool_calls_limit=3, regeneration_limit=2)
+        assert agent.tool_calls_limit == 3
+        assert agent.regeneration_limit == 2
 
-        with pytest.raises(ToolAgentError, match="next step output must be a JSON object"):
-            agent.invoke({"prompt": "run react"})
+    def test_reserved_tools_registered_on_construction(self) -> None:
+        agent = make_react_agent([])
+        assert agent.has_tool("return")
+        assert agent.has_tool("make_sequence")
+        assert agent.has_tool("make_dict")
+        assert agent.get_tool("return") is return_tool
 
-    def test_invokes_step_by_step_until_return(self) -> None:
+    def test_reserved_tool_names_cannot_be_registered_through_public_api(self) -> None:
+        def dummy() -> None:
+            return None
+
+        agent = make_react_agent([])
+        with pytest.raises(ToolRegistrationError):
+            agent.register_tool(dummy, alias="return")
+        with pytest.raises(ToolRegistrationError):
+            agent.register_tool(dummy, alias="make_sequence")
+
+
+# --------------------------------------------------------------------------- #
+# Full invoke() round trip
+# --------------------------------------------------------------------------- #
+class TestReActInvokeRoundTrip:
+    def test_multi_round_invoke_dispatches_then_returns(self) -> None:
         agent = make_react_agent(
             [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 2, "y": 3},
-                    description="Add the two input numbers for the current calculation.",
-                ),
-                react_step_json(
-                    step=1,
-                    tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the addition result by ten for the current calculation.",
-                ),
-                react_step_json(
-                    step=2,
-                    tool=return_tool.full_name,
-                    args={"val": "<<__s1__>>"},
-                    description="Return the final multiplied value because the current calculation is complete.",
-                ),
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="multiply", arguments=[arg("x", "$a"), arg("y", 10)], result_name="b"),
+                rstep(call="return", arguments=[arg("val", "$b")]),
             ],
             tool_calls_limit=2,
         )
@@ -68,352 +122,12 @@ class TestReActAgent:
 
         assert result.result == 50
 
-    def test_injects_running_plan_after_first_step(self) -> None:
+    def test_async_invoke_executes_rounds_and_returns_value(self) -> None:
         agent = make_react_agent(
             [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 2, "y": 3},
-                    duration=1,
-                    description="Add the two input numbers so the result can be returned.",
-                ),
-                react_step_json(
-                    step=1,
-                    tool=return_tool.full_name,
-                    args={"val": "<<__s0__>>"},
-                    description="Return the addition result because the current task is complete.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        result = agent.invoke({"prompt": "run react"})
-
-        assert result.result == 5
-        engine = agent.llm_engine
-        assert isinstance(engine, FakeLLMEngine)
-        assert len(engine.calls) == 2
-        second_call_text = "\n".join(message["content"] for message in engine.calls[1])
-        assert "RUNNING PLAN STEPS 0-0 SO FAR" in second_call_text
-        assert "Add the two input numbers so the result can be returned." in second_call_text
-        assert "Tool.tests.add" in second_call_text
-        assert "result_ref" in second_call_text
-        assert "<<__s0__>>" in second_call_text
-        assert "observable_result" in second_call_text
-        assert "5" in second_call_text
-        assert "run_id" in second_call_text
-
-    @pytest.mark.parametrize(
-        "raw_response, match",
-        [
-            (
-                json.dumps(
-                    {
-                        "step": 0,
-                        "tool": "Tool.tests.add",
-                        "args": {},
-                        "description": "Try to run a step with no duration for validation.",
-                    }
-                ),
-                "missing required key 'duration'",
-            ),
-            (
-                json.dumps(
-                    {
-                        "step": 0,
-                        "tool": "Tool.tests.add",
-                        "args": {},
-                        "duration": 0,
-                    }
-                ),
-                "missing required key 'description'",
-            ),
-            (
-                json.dumps(
-                    {
-                        "step": 0,
-                        "args": {},
-                        "duration": 0,
-                        "description": "Try to run an incomplete step for validation.",
-                    }
-                ),
-                "missing required keys",
-            ),
-            (
-                json.dumps(
-                    {
-                        "step": 0,
-                        "tool": "Tool.tests.add",
-                        "duration": 0,
-                        "description": "Try to run an incomplete step for validation.",
-                    }
-                ),
-                "missing required keys",
-            ),
-        ],
-    )
-    def test_rejects_missing_required_step_keys(
-        self,
-        raw_response: str,
-        match: str,
-    ) -> None:
-        agent = make_react_agent([raw_response], tool_calls_limit=1)
-
-        with pytest.raises(ToolAgentError, match=match):
-            agent.invoke({"prompt": "run react"})
-
-    @pytest.mark.parametrize("duration", [-1, 4, 1.5, True, "1"])
-    def test_rejects_invalid_duration(self, duration: Any) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 1, "y": 2},
-                    duration=duration,
-                    description="Add the two numbers for the current calculation.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="duration"):
-            agent.invoke({"prompt": "run react"})
-
-    @pytest.mark.parametrize("description", ["", "   ", 1, None])
-    def test_rejects_invalid_description(self, description: Any) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 1, "y": 2},
-                    duration=0,
-                    description=description,
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="description"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_accepts_missing_step_key_and_uses_expected_step(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=None,
-                    tool="Tool.tests.add",
-                    args={"x": 1, "y": 2},
-                    description="Add the two test numbers for this ReAct step.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        task = agent.think(task)
-
-        updated = agent.prepare(task)
-
-        slot = updated.running_blackboard[0]
-        assert updated.prepared_steps == [0]
-        assert slot.step == 0
-        assert slot.tool == "Tool.tests.add"
-        assert slot.resolved_args == {"x": 1, "y": 2}
-        assert updated.step_meta[0].description == "Add the two test numbers for this ReAct step."
-
-    def test_rejects_extra_step_keys(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={},
-                    description="Attempt a step with an unsupported extra key.",
-                    extra=True,
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="unsupported keys"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_rejects_non_dict_args(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args=[],
-                    description="Attempt a step whose args are the wrong shape.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="'args' must be a dict"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_accepts_mismatched_step_index_and_overrides_with_expected_step(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=99,
-                    tool="Tool.tests.add",
-                    args={"x": 1, "y": 2},
-                    description="Add the two test numbers despite the advisory step mismatch.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        task = agent.think(task)
-
-        updated = agent.prepare(task)
-
-        slot = updated.running_blackboard[0]
-        assert updated.prepared_steps == [0]
-        assert slot.step == 0
-        assert slot.tool == "Tool.tests.add"
-        assert slot.resolved_args == {"x": 1, "y": 2}
-
-    def test_rejects_future_step_dependency(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": "<<__s0__>>", "y": 2},
-                    description="Attempt to use the current step as its own input dependency.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="illegal deps"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_rejects_unknown_tool(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.missing",
-                    args={},
-                    description="Attempt to call an unregistered tool.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="unknown tool"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_rejects_when_next_step_exceeds_capacity(self) -> None:
-        # Regression test for the budget-enforcement fix (this session): the
-        # last available slot under tool_calls_limit must be the return
-        # tool. think()/_process_next_step_output's own budget check (step
-        # 9) is the only place left that can catch this -- act() no longer
-        # re-validates budget at all (1c dropped that as a dead guard).
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 1, "y": 2},
-                    description="Add the two numbers as the only permitted non-return call.",
-                ),
-                react_step_json(
-                    step=1,
-                    tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 3},
-                    description="Attempt to multiply after the non-return tool budget is exhausted.",
-                ),
-            ],
-            tool_calls_limit=1,
-        )
-
-        with pytest.raises(ToolAgentError, match="last available slot under"):
-            agent.invoke({"prompt": "run react"})
-
-    def test_prepare_records_slot_metadata(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 2, "y": 3},
-                    duration=2,
-                    description="Add the two numbers and keep the result visible for later branching.",
-                ),
-            ],
-            tool_calls_limit=2,
-        )
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        task = agent.think(task)
-
-        updated = agent.prepare(task)
-
-        slot = updated.running_blackboard[0]
-        assert updated.prepared_steps == [0]
-        assert slot.status == "prepared"
-        assert slot.is_prepared() is True
-        assert slot.step_dependencies == ()
-        assert slot.await_step is NO_VAL
-        assert slot.resolved_args == {"x": 2, "y": 3}
-        assert updated.step_meta[0].observable == 2
-        assert updated.step_meta[0].description == "Add the two numbers and keep the result visible for later branching."
-
-    def test_prepare_records_step_dependencies(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=1,
-                    tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the prior addition result by ten for the current calculation.",
-                ),
-            ],
-            tool_calls_limit=2,
-        )
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        task.next_step_index = 1
-        task.running_blackboard[0] = executed_slot(0, 5)
-        task.step_meta[0].description = "Add the two numbers for the current calculation."
-        task = agent.think(task)
-
-        updated = agent.prepare(task)
-
-        slot = updated.running_blackboard[1]
-        assert slot.status == "prepared"
-        assert slot.step_dependencies == (0,)
-        assert slot.await_step is NO_VAL
-        assert slot.resolved_args == {"x": 5, "y": 10}
-        assert updated.step_meta[1].description == "Multiply the prior addition result by ten for the current calculation."
-
-    def test_async_invoke_executes_step_by_step_until_return(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(
-                    step=0,
-                    tool="Tool.tests.add",
-                    args={"x": 2, "y": 3},
-                    description="Add the two input numbers for the current calculation.",
-                ),
-                react_step_json(
-                    step=1,
-                    tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the addition result by ten for the current calculation.",
-                ),
-                react_step_json(
-                    step=2,
-                    tool=return_tool.full_name,
-                    args={"val": "<<__s1__>>"},
-                    description="Return the final multiplied value because the current calculation is complete.",
-                ),
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="multiply", arguments=[arg("x", "$a"), arg("y", 10)], result_name="b"),
+                rstep(call="return", arguments=[arg("val", "$b")]),
             ],
             tool_calls_limit=2,
         )
@@ -422,17 +136,385 @@ class TestReActAgent:
 
         assert result.result == 50
 
-    def test_llm_record_system_prompt_name_is_reason_then_act(self) -> None:
+    def test_single_round_return_with_literal_value(self) -> None:
+        agent = make_react_agent([rstep(call="return", arguments=[arg("val", 42)])])
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 42
+
+    def test_return_null_is_a_legitimate_result(self) -> None:
+        agent = make_react_agent([rstep(call="return", arguments=[arg("val", None)])])
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result is None
+
+
+# --------------------------------------------------------------------------- #
+# think()/prepare() handoff -- prepare() is a documented no-op for this family
+# --------------------------------------------------------------------------- #
+class TestReActThinkPrepareHandoff:
+    def test_think_resolves_exactly_one_call_per_round(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="add", arguments=[arg("x", 1), arg("y", 2)])],
+            tool_calls_limit=1,
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        assert task.generated_step is None
+        assert task.resolved_args is None
+
+        task = agent.think(task)
+
+        assert task.generated_step is not None
+        assert task.generated_step.tool == "add"
+        assert task.resolved_args == {"x": 1, "y": 2}
+
+    def test_prepare_is_a_documented_noop_passthrough(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="return", arguments=[arg("val", 1)])],
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+        generated_before = task.generated_step
+        resolved_before = task.resolved_args
+
+        returned = agent.prepare(task)
+
+        assert returned is task
+        assert task.generated_step is generated_before
+        assert task.resolved_args is resolved_before
+
+    def test_act_consumes_generated_step_and_resets_it(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="add", arguments=[arg("x", 1), arg("y", 2)])],
+            tool_calls_limit=1,
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+        task = agent.prepare(task)
+
+        task = agent.act(task)
+
+        assert task.generated_step is None
+        assert task.resolved_args is None
+        assert len(task.completed) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Auto-naming: an unnamed successful call gets __rN__, contiguous by
+# successful calls only; a return call's identifier is always forced None.
+# --------------------------------------------------------------------------- #
+class TestReActAutoNaming:
+    def test_unnamed_successful_calls_get_contiguous_dunder_names(self) -> None:
         agent = make_react_agent(
             [
-                react_step_json(
-                    tool=return_tool.full_name,
-                    args={"val": 42},
-                    duration=0,
-                    description="Return the value for the test.",
-                )
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)]),
+                rstep(call="multiply", arguments=[arg("x", "$__r0__"), arg("y", 10)]),
+                rstep(call="return", arguments=[arg("val", "$__r1__")]),
+            ],
+            tool_calls_limit=2,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 50
+        record = agent.get_conversation()[-1]
+        identifiers = [s.identifier for s in record.statements]
+        assert identifiers == ["__r0__", "__r1__", None]
+
+    def test_failed_attempt_does_not_consume_a_dunder_number(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 2)]),
+                rstep(call="return", arguments=[arg("val", "$__r0__")]),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        record = agent.get_conversation()[-1]
+        identifiers = [s.identifier for s in record.statements]
+        assert identifiers == ["__r0__", None]
+
+    def test_return_call_identifier_forced_to_none_even_when_model_names_it(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="return", arguments=[arg("val", 42)], result_name="my_result")],
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 42
+        record = agent.get_conversation()[-1]
+        assert record.statements[-1].tool == "return"
+        assert record.statements[-1].identifier is None
+
+    def test_explicitly_named_successful_call_keeps_its_own_name(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="sum_value"),
+                rstep(call="return", arguments=[arg("val", "$sum_value")]),
             ],
             tool_calls_limit=1,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 5
+        record = agent.get_conversation()[-1]
+        assert record.statements[0].identifier == "sum_value"
+
+
+# --------------------------------------------------------------------------- #
+# $name sigil resolution against task.cache
+# --------------------------------------------------------------------------- #
+class TestReActSigilResolution:
+    def test_whole_match_substitutes_real_typed_value(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="multiply", arguments=[arg("x", "$a"), arg("y", 2)], result_name="b"),
+                rstep(call="return", arguments=[arg("val", "$b")]),
+            ],
+            tool_calls_limit=2,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 10
+
+    def test_embedded_reference_interpolates_as_text(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="return", arguments=[arg("val", "sum is $a")]),
+            ],
+            tool_calls_limit=1,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == "sum is 5"
+
+    def test_unmatched_embedded_sigil_is_left_as_literal_text(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="return", arguments=[arg("val", "nothing here: $ghost")])],
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == "nothing here: $ghost"
+
+    def test_auto_named_result_resolvable_by_dunder_name_next_round(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)]),
+                rstep(call="return", arguments=[arg("val", "$__r0__")]),
+            ],
+            tool_calls_limit=1,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 5
+
+
+# --------------------------------------------------------------------------- #
+# Generation retry loop: unresolvable $name / malformed call never lands in
+# failed_statements -- caught and regenerated inside think()'s own loop.
+# --------------------------------------------------------------------------- #
+class TestReActGenerationRetry:
+    def test_unresolvable_reference_triggers_regeneration_then_succeeds(self) -> None:
+        invalid = rstep(call="return", arguments=[arg("val", "$missing")])
+        valid = rstep(call="return", arguments=[arg("val", 7)])
+        agent = make_react_agent(
+            [invalid, valid],
+            regeneration_limit=1,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 7
+        record = agent.get_conversation()[-1]
+        assert record.regenerations_used == 1
+        assert len(record.llm_records) == 2
+
+    def test_unresolvable_reference_never_lands_in_failed_statements(self) -> None:
+        invalid = rstep(call="return", arguments=[arg("val", "$missing")])
+        valid = rstep(call="return", arguments=[arg("val", 7)])
+        agent = make_react_agent(
+            [invalid, valid],
+            regeneration_limit=1,
+            context_enabled=True,
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        record = agent.get_conversation()[-1]
+        assert record.failed_statements == ()
+
+    def test_unresolvable_reference_budget_exhausted_raises(self) -> None:
+        invalid = rstep(call="return", arguments=[arg("val", "$missing")])
+        agent = make_react_agent([invalid], regeneration_limit=0)
+
+        with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
+            agent.invoke({"prompt": "run"})
+
+    def test_unknown_tool_triggers_regeneration_then_succeeds(self) -> None:
+        invalid = rstep(call="nonexistent_tool", arguments=[])
+        valid = rstep(call="return", arguments=[arg("val", 42)])
+        agent = make_react_agent([invalid, valid], regeneration_limit=1)
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 42
+
+    def test_tool_calls_limit_exceeded_triggers_regeneration_then_succeeds(self) -> None:
+        # At the budget boundary (tool_calls_used >= limit), the schema's
+        # enum narrows to return-only -- but a scripted response can still
+        # name a real tool outside that enum; translate_calls' own budget
+        # check (remaining_budget <= 0) is the structural backstop tested
+        # here directly via a plain over-budget attempt.
+        over_budget = rstep(call="add", arguments=[arg("x", 1), arg("y", 2)])
+        valid = rstep(call="return", arguments=[arg("val", 1)])
+        agent = make_react_agent(
+            [over_budget, valid],
+            tool_calls_limit=0,
+            regeneration_limit=1,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 1
+
+
+# --------------------------------------------------------------------------- #
+# Real dispatch failure: fail_fast=False tolerates, fail_fast=True raises.
+# --------------------------------------------------------------------------- #
+class TestReActDispatchFailure:
+    def test_fail_fast_false_tolerates_failure_and_continues(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 2)]),
+                rstep(call="return", arguments=[arg("val", "$__r0__")]),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        record = agent.get_conversation()[-1]
+        assert len(record.failed_statements) == 1
+        assert record.failed_statements[0].tool == "fail_tool"
+
+    def test_fail_fast_true_raises_tool_invocation_error(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="fail_tool", arguments=[])],
+            fail_fast=True,
+        )
+
+        with pytest.raises(ToolInvocationError):
+            agent.invoke({"prompt": "run"})
+
+    def test_last_call_failed_flag_set_on_failure_and_cleared_on_success(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="fail_tool", arguments=[])],
+            fail_fast=False,
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+        task = agent.act(task)
+
+        assert task.last_call_failed is True
+        assert len(task.failed_statements) == 1
+        assert task.failed_statements[0].exception is not None
+        assert task.completed == []
+
+    def test_failure_is_rendered_for_the_next_round(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="return", arguments=[arg("val", 1)]),
+            ],
+            fail_fast=False,
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        engine = agent.llm_engine
+        assert isinstance(engine, FakeLLMEngine)
+        second_call_text = "\n".join(
+            message["content"] for message in engine.calls[1]
+        )
+        assert "YOUR LAST CALL FAILED" in second_call_text
+        assert "intentional failure" in second_call_text
+
+
+# --------------------------------------------------------------------------- #
+# Record / result shape
+# --------------------------------------------------------------------------- #
+class TestReActRecordAndResultShape:
+    def test_successful_run_statements_and_usage_report(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="add", arguments=[arg("x", "$a"), arg("y", 1)], result_name="b"),
+                rstep(call="return", arguments=[arg("val", "$b")]),
+            ],
+            tool_calls_limit=2,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 6
+
+        record = agent.get_conversation()[-1]
+        assert len(record.statements) == 3  # a, b, return
+        assert record.failed_statements == ()
+        assert record.regenerations_used == 0
+
+        by_tool = {u.tool_name: u.call_count for u in result.usage_report.by_tool}
+        assert by_tool == {"add": 2}
+        assert result.usage_report.total_dispatched == 2
+        assert result.usage_report.total_failed == 0
+        assert result.failed_call_count == 0
+        assert result.regenerations_used == 0
+
+    def test_failed_run_records_failed_statement_and_usage(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 2)]),
+                rstep(call="return", arguments=[arg("val", "$__r0__")]),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            context_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        assert result.failed_call_count == 1
+        assert result.usage_report.total_failed == 1
+
+    def test_llm_record_system_prompt_name_is_reason_then_act(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="return", arguments=[arg("val", 1)])],
             context_enabled=True,
         )
 
@@ -440,570 +522,3 @@ class TestReActAgent:
 
         for rec in agent.get_conversation()[-1].llm_records:
             assert rec.system_prompt_name == "reason_then_act"
-
-
-class TestReActThinkPrepareHandoff:
-    """New 1f coverage: think() generates+validates exactly one step per
-    round onto task.generated_step (a fresh decision every round, unlike
-    PlanAct's once-per-run generated_plan); prepare() unpacks it and resets
-    it back to NO_VAL."""
-
-    def test_think_stashes_generated_step_and_prepare_resets_it(self) -> None:
-        agent = make_react_agent(
-            [react_step_json(tool=return_tool.full_name, args={"val": 1}, duration=0)],
-            tool_calls_limit=1,
-        )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
-        assert task.generated_step is NO_VAL
-
-        task = agent.think(task)
-        assert task.generated_step is not NO_VAL
-
-        task = agent.prepare(task)
-        assert task.generated_step is NO_VAL
-
-
-class TestReActBlackboardInvariants:
-    """New 1f coverage: across a multi-step run, running_blackboard[i].step
-    == i holds for every slot and no slot is written twice -- under both
-    fail_fast settings. ReAct pre-allocates step=i at construction and never
-    reorders slots, so this is largely structural, but verified end-to-end
-    here rather than assumed."""
-
-    def test_step_matches_index_and_no_double_write_fail_fast_true(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}),
-                react_step_json(step=1, tool="Tool.tests.multiply", args={"x": "<<__s0__>>", "y": 3}),
-                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
-            ],
-            tool_calls_limit=2,
-        )
-
-        result = agent.invoke({"prompt": "run"})
-
-        assert result.result == 9
-        board = agent.blackboard
-        assert len(board) == 3
-        for i, slot in enumerate(board):
-            assert slot.step == i
-            assert slot.status == BlackboardSlot.EXECUTED
-
-    def test_step_matches_index_and_no_double_write_fail_fast_false(self) -> None:
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool="Tool.tests.add", args={"x": 1, "y": 2}),
-                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
-            ],
-            tool_calls_limit=2,
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "run"})
-
-        assert result.result == 3
-        board = agent.blackboard
-        assert len(board) == 3
-        for i, slot in enumerate(board):
-            assert slot.step == i
-        assert board[0].status == BlackboardSlot.FAILED
-        assert board[1].status == BlackboardSlot.EXECUTED
-        assert board[2].status == BlackboardSlot.EXECUTED
-
-    def test_double_prepare_without_act_is_unreachable_via_the_loop(self) -> None:
-        """Demonstrates why the base loop's fixed think -> prepare -> act
-        ordering is what actually prevents double-prepare-without-act, not
-        a guard inside prepare() itself (the old re-entry check was dropped
-        in 1c as dead). A hand-rolled second prepare() call, with no
-        intervening act(), tries to unpack task.generated_step -- but
-        prepare() already reset it to NO_VAL on the first call, so it
-        breaks loudly (TypeError) rather than silently corrupting state."""
-        agent = make_react_agent(
-            [react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2})],
-            tool_calls_limit=1,
-        )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
-        task = agent.think(task)
-
-        task = agent.prepare(task)  # consumes generated_step, resets to NO_VAL
-        assert task.prepared_steps == [0]
-
-        with pytest.raises(TypeError):
-            agent.prepare(task)  # hand-rolled re-entry, no intervening think()/act()
-
-
-class TestReActCascadeFailedPropagation:
-    """
-    Integration tests for cascade FAILED propagation in ReActAgent.
-
-    When a tool step fails (fail_fast=False), a subsequent LLM-generated
-    step whose args reference it via <<__sN__>> is cascade-marked FAILED in
-    prepare() without raising. The return tool always raises when its arg
-    dependencies failed.
-    """
-
-    def test_react_dependent_step_is_cascade_failed(self) -> None:
-        """ReAct: non-return step with a failed dep is cascade-marked FAILED; run succeeds."""
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool="Tool.tests.add", args={"x": "<<__s0__>>", "y": 2}),
-                react_step_json(step=2, tool=return_tool.full_name, args={"val": 99}, duration=0),
-            ],
-            tool_calls_limit=2,
-            fail_fast=False,
-        )
-
-        result = agent.invoke({"prompt": "react cascade"})
-
-        assert result.result == 99
-        board = agent.blackboard
-        assert board[0].status == BlackboardSlot.FAILED
-        assert board[1].status == BlackboardSlot.FAILED
-        assert board[2].status == BlackboardSlot.EXECUTED
-
-    def test_react_return_step_with_failed_dep_raises(self) -> None:
-        """ReAct: return step depending on a FAILED step raises ToolAgentError."""
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
-            ],
-            tool_calls_limit=1,
-            fail_fast=False,
-        )
-
-        with pytest.raises(ToolAgentError, match="return step"):
-            agent.invoke({"prompt": "react return cascade raise"})
-
-
-class TestReActGenerationRetry:
-    """Retry loop in _generate_next_step/_agenerate_next_step: shared budget, feedback, LLMRecord accumulation."""
-
-    INVALID_JSON = "this is not json at all"
-
-    # A structurally invalid step: references a tool that doesn't exist.
-    INVALID_STEP_WRONG_TOOL = react_step_json(
-        step=0, tool="Tool.tests.nonexistent", args={}, duration=0
-    )
-
-    VALID_STEP_0 = react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1)
-    VALID_RETURN = react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0)
-    VALID_RETURN_LITERAL = react_step_json(step=0, tool=return_tool.full_name, args={"val": 42}, duration=0)
-
-    def test_zero_retries_raises_on_first_bad_json(self) -> None:
-        """generation_retries=0 (default): bad JSON raises immediately."""
-        agent = make_react_agent([self.INVALID_JSON])
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-
-    def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
-        """generation_retries=0: exactly one LLM call is made before raising."""
-        engine = FakeLLMEngine([self.INVALID_JSON])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=0,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-        assert len(engine.calls) == 1
-
-    def test_json_error_retry_succeeds_on_second_call(self) -> None:
-        """generation_retries=1: bad JSON on first call, valid step on second; run completes."""
-        agent = make_react_agent(
-            [self.INVALID_JSON, self.VALID_RETURN_LITERAL],
-            generation_retries=1,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 42
-
-    def test_json_error_retry_stores_two_llm_records(self) -> None:
-        """Two attempts on a single step produce two LLMRecords."""
-        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-            context_enabled=True,
-        )
-        agent.invoke({"prompt": "run"})
-        llm_records = agent.get_conversation()[-1].llm_records
-        assert len(llm_records) == 2
-        assert len(llm_records[0].messages) == 3
-        # Self-contained convention: retry's messages = full task_messages so
-        # far (3-element first-attempt thread + 2 injected feedback), not
-        # just the 2 new ones.
-        assert len(llm_records[1].messages) == 5
-
-    def test_spec_error_retry_succeeds_on_second_call(self) -> None:
-        """generation_retries=1: unknown tool on first step attempt; valid step on second."""
-        agent = make_react_agent(
-            [self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL],
-            generation_retries=1,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 42
-
-    def test_spec_error_retry_stores_two_llm_records(self) -> None:
-        """Spec-validation failure + successful retry = two LLMRecords for that step."""
-        engine = FakeLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-            context_enabled=True,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        llm_records = agent.get_conversation()[-1].llm_records
-        assert len(llm_records) == 2
-        assert len(llm_records[0].messages) == 3
-        # Self-contained convention: retry's messages = full task_messages so
-        # far (3-element first-attempt thread + 2 injected feedback), not
-        # just the 2 new ones.
-        assert len(llm_records[1].messages) == 5
-
-    def test_budget_exhausted_raises_after_all_attempts(self) -> None:
-        """generation_retries=1: both attempts return invalid JSON -> ToolAgentError."""
-        agent = make_react_agent(
-            [self.INVALID_JSON, self.INVALID_JSON],
-            generation_retries=1,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-
-    def test_budget_exhausted_records_all_llm_calls(self) -> None:
-        """All attempts (including the failing ones) are recorded as LLM calls."""
-        engine = FakeLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        with pytest.raises(ToolAgentError):
-            agent.invoke({"prompt": "run"})
-        assert len(engine.calls) == 2
-
-    def test_json_feedback_appended_to_working_messages(self) -> None:
-        """On JSON-decode failure the retry call receives more messages than the first call."""
-        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        agent.invoke({"prompt": "run"})
-        assert len(engine.calls[1]) > len(engine.calls[0])
-        last_msg = engine.calls[1][-1]
-        assert last_msg["role"] == "user"
-        assert "could not be parsed" in last_msg["content"]
-
-    def test_spec_feedback_contains_reserialised_step_not_raw_string(self) -> None:
-        """On spec-validation failure the retry user message contains the re-serialised step."""
-        engine = FakeLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        last_msg = engine.calls[1][-1]
-        assert last_msg["role"] == "user"
-        assert "unknown tool" in last_msg["content"]
-
-    def test_shared_budget_across_steps(self) -> None:
-        """Retries consumed by step 0 reduce availability for step 1."""
-        # generation_retries=1: step 0 uses the 1 retry (bad JSON -> valid step).
-        # Step 1 (return) immediately gets bad JSON; no retries left -> ToolAgentError.
-        agent = make_react_agent(
-            [self.INVALID_JSON, self.VALID_STEP_0, self.INVALID_JSON],
-            generation_retries=1,
-            tool_calls_limit=3,
-        )
-        with pytest.raises(ToolAgentError, match="budget exhausted"):
-            agent.invoke({"prompt": "run"})
-
-    def test_llm_records_accumulate_all_attempts(self) -> None:
-        """Total LLMRecords equals the sum of all attempt counts across all steps."""
-        # step 0: 2 attempts (1 retry); return step: 1 attempt. Total = 3.
-        engine = FakeLLMEngine([
-            self.INVALID_JSON,       # step 0 attempt 1 -- bad JSON
-            self.VALID_STEP_0,       # step 0 attempt 2 -- succeeds
-            self.VALID_RETURN,       # return step -- succeeds first try
-        ])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-            tool_calls_limit=3,
-            context_enabled=True,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        assert len(agent.get_conversation()[-1].llm_records) == 3
-
-    def test_observable_counters_stable_during_retries(self) -> None:
-        """Observable counters on prior steps do not decrement during a retry attempt."""
-        # step 0: valid, duration=2 (observable for 2 future successful generations).
-        # return step: 1 failed attempt (bad JSON) before succeeding.
-        # observable for step 0 must still be 2 after the failed retry, and 1 after the success.
-        engine = FakeLLMEngine([
-            self.VALID_STEP_0,           # step 0: observable=1 (duration=1)
-            self.INVALID_JSON,           # return step attempt 1: fails -> no counter decrement
-            self.VALID_RETURN,           # return step attempt 2: succeeds -> decrements
-        ])
-        agent = ReActAgent(
-            name="tests",
-            namespace="tests",
-            description=".",
-            llm_engine=engine,
-            generation_retries=1,
-            tool_calls_limit=3,
-            context_enabled=True,
-        )
-        register_math_tools(agent)  # type: ignore[arg-type]
-        agent.invoke({"prompt": "run"})
-        # After the run: step 0 had observable=1, which was decremented exactly once
-        # (by the successful return-step generation). It should now be 0.
-        record = agent.get_conversation()[-1]
-        # The run completed; step 0's observable was decremented once (by the successful commit),
-        # not twice (which would happen if the failed retry also decremented it).
-        assert len(record.llm_records) == 3  # 1 (step0) + 1 (failed return) + 1 (success return)
-
-
-class TestMaxDurationSingleSource:
-    """B3/B-7 (superseded by render-task-logic): max_duration is now cheaply
-    re-derived independently at each site that needs it (render_task,
-    _generate_next_step, prepare) from
-    max(0, self._tool_calls_limit - prefix_len) rather than computed once
-    and threaded through as a parameter. The invariant under test is no
-    longer "single computation, threaded through" but "every independent
-    derivation agrees," which the boundary-condition tests below verify
-    end-to-end."""
-
-    def test_max_duration_limits_step_at_budget_boundary(self) -> None:
-        """A step with duration == remaining budget is accepted."""
-        agent = make_react_agent(
-            [
-                # Step 0: duration=2 with tool_calls_limit=3 -> max_duration=3; fine.
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=2),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
-            ],
-            tool_calls_limit=3,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 3
-
-    def test_step_exceeding_max_duration_triggers_retry(self) -> None:
-        """A step with duration > remaining budget is rejected (validation error -> retry)."""
-        agent = make_react_agent(
-            [
-                # Step 0 bad: duration=5 when only 2 slots remain (prefix_len=0, limit=2).
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=5),
-                # Step 0 good: corrected on retry.
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
-            ],
-            tool_calls_limit=2,
-            generation_retries=1,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 3
-
-    def test_prepare_no_longer_takes_max_duration_param(self) -> None:
-        """Locks down the render-task-logic redesign: max_duration is
-        recomputed internally from prefix_len rather than accepted as a
-        parameter. prepare() (the 1c/1e rename of the old
-        _apply_react_step_result) is a plain (self, task) hook."""
-        import inspect
-        sig = inspect.signature(ReActAgent.prepare)
-        params = sig.parameters
-        assert "max_duration" not in params
-        assert "llm_records" not in params
-
-    def test_max_duration_flows_from_think_to_prepare(self) -> None:
-        """observe_duration == max_duration at budget boundary is accepted end-to-end."""
-        agent = make_react_agent(
-            [
-                # prefix_len=0, tool_calls_limit=1 -> max_duration = max(0, 1-0) = 1; duration=1 OK.
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 2, "y": 3}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
-            ],
-            tool_calls_limit=1,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 5
-
-
-class TestCacheRefValidation:
-    """Three-category cache-ref validation for PlanAct and ReAct, plus B1 FAILED step visibility."""
-
-    # ── PlanAct out-of-range ────────────────────────────────────────────────
-
-    def test_planact_out_of_range_cache_ref_raises(self) -> None:
-        """PlanAct: cache index beyond cache length raises with 'do not exist' message."""
-        agent = make_planact_agent(
-            [
-                json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__c5__>>"}},
-                ]),
-            ],
-            context_enabled=False,
-        )
-        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
-            agent.invoke({"prompt": "run"})
-
-    # ── PlanAct out-of-conversation ──────────────────────────────────────────
-
-    def test_planact_out_of_conv_cache_ref_raises(self) -> None:
-        """PlanAct: cache index in range but not in either frozenset raises."""
-        agent = make_planact_agent([], context_enabled=True)
-        # Seed a slot in the blackboard directly (simulates a prior-session
-        # entry) -- ToolAgentTask has no cache_blackboard field; cache state
-        # lives only on the agent.
-        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
-        agent._blackboard.append(prior_slot)
-
-        cache_blackboard = [prior_slot.copy()]
-
-        # Parse a plan that references cache index 0.
-        plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}])
-        parsed = json.loads(plan_json)
-
-        # Both frozensets are empty -- index 0 is in-range but not from this conversation.
-        result = agent._process_plan_output(
-            parsed=parsed,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
-        assert isinstance(result, str)
-        assert "not part of this conversation" in result
-
-    # ── ReAct out-of-range ───────────────────────────────────────────────────
-
-    def test_react_out_of_range_cache_ref_raises(self) -> None:
-        """ReAct: cache index beyond cache length raises with 'do not exist' message."""
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c99__>>", "y": 1}),
-            ],
-            tool_calls_limit=1,
-            context_enabled=False,
-        )
-        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
-            agent.invoke({"prompt": "run"})
-
-    # ── ReAct out-of-conversation ────────────────────────────────────────────
-
-    def test_react_out_of_conv_cache_ref_raises(self) -> None:
-        """ReAct: in-range cache index not in either frozenset raises."""
-        agent = make_react_agent([], context_enabled=True, tool_calls_limit=1)
-        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
-        agent._blackboard.append(prior_slot)
-
-        parsed = json.loads(react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}))
-        cache_blackboard = [prior_slot.copy()]
-
-        result = agent._process_next_step_output(
-            parsed=parsed,
-            expected_step=0,
-            cache_blackboard=cache_blackboard,
-            max_duration=1,
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
-        assert isinstance(result, str)
-        assert "not part of this conversation" in result
-
-    # ── B1: FAILED step visible in ReAct snapshot ───────────────────────────
-
-    def test_failed_step_appears_in_react_snapshot(self) -> None:
-        """B1: under fail_fast=False, a FAILED running-blackboard slot is rendered
-        with status='FAILED' and error in the snapshot passed to the next step."""
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}, duration=0),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": 99}, duration=0),
-            ],
-            tool_calls_limit=2,
-            fail_fast=False,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 99
-
-        # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        # Manually seed a FAILED slot at index 0 to simulate the post-failure state.
-        failed_slot = BlackboardSlot(
-            step=0,
-            tool="Tool.tests.fail_tool",
-            args={},
-            error=RuntimeError("intentional failure"),
-            status=BlackboardSlot.FAILED,
-        )
-        task.running_blackboard[0] = failed_slot
-        task.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
-        # render_task derives prefix_len from next_step_index internally
-        # (no longer a separate parameter) -- advance the cursor to match
-        # the "after step 0, before step 1" snapshot this test wants.
-        task.next_step_index = 1
-
-        messages = agent.render_task(task)
-        # messages[-2] is the assistant turn with the running-plan snapshot
-        # (task_messages occupies the tail of the returned list: goal,
-        # snapshot, request).
-        snapshot_text = messages[-2]["content"]
-
-        assert "FAILED" in snapshot_text
-        assert "intentional failure" in snapshot_text
-
-    def test_executed_step_carries_no_failed_status_in_snapshot(self) -> None:
-        """B1: a successfully EXECUTED step does not get status=FAILED in the snapshot."""
-        agent = make_react_agent(
-            [
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
-            ],
-            tool_calls_limit=2,
-        )
-        result = agent.invoke({"prompt": "run"})
-        assert result.result == 3
-
-        # Build snapshot after step 0 executed -- check no FAILED markers.
-        task = agent._initialize_task(turns=[], prompt="react", inputs={})
-        # After invoke, the blackboard is persisted; index 0 is the executed add step.
-        exec_slot = agent.blackboard[0]
-        task.running_blackboard[0] = exec_slot
-        task.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
-        # render_task derives prefix_len from next_step_index internally
-        # (no longer a separate parameter) -- advance the cursor to match
-        # the "after step 0, before step 1" snapshot this test wants.
-        task.next_step_index = 1
-
-        messages = agent.render_task(task)
-        # messages[-2] is the assistant turn with the running-plan snapshot
-        # (task_messages occupies the tail of the returned list: goal,
-        # snapshot, request).
-        snapshot_text = messages[-2]["content"]
-
-        assert "result_ref" in snapshot_text
-        # No slot-level "status" key should appear (only FAILED slots get that field).
-        assert "'status'" not in snapshot_text

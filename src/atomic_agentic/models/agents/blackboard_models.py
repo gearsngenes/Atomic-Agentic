@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar, Mapping, Optional
+from typing import Any, Optional
 
 from ...constants.agents import (
-    ARGS_FIELD,
-    AWAIT_FIELD,
-    STEP_FIELD,
-    TOOL_FIELD,
+    ATTR_CALL_ALIAS,
+    KWARGS_UNPACK_KEY,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RETURN_VALUE_FIELD,
+    RHS_ASSIGN_ALIAS,
 )
-from ...constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ...constants.core import IDENTIFIER_PATTERN
 from ..results import AtomicResult
 
 __all__ = [
     "ConstantSpec",
-    "BlackboardSlot",
-    "CodeStatement",
+    "ToolStatement",
 ]
 
 
@@ -93,350 +94,67 @@ class ConstantSpec:
 
 
 @dataclass(slots=True)
-class BlackboardSlot:
+class ToolStatement:
     """
-    One indexed slot in the run blackboard, representing a single tool invocation.
+    One slot in a per-invocation call/statement sequence -- the single,
+    unified representation shared by ``ScriptActAgent`` (built directly from
+    real ``ast.parse`` output), ``PlanActAgent``, and ``ReActAgent`` (built
+    by ``utils/sigils.py``'s ``translate_calls`` from a JSON wire payload).
+    Exactly one concrete representation, no ABC, no per-grammar hook.
 
-    Each slot tracks the complete lifecycle of a tool call from planning through execution.
-    State transitions are tracked explicitly through ``status`` while unset field values
-    continue to use the shared ``NO_VAL`` marker:
+    ``args``/``kwargs`` are always real ``ast.expr`` nodes, regardless of
+    origin: for ``ScriptActAgent`` that's unchanged (its parser already
+    builds real ast nodes directly); for ``PlanActAgent``/``ReActAgent`` the
+    JSON wire payload's plain scalars are translated into ``ast.Constant``/
+    ``ast.Name``/``ast.JoinedStr`` nodes by ``translate_calls`` before a
+    ``ToolStatement`` is ever constructed. No ``.dependencies``/
+    ``.resolved_refs`` field exists here, ever -- dependencies are always
+    derived on demand via ``extract_identifiers`` (``utils/agents.py``) over
+    the real ``ast.expr`` tree.
 
-    State Lifecycle
-    ~~~~~~~~~~~~~~~
-    1. **Empty**: ``status="empty"``
-       - Slot allocated but not yet planned
-
-    2. **Planned**: ``status="planned"``
-       - Slot assigned a tool and raw arguments, but not yet ready for execution
-
-    3. **Prepared**: ``status="prepared"``
-       - Slot assigned resolved arguments; ready for execution
-       - Placeholder dependencies have been resolved to concrete values
-
-    4. **Executed**: ``status="executed"``
-       - Tool has been invoked successfully; result is stored
-       - Slot is now available for subsequent steps' placeholder resolution
-
-    5. **Failed**: ``status="failed"``
-       - Tool invocation failed; error is stored
-
-    Fields
-    ------
-    step : int
-        Global blackboard index (0-based). Always matches the slot's position in the
-        containing blackboard list during planning. After persistence to cache, this
-        index becomes globally unique (incremented from previous cache length).
-
-    tool : str | NO_VAL
-        Tool name (``Tool.full_name``). Set at prepare time; must reference a
-        registered tool or invoke will raise.
-
-    args : Any (typically dict)
-        Raw, unresolved arguments. May contain placeholders (``<<__sN__>>``,
-        ``<<__cN__>>``). Immutable after prepare time.
-
-    resolved_args : Any (typically dict) | NO_VAL
-        Arguments after placeholder resolution. Created at prepare time by
-        ``_resolve_placeholders(args, state=...)``. Passed to ``tool.invoke()``.
-
-    result : AtomicResult | NO_VAL
-        Full result envelope (``ToolResult``, an ``AtomicResult`` subclass)
-        produced by a successful tool invocation — preserved whole for richer
-        tracing (timing, run identity, invoker). Set by ``act()``.
-        Consumers that need the caller-facing
-        value (placeholder resolution, previews, ``return_value``) read
-        ``result.result`` directly; every such site is already gated by an
-        ``is_executed()`` check, so the envelope is guaranteed present there.
-
-    error : Any | NO_VAL
-        Exception captured during execution (if any). Set only on failure.
-        Result remains ``NO_VAL`` if error is set.
-
-    status : str
-        Explicit lifecycle status. Must be one of:
-        ``"empty"``, ``"planned"``, ``"prepared"``, ``"executed"``, or ``"failed"``.
-
-    step_dependencies : tuple[int, ...]
-        Plan-local step dependencies used by planning/batch compilation logic.
-        This field is stored directly and is not inferred from ``args``.
-
-    await_step : int | NO_VAL
-        Optional explicit scheduling barrier from a planner ``"await"`` field.
-        Defaults to ``NO_VAL`` when no await barrier is present.
-    """
-    EMPTY: ClassVar[str] = "empty"
-    PLANNED: ClassVar[str] = "planned"
-    PREPARED: ClassVar[str] = "prepared"
-    EXECUTED: ClassVar[str] = "executed"
-    FAILED: ClassVar[str] = "failed"
-
-    VALID_STATUSES: ClassVar[frozenset[str]] = frozenset(
-        {
-            EMPTY,
-            PLANNED,
-            PREPARED,
-            EXECUTED,
-            FAILED,
-        }
-    )
-
-    RESOLVED_ARGS_FIELD: ClassVar[str] = "resolved_args"
-    RESULT_FIELD: ClassVar[str] = "result"
-    ERROR_FIELD: ClassVar[str] = "error"
-    STATUS_FIELD: ClassVar[str] = "status"
-    STEP_DEPENDENCIES_FIELD: ClassVar[str] = "step_dependencies"
-    AWAIT_STEP_FIELD: ClassVar[str] = "await_step"
-
-    FROM_DICT_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {
-            STEP_FIELD,
-            TOOL_FIELD,
-            ARGS_FIELD,
-            RESOLVED_ARGS_FIELD,
-            RESULT_FIELD,
-            ERROR_FIELD,
-            STATUS_FIELD,
-            STEP_DEPENDENCIES_FIELD,
-            AWAIT_FIELD,
-            AWAIT_STEP_FIELD,
-        }
-    )
-
-    step: int
-
-    tool: str | Any = NO_VAL
-    args: Any = NO_VAL
-    resolved_args: Any = NO_VAL
-    result: AtomicResult | Any = NO_VAL
-    error: Any = NO_VAL
-    status: str = EMPTY
-    step_dependencies: tuple[int, ...] = ()
-    await_step: int | Any = NO_VAL
-
-    def __post_init__(self) -> None:
-        self._validate_step(self.step)
-        self._validate_status(self.status)
-        self.step_dependencies = self._normalize_step_dependencies(
-            self.step_dependencies
-        )
-        self._validate_await_step(self.await_step)
-
-    @staticmethod
-    def _validate_step(value: Any) -> None:
-        if type(value) is not int or value < 0:
-            raise ValueError("BlackboardSlot.step must be an int >= 0.")
-
-    @classmethod
-    def _validate_status(cls, value: Any) -> None:
-        if not isinstance(value, str) or value not in cls.VALID_STATUSES:
-            raise ValueError(
-                "BlackboardSlot.status must be one of: "
-                f"{', '.join(sorted(cls.VALID_STATUSES))}."
-            )
-
-    @staticmethod
-    def _normalize_step_dependencies(value: Any) -> tuple[int, ...]:
-        if value is NO_VAL or value is None:
-            return tuple()
-
-        if isinstance(value, int) and not isinstance(value, bool):
-            raw_values = [value]
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            raw_values = list(value)
-        else:
-            raise ValueError(
-                "BlackboardSlot.step_dependencies must be an int or an iterable of ints."
-            )
-
-        normalized: set[int] = set()
-        for dep in raw_values:
-            if type(dep) is not int or dep < 0:
-                raise ValueError(
-                    "BlackboardSlot.step_dependencies must contain only ints >= 0."
-                )
-            normalized.add(dep)
-
-        return tuple(sorted(normalized))
-
-    @staticmethod
-    def _validate_await_step(value: Any) -> None:
-        if value is NO_VAL:
-            return
-        if type(value) is not int or value < 0:
-            raise ValueError("BlackboardSlot.await_step must be NO_VAL or an int >= 0.")
-
-    def is_empty(self) -> bool:
-        return self.status == self.EMPTY
-
-    def is_planned(self) -> bool:
-        return self.status == self.PLANNED
-
-    def is_prepared(self) -> bool:
-        return self.status == self.PREPARED
-
-    def is_executed(self) -> bool:
-        return self.status == self.EXECUTED
-
-    def is_failed(self) -> bool:
-        return self.status == self.FAILED
-
-    def copy(self) -> "BlackboardSlot":
-        """Return a shallow copy of this blackboard slot."""
-        return BlackboardSlot(
-            step=self.step,
-            tool=self.tool,
-            args=self.args,
-            resolved_args=self.resolved_args,
-            result=self.result,
-            error=self.error,
-            status=self.status,
-            step_dependencies=self.step_dependencies,
-            await_step=self.await_step,
-        )
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "BlackboardSlot":
-        """
-        Construct a blackboard slot from a mapping.
-
-        This method does not inspect ``args`` or infer dependencies. Dependency metadata
-        should be passed directly through ``step_dependencies`` by the caller.
-
-        The planner-facing key ``"await"`` is accepted as an alias for ``await_step``.
-        """
-        if not isinstance(data, Mapping):
-            raise TypeError(
-                f"BlackboardSlot.from_dict requires a mapping; got {type(data).__name__!r}."
-            )
-
-        extra = set(data.keys()) - cls.FROM_DICT_FIELDS
-        if extra:
-            raise ValueError(
-                f"BlackboardSlot.from_dict received unsupported keys: {sorted(extra)!r}."
-            )
-
-        if STEP_FIELD not in data:
-            raise ValueError(
-                f"BlackboardSlot.from_dict missing required key: {STEP_FIELD!r}."
-            )
-
-        if AWAIT_FIELD in data and cls.AWAIT_STEP_FIELD in data:
-            raise ValueError(
-                f"BlackboardSlot.from_dict received both {AWAIT_FIELD!r} and "
-                f"{cls.AWAIT_STEP_FIELD!r}; provide only one."
-            )
-
-        await_step = data.get(
-            cls.AWAIT_STEP_FIELD,
-            data.get(AWAIT_FIELD, NO_VAL),
-        )
-
-        return cls(
-            step=data[STEP_FIELD],
-            tool=data.get(TOOL_FIELD, NO_VAL),
-            args=data.get(ARGS_FIELD, NO_VAL),
-            resolved_args=data.get(cls.RESOLVED_ARGS_FIELD, NO_VAL),
-            result=data.get(cls.RESULT_FIELD, NO_VAL),
-            error=data.get(cls.ERROR_FIELD, NO_VAL),
-            status=data.get(cls.STATUS_FIELD, cls.EMPTY),
-            step_dependencies=data.get(cls.STEP_DEPENDENCIES_FIELD, tuple()),
-            await_step=await_step,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            STEP_FIELD: self.step,
-            TOOL_FIELD: self.tool,
-            ARGS_FIELD: self.args,
-            self.RESOLVED_ARGS_FIELD: self.resolved_args,
-            self.RESULT_FIELD: self.result,
-            self.ERROR_FIELD: self.error,
-            self.STATUS_FIELD: self.status,
-            self.STEP_DEPENDENCIES_FIELD: self.step_dependencies,
-            self.AWAIT_STEP_FIELD: self.await_step,
-        }
-
-
-@dataclass(slots=True)
-class CodeStatement:
-    """
-    One slot in a ScriptAgent subtask's per-invocation statement sequence.
-
-    Every generated statement normalizes to this one call-shaped record --
-    a real tool call (``tool`` = the call's dotted name, optionally a bare
-    unassigned call with ``identifier=None``), a bare expression (``tool``
-    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), a terminal
-    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``),
-    or a rewritten Python builtin call (``tool`` = ``PY_BUILTIN_ALIAS``,
-    structurally a real tool call with the builtin's name spliced into
-    ``args[0]`` as a plain ``str`` by ``rewrite_builtin_calls`` -- the one
-    exception to the rule below, since it's a post-parse rewrite, not
-    something the model itself wrote as an expression). Every other
-    ``args``/``kwargs`` value is always the original ``ast.expr`` node the
-    model wrote, whether or not the expression has a dependency on
-    another slot's identifier -- a dependency-free expression is only
-    dry-run evaluated at parse time (catching a guaranteed-bad constant
-    expression early), never folded into a plain value; the sole
-    ``resolve_slot_args`` call at prepare time is where every such value,
-    dependency-bearing or not, actually resolves to a plain Python value.
     Mutable (not frozen) -- ``result``/``exception`` are populated after
     construction by a future ``act()``-phase caller.
 
     Fields
     ------
     identifier : str | None
-        This slot's bound name -- the statement's LHS, or a synthesized
-        ``_SUB_N`` name for an auto-hoisted nested call. ``None`` for a
-        bare (unassigned) call or a ``return`` statement -- never
-        resolvable by name, and never written into
-        ``ScriptAgentTask.cache``.
+        This slot's bound name. ``None`` for a bare (unassigned) call or a
+        terminal ``return``. A JSON-sourced identifier has already been
+        normalized (stripped, ``$``-prefix removed, blank-collapsed to
+        ``None``) by ``translate_calls`` *before* this constructor ever
+        runs; a ``ScriptActAgent``-sourced identifier is always already
+        ast-sourced-legal. One uniform legality check applies here either
+        way -- no per-grammar leniency hook.
 
     tool : str
-        Dotted call name (e.g. ``"Type.namespace.name"``), or
-        ``RHS_ASSIGN_ALIAS`` (``"rhs_assign"``) for a bare-expression
-        statement. ``rhs_assign``/``RETURN_ALIAS`` calls never count
-        against tool-call budget accounting -- they're never dispatched at
-        all. ``PY_BUILTIN_ALIAS`` (``"py_builtin"``) marks a rewritten
-        approved-builtin call -- dispatches through a real ``Tool``
-        (``agents.tools.builtin_call_tool``) and counts toward tool-call
-        budget accounting identically to a real registered-tool call (no
-        exemption).
+        The call's identity -- a dotted call name, a registered tool's
+        alias/``full_name``, or a grammar-specific sentinel (``RHS_ASSIGN_
+        ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` for
+        a ``ScriptActAgent``-sourced statement; ``RETURN_ALIAS`` is the only
+        sentinel a ``PlanActAgent``/``ReActAgent``-sourced statement ever
+        carries). Must be a non-empty string.
 
-    args : tuple[Any, ...]
-        Positional call arguments, in source order. Each entry is an
-        ``ast.expr`` (dependency-bearing or not -- see class docstring) or
-        an ``ast.Starred`` (a ``*expr`` unpack, its Starred-ness preserved
-        regardless of whether its own inner expr has dependencies, so it
-        survives to resolve time) -- except ``args[0]`` on a
-        ``PY_BUILTIN_ALIAS`` slot, a plain ``str`` (see class docstring).
-        Empty for a keyword-only call, or for the ``rhs_assign``/
-        ``return`` sentinel shape (which lives entirely in ``kwargs``).
+    args : tuple[ast.expr, ...]
+        Positional call arguments, in source order. Normalized to a tuple
+        from whatever tuple/list was supplied. Always real ``ast.expr``
+        (or ``ast.Starred``, itself an ``ast.expr`` subtype) nodes.
 
-    kwargs : dict[str, Any]
-        Keyword call arguments (real tool call), or ``{"val": <expr>}``
-        (``rhs_assign``/``return``). Each value is an ``ast.expr`` node --
-        see class docstring. A ``**expr`` unpack is stored under the
-        reserved key ``constants.agents.KWARGS_UNPACK_KEY`` (``"**"``,
-        never a valid Python identifier, so it never collides with a real
-        parameter name) -- at most one per statement.
+    kwargs : dict[str, ast.expr]
+        Keyword call arguments. Same element-type guarantee as ``args``.
 
     batch_index : int | None
         Which concurrently-dispatched batch this slot belongs to, stamped
-        once by ``compile_batches`` when the batch closes. ``None`` until
-        then -- never observed externally in that state, since only
-        committed slots (always already batch-stamped) ever reach
-        ``.completed`` or a rendered record. Not defensively validated in
-        ``__post_init__``, matching ``result``/``exception``'s treatment
-        below: set internally by framework lifecycle code, not derived
-        from external/LLM input.
+        once by the shared batch compiler (``utils/agents.py``'s
+        ``compile_batches``) when the batch closes. ``None`` until then. Not
+        defensively validated -- set internally by framework lifecycle code,
+        not derived from external/LLM input.
 
     result : AtomicResult | None
         Full result envelope from a future ``act()``-phase caller. ``None``
         until executed.
 
     exception : Exception | None
-        Live exception object from a failed execution attempt, or a
-        ``DependencyFailedError`` if a dependency itself failed. ``None``
+        Live exception object from a failed execution attempt. ``None``
         until a failure occurs. Not stringified.
     """
 
@@ -449,37 +167,41 @@ class CodeStatement:
     exception: Exception | None = None
 
     def __post_init__(self) -> None:
-        # 1. identifier, if not None, must be a non-empty, Python-
-        # identifier-legal string. None means a bare call or return.
+        # 1. identifier: if not None, must be a non-empty, IDENTIFIER_
+        # PATTERN-legal string -- hard raise otherwise. Safe unconditionally
+        # now: a ScriptActAgent-sourced identifier is always already
+        # ast-sourced-legal; a JSON-sourced identifier has already been
+        # normalized (stripped, $-prefix removed, blank-collapsed to None)
+        # by translate_calls before this constructor ever runs -- no
+        # leniency needed here.
         if self.identifier is not None and (
             not isinstance(self.identifier, str)
             or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
         ):
             raise ValueError(
-                "CodeStatement.identifier must be None or a non-empty, "
+                "ToolStatement.identifier must be None or a non-empty, "
                 f"Python-identifier-legal string; got {self.identifier!r}."
             )
 
-        # 2. tool must be a non-empty string (dotted call names are not
-        # bare identifiers, so IDENTIFIER_PATTERN does not apply here).
+        # 2. tool must be a non-empty string.
         if not isinstance(self.tool, str) or not self.tool.strip():
             raise ValueError(
-                f"CodeStatement.tool must be a non-empty string; got {self.tool!r}."
+                f"ToolStatement.tool must be a non-empty string; got {self.tool!r}."
             )
 
-        # 3. args must be a tuple or list (no per-element validation --
-        # values may be literally anything, including raw ast nodes).
+        # 3. args must be a tuple or list (no per-element validation).
         # Normalized to a tuple below.
         if isinstance(self.args, (str, bytes)) or not isinstance(self.args, (tuple, list)):
             raise TypeError(
-                f"CodeStatement.args must be a tuple or list; got {type(self.args).__name__!r}."
+                f"ToolStatement.args must be a tuple or list; "
+                f"got {type(self.args).__name__!r}."
             )
         self.args = tuple(self.args)
 
         # 4. kwargs must be a dict.
         if not isinstance(self.kwargs, dict):
             raise TypeError(
-                f"CodeStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
+                f"ToolStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
             )
 
         # 5. batch_index/result/exception are set internally by framework
@@ -491,22 +213,75 @@ class CodeStatement:
         """
         Return the explicit serialized dictionary representation, for
         debugging/observability only -- never used to reconstruct or
-        re-plan. An args/kwargs value still an unresolved ``ast.expr``/
-        ``ast.Starred`` (this slot depended on another slot's identifier,
-        never folded back per ``resolve_slot_args``'s own docstring) is
-        rendered as its source text via ``ast.unparse`` rather than the
-        raw AST node, which is not JSON-serializable.
+        re-plan. Renders a value via ``ast.unparse(value)`` if it's an
+        ``ast.expr``, else passes it through unchanged -- the one rendering
+        rule needed now that args/kwargs are always ``ast.expr``.
         """
-
-        def render(value: Any) -> Any:
+        def render_value(value: Any) -> Any:
             return ast.unparse(value) if isinstance(value, ast.expr) else value
 
         return {
             "identifier": self.identifier,
             "tool": self.tool,
-            "args": [render(value) for value in self.args],
-            "kwargs": {key: render(value) for key, value in self.kwargs.items()},
+            "args": [render_value(value) for value in self.args],
+            "kwargs": {key: render_value(value) for key, value in self.kwargs.items()},
             "batch_index": self.batch_index,
             "result": self.result.to_dict() if self.result is not None else None,
             "exception": repr(self.exception) if self.exception is not None else None,
         }
+
+    def to_code(self) -> str:
+        """
+        Render this statement as one line of real Python source. For a
+        ``PlanActAgent``/``ReActAgent``-sourced statement (``tool`` is a
+        real registered tool or ``RETURN_ALIAS``, ``args``/``kwargs`` are
+        ``Name``/``Constant``/``JoinedStr`` only), this produces real Python
+        source with zero extra code -- the renderer only ever inspects
+        ``ast.expr``-ness, never which grammar produced the node.
+
+        ``RETURN_ALIAS`` needs its value read from either ``kwargs`` or
+        ``args``, not ``kwargs`` alone: ``RETURN_TOOL_NAME`` (``ReActAgent``'s
+        real, dispatched ``return`` tool) and ``RETURN_ALIAS``
+        (``PlanActAgent``'s synthesized, non-dispatched sentinel) are the
+        identical string ``"return"`` (see ``agents/react.py``'s own module
+        docstring). ``PlanActAgent``'s sentinel is always framework-built
+        with ``kwargs={"val": ...}``, but ``ReActAgent``'s real call is
+        model-authored like any other tool call -- its one argument may be
+        given positionally (``"name": null``) just as legally as by keyword,
+        landing in ``args`` instead.
+        """
+
+        def render_value(value: Any) -> str:
+            return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
+
+        if self.tool == RETURN_ALIAS:
+            value = self.kwargs[RETURN_VALUE_FIELD] if RETURN_VALUE_FIELD in self.kwargs else self.args[0]
+            return f"return {render_value(value)}"
+
+        prefix = f"{self.identifier} = " if self.identifier is not None else ""
+        if self.tool == RHS_ASSIGN_ALIAS:
+            return f"{prefix}{render_value(self.kwargs['val'])}"
+
+        # A py_builtin slot renders back as the original natural call syntax
+        # (`len(x)`), never the internal rewritten form (`py_builtin('len',
+        # x)`) -- unsplice the builtin name before falling into the same
+        # generic rendering as any real tool call. An attr_call slot gets the
+        # same treatment: `obj.method(args)`, not the internal (obj, "method",
+        # *args) shape.
+        if self.tool == PY_BUILTIN_ALIAS:
+            call_name, call_args = self.args[0], self.args[1:]
+        elif self.tool == ATTR_CALL_ALIAS:
+            call_name, call_args = f"{render_value(self.args[0])}.{self.args[1]}", self.args[2:]
+        else:
+            call_name, call_args = self.tool, self.args
+
+        positional_tokens = [
+            f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
+            for entry in call_args
+        ]
+        keyword_tokens = [
+            f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
+            for name, value in self.kwargs.items()
+        ]
+        args_source = ", ".join(positional_tokens + keyword_tokens)
+        return f"{prefix}{call_name}({args_source})"

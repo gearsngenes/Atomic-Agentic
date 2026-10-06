@@ -505,8 +505,8 @@ class Agent(AtomicInvokable, ABC):
     # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
     # bare AgentTask is subclass-agnostic base-contract work. BasicAgent
     # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
-    # since only PlanActAgent/ReActAgent know how to build their own richer
-    # ToolAgentTask subclass; the bare AgentTask this base method returns
+    # since only PlanActAgent/ReActAgent/ScriptActAgent know how to build
+    # their own richer AgentTask subclass; the bare AgentTask this base method returns
     # isn't sufficient for them. act stays @abstractmethod here — every
     # subclass's advance-by-one-round execution logic genuinely differs.
     def _initialize_task(
@@ -685,10 +685,13 @@ class Agent(AtomicInvokable, ABC):
     ) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
-        ``BasicAgent`` uses this base implementation as-is; ``ToolAgent``
-        overrides it to return a ``ToolAgentRecord`` with blackboard
-        bookkeeping folded in. ``final_result`` is deliberately left at its
-        dataclass default (``None``) — it is not knowable until
+        ``BasicAgent`` uses this base implementation as-is; ``PlanActAgent``/
+        ``ReActAgent``/``ScriptActAgent`` each override it directly (not via
+        a shared ``ToolAgent`` implementation) to return their own richer
+        ``ToolAgentRecord``-family (or, for ``ScriptActAgent``,
+        ``ScriptActAgentRecord``) subclass. ``final_result`` is
+        deliberately left at its dataclass default (``None``) — it is not
+        knowable until
         ``build_result_from_record`` runs afterward; the caller attaches it
         via ``dataclasses.replace(...)``.
         """

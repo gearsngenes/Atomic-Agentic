@@ -7,10 +7,8 @@ from atomic_agentic.constants.agents import (
     CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
-    FINAL_ROUND_WARNING,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
-    PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -69,16 +67,6 @@ class TestDunderAttributePattern:
         assert not DUNDER_ATTRIBUTE_PATTERN.fullmatch("public")
 
 
-class TestPausePattern:
-    def test_matches_pause_comment_case_insensitively(self) -> None:
-        assert PAUSE_PATTERN.match("# PAUSE")
-        assert PAUSE_PATTERN.match("#PAUSE")
-        assert PAUSE_PATTERN.match("# pause")
-
-    def test_does_not_match_trailing_non_pause_comment(self) -> None:
-        assert not PAUSE_PATTERN.match("x = 1  # not a pause")
-
-
 class TestCodeFencePatterns:
     def test_code_fence_pattern_matches_full_block(self) -> None:
         match = CODE_FENCE_PATTERN.match("```python\nx = 1\n```")
@@ -103,10 +91,3 @@ class TestUnsupportedExprLabels:
     def test_labels_are_non_empty_strings(self) -> None:
         for label in UNSUPPORTED_EXPR_LABELS.values():
             assert isinstance(label, str) and label.strip()
-
-
-class TestFinalRoundWarning:
-    def test_is_a_non_empty_string_mentioning_pause(self) -> None:
-        assert isinstance(FINAL_ROUND_WARNING, str)
-        assert FINAL_ROUND_WARNING.strip()
-        assert "# PAUSE" in FINAL_ROUND_WARNING

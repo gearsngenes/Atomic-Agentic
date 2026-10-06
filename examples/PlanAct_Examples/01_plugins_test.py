@@ -1,18 +1,16 @@
-﻿from dotenv import load_dotenv
-import logging
+﻿import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
-from atomic_agentic.llm import OpenAIEngine
 
-load_dotenv()
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
 print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
     namespace="examples",
@@ -22,12 +20,12 @@ agent = PlanActAgent(
 )
 
 # Register tool lists
-agent.batch_register(EXPONENT_TOOLS)
-agent.batch_register(BASIC_MATH_TOOLS)
-agent.batch_register(CONSOLE_TOOLS)
+agent.register_tools(EXPONENT_TOOLS)
+agent.register_tools(BASIC_MATH_TOOLS)
+agent.register_tools(CONSOLE_TOOLS)
 
-# Register the pi constant
-agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
+# Register the pi constant (value first, then alias/description)
+agent.register_constant(math.pi, alias="PI", description="Mathematical constant `pi`")
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -43,6 +41,6 @@ result = agent.invoke({"prompt": task_prompt})
 from pprint import pprint
 print("\n=== FINAL AGENT RESULT ===")
 pprint(result)
-print("BLACKBOARD AFTER MATH DEMO:")
-pprint(agent.blackboard)
+print("EXECUTED CALLS AFTER MATH DEMO:")
+print(agent.get_conversation()[-1].render_as_code())
 agent.clear_memory()

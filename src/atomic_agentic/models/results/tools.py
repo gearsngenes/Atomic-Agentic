@@ -84,7 +84,7 @@ class PyA2AtomicToolResult(ToolResult):
         The invokable name registered on the remote host.
     invokable_type:
         Class name of the remote invokable as reported by the host
-        (e.g. ``"Tool"``, ``"Agent"``, ``"ToolAgent"``). Reflects the
+        (e.g. ``"Tool"``, ``"Agent"``, ``"JsonToolAgent"``). Reflects the
         metadata snapshot at the time of this invocation.
     """
 

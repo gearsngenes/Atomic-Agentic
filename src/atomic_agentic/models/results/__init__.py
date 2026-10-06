@@ -3,7 +3,14 @@ from __future__ import annotations
 from .atomic import AtomicResult
 from .commands import CommandResult
 from .structured import StructuredResult
-from .agents import AgentResult, ToolAgentResult, ThinkingAgentResult, ToolUsageRecord
+from .agents import (
+    AgentResult,
+    ToolAgentResult,
+    ScriptActAgentResult,
+    ThinkingAgentResult,
+    ToolUsageRecord,
+    ToolUsageReport,
+)
 from .llm import (
     AnthropicTokenUsage,
     GeminiTokenUsage,
@@ -49,8 +56,10 @@ __all__ = [
     "LlamaCppModelData",
     "LLMResult",
     "ToolUsageRecord",
+    "ToolUsageReport",
     "AgentResult",
     "ToolAgentResult",
+    "ScriptActAgentResult",
     "ThinkingAgentResult",
     "WorkflowResult",
     "SequentialFlowResult",

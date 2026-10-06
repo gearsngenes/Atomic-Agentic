@@ -5,6 +5,120 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a32] - 2026-10-05
+
+This release rewrites `PlanActAgent` and `ReActAgent` from the ground up onto
+a single shared, sigil-based JSON call grammar, renames `ScriptAgent` to
+`ScriptActAgent`, and introduces a new abstract `ToolAgent` base class that
+unifies tool/constant registration, execution knobs, and shared rendering
+across all three concrete tool-calling agent families (replacing a
+short-lived, now-removed `JsonToolAgent` tier introduced earlier in this
+release's own development). Both rewritten agents move from hand-parsed,
+prompted JSON onto native `output_structure` strict-mode schemas, gain real
+per-tool usage reporting, and `ScriptActAgent` drops its voluntary `# PAUSE`
+self-continuation in favor of a bounded, framework-driven repair mechanism. A
+new, optional `tool_instructions` construction-time field lets any
+`ToolAgent` bake standing behavioral guidance into construction instead of
+repeating it in every task prompt. An exploratory fourth agent family
+(`DagAgent`) was fully built and live-tested across five providers during
+this release's design process, then removed once its design was fully
+absorbed into the rewritten `PlanActAgent`/`ReActAgent`. This is a breaking
+release: `ScriptAgent` no longer exists (renamed `ScriptActAgent`),
+`JsonToolAgent` no longer exists (absorbed into `ToolAgent`), and
+`batch_register` is removed in favor of `register_tool`/`register_tools`.
+
+### Added
+
+- `tool_instructions: str | PromptConfig | None` -- new optional
+  construction-time field on `ToolAgent`, shared by `PlanActAgent`/
+  `ReActAgent`/`ScriptActAgent`. Lets a user describe standing rules for how
+  an agent should use its registered tools (e.g. "always call the outliner
+  first, then alternate reviewer/writer") once at construction instead of
+  repeating it in every task prompt. Any `{name}`-style placeholder it
+  contains becomes a real, per-invocation agent parameter rendered against
+  that invocation's own inputs -- mirrors `BasicAgent.role_prompt`/
+  `ThinkingAgent.thinking_instructions`.
+- New abstract `ToolAgent(Agent, ABC)` base class -- the shared ancestor of
+  `PlanActAgent`, `ReActAgent`, and `ScriptActAgent`. Owns tool registration
+  (`register_tool`/`register_tools`/`list_tools`/`has_tool`/`get_tool`/
+  `remove_tool`/`clear_tools`), constant registration, and the execution
+  knobs common to all three (`tool_calls_limit`, `regeneration_limit`,
+  `tool_concurrency_limit`).
+- `ToolAgentRecord.usage_report()` / `ToolAgentResult.usage_report` -- a
+  shared, per-tool-name dispatch/failure usage report now available on every
+  `ToolAgent` family, not just `ScriptActAgent`'s own prior breakdown.
+- New examples: `ReAct_Examples/04_incident_responder.py`,
+  `ScriptAct_Examples/06_replanning_demo.py`; a shared, provider-switchable
+  `shared_engine.py` added to the `PlanAct_Examples/` and `ReAct_Examples/`
+  directories (`ScriptAct_Examples/` already had its own).
+
+### Changed
+
+- breaking: `ScriptAgent` is renamed `ScriptActAgent`; its examples moved
+  from `examples/ScriptAgent_Examples/` to `examples/ScriptAct_Examples/`.
+- breaking: `PlanActAgent` and `ReActAgent` are substantially rewritten --
+  both move from a hand-rolled, prompted-JSON placeholder grammar onto a
+  native `output_structure` strict-mode JSON schema with `$name`-sigil value
+  resolution (the same resolution mechanism `ScriptActAgent` already used).
+  Their task/record/result shapes, system prompts, and internal call
+  representation all changed; their public construction and
+  `.invoke()`/`.async_invoke()` contracts are unchanged.
+- breaking: `JsonToolAgent` (a short-lived intermediate tier introduced
+  earlier in this release's own development) no longer exists -- its
+  registration/constants/limits surface was absorbed directly into the new
+  `ToolAgent` base.
+- breaking: `batch_register` is removed. Use `register_tool`/`register_tools`
+  (alias-based, available uniformly on every `ToolAgent`) instead.
+- `ScriptActAgent` no longer supports a voluntary `# PAUSE` self-continuation
+  -- a plan either completes or fails and triggers a bounded,
+  framework-driven repair round (`replanning_limit`), matching the recovery
+  mechanism `PlanActAgent`/`ReActAgent` also use for execution failures.
+- breaking: `CodeStatement` is renamed/generalized to `ToolStatement` -- now
+  the shared statement representation across all three tool-calling agent
+  families, each concrete statement representable as both a JSON dict and
+  reconstructed Python source.
+- Registered constants keep their `K_`-prefixed wire name, but a new result
+  name is now rejected only if it actually collides with a real registered
+  constant or an actual `task_result_N` entry this run -- not merely for
+  looking `K_`-prefix-shaped.
+
+### Fixed
+
+- Six unconditional debug `print()` statements left in `PlanActAgent`/
+  `ReActAgent` from this release's own development (dumping raw
+  LLM-generated plan/step JSON to stdout every round) replaced with proper
+  `logger.debug(...)` calls.
+- `tools/prebuilt.py`'s `log_trace` tool called a `logging.TRACE` level that
+  does not exist in Python's standard library -- always raised
+  `AttributeError`. Removed outright, along with its entry in
+  `CONSOLE_TOOLS`.
+- `examples/Tool_Examples/math_host_server.py` and
+  `inter_agent_host_server.py` still called the removed `batch_register` API
+  and would crash immediately -- updated to `register_tools(...)`.
+- `README.md`'s `ScriptAgent` quickstart was left over from `v2.0.0a30` and
+  never updated for this rename -- it imported the no-longer-existing
+  `ScriptAgent`/`MATH_TOOLS` names and pointed at the old
+  `examples/ScriptAgent_Examples/` path. Fixed to `ScriptActAgent`/
+  `BASIC_MATH_TOOLS`/`examples/ScriptAct_Examples/`, and its stale "superseded
+  by ScriptAgent" note on `PlanActAgent`/`ReActAgent` replaced with an
+  accurate description of the two classes' actual difference.
+
+### Removed
+
+- `examples/ScriptAgent_Examples/05_reactive_codewriter.py` -- removed, not
+  carried over into `ScriptAct_Examples/` (the directory's remaining
+  examples were renumbered after its removal).
+- `tools/prebuilt.py`'s dead `is_in`/`if_else_select` functions (never
+  wrapped in a `Tool` or registered anywhere).
+- `utils/agents.py::extract_dependencies` -- fully dead code referencing
+  placeholder constants that no longer exist anywhere in `src/`.
+- The exploratory `DagAgent` class, its dedicated models/utils, and its wire
+  schema -- fully built and live-tested across five providers during this
+  release, then removed once its design (native `output_structure`
+  strict-mode planning, `$name`-sigil resolution) was fully absorbed into
+  the rewritten `PlanActAgent`/`ReActAgent` instead of shipping as a
+  separate fourth agent family.
+
 ## [2.0.0a31] - 2026-09-17
 
 This release rebuilds `SelfAskAgent` into `ThinkingAgent`: a renamed,

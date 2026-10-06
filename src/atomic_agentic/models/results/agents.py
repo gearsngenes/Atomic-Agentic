@@ -9,8 +9,10 @@ from .llm import LLMModelData, TokenUsage
 
 __all__ = [
     "ToolUsageRecord",
+    "ToolUsageReport",
     "AgentResult",
     "ToolAgentResult",
+    "ScriptActAgentResult",
     "ThinkingAgentResult",
 ]
 
@@ -49,6 +51,70 @@ class ToolUsageRecord:
         return {
             "tool_name": self.tool_name,
             "call_count": self.call_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUsageReport:
+    """
+    Per-invocation tool-usage report, shared identically by every concrete
+    ToolAgent (ScriptActAgent/PlanActAgent/ReActAgent).
+
+    Fields
+    ------
+    by_tool:
+        One entry per distinct real tool identity actually dispatched,
+        ordered by first-call order, ``call_count >= 1`` each.
+
+    total_dispatched:
+        Sum of every ``by_tool`` entry's ``call_count`` -- every dispatched
+        call this run, successful or failed, across every tool identity.
+
+    total_failed:
+        Count of dispatched calls that actually raised this run (the subset
+        of ``total_dispatched`` that failed). ``total_dispatched -
+        total_failed`` is the successful-dispatch count.
+    """
+
+    by_tool: tuple[ToolUsageRecord, ...]
+    total_dispatched: int
+    total_failed: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.by_tool, Sequence) or isinstance(self.by_tool, (str, bytes, bytearray)):
+            raise TypeError(
+                "ToolUsageReport.by_tool must be a sequence of ToolUsageRecord "
+                f"instances, got {type(self.by_tool).__name__}."
+            )
+
+        normalized = tuple(self.by_tool)
+
+        for index, record in enumerate(normalized):
+            if not isinstance(record, ToolUsageRecord):
+                raise TypeError(
+                    "ToolUsageReport.by_tool must contain only ToolUsageRecord "
+                    f"instances; item {index} is {type(record).__name__}."
+                )
+
+        object.__setattr__(self, "by_tool", normalized)
+
+        if isinstance(self.total_dispatched, bool) or not isinstance(self.total_dispatched, int) or self.total_dispatched < 0:
+            raise ValueError(
+                "ToolUsageReport.total_dispatched must be a non-negative int, "
+                f"got {self.total_dispatched!r}."
+            )
+        if isinstance(self.total_failed, bool) or not isinstance(self.total_failed, int) or self.total_failed < 0:
+            raise ValueError(
+                "ToolUsageReport.total_failed must be a non-negative int, "
+                f"got {self.total_failed!r}."
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        return {
+            "by_tool": [r.to_dict() for r in self.by_tool],
+            "total_dispatched": self.total_dispatched,
+            "total_failed": self.total_failed,
         }
 
 
@@ -119,87 +185,88 @@ class AgentResult(AtomicResult):
 @dataclass(frozen=True, slots=True)
 class ToolAgentResult(AgentResult):
     """
-    Successful ToolAgent invocation result.
+    Successful ToolAgent invocation result. Shared directly by
+    ``PlanActAgent``/``ReActAgent``, and the base class of
+    ``ScriptActAgentResult`` too.
 
-    Extends ``AgentResult`` with per-tool call-count accounting and optional
-    partial-failure records when the agent ran with ``fail_fast=False``.
+    Extends ``AgentResult`` with per-tool call-count accounting and a
+    lightweight failure summary when the agent ran with ``fail_fast=False``.
 
     Fields
     ------
-    tool_usage:
-        Ordered tuple of per-tool usage records, ordered by first-call order
-        within the invocation. May be empty if no non-return tools executed.
+    usage_report:
+        ``ToolUsageReport`` summarizing per-tool call counts plus
+        ``total_dispatched``/``total_failed`` for the invocation. Re-derived
+        (by the caller, e.g. ``PlanActAgent.build_result_from_record``) from
+        ``record.usage_report()`` rather than a blackboard span.
 
-    exception_records:
-        Tuple of ``(global_blackboard_index, exception)`` pairs for every
-        tool slot that failed during the run. Empty when ``fail_fast=True``
-        (failures raise immediately) or when all tools succeeded.
-        The index is the absolute position of the failed slot in the agent's
-        persistent blackboard after ``update_blackboard`` has run.
+    failed_call_count:
+        Count of calls whose dispatch actually raised this run -- a cheap
+        "did anything fail, how much" summary only; the rich per-failure
+        detail (identifier, tool, args, the actual exception) lives on
+        ``record.failed_statements`` instead. ``0`` when ``fail_fast=True``
+        (failures raise immediately) or when nothing failed.
+
+    regenerations_used:
+        Threaded from ``record.regenerations_used`` verbatim.
     """
 
-    tool_usage: tuple[ToolUsageRecord, ...]
-    exception_records: tuple[tuple[int, Exception], ...] = ()
+    usage_report: ToolUsageReport
+    failed_call_count: int = 0
+    regenerations_used: int = 0
 
     def __post_init__(self) -> None:
-        normalized_tool_usage = self._normalize_tool_usage(self.tool_usage)
-        object.__setattr__(self, "tool_usage", normalized_tool_usage)
-        normalized_exc = self._normalize_exception_records(self.exception_records)
-        object.__setattr__(self, "exception_records", normalized_exc)
+        if not isinstance(self.usage_report, ToolUsageReport):
+            raise TypeError(
+                "ToolAgentResult.usage_report must be a ToolUsageReport instance, "
+                f"got {type(self.usage_report).__name__}."
+            )
         AgentResult.__post_init__(self)
-
-    @staticmethod
-    def _normalize_tool_usage(value: Any) -> tuple[ToolUsageRecord, ...]:
-        """Validate and normalize the invocation's tool usage records."""
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-            raise TypeError(
-                "ToolAgentResult.tool_usage must be a sequence of ToolUsageRecord "
-                f"instances, got {type(value).__name__}."
-            )
-
-        normalized = tuple(value)
-
-        for index, record in enumerate(normalized):
-            if not isinstance(record, ToolUsageRecord):
-                raise TypeError(
-                    "ToolAgentResult.tool_usage must contain only ToolUsageRecord "
-                    f"instances; item {index} is {type(record).__name__}."
-                )
-
-        return normalized
-
-    @staticmethod
-    def _normalize_exception_records(
-        value: Any,
-    ) -> tuple[tuple[int, Exception], ...]:
-        """Validate and normalize the invocation's per-slot failure records."""
-        if not isinstance(value, (tuple, list)):
-            raise TypeError(
-                "ToolAgentResult.exception_records must be a sequence of "
-                f"(int, Exception) tuples, got {type(value).__name__}."
-            )
-        normalized = tuple(value)
-        for i, item in enumerate(normalized):
-            if (
-                not isinstance(item, tuple)
-                or len(item) != 2
-                or not isinstance(item[0], int)
-                or not isinstance(item[1], Exception)
-            ):
-                raise TypeError(
-                    "ToolAgentResult.exception_records items must be "
-                    f"(int, Exception) tuples; item {i} is invalid."
-                )
-        return normalized
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
-        data["tool_usage"] = [r.to_dict() for r in self.tool_usage]
-        data["exception_records"] = [
-            {"blackboard_index": idx, "error": str(e)}
-            for idx, e in self.exception_records
-        ]
+        data["usage_report"] = self.usage_report.to_dict()
+        data["failed_call_count"] = self.failed_call_count
+        data["regenerations_used"] = self.regenerations_used
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptActAgentResult(ToolAgentResult):
+    """
+    Successful ScriptActAgent invocation result, a ``ToolAgentResult``
+    subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
+    are all real, inherited, required fields -- ``agents/scriptact.py``'s
+    ``build_result_from_record`` populates ``usage_report``/
+    ``failed_call_count`` via ``record.usage_report()``/
+    ``len(record.failed_statements)``, mirroring ``PlanActAgent``'s/
+    ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
+    genuinely ``ScriptActAgent``-specific.
+
+    Fields
+    ------
+    repair_rounds_used:
+        Threaded from ``record.repair_rounds_used`` verbatim -- framework-
+        granted repair rounds actually consumed after a resolution or
+        execution failure (see ``ScriptActAgent``'s ``replanning_limit``).
+        ``0`` means the plan finished without ever needing one.
+    """
+
+    repair_rounds_used: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation --
+        extends the inherited ``ToolAgentResult.to_dict()`` (already
+        includes ``usage_report``/``failed_call_count``/``regenerations_used``)
+        with just ``repair_rounds_used``."""
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (the same
+        # slotted-dataclass-subclass gotcha records.py's own __post_init__
+        # methods already document and work around).
+        data = super(ScriptActAgentResult, self).to_dict()
+        data["repair_rounds_used"] = self.repair_rounds_used
         return data
 
 

@@ -1,278 +1,114 @@
 """
-ToolAgents: LLM-Driven Iterative Tool Calling with Persistent Blackboard Memory
+ToolAgent: shared ancestor for every tool-registering, constant-registering
+Agent family.
 
-This module provides an extensible framework for building intelligent agents that
-use **Large Language Models (LLMs)** to decide which tools to invoke, observe
-results, and either plan or react accordingly.
+Owns the surface that ``PlanActAgent``/``ReActAgent`` (formerly unified
+under the now-removed ``JsonToolAgent``) and ``ScriptActAgent`` already
+shared byte-for-byte or near-identically: tool registration (alias-based,
+``register_tool``/``register_tools``), constant registration (alias-named,
+construction-time only), shared rendering
+(``actions_context``/``constants_context``/``render_turn``), and the
+execution knobs common to both grammars (``tool_calls_limit``,
+``regeneration_limit``, ``tool_concurrency_limit``).
 
-Core Concept
-------------
-Rather than executing a fixed sequence of operations, ToolAgents maintain an
-interactive execution loop:
+Deliberately owns no execution engine and no lifecycle body of any kind --
+every ``_initialize_task``/``think``/``prepare``/``act`` (+ async mirror)
+hook stays ``@abstractmethod`` here, purely for base-``Agent``-compatible
+type-narrowing/documentation (no new enforcement beyond what ``Agent``'s own
+abstracts already require). Each concrete family's generation/resolution/
+dispatch logic stays fully its own, duplicated rather than shared, per this
+branch's established Stage A/B duplication posture.
 
-1. **LLM decides**: The LLM examines the current task and decides which tools to invoke
-2. **Tools execute**: Selected tools run and produce results
-3. **Task updates**: Results are stored in the invocation's running blackboard
-4. **Loop continues**: The LLM observes results and decides next steps, or terminates
-5. **Memory persists**: If `context_enabled=True`, completed tool slots are merged into
-   the persisted blackboard and the completed invocation is stored as a ToolAgentRecord
-
-The canonical memory model separates storage from rendering:
-
-- Agent memory is stored as memory records (`AgentRecord` / `ToolAgentRecord`)
-- Tool execution results are stored as blackboard slots
-- A ToolAgentRecord stores the half-open blackboard span produced by one invocation
-- Future LLM-facing messages are rendered from records and their associated blackboard spans
-
-Execution Persistence
----------------------
-Tool invocations are tracked in an execution blackboard:
-
-- Each step records: **tool name**, **arguments** (possibly containing placeholders),
-  **resolved arguments**, and **execution result** (or error)
-- If `context_enabled=True`, the blackboard is persisted between invoke() calls,
-  allowing new runs to reference prior results
-- LLM-facing message history is rendered from stored turns rather than stored as the
-  canonical memory format
-
-Blackboard Architecture
-~~~~~~~~~~~~~~~~~~~~~~~
-The **blackboard pattern** is used internally to store and manage tool execution state:
-
-- **Running blackboard**: Current invocation's tool calls (ephemeral, local to this run)
-- **Cached blackboard**: Prior invocation results persisted from previous runs
-- **Placeholders**: Tool arguments can reference results from:
-
-  - ``<<__sN__>>`` – result from running step N (current invoke, 0-based index)
-  - ``<<__cN__>>`` – result from cache entry N (prior invokes, 0-based index)
-
-Placeholders are resolved at execution time to their concrete values, enabling dynamic
-data flow and automatic dependency management.
-
-Intelligent Iteration Strategies
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Subclasses implement different iteration approaches:
-
-- **PlanActAgent**: LLM generates a complete plan upfront, then the system executes it
-  in topologically-sorted concurrent batches.
-- **ReActAgent**: LLM emits one tool call per turn, observes the current-run result,
-  then decides the next step.
-
-Execution Model
-~~~~~~~~~~~~~~~
-**Template-Method Pattern**: ``ToolAgent`` owns the invariant iteration loop; subclasses
-provide domain-specific planning/iteration logic via abstract hooks.
-
-**Concurrent Execution**: Batches of independent tool calls execute concurrently with
-gather-based error handling.
-
-**Termination**: Agents invoke the canonical ``return`` tool to signal completion and
-return a final value.
-
-Subclass Responsibilities
--------------------------
-``ToolAgent`` drives every subclass through the shared
-``think`` → ``prepare`` → ``act`` lifecycle (``agents/base.py``); ``act`` is
-concrete and final here. Subclasses implement:
-
-**_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
-  Build and return a task for this invocation:
-  - Stamp the system prompt name
-  - Snapshot prior cached results if context is enabled
-  - Allocate running blackboard slots for current-run tool calls
-
-**think(task)** / **async_think(task)** → ``ToolAgentTask`` (or subclass)
-  Make this round's real decision via the LLM: render, call the engine,
-  parse/validate the output, store the decision onto ``task``.
-
-**prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
-  Turn that decision into something executable, no further LLM calls:
-  validate/resolve placeholders, cascade-check dependencies, populate
-  `task.prepared_steps`.
-
-**_render_task_messages(task)** → ``list[dict[str, str]]``
-  The one piece of ``Agent.render_task``'s shared pipeline (``base.py``)
-  each subclass still owns — built on the shared ``_render_task_banner``
-  helper below (the pipeline's own ``_render_system_message`` is a sibling
-  step, not something ``_render_task_messages`` itself calls).
-
-The task is extensible: subclasses carry domain-specific fields (batches,
-cursors, planning metadata) on their own ``ToolAgentTask`` subclass
-(``PlanActTask``, ``ReActTask``).
-
-Concrete Subclasses
--------------------
-- **PlanActAgent** (``agents/planact.py``): One-shot planner; queries LLM once to
-  generate an entire plan, then executes in concurrent batches. Fast, deterministic,
-  no replanning.
-- **ReActAgent** (``agents/react.py``): Iterative actor; queries LLM once per step,
-  reacts to each result. Fully adaptive, but requires more LLM turns and sequential
-  execution.
+``fail_fast`` is deliberately NOT here: ``PlanActAgent``'s version governs
+whole-batch cascade-vs-abort, ``ReActAgent``'s governs single-call
+raise-vs-tolerate -- different granularity, coincidentally the same name and
+type, never one shared feature. Each declares its own independently.
+``ScriptActAgent`` has no concept of it at all.
 """
 
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
-import asyncio
-from collections.abc import Collection
-from datetime import datetime
-import logging
-import re
-import json
-import warnings
+from dataclasses import replace
 from typing import (
     Any,
     Callable,
-    Mapping,
+    ClassVar,
+    Literal,
     Optional,
 )
-import pprint
 
 from .base import Agent
-from ..constants.agents import (
-    ARGS_FIELD,
-    AWAIT_FIELD,
-    RETURN_TOOL_FULL_NAME,
-    STEP_FIELD,
-    TOOL_FIELD,
-)
-
-from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
-from ..models.results.agents import ToolAgentResult, ToolUsageRecord
-from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from ..models.agents.tasks import ToolAgentTask
+from ..models.agents.records import AgentRecord
+from ..models.agents.blackboard_models import ConstantSpec
+from ..models.agents.tasks import AgentTask
 from ..exceptions import (
     ToolAgentError,
-    ToolInvocationError,
     ToolRegistrationError,
 )
-from ..constants.core import IDENTIFIER_PATTERN_TEXT
+from ..constants.core import IDENTIFIER_PATTERN
 from ..core.Invokable import AtomicInvokable
-from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..utils.agents import extract_dependencies, extract_json_object
-from ..utils.core import run_coro_sync
-from .tools import return_tool
+from ..models.agents.prompts import PromptConfig
+from ..utils.agents import normalize_prompt_config
+from .prompts import TOOL_INSTRUCTIONS_BANNER
 
 
-logger = logging.getLogger(__name__)
-
-
-# --------------------------------------------------------------------------- #
-# Base ToolAgent
-# --------------------------------------------------------------------------- #
 class ToolAgent(Agent, ABC):
     """
-    Abstract base class implementing the template-method pattern for tool-using agents.
+    Abstract base shared by every tool-registering, constant-registering
+    Agent family: tool registry, constant registry, shared rendering, and
+    execution knobs. See module docstring for the full rationale.
 
-    This class owns the invariant iteration loop; subclasses provide domain-specific
-    planning and batch preparation strategies. The architecture uses a blackboard slot
-    system with sentinel-driven state and placeholder-based dependency management.
+    What this class owns:
 
-    Task-Oriented Lifecycle
-    ------------------------
-    ``Agent.invoke()``/``async_invoke()`` drive every ``ToolAgent`` through
-    the shared base lifecycle::
+    - Tool registration (``register_tool``/``register_tools``, alias-based,
+      never the dotted ``full_name``) and the read accessors
+      (``list_tools``/``has_tool``/``get_tool``/``remove_tool``/
+      ``clear_tools``/``actions_context``), plus a ``_validate_effective_tool_id``
+      hook (default: reserved-name check only) a subclass with its own
+      additional naming constraints (e.g. ``ScriptActAgent``'s parser
+      sentinels/real-builtin collision) extends via ``super()``.
+    - Constant registration (``register_constant``/``register_constants``,
+      construction-time only, alias-named wire names) and its own
+      accessors.
+    - Tool-usage guidance (``tool_instructions``, construction-time only,
+      read-only property) rendered as a trailing system-message section via
+      ``_render_system_message``, appended only when set.
+    - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
+      ``tool_concurrency_limit``.
+    - Shared rendering: ``actions_context``/``constants_context``/
+      ``_render_docstring_block``, ``_turn_position``/``render_turn``,
+      ``_copy_for_task_namespace``, and ``_render_system_message`` (built
+      around a ``_extra_system_context()`` hook, default ``{}``).
+    - ``to_dict()`` diagnostics for the above.
 
-    1. task = _initialize_task(turns=turns, prompt=prompt, inputs=inputs)   [subclass hook]
-    2. while not task.complete:
-        task = think(task)                                                  [subclass hook]
-        task = prepare(task)                                                [subclass hook]
-        task = act(task)                                                    [ToolAgent, final]
-    3. record = _build_record_from_task(task, turns)                        [ToolAgent override]
-    4. post_invoke -> build_result_from_record(record, ...)                 [ToolAgent override]
-
-    ``act`` (final; subclasses should not override) trusts ``prepare``'s
-    (and, for tool existence/budget, ``think``'s) contract completely — it
-    does not re-validate indices, tool names, or budget, only whether
-    there's anything to run::
-
-        if not task.prepared_steps: return task       # cascade-skip: entire round produced nothing
-        <execute task.prepared_steps concurrently>     [ToolAgent, final]
-
-    Each LLM generation made along the way is captured as an ``LLMRecord``
-    and accumulated onto ``task.llm_records``. ``_build_record_from_task``
-    persists the completed run's blackboard slots via ``update_blackboard``
-    — always, regardless of ``context_enabled`` (that flag only gates
-    ``valid_cache_indices``/``failed_cache_indices`` in ``_initialize_task``)
-    — and captures the resulting span as ``blackboard_start``/
-    ``blackboard_end`` on the returned ``ToolAgentRecord``.
-    ``build_result_from_record`` re-derives ``tool_usage``/
-    ``exception_records`` from that persisted span. Future LLM-facing
-    messages are rendered from the stored ``ToolAgentRecord`` by
-    ``render_turn(...)``.
-
-    Subclass Responsibilities
-    -------------------------
-    Subclasses implement:
-
-    **_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
-        Build and return a task for this invocation. Must:
-        - Stamp ``system_prompt_name`` so ``render_task`` can render the
-          active system prompt on demand (never pre-rendered/cached as text)
-        - Compute ``valid_cache_indices``/``failed_cache_indices`` via
-          ``_compute_cache_index_sets(turns)``
-        - Create an appropriate running blackboard
-        - Initialize ``executed_steps``, ``prepared_steps``, and completion state
-
-    **think(task)** / **async_think(task)** → ``ToolAgentTask`` (or subclass)
-        Make this round's real decision via the LLM (render via
-        ``self.render_task(task)``, call the engine, parse/validate the
-        output, store the decision onto ``task``). Responsible for
-        guaranteeing tool names are registered and the decision respects
-        ``tool_calls_limit`` — neither is re-checked downstream.
-
-    **prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
-        Turn that decision into something executable, no further LLM calls:
-        - Cascade-check dependencies (``self._check_cascade_failure``)
-        - Resolve placeholders with ``self._resolve_placeholders(...)``
-        - Fill ``task.prepared_steps`` with indices ready for execution
-        - Return the updated task
-
-    **_render_task_messages(task)** → ``list[dict[str, str]]``
-        The one piece of ``Agent.render_task``'s shared pipeline still
-        owned per-family — built on ``_render_task_banner`` below
-        (``_render_system_message`` is a sibling pipeline step, not
-        something this hook itself calls).
-
-    Key Features
-    ~~~~~~~~~~~~
-    **Concurrent Execution**: Each prepared batch runs through async tool invocation and
-    gather-based result collection.
-
-    **Placeholder Resolution**: Supported syntaxes:
-        - ``<<__sN__>>`` – reference to running step N
-        - ``<<__cN__>>`` – reference to cache entry N
-        Full-string placeholders preserve types; inline placeholders render via ``repr()``.
-
-    **Return Semantics**: The canonical ``return_tool`` is registered automatically.
-        When return executes, ``task.generated_response`` is set and ``task.complete``
-        becomes ``True``, ending the think→prepare→act loop.
-
-    **Budget Enforcement**: If ``tool_calls_limit`` is set, ``think`` is responsible for
-        keeping non-return tool calls within it — validated once at decision time,
-        not re-checked when ``act`` executes.
-
-    **Context Persistence**: The completed run blackboard is always merged into
-        ``self._blackboard`` (``blackboard_start``/``blackboard_end`` always set on
-        the ``ToolAgentRecord``). If ``context_enabled=True``, those prior slots are
-        also fed into the LLM as context on the next invocation.
+    What it does not own: any lifecycle hook body, any placeholder/
+    reference-resolution grammar, any retry loop, or record/result
+    construction -- every concrete family owns all of that itself.
     """
-    TOOLS_FIELD = "TOOLS"
-    LIMIT_FIELD = "TOOL_CALLS_LIMIT"
-    CONSTANTS_FIELD = "CONSTANTS"
 
-    STEP_REF_PATTERN: re.Pattern[str] = re.compile(
-    r"<<__s(\d+)__>>"
-    )
-    CACHE_REF_PATTERN: re.Pattern[str] = re.compile(
-        r"<<__c(\d+)__>>"
-    )
-    CONST_REF_PATTERN: re.Pattern[str] = re.compile(
-        rf"<<__k\.({IDENTIFIER_PATTERN_TEXT})__>>"
+    TOOLS_FIELD: ClassVar[str] = "TOOLS"
+    CONSTANTS_FIELD: ClassVar[str] = "CONSTANTS"
+    TOOL_INSTRUCTIONS_KEY: ClassVar[str] = "tool_instructions"
+
+    _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
+    _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
+
+    #: Effective tool ids no subclass instance may ever register, remove, or
+    #: replace through the public API -- seeded only via ``_seed_reserved_tool``,
+    #: bypassing ``register_tool`` entirely. Empty by default; each subclass
+    #: that needs reserved tools overrides this.
+    _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset()
+
+    #: Shared by ``_copy_for_task_namespace`` -- known atomic-immutable types
+    #: that never need a defensive deep copy.
+    _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
+        str, int, float, bool, complex, bytes, type(None),
     )
 
     def __init__(
@@ -283,88 +119,92 @@ class ToolAgent(Agent, ABC):
         llm_engine: LLMEngine,
         context_enabled: bool = False,
         *,
-        fail_fast: bool = True,
-        generation_retries: int = 0,
         tool_calls_limit: Optional[int] = None,
-        peek_at_cache: bool = False,
+        regeneration_limit: int = 5,
+        tool_concurrency_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
-        blackboard_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        constants: Optional[list[Any]] = None,
+        constant_aliases: Optional[list[Optional[str]]] = None,
+        constant_descriptions: Optional[list[Optional[str]]] = None,
+        tool_instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Parameters
         ----------
-        name : str
-            Agent identity name. Frozen at construction.
-        namespace : str
-            Agent identity namespace. Frozen at construction.
-        description : str
-            Human-readable description of this agent's purpose.
-        llm_engine : LLMEngine
-            Provider-facing LLM engine used for all generation calls.
-        context_enabled : bool
-            When ``True``, prior blackboard steps are fed into each invocation
-            as LLM context (``valid_cache_indices``/``failed_cache_indices``
-            become non-empty in ``_initialize_task``). The blackboard is
-            always persisted after each invoke regardless of this setting.
-            Defaults to ``False``.
-        fail_fast : bool
-            When ``True`` (default), the first tool call failure immediately
-            raises and aborts the run. When ``False``, failing slots are marked
-            ``FAILED`` and the loop continues to execute independent steps;
-            failures are collected in ``ToolAgentResult.exception_records``.
-            Return-tool failures always raise regardless of this setting.
-        generation_retries : int
-            Number of additional LLM generation attempts to make when the plan
-            output cannot be parsed or fails spec validation. ``0`` (default)
-            means a single attempt with no retries; ``N`` means up to ``N``
-            extra attempts beyond the first. Must be a non-negative ``int``.
+        name, namespace, description, llm_engine, context_enabled
+            Forwarded to ``Agent.__init__`` unchanged.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
-        peek_at_cache : bool
-            When ``True``, the persisted blackboard is rendered with raw
-            result and resolved-args fields exposed (via
-            ``blackboard_serialized(peek=True)``). Defaults to ``False``.
-        response_preview_limit : int | None
-            Character limit for assistant response previews in rendered turns.
-            ``None`` means no truncation.
-        blackboard_preview_limit : int | None
-            Character limit for cached blackboard result previews. ``None``
-            means no truncation.
-        pre_invoke : AtomicInvokable | Callable | None
-            Optional hook invoked before the main agent loop. Receives the
-            same inputs as the agent.
-        post_invoke : AtomicInvokable | Callable | None
-            Optional hook invoked after the main agent loop. Receives the
-            agent result.
-        post_result_key : str | None
-            Key under which the agent result is passed to ``post_invoke``
-            when ``post_invoke`` is set.
-        records_window : int | None
-            Maximum number of prior ``AgentRecord`` turns rendered into LLM
-            context. ``None`` means all records are rendered.
+        regeneration_limit : int
+            Bounded-attempts ceiling for regenerating a single round's
+            malformed/invalid draft before raising. Always a plain ``int``,
+            never ``None``. Defaults to ``5``.
+        tool_concurrency_limit : int | None
+            Max dispatched calls allowed in a single concurrently-executed
+            batch. ``None`` means unlimited (default).
+        response_preview_limit, pre_invoke, post_invoke, post_result_key,
+        records_window
+            Forwarded to ``Agent.__init__`` unchanged.
+        tools : list | None
+            Construction-time convenience: registered via ``register_tools()``
+            if given.
+        constants : list[Any] | None
+            Construction-time convenience: registered via
+            ``register_constants()`` if given, alongside ``constant_aliases``/
+            ``constant_descriptions``.
+        constant_aliases, constant_descriptions
+            Positionally aligned with ``constants``. See ``register_constant``.
+        tool_instructions : str | PromptConfig | None
+            Optional standing tool-usage guidance (e.g. "always call the
+            outliner first," "alternate writer/reviewer"), rendered as a
+            trailing system-message section appended only when set -- no
+            effect on the rendered system message otherwise. A plain
+            ``str`` is free-form prose (empty/whitespace-only normalizes to
+            "not provided"); a ``PromptConfig`` is accepted directly for a
+            caller who wants discovered template fields of their own (e.g.
+            referencing ``{TOOLS}``/``{CONSTANTS}``, already in the same
+            render context). A discovered ``{name}`` field other than
+            ``{TOOLS}``/``{CONSTANTS}`` becomes a real declared parameter of
+            this agent -- validated/defaulted by the normal
+            ``invoke(inputs)`` pipeline, the same mechanism
+            ``BasicAgent.role_prompt``/``ThinkingAgent.thinking_instructions``
+            already use -- and is rendered against ``task.inputs`` merged
+            with ``{TOOLS}``/``{CONSTANTS}``/``_extra_system_context()``
+            (``task.inputs`` first, so it can never shadow those framework
+            fields). Frozen at construction -- read-only via the
+            ``tool_instructions`` property, matching
+            ``BasicAgent.role_prompt``'s own precedent; construct a new
+            agent for different instructions. Guidance only, not a
+            guarantee: a malformed draft it causes is still caught by the
+            existing generation-retry/repair loop, same as any other
+            malformed draft.
 
-        Emits a ``FutureWarning`` on every construction: the ``ToolAgent``
-        family (this class, ``PlanActAgent``, ``ReActAgent``) is superseded
-        by ``ScriptAgent``. No behavior changes as a result of this warning
-        -- purely an additive signal.
+        ``fail_fast`` is intentionally not a parameter here -- each concrete
+        subclass that needs it declares and validates its own.
         """
-        warnings.warn(
-            f"{type(self).__name__} is part of Atomic-Agentic's legacy "
-            "ToolAgent family (JSON-based tool-call planning, parsed and "
-            "repaired as free text). This approach is superseded by "
-            "ScriptAgent, which plans using native Python call statements "
-            "instead of loose JSON strings; any future agent that still "
-            "needs JSON-shaped output should use provider-native "
-            "structured output (LLMEngine's output_structure) rather than "
-            "hand-rolled parsing. Consider migrating to ScriptAgent.",
-            FutureWarning,
-            stacklevel=3,
+        # Normalized before super().__init__() (unlike every other
+        # ToolAgent construction-time field) so a {name} field discovered
+        # inside the template can be declared as a real extra_parameters
+        # entry -- the same precedent ThinkingAgent's role_prompt/
+        # thinking_instructions already establishes.
+        normalized_tool_instructions = normalize_prompt_config(
+            tool_instructions,
+            default_template=None,
+            provided_description="Tool instructions",
+            error_label="tool_instructions",
         )
+        tool_instructions_params = (
+            list(normalized_tool_instructions.parameters)
+            if normalized_tool_instructions is not None
+            else []
+        )
+
         super().__init__(
             name=name,
             namespace=namespace,
@@ -376,36 +216,34 @@ class ToolAgent(Agent, ABC):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
+            extra_parameters=tool_instructions_params,
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
-        self._blackboard: list[BlackboardSlot] = []
-        self._constants: list[ConstantSpec] = []
+        self._constants: dict[str, ConstantSpec] = {}
+        self._constant_counter: int = 0
 
-        if not isinstance(fail_fast, bool):
-            raise ToolAgentError("fail_fast must be a bool.")
-        self._fail_fast: bool = fail_fast
+        if type(regeneration_limit) is not int or regeneration_limit < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: regeneration_limit must "
+                f"be an int >= 0; got {regeneration_limit!r}."
+            )
+        self._regeneration_limit = regeneration_limit
 
-        if type(generation_retries) is not int or generation_retries < 0:
-            raise ToolAgentError("generation_retries must be a non-negative int.")
-        self._generation_retries: int = generation_retries
-
-        if type(peek_at_cache) is not bool:
-            raise ToolAgentError("peek_at_cache must be a boolean.")
-        self._peek_at_cache = peek_at_cache
-
-        if blackboard_preview_limit is None:
-            self._blackboard_preview_limit = None
-        elif type(blackboard_preview_limit) is not int or blackboard_preview_limit <= 0:
-            raise ToolAgentError("blackboard_preview_limit must be None or a positive integer > 0.")
-        else:
-            self._blackboard_preview_limit = blackboard_preview_limit
+        self.tool_concurrency_limit = tool_concurrency_limit
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
 
-        # Always include canonical return tool (avoid collisions by skipping).
-        self.register(return_tool, name_collision_mode="skip")
+        if tools is not None:
+            self.register_tools(tools)
+        if constants is not None:
+            self.register_constants(
+                constants, aliases=constant_aliases, descriptions=constant_descriptions
+            )
+
+        if normalized_tool_instructions is not None:
+            self._system_prompts[self.TOOL_INSTRUCTIONS_KEY] = normalized_tool_instructions
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -424,130 +262,349 @@ class ToolAgent(Agent, ABC):
             raise ToolAgentError("tool_calls_limit must be None or an int >= 0.")
         self._tool_calls_limit = value
 
-    def blackboard_serialized(self, peek: bool = False) -> list[dict[str, Any]]:
+    @property
+    def regeneration_limit(self) -> int:
+        """Bounded-attempts ceiling for regenerating a single round's
+        malformed/invalid draft before raising -- always a plain ``int``,
+        never ``None``. Read-only."""
+        return self._regeneration_limit
+
+    @property
+    def tool_concurrency_limit(self) -> Optional[int]:
+        """Max dispatched (real tool) calls allowed in a single
+        concurrently-executed batch. ``None`` means unlimited."""
+        return self._tool_concurrency_limit
+
+    @tool_concurrency_limit.setter
+    def tool_concurrency_limit(self, value: Optional[int]) -> None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: tool_concurrency_limit "
+                f"must be None or an int >= 1; got {value!r}."
+            )
+        self._tool_concurrency_limit = value
+
+    @property
+    def tool_instructions(self) -> Optional[str]:
         """
-        Read-only serialized view of the persisted blackboard.
-
-        ``peek=False`` (default): hides ``result`` and ``resolved_args`` fields.
-        ``peek=True``: includes those fields; the ``result`` value is rendered
-        through ``_preview_blackboard_result`` so ``blackboard_preview_limit``
-        applies consistently with the ReAct observable rendering path.
+        Standing tool-usage guidance rendered as a trailing system-message
+        section, or ``None`` if never set. The stored template string is
+        frozen at construction -- matches ``BasicAgent.role_prompt``'s own
+        read-only precedent; no setter -- but its *rendered* content can
+        vary per invocation if it references a declared field beyond
+        ``{TOOLS}``/``{CONSTANTS}``, resolved from ``task.inputs`` at render
+        time. Not a contradiction: the template text never changes, only
+        what it renders to.
         """
-        if peek:
-            result = []
-            for slot in self._blackboard:
-                d = slot.to_dict()
-                if slot.is_executed():
-                    d[BlackboardSlot.RESULT_FIELD] = self._preview_blackboard_result(
-                        slot.result.result
-                    )
-                    d["run_id"] = slot.result.run_id
-                result.append(d)
-            return result
-        else:
-            result = []
-            for slot in self._blackboard:
-                d = slot.to_dict()
-                d.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
-                d.pop(BlackboardSlot.RESULT_FIELD)
-                if slot.is_executed():
-                    d["run_id"] = slot.result.run_id
-                result.append(d)
-            return result
-    
-    @property
-    def blackboard(self) -> list[BlackboardSlot]:
-        """Shallow copy of the persisted blackboard slots. Mutations to the
-        returned list or its slots do not affect internal agent state."""
-        return [slot.copy() for slot in self._blackboard]
+        config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
+        return config.template if config is not None else None
 
-    @property
-    def fail_fast(self) -> bool:
-        """When False, individual tool call failures are recorded rather than raised."""
-        return self._fail_fast
+    # ------------------------------------------------------------------ #
+    # Shared helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_collision_policy(name_collision_policy: str, allowed: tuple[str, ...]) -> str:
+        """Takes an explicit ``allowed`` set -- tool call sites pass
+        ``self._TOOL_COLLISION_POLICIES``, constant call sites pass
+        ``self._CONSTANT_COLLISION_POLICIES`` (constants alone support the
+        extra ``"suffix"`` mode)."""
+        policy = name_collision_policy.lower().strip()
+        if policy not in allowed:
+            raise ToolRegistrationError(
+                f"name_collision_policy must be one of: "
+                f"{', '.join(repr(p) for p in allowed)}."
+            )
+        return policy
 
-    @property
-    def generation_retries(self) -> int:
-        """Number of extra generation attempts allowed beyond the first. Read-only."""
-        return self._generation_retries
-
-    @property
-    def peek_at_cache(self) -> bool:
-        """Whether ``blackboard_serialized(peek=True)`` is used when building
-        LLM context, exposing raw result and resolved-args fields."""
-        return self._peek_at_cache
-
-    @property
-    def blackboard_preview_limit(self) -> Optional[int]:
-        """Character limit for cached blackboard result previews. None means no truncation."""
-        return self._blackboard_preview_limit
-
-    def _preview_blackboard_result(self, result: Any) -> str:
-        """Render and optionally truncate a cached blackboard result preview."""
-        try:
-            text = repr(result)
-        except Exception:
-            text = str(result)
-
-        if (
-            self._blackboard_preview_limit is not None
-            and len(text) > self._blackboard_preview_limit
+    @staticmethod
+    def _validate_tool_alias(alias: Optional[str]) -> None:
+        """Shape-only check on an explicit ``alias`` -- ``None`` (no alias
+        given) always passes; a given alias must be a Python-identifier-
+        legal string."""
+        if alias is not None and (
+            not isinstance(alias, str) or not IDENTIFIER_PATTERN.fullmatch(alias)
         ):
-            text = text[: self._blackboard_preview_limit] + "..."
+            raise ToolRegistrationError(
+                f"alias must be None or a Python-identifier-legal string; got {alias!r}."
+            )
 
-        return text
+    def _validate_effective_tool_id(self, effective_id: str) -> None:
+        """
+        Validate a tool's final effective id (an explicit alias, or the
+        bare ``name``/``invokable.name`` fallback when none is given) --
+        called from ``register_tool``/``register_tools`` for every
+        candidate, before it's ever added to the toolbox.
+
+        Default body: reject only a real reserved-tool-id collision
+        (``self._RESERVED_TOOL_NAMES``). A subclass with additional naming
+        constraints (e.g. parser sentinels or real-builtin-name collisions)
+        overrides this, calling ``super()._validate_effective_tool_id(...)``
+        first and adding its own checks after.
+        """
+        if effective_id in self._RESERVED_TOOL_NAMES:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {effective_id!r} is "
+                "reserved and cannot be registered through this API."
+            )
 
     # ------------------------------------------------------------------ #
-    # Memory management
+    # Tool registration
     # ------------------------------------------------------------------ #
-    def clear_memory(self) -> None:
-        """Clear the stored turn history and the persisted blackboard."""
-        super().clear_memory()
-        self._blackboard.clear()
+    def register_tool(
+        self,
+        tool: AtomicInvokable | Callable,
+        alias: Optional[str] = None,
+        description: Optional[str] = None,
+        *,
+        name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
+    ) -> bool:
+        """
+        Register one invokable under an alias (sole effective identity) or,
+        absent one, its own bare ``name`` — never the dotted ``full_name``,
+        which only confuses an LLM asked to copy a tool id verbatim.
+        ``AtomicInvokable`` inputs are stored as-is (never re-``toolify``'d);
+        ``description`` is a documented no-op in that case — ``alias`` alone
+        covers the "cover name" use case. Callables are normalized via
+        ``toolify(namespace=self.name)``.
+
+        A bare ``name`` collision across tools from different namespaces is
+        not auto-disambiguated — it's caught by the same
+        ``name_collision_policy`` as any other duplicate effective id; give
+        one of them an explicit ``alias`` to resolve it.
+
+        Returns whether the tool was newly registered (``False`` only when
+        ``name_collision_policy="skip"`` hits an existing effective id).
+        """
+        policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
+
+        if isinstance(tool, AtomicInvokable):
+            invokable = tool
+        elif callable(tool):
+            try:
+                invokable = toolify(
+                    component=tool,
+                    name=tool.__name__,
+                    description=description or tool.__doc__,
+                    namespace=self.name,
+                )
+            except Exception as exc:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: failed to toolify component: {exc}"
+                ) from exc
+        else:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: unsupported component type "
+                f"{type(tool).__name__!r}. Expected AtomicInvokable or Callable."
+            )
+
+        self._validate_tool_alias(alias)
+        effective_id = alias if alias is not None else invokable.name
+        self._validate_effective_tool_id(effective_id)
+
+        if effective_id in self._toolbox:
+            if policy == "raise":
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: tool already registered: {effective_id!r}."
+                )
+            if policy == "skip":
+                return False
+
+        self._toolbox[effective_id] = invokable
+        return True
+
+    def register_tools(
+        self,
+        tools: list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient],
+        aliases: Optional[list[Optional[str]]] = None,
+        *,
+        name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
+    ) -> bool:
+        """
+        Register a mixed batch of plain invokables/callables and
+        hub/client objects (``MCPClientHub``/``A2AClientHub``/
+        ``PyA2AtomicClient``) in one pass. A hub/client entry expands into
+        every tool it exposes, each under its own intrinsic bare ``name`` —
+        never the dotted ``full_name`` — and no aliasing possible for
+        hub-expanded entries. Every candidate's effective id is validated
+        via ``_validate_effective_tool_id`` as soon as it's computed, during
+        this same expansion pass -- not a second, separate pass afterward.
+        Whole-batch validation happens before any toolbox mutation;
+        intra-batch duplicate effective ids always raise regardless of
+        ``name_collision_policy``.
+
+        Returns ``True`` iff every item was newly registered (only ``"skip"``
+        can make this ``False``; ``"raise"``/``"replace"`` are unconditionally
+        ``True`` once the call doesn't raise).
+        """
+        policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
+
+        if aliases is not None and len(aliases) != len(tools):
+            raise ValueError(
+                f"{type(self).__name__}.{self.name}: aliases must be the same "
+                f"length as tools; got {len(aliases)} vs {len(tools)}."
+            )
+
+        # Expand every entry into (effective_id, invokable) candidates
+        # without mutating self._toolbox yet.
+        candidates: list[tuple[str, AtomicInvokable]] = []
+        for index, item in enumerate(tools):
+            item_alias = aliases[index] if aliases is not None else None
+
+            if isinstance(item, (MCPClientHub, A2AClientHub, PyA2AtomicClient)):
+                if item_alias is not None:
+                    raise ValueError(
+                        f"{type(self).__name__}.{self.name}: a hub/client entry at "
+                        f"index {index} cannot take an alias (it expands into "
+                        "multiple tools)."
+                    )
+                if isinstance(item, MCPClientHub):
+                    remote_names = item.list_tools()
+                elif isinstance(item, A2AClientHub):
+                    remote_names = list(item.get_atomic_skills())
+                else:
+                    remote_names = item.list_invokables()
+
+                for remote_name in remote_names:
+                    try:
+                        proxy = toolify(
+                            component=item,
+                            namespace=self.name,
+                            remote_name=remote_name,
+                        )
+                    except Exception as exc:
+                        raise ToolRegistrationError(
+                            f"{type(self).__name__}.{self.name}: failed to toolify "
+                            f"remote {remote_name!r}: {exc}"
+                        ) from exc
+                    self._validate_effective_tool_id(proxy.name)
+                    candidates.append((proxy.name, proxy))
+
+                if isinstance(item, A2AClientHub):
+                    try:
+                        generic_proxy = toolify(component=item, namespace=self.name)
+                    except Exception as exc:
+                        raise ToolRegistrationError(
+                            f"{type(self).__name__}.{self.name}: failed to toolify "
+                            f"generic A2A tool: {exc}"
+                        ) from exc
+                    self._validate_effective_tool_id(generic_proxy.name)
+                    candidates.append((generic_proxy.name, generic_proxy))
+
+            elif isinstance(item, AtomicInvokable):
+                self._validate_tool_alias(item_alias)
+                effective_id = item_alias if item_alias is not None else item.name
+                self._validate_effective_tool_id(effective_id)
+                candidates.append((effective_id, item))
+
+            elif callable(item):
+                try:
+                    invokable = toolify(
+                        component=item,
+                        name=item.__name__,
+                        description=item.__doc__,
+                        namespace=self.name,
+                    )
+                except Exception as exc:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: failed to toolify "
+                        f"{item!r}: {exc}"
+                    ) from exc
+                self._validate_tool_alias(item_alias)
+                effective_id = item_alias if item_alias is not None else invokable.name
+                self._validate_effective_tool_id(effective_id)
+                candidates.append((effective_id, invokable))
+
+            else:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: unsupported item type "
+                    f"{type(item).__name__!r} at index {index}."
+                )
+
+        # Intra-batch dedup — always raises regardless of name_collision_policy.
+        seen: set[str] = set()
+        for effective_id, _ in candidates:
+            if effective_id in seen:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: duplicate effective id in "
+                    f"incoming batch: {effective_id!r}."
+                )
+            seen.add(effective_id)
+
+        # Cross-check against the existing toolbox per name_collision_policy.
+        any_skipped = False
+        vetted: list[tuple[str, AtomicInvokable]] = []
+        for effective_id, invokable in candidates:
+            if effective_id in self._toolbox:
+                if policy == "raise":
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: tool already registered: "
+                        f"{effective_id!r}."
+                    )
+                if policy == "skip":
+                    any_skipped = True
+                    continue
+            vetted.append((effective_id, invokable))
+
+        for effective_id, invokable in vetted:
+            self._toolbox[effective_id] = invokable
+
+        return not any_skipped
+
     # ------------------------------------------------------------------ #
-    # Toolbox Helpers
+    # Tool accessors
     # ------------------------------------------------------------------ #
     def actions_context(self) -> str:
-        """String representation of all tools in the toolbox for prompt injection.
-
-        Each tool renders as its own block: the tool's signature line, then
-        its description with every non-blank line indented two spaces (blank
-        lines are preserved as fully blank, not indent-padded). Blocks are
-        separated by "\\n---\\n".
         """
-        tools = list(self._toolbox.values())
+        Render every registered tool for prompt injection, one block per
+        tool (signature line + a 4-space-indented triple-quoted docstring
+        description, via ``_render_docstring_block``), joined by
+        ``"\\n---\\n"``. Every rendered id is bare, never dotted: when
+        ``tid`` is the tool's own ``name`` this is just ``tool.signature``
+        verbatim; when ``tid`` is a distinct alias, only the leading
+        identity token of ``tool.signature`` is swapped for the alias — the
+        ``(args) -> ReturnType`` portion renders unchanged.
+        """
         blocks: list[str] = []
-        for t in tools:
-            indented_lines = [
-                line if not line.strip() else f"  {line}"
-                for line in t.description.splitlines()
-            ]
-            blocks.append(f"{t.fullname_signature}\n" + "\n".join(indented_lines))
+        for tid, tool in self._toolbox.items():
+            if tid == tool.name:
+                rendered_signature = tool.signature
+            else:
+                rendered_signature = tid + tool.signature[len(tool.name):]
+
+            blocks.append(f"{rendered_signature}\n{self._render_docstring_block(tool.description)}")
+
         return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:
-        """Return a shallow copy of the toolbox mapping ``full_name → AtomicInvokable``."""
+        """Shallow copy of the toolbox, keyed by effective id (alias or bare name)."""
         return dict(self._toolbox)
 
-    def has_tool(self, tool_full_name: str) -> bool:
-        """Return ``True`` if a tool with the given ``full_name`` is registered."""
-        return tool_full_name in self._toolbox
+    def has_tool(self, tool_id: str) -> bool:
+        """Return ``True`` if ``tool_id`` (an alias or the tool's own bare ``name``) is registered."""
+        return tool_id in self._toolbox
 
-    def get_tool(self, tool_full_name: str) -> AtomicInvokable:
-        """Return the registered invokable with the given ``full_name``.
+    def get_tool(self, tool_id: str) -> AtomicInvokable:
+        """Return the registered invokable for ``tool_id``.
 
         Raises
         ------
         ToolAgentError
-            If no tool with ``tool_full_name`` is registered.
+            If ``tool_id`` is not registered.
         """
-        tool = self._toolbox.get(tool_full_name)
+        tool = self._toolbox.get(tool_id)
         if tool is None:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_full_name!r}.")
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_id!r}.")
         return tool
 
-    def remove_tool(self, tool_full_name: str) -> bool:
-        """Remove the tool with the given ``full_name`` from the toolbox.
+    def remove_tool(self, tool_id: str) -> bool:
+        """Remove the tool stored under ``tool_id``.
+
+        Raises
+        ------
+        ToolRegistrationError
+            If ``tool_id`` is reserved (see ``_RESERVED_TOOL_NAMES``) —
+            reserved tools can never be removed through this API, regardless
+            of whether they're actually present.
 
         Returns
         -------
@@ -555,1562 +612,407 @@ class ToolAgent(Agent, ABC):
             ``True`` if the tool was present and removed; ``False`` if it was
             not registered.
         """
-        return self._toolbox.pop(tool_full_name, None) is not None
+        if tool_id in self._RESERVED_TOOL_NAMES:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {tool_id!r} is reserved "
+                "and cannot be removed."
+            )
+        return self._toolbox.pop(tool_id, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove all registered tools from the toolbox except the mandatory return tool."""
-        self._toolbox.clear()
-        self.register(return_tool, name_collision_mode="skip")
+        """Remove every registered tool except reserved ones (see
+        ``_RESERVED_TOOL_NAMES``) — reserved tools are never cleared,
+        regardless of how they were seeded."""
+        self._toolbox = {
+            tid: tool for tid, tool in self._toolbox.items()
+            if tid in self._RESERVED_TOOL_NAMES
+        }
+
+    def _seed_reserved_tool(
+        self, tool: AtomicInvokable | Callable, name: str, description: Optional[str] = None,
+    ) -> None:
+        """
+        Directly insert ``tool`` into the toolbox under ``name``, bypassing
+        ``register_tool`` entirely — the one sanctioned way to populate a
+        reserved effective id (``register_tool``/``register_tools`` reject
+        any id in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
+        toolified first, exactly like ``register_tool``'s own callable
+        branch; ``AtomicInvokable`` instances are stored as-is. Intended to
+        be called from a subclass's own ``__init__``, after
+        ``super().__init__()``, once per reserved name that subclass
+        declares.
+        """
+        if isinstance(tool, AtomicInvokable):
+            invokable = tool
+        else:
+            invokable = toolify(
+                component=tool,
+                name=name,
+                description=description or tool.__doc__,
+                namespace=self.name,
+            )
+        self._toolbox[name] = invokable
 
     # ------------------------------------------------------------------ #
     # Constants Helpers
     # ------------------------------------------------------------------ #
     @property
-    def constants(self) -> list[ConstantSpec]:
-        """Return a shallow copy of registered ToolAgent constants."""
-        return list(self._constants)
+    def constants(self) -> dict[str, ConstantSpec]:
+        """Shallow copy of registered constants, keyed by the bare uppercase alias."""
+        return dict(self._constants)
 
     def register_constant(
         self,
-        name: str,
-        value: Any,
-        description: str | None = None,
-        inline_limit: int | None = None,
-    ) -> str:
+        constant: Any,
+        alias: Optional[str] = None,
+        description: Optional[str] = None,
+        *,
+        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
+    ) -> bool:
         """
-        Register one named runtime constant on this ToolAgent.
+        Register one named runtime constant. ``alias`` is optional: given,
+        stored under ``alias.upper()`` (wire-facing ``ConstantSpec.name`` is
+        ``f"K_{alias.upper()}"``); omitted, auto-named from
+        ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict
+        key and ``ConstantSpec.name`` are this same string, then the counter
+        increments). The counter never decrements, so a retired auto-name is
+        never reissued.
 
-        Constants are stored separately from tools. They are not executable and
-        do not participate in tool registration, tool-call budgeting, or
-        blackboard persistence.
+        ``description``, when omitted or blank/whitespace-only, stores the
+        literal string ``"No details"`` -- never ``None``.
 
-        Parameters
-        ----------
-        name : str
-            Constant name. Must be identifier-like: letters/underscore first,
-            then letters/numbers/underscore.
-        value : Any
-            Runtime value to bind to the constant.
-        description : str | None
-            Optional human-readable description.
-        inline_limit : int | None
-            Optional character limit for future inline string substitution.
+        ``name_collision_policy`` gains a fourth value, ``"suffix"``: on
+        collision, retries ``f"{key}_0"``, ``f"{key}_1"``, ... until an
+        unused key is found, and registers under that key instead of
+        raising/skipping.
 
-        Returns
-        -------
-        str
-            The normalized registered constant name.
-
-        Raises
-        ------
-        ToolAgentError
-            If the spec is invalid or the name is already registered.
+        Returns whether the constant was newly registered under its
+        originally intended key (``False`` only when
+        ``name_collision_policy="skip"`` hits an existing key; ``"suffix"``
+        always returns ``True``, since it renames instead of skipping).
         """
-        try:
-            spec = ConstantSpec(
-                name=name,
-                value=value,
-                description=description,
-                inline_limit=inline_limit,
-            )
-        except Exception as exc:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: invalid constant spec: {exc}"
-            ) from exc
+        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
 
-        if any(existing.name == spec.name for existing in self._constants):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
-            )
+        if alias is None:
+            key = f"K_{self._constant_counter}"
+            self._constant_counter += 1
+            name = key
+        else:
+            if not isinstance(alias, str) or not alias.strip():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: alias must be None or a "
+                    f"non-empty string; got {alias!r}."
+                )
+            key = alias.upper()
+            name = f"K_{key}"
 
-        self._constants.append(spec)
-        return spec.name
+        normalized_description = description.strip() if isinstance(description, str) else None
+        effective_description = normalized_description if normalized_description else "No details"
 
-    def batch_register_constants(
+        if key in self._constants:
+            if policy == "raise":
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant already registered: "
+                    f"{key!r}."
+                )
+            if policy == "skip":
+                return False
+            if policy == "suffix":
+                i = 0
+                candidate = f"{key}_{i}"
+                while candidate in self._constants:
+                    i += 1
+                    candidate = f"{key}_{i}"
+                key = candidate
+                name = f"K_{key}"
+            # "replace" falls through to the unconditional overwrite below.
+
+        self._constants[key] = ConstantSpec(name=name, value=constant, description=effective_description)
+        return True
+
+    def register_constants(
         self,
-        **constants: tuple[Any, ...],
-    ) -> list[str]:
+        constants: list[Any],
+        aliases: Optional[list[Optional[str]]] = None,
+        descriptions: Optional[list[Optional[str]]] = None,
+        *,
+        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
+    ) -> bool:
         """
-        Register constants from keyword arguments.
+        Register a batch of constants. ``aliases``/``descriptions`` are
+        optional and positionally aligned with ``constants`` -- an omitted
+        list, or an individual ``None`` entry, means "auto-name"/"default
+        description" for that position, exactly mirroring
+        ``register_constant``'s single-item behavior. Whole-batch length
+        validation before any mutation.
 
-        Each keyword name becomes the constant name. Each keyword value must be
-        a tuple with one, two, or three items:
+        Under ``name_collision_policy="suffix"``, the existing "intra-batch
+        duplicates always raise" rule is bypassed: a colliding key (whether
+        against another entry in this same batch or against the existing
+        registry) is resolved by the same ``f"{key}_i"`` retry used by
+        ``register_constant``, rather than raising. The other three policies
+        keep the unconditional intra-batch raise.
 
-        - ``NAME=(value,)``
-        - ``NAME=(value, description)``
-        - ``NAME=(value, description, inline_limit)``
-
-        Tuple-valued constants must be wrapped as the first item of a one-item
-        tuple, for example: ``COORDS=((1, 2),)``.
-
-        This method validates the whole batch before mutating ``self._constants``.
-
-        Returns
-        -------
-        list[str]
-            Registered constant names in keyword insertion order.
-
-        Raises
-        ------
-        ToolAgentError
-            If any item is malformed, duplicated in the batch, or already
-            registered on this ToolAgent.
+        Returns ``True`` iff every item was newly registered under its
+        originally intended key (only ``"skip"`` can make this ``False``).
         """
-        if not constants:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: batch_register_constants expects at least one constant."
+        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
+
+        if aliases is not None and len(aliases) != len(constants):
+            raise ValueError(
+                f"{type(self).__name__}.{self.name}: aliases must be the same "
+                f"length as constants; got {len(aliases)} vs {len(constants)}."
+            )
+        if descriptions is not None and len(descriptions) != len(constants):
+            raise ValueError(
+                f"{type(self).__name__}.{self.name}: descriptions must be the same "
+                f"length as constants; got {len(descriptions)} vs {len(constants)}."
             )
 
-        existing_names = {spec.name for spec in self._constants}
-        candidate_names: set[str] = set()
-        candidates: list[ConstantSpec] = []
+        candidates: dict[str, ConstantSpec] = {}
+        for index, value in enumerate(constants):
+            alias = aliases[index] if aliases is not None else None
+            raw_description = descriptions[index] if descriptions is not None else None
+            normalized_description = raw_description.strip() if isinstance(raw_description, str) else None
+            effective_description = normalized_description if normalized_description else "No details"
 
-        for raw_name, payload in constants.items():
-            if not isinstance(payload, tuple):
+            if alias is None:
+                key = f"K_{self._constant_counter}"
+                self._constant_counter += 1
+                name = key
+            else:
+                if not isinstance(alias, str) or not alias.strip():
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: alias must be None or "
+                        f"a non-empty string; got {alias!r}."
+                    )
+                key = alias.upper()
+                name = f"K_{key}"
+
+            # Intra-batch dedup: "suffix" resolves it below instead of
+            # raising; the other three policies keep the unconditional raise.
+            if key in candidates and policy != "suffix":
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} must be provided as a tuple "
-                    "of (value,), (value, description), or (value, description, inline_limit)."
+                    f"{type(self).__name__}.{self.name}: duplicate constant name in "
+                    f"batch: {key!r}."
                 )
 
-            if len(payload) not in {1, 2, 3}:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} tuple must have length 1, 2, or 3; "
-                    f"got {len(payload)}."
-                )
+            # "suffix" resolves either collision source (intra-batch or
+            # pre-existing registry) uniformly, right here -- this entry is
+            # guaranteed collision-free before it ever reaches `candidates`.
+            if policy == "suffix" and (key in candidates or key in self._constants):
+                i = 0
+                candidate_key = f"{key}_{i}"
+                while candidate_key in candidates or candidate_key in self._constants:
+                    i += 1
+                    candidate_key = f"{key}_{i}"
+                key = candidate_key
+                name = f"K_{key}"
 
-            value = payload[0]
-            description = payload[1] if len(payload) >= 2 else None
-            inline_limit = payload[2] if len(payload) == 3 else None
+            candidates[key] = ConstantSpec(name=name, value=value, description=effective_description)
 
-            try:
-                spec = ConstantSpec(
-                    name=raw_name,
-                    value=value,
-                    description=description,
-                    inline_limit=inline_limit,
-                )
-            except Exception as exc:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: invalid constant spec for {raw_name!r}: {exc}"
-                ) from exc
+        # Cross-check against the existing registry per policy. "suffix"
+        # entries never trigger anything here -- already resolved above.
+        any_skipped = False
+        vetted: dict[str, ConstantSpec] = {}
+        for key, spec in candidates.items():
+            if key in self._constants and policy != "suffix":
+                if policy == "raise":
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: constant already "
+                        f"registered: {key!r}."
+                    )
+                if policy == "skip":
+                    any_skipped = True
+                    continue
+                # "replace" falls through to the unconditional overwrite below.
+            vetted[key] = spec
 
-            if spec.name in candidate_names:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: duplicate constant name in batch: {spec.name!r}."
-                )
+        self._constants.update(vetted)
+        return not any_skipped
 
-            if spec.name in existing_names:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
-                )
+    def has_constant(self, alias: str) -> bool:
+        """Return whether a constant is registered under ``alias`` (case-insensitive)."""
+        return alias.upper() in self._constants
 
-            candidate_names.add(spec.name)
-            candidates.append(spec)
+    def get_constant(self, alias: str) -> ConstantSpec:
+        """Return the registered constant for ``alias`` (case-insensitive).
 
-        self._constants.extend(candidates)
-        return [spec.name for spec in candidates]
-
-    def has_constant(self, name: str) -> bool:
-        """Return whether a constant with the given name is registered."""
-        if not isinstance(name, str) or not name.strip():
-            return False
-
-        normalized_name = name.strip()
-        return any(spec.name == normalized_name for spec in self._constants)
-
-    def get_constant(self, name: str) -> ConstantSpec:
+        Raises ``ToolAgentError`` if no constant is registered under it.
         """
-        Return the registered constant with the given name.
+        spec = self._constants.get(alias.upper())
+        if spec is None:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown constant {alias!r}.")
+        return spec
 
-        Raises ``ToolAgentError`` if no constant with that name exists.
+    def remove_constant(self, alias: str) -> bool:
+        """Remove the constant registered under ``alias`` (case-insensitive).
+        Returns whether it was present."""
+        return self._constants.pop(alias.upper(), None) is not None
+
+    def update_constant_description(self, alias: str, description: str) -> None:
         """
-        if not isinstance(name, str) or not name.strip():
+        Replace only the ``description`` of an already-registered constant
+        -- ``.name``/``.value`` are never touched. Looked up the same way
+        ``get_constant`` resolves ``alias`` (``alias.upper()``; works for a
+        user-given alias or a literal auto-generated ``K_i`` key).
+        ``description`` must be a real, non-empty string once stripped --
+        there is no reset-to-default (``None``) path.
+
+        Raises ``ToolAgentError`` if no constant is registered under
+        ``alias``, or if ``description`` is not a non-empty string.
+        """
+        key = alias.upper()
+        spec = self._constants.get(key)
+        if spec is None:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown constant {alias!r}.")
+        if not isinstance(description, str) or not description.strip():
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: constant name must be a non-empty string."
+                f"{type(self).__name__}.{self.name}: description must be a "
+                f"non-empty string; got {description!r}."
             )
-
-        normalized_name = name.strip()
-        for spec in self._constants:
-            if spec.name == normalized_name:
-                return spec
-
-        raise ToolAgentError(
-            f"{type(self).__name__}.{self.name}: unknown constant {normalized_name!r}."
-        )
-
-    def remove_constant(self, name: str) -> bool:
-        """Remove a registered constant by name. Returns True if removed."""
-        if not isinstance(name, str) or not name.strip():
-            return False
-
-        normalized_name = name.strip()
-        for index, spec in enumerate(self._constants):
-            if spec.name == normalized_name:
-                del self._constants[index]
-                return True
-
-        return False
+        self._constants[key] = replace(spec, description=description.strip())
 
     def clear_constants(self) -> None:
-        """Remove all registered constants from this ToolAgent."""
+        """Remove every registered constant."""
         self._constants.clear()
+
+    @staticmethod
+    def _render_docstring_block(description: str) -> str:
+        """
+        Render ``description`` as a 4-space-indented triple-quoted docstring
+        block, shared by ``actions_context``/``constants_context`` so a
+        tool's and a constant's description render identically. A
+        single-line description closes on the same line
+        (``    \"\"\"text\"\"\"``); a multi-line description continues indented
+        (blank lines left bare, matching ordinary docstring convention) with
+        the closing triple-quote on its own indented line.
+        """
+        lines = description.splitlines() or [""]
+        if len(lines) == 1:
+            return f'    """{lines[0]}"""'
+
+        continuation = "\n".join(
+            f"    {line}" if line.strip() else line for line in lines[1:]
+        )
+        return f'    """{lines[0]}\n{continuation}\n    """'
 
     def constants_context(self) -> str:
         """
-        Render the dynamic constants list for future prompt injection.
-
-        This method intentionally renders only the list body, not a section
-        header or explanatory text. It also intentionally does not render raw
-        constant values.
+        Render every registered constant for prompt injection, one block
+        per constant (a ``NAME: type`` annotation line + a 4-space-indented
+        triple-quoted docstring description, via ``_render_docstring_block``),
+        matching ``actions_context``'s own docstring-style rendering. Names
+        print exactly as stored (``K_<ALIAS>`` when aliased, or ``K_i`` when
+        auto-named) — no prefix synthesized here. Empty
+        registry renders a "no constants" message.
         """
         if not self._constants:
             return "No constants registered."
 
         rendered: list[str] = []
-        for spec in self._constants:
+        for spec in self._constants.values():
             description = (
-                spec.description
-                if spec.description is not None
-                else "No description provided."
+                spec.description if spec.description is not None else "No description provided."
             )
-            rendered.append(
-                f"- {spec.name}\n"
-                f"  Type: {spec.type}\n"
-                f"  Description: {description}"
-            )
+            rendered.append(f"{spec.name}: {spec.type}\n{self._render_docstring_block(description)}")
 
         return "\n\n".join(rendered)
 
-    def register(
-        self,
-        component: AtomicInvokable | Callable,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        *,
-        name_collision_mode: str = "raise",
-    ) -> str:
-        """Register one invokable on this ToolAgent.
-
-        AtomicInvokables are stored directly under their own ``full_name``
-        when no ``name``/``description`` override is requested. When either
-        is supplied, the AtomicInvokable is routed through ``toolify``
-        instead, producing a new Tool that delegates to it by reference
-        under the requested identity — the original is never mutated. Plain
-        callables always go through ``toolify`` with this agent's ``name``
-        as their namespace.
-
-        Parameters
-        ----------
-        component : AtomicInvokable | Callable
-            The item to register. AtomicInvokables are stored as-is unless
-            an override is requested; callables always go through
-            ``toolify(namespace=self.name)``.
-        name : str | None
-            Override the tool name. For callables, ``None`` infers from
-            ``component.__name__``. For AtomicInvokables, supplying this
-            routes registration through ``toolify`` instead of direct store.
-        description : str | None
-            Override the tool description. For callables, ``None`` infers
-            from ``component.__doc__``. For AtomicInvokables, supplying this
-            routes registration through ``toolify`` instead of direct store.
-        name_collision_mode : str
-            Controls behavior when the resolved ``full_name`` is already
-            registered. One of ``"raise"`` (default), ``"skip"``, or
-            ``"replace"``.
-
-        Returns
-        -------
-        str
-            The registered invokable's ``full_name`` (``"Type.namespace.name"``).
-
-        Raises
-        ------
-        ToolRegistrationError
-            If ``name_collision_mode`` is invalid; if ``toolify`` fails; or
-            if a collision is detected under ``"raise"`` mode.
+    def _copy_for_task_namespace(self, value: Any) -> Any:
         """
-        name_collision_mode = name_collision_mode.lower().strip()
-        if name_collision_mode not in ("raise", "skip", "replace"):
-            raise ToolRegistrationError(
-                "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
-            )
-
-        # AtomicInvokable route — store directly under its own identity,
-        # unless an override is requested, in which case toolify it.
-        if isinstance(component, AtomicInvokable):
-            if name is None and description is None:
-                key = component.full_name
-                invokable = component
-            else:
-                try:
-                    invokable = toolify(
-                        component=component,
-                        name=name,
-                        description=description,
-                        namespace=self.name,
-                    )
-                except Exception as e:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
-                    ) from e
-                key = invokable.full_name
-
-        # Callable route — normalize via toolify with self.name as namespace
-        elif callable(component):
-            try:
-                invokable = toolify(
-                    component=component,
-                    name=name or component.__name__,
-                    description=description or component.__doc__,
-                    namespace=self.name,
-                )
-            except Exception as e:
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
-                ) from e
-            key = invokable.full_name
-
-        else:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: unsupported component type "
-                f"{type(component).__name__!r}. Expected AtomicInvokable or Callable."
-            )
-
-        if key in self._toolbox:
-            if name_collision_mode == "raise":
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: tool already registered: {key}"
-                )
-            if name_collision_mode == "skip":
-                return key
-
-        self._toolbox[key] = invokable
-        return key
-
-    def batch_register(
-        self,
-        tools: list[AtomicInvokable | Callable] | None = None,
-        client: PyA2AtomicClient | MCPClientHub | A2AClientHub | None = None,
-        *,
-        name_collision_mode: str = "raise",
-    ) -> list[str]:
-        """Register a batch of invokables on this ToolAgent.
-
-        Accepts a local list, a remote client, or both. All items are expanded
-        into ``(full_name, invokable)`` pairs before any toolbox mutation;
-        duplicate full_names within the incoming batch always raise regardless
-        of ``name_collision_mode``.
-
-        Filtering which remote names get registered is no longer a
-        ``batch_register`` concern -- it belongs to the hub itself
-        (``MCPClientHub``/``A2AClientHub``/``PyA2AtomicClient``'s frozen
-        ``include_names``/``exclude_names``, set at hub construction). Every
-        consumer of a given hub (this method, ``batch_toolify``,
-        ``ScriptAgent.register_tools``, or a caller using the hub directly)
-        sees the identical already-filtered view.
-
-        Parameters
-        ----------
-        tools : list[AtomicInvokable | Callable] | None
-            Local items to register. AtomicInvokables are stored as-is;
-            callables are normalized via ``toolify(namespace=self.name)``.
-        client : PyA2AtomicClient | MCPClientHub | A2AClientHub | None
-            Remote client to enumerate and register tools from. Combined with
-            ``tools`` in one registration pass when both are provided.
-            Registers every name the client's own discovery surface reports
-            (already filtered by the client's own construction-time
-            include/exclude configuration, if any). For an ``A2AClientHub``,
-            every discovered Atomic skill is registered in skill mode, plus
-            one generic-mode tool registered unconditionally -- the generic
-            tool is never filtered, since it isn't sourced from
-            ``get_atomic_skills()``.
-        name_collision_mode : str
-            Per-item collision policy for toolbox conflicts. One of
-            ``"raise"`` (default), ``"skip"``, or ``"replace"``. Does not
-            affect intra-batch dedup, which always raises.
-
-        Returns
-        -------
-        list[str]
-            ``full_name`` of every invokable newly registered. Skipped items
-            (under ``"skip"`` mode) are excluded.
-
-        Raises
-        ------
-        ValueError
-            If both ``tools`` and ``client`` are ``None``, or if ``tools`` is
-            empty and no ``client`` is provided.
-        ToolRegistrationError
-            If ``name_collision_mode`` is invalid; if a duplicate full_name
-            appears in the incoming batch; if toolification of any item fails;
-            or if a toolbox collision is detected under ``"raise"`` mode.
+        Return ``value`` unchanged if it's a known atomic-immutable type
+        (nothing callable on these ever mutates in place); otherwise return
+        a deep copy. Used to seed both ``task.cache``'s ``task_result_i``
+        entries and ``task.constant_values`` exactly once per invocation,
+        so a mutating attribute/method call on either can never reach the
+        real, shared registered constant or a prior invocation's stored
+        result -- covers aliasing and nested-attribute mutation uniformly,
+        since nothing shared is ever exposed by direct reference in the
+        first place.
         """
-        name_collision_mode = name_collision_mode.lower().strip()
-        if name_collision_mode not in ("raise", "skip", "replace"):
-            raise ToolRegistrationError(
-                "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
-            )
-
-        # Validate argument combinations before any expansion
-        if tools is None and client is None:
-            raise ValueError(
-                f"{type(self).__name__}.batch_register requires at least one of: "
-                "tools list or client."
-            )
-        if tools is not None and len(tools) == 0 and client is None:
-            raise ValueError(
-                f"{type(self).__name__}.batch_register: tools list is empty and no "
-                "client provided."
-            )
-        # Expand all sources into (full_name, invokable) pairs
-        combined: list[tuple[str, AtomicInvokable]] = []
-
-        if tools is not None:
-            for item in tools:
-                if isinstance(item, AtomicInvokable):
-                    combined.append((item.full_name, item))
-                elif callable(item):
-                    try:
-                        t = toolify(
-                            component=item,
-                            namespace=self.name,
-                        )
-                    except Exception as exc:
-                        raise ToolRegistrationError(
-                            f"{type(self).__name__}.{self.name}: failed to toolify "
-                            f"{item!r}: {exc}"
-                        ) from exc
-                    combined.append((t.full_name, t))
-                else:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: unsupported item type "
-                        f"{type(item).__name__!r} in tools list."
-                    )
-
-        if client is not None:
-            if isinstance(client, MCPClientHub):
-                available = client.list_tools()
-            elif isinstance(client, A2AClientHub):
-                available = list(client.get_atomic_skills())
-            else:
-                available = client.list_invokables()
-
-            for remote_name in available:
-                try:
-                    proxy = toolify(
-                        component=client,
-                        namespace=self.name,
-                        remote_name=remote_name,
-                    )
-                except Exception as exc:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: failed to toolify remote "
-                        f"{remote_name!r}: {exc}"
-                    ) from exc
-                combined.append((proxy.full_name, proxy))
-
-            # A2A generic tool: always registered when client is an
-            # A2AClientHub, unconditionally -- regardless of any hub-level
-            # include/exclude filter, since the hub only filters what
-            # get_atomic_skills() reports and the generic tool isn't sourced
-            # from that list. A same-named skill colliding with it on
-            # full_name is caught by the intra-batch dedup check below, same
-            # as any other collision.
-            if isinstance(client, A2AClientHub):
-                try:
-                    generic_proxy = toolify(component=client, namespace=self.name)
-                except Exception as exc:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: failed to toolify "
-                        f"generic A2A tool: {exc}"
-                    ) from exc
-                combined.append((generic_proxy.full_name, generic_proxy))
-
-        # Intra-set dedup — always raise regardless of name_collision_mode
-        seen: set[str] = set()
-        for key, _ in combined:
-            if key in seen:
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: duplicate full_name in "
-                    f"incoming batch: {key!r}."
-                )
-            seen.add(key)
-
-        # Register against toolbox — apply name_collision_mode per item
-        registered: list[str] = []
-        for key, invokable in combined:
-            if key in self._toolbox:
-                if name_collision_mode == "raise":
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: already registered: {key}"
-                    )
-                if name_collision_mode == "skip":
-                    continue
-            self._toolbox[key] = invokable
-            registered.append(key)
-
-        return registered
+        if isinstance(value, self._ATOMIC_IMMUTABLE_TYPES):
+            return value
+        return copy.deepcopy(value)
 
     # ------------------------------------------------------------------ #
-    # Placeholder resolution helpers (prepare-time)
+    # Cross-invocation result addressing
     # ------------------------------------------------------------------ #
-    def _resolve_placeholders(self, obj: Any, *, task: ToolAgentTask) -> Any:
+    def _turn_position(self, turn: AgentRecord) -> int:
         """
-        Resolve all placeholders in an object to their concrete values.
-
-        This method recursively traverses the object structure and replaces placeholder
-        references with their concrete runtime values. Placeholders can reference:
-
-        - previously executed current-run steps,
-        - previously persisted cache entries,
-        - registered ToolAgent constants.
-
-        Supported Placeholder Formats
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        - ``<<__sN__>>`` – Result from running step N (0-based, plan-local to this invoke)
-        - ``<<__cN__>>`` – Result from cache entry N (0-based, from persisted blackboard)
-        - ``<<__k.NAME__>>`` – Registered ToolAgent constant named NAME
-
-        Two resolution modes apply depending on placeholder position:
-
-        1. **Full-String Placeholder**:
-           - Returns the referenced value as-is, preserving its type.
-           - Examples:
-             - ``"<<__s0__>>"`` returns step 0's result directly.
-             - ``"<<__c0__>>"`` returns cache 0's result directly.
-             - ``"<<__k.PI__>>"`` returns the registered constant value directly.
-
-        2. **Inline Placeholder**:
-           - Replaces the placeholder with ``repr(value)``, falling back to ``str(value)``.
-           - For constants only, applies ``ConstantSpec.inline_limit`` if configured.
-           - Example:
-             - ``"Step returned: <<__s0__>>"`` becomes a string.
-             - ``"Use constant: <<__k.NAME__>>"`` becomes a string, possibly truncated
-               for that constant's inline representation.
-
-        Readiness Validation
-        ~~~~~~~~~~~~~~~~~~~~
-        Before resolution, validates that all referenced step/cache slots are marked
-        executed and that all referenced constants are registered.
-
-        Parameters
-        ----------
-        obj : Any
-            Object to resolve. Can be nested lists, tuples, sets, dicts, strings,
-            or scalar values.
-        task : ToolAgentTask
-            Execution task containing running_blackboard. Cache references
-            are resolved directly against the agent-level, always-persisted
-            ``self._blackboard`` (see ``update_blackboard``) — never a
-            task-local snapshot.
-
-        Returns
-        -------
-        Any
-            Resolved object with all placeholders replaced. Structure is preserved;
-            only placeholder tokens are replaced. Step/cache placeholders always
-            resolve to the unwrapped ``AtomicResult.result`` payload of the
-            referenced slot — never the envelope itself — since readiness
-            validation (above) guarantees those slots are executed before
-            substitution runs.
-
-        Raises
-        ------
-        ToolAgentError
-            If a referenced step/cache placeholder is out of bounds or unexecuted,
-            or if a referenced constant is not registered.
+        Walk ``turn.prev`` backward to the conversation root, counting
+        hops. The root itself is position 0, its child is 1, etc. --
+        matches the turn's actual index in ``get_conversation()``'s full
+        list, computed fresh from existing structure (correct even when
+        ``task.turns`` is a ``records_window``-truncated tail, since this
+        always walks all the way to the true root regardless of window).
         """
-        cache = self._blackboard
-        running = task.running_blackboard
-        constants_by_name: dict[str, ConstantSpec] = {
-            spec.name: spec
-            for spec in self._constants
-        }
-
-        needed_cache: set[int] = set(
-            extract_dependencies(obj, placeholder_pattern=self.CACHE_REF_PATTERN)
-        )
-        needed_steps: set[int] = set(
-            extract_dependencies(obj, placeholder_pattern=self.STEP_REF_PATTERN)
-        )
-        needed_constants: set[str] = set()
-
-        def collect_constant_refs(x: Any) -> None:
-            if isinstance(x, str):
-                for match in self.CONST_REF_PATTERN.finditer(x):
-                    needed_constants.add(match.group(1))
-                return
-            if isinstance(x, dict):
-                for key, value in x.items():
-                    collect_constant_refs(key)
-                    collect_constant_refs(value)
-                return
-            if isinstance(x, (list, tuple, set)):
-                for value in x:
-                    collect_constant_refs(value)
-                return
-
-        collect_constant_refs(obj)
-
-        # ----------------------------
-        # 2) Validate readiness.
-        # ----------------------------
-        for idx in sorted(needed_cache):
-            if idx < 0 or idx >= len(cache):
-                raise ToolAgentError(
-                    f"Cache reference {idx} out of range (cache length={len(cache)})."
-                )
-            if not cache[idx].is_executed():
-                status_note = "permanently FAILED" if cache[idx].is_failed() else "not executed"
-                raise ToolAgentError(
-                    f"Referenced cache {idx} is {status_note} and cannot be resolved."
-                )
-
-        for idx in sorted(needed_steps):
-            if idx < 0 or idx >= len(running):
-                raise ToolAgentError(
-                    f"Step reference {idx} out of range (running plan length={len(running)})."
-                )
-            if not running[idx].is_executed():
-                raise ToolAgentError(f"Referenced step {idx} is not executed.")
-
-        for name in sorted(needed_constants):
-            if name not in constants_by_name:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: unknown constant reference {name!r}."
-                )
-
-        # ----------------------------
-        # 3) Resolve recursively.
-        # ----------------------------
-        def render_inline(value: Any, *, inline_limit: int | None = None) -> str:
-            try:
-                text = repr(value)
-            except Exception:
-                text = str(value)
-
-            if inline_limit is not None and len(text) > inline_limit:
-                text = text[:inline_limit]
-
-            return text
-
-        def resolve_str(s: str) -> Any:
-            # Exact placeholder -> preserve type
-            m_cache = self.CACHE_REF_PATTERN.fullmatch(s)
-            if m_cache:
-                return cache[int(m_cache.group(1))].result.result
-
-            m_step = self.STEP_REF_PATTERN.fullmatch(s)
-            if m_step:
-                return running[int(m_step.group(1))].result.result
-
-            m_constant = self.CONST_REF_PATTERN.fullmatch(s)
-            if m_constant:
-                return constants_by_name[m_constant.group(1)].value
-
-            # Inline substitution
-            def repl_cache(m: re.Match[str]) -> str:
-                idx = int(m.group(1))
-                return render_inline(cache[idx].result.result)
-
-            def repl_step(m: re.Match[str]) -> str:
-                idx = int(m.group(1))
-                return render_inline(running[idx].result.result)
-
-            def repl_constant(m: re.Match[str]) -> str:
-                spec = constants_by_name[m.group(1)]
-                return render_inline(
-                    spec.value,
-                    inline_limit=spec.inline_limit,
-                )
-
-            out = self.CACHE_REF_PATTERN.sub(repl_cache, s)
-            out = self.STEP_REF_PATTERN.sub(repl_step, out)
-            out = self.CONST_REF_PATTERN.sub(repl_constant, out)
-            return out
-
-        def resolve(x: Any) -> Any:
-            if isinstance(x, str):
-                return resolve_str(x)
-            if isinstance(x, list):
-                return [resolve(v) for v in x]
-            if isinstance(x, tuple):
-                return tuple(resolve(v) for v in x)
-            if isinstance(x, set):
-                return set([resolve(v) for v in x])
-            if isinstance(x, dict):
-                return {resolve(k): resolve(v) for k, v in x.items()}
-            return x
-
-        return resolve(obj)
-
-    # ------------------------------------------------------------------ #
-    # Batch preparation helpers (prepare-time, shared by subclasses)
-    # ------------------------------------------------------------------ #
-    def _compile_batches_from_deps(
-        self,
-        *,
-        planned_slots: list[BlackboardSlot],
-        return_idx: int | None = None,
-    ) -> list[list[int]]:
-        """
-        Compile concurrent execution batches from scheduling dependencies.
-
-        For non-return step i: scheduling_deps[i] = step_dependencies plus
-        await_step if present; level[i] = 0 if scheduling_deps is empty,
-        else 1 + max(level[d] for d in scheduling_deps). Steps at the same
-        level share no dependency and may execute concurrently.
-
-        ``return_idx`` is optional so a partial step list with no
-        terminating return step (e.g. one round of a future adaptive-batch
-        subclass's generation) can be compiled the same way a full plan
-        can:
-
-        - Given: isolates it as its own final batch — the caller
-          (``PlanActAgent.think()``/``async_think()``) is responsible for
-          having already validated it points at a real return-tool slot at
-          the final position; this method trusts that contract rather than
-          re-checking it.
-        - ``None``: every given slot participates in leveling; no isolated
-          final batch.
-
-        This method does not itself guard against ``planned_slots`` being
-        empty — callers must ensure non-emptiness before calling.
-        """
-        # Only indices in [0, level_span) participate in leveling; when return_idx
-        # is given, that final index is isolated below rather than leveled.
-        level_span = return_idx if return_idx is not None else len(planned_slots)
-
-        levels: dict[int, int] = {}
-        for i in range(level_span):
-            slot = planned_slots[i]
-
-            scheduling_deps: set[int] = set(slot.step_dependencies)
-            if slot.await_step is not NO_VAL:
-                scheduling_deps.add(slot.await_step)
-
-            if not scheduling_deps:
-                levels[i] = 0
-            else:
-                levels[i] = 1 + max(levels[d] for d in scheduling_deps)
-
-        buckets: dict[int, list[int]] = {}
-        for i in range(level_span):
-            lvl = levels.get(i, 0)
-            buckets.setdefault(lvl, []).append(i)
-
-        batches: list[list[int]] = []
-        for lvl in sorted(buckets):
-            batch = sorted(buckets[lvl])
-            if batch:
-                batches.append(batch)
-
-        if return_idx is not None:
-            batches.append([return_idx])
-
-        return batches
-
-    def _check_cascade_failure(
-        self,
-        slot: BlackboardSlot,
-        board: list[BlackboardSlot],
-    ) -> bool:
-        """
-        Check one slot's argument-dependencies for already-failed steps and
-        mark or raise accordingly.
-
-        Shared by ``PlanActAgent``, ``ReActAgent``, and future ``ToolAgent``
-        subclasses. Callers are responsible for only invoking this when
-        ``not self._fail_fast`` — this method does not check ``fail_fast``
-        itself.
-
-        Uses ``extract_dependencies(slot.args, ...)`` rather than
-        ``slot.step_dependencies`` because a return slot's
-        ``step_dependencies`` may be forced to include every prior step for
-        scheduling purposes; only steps actually referenced in ``args``
-        need to resolve successfully.
-
-        Returns
-        -------
-        bool
-            ``True`` if ``slot`` was marked ``FAILED`` due to a failed
-            dependency (caller should skip executing it). ``False`` if no
-            cascade failure was found.
-
-        Raises
-        ------
-        ToolAgentError
-            If ``slot`` is the return tool and depends on a failed step — a
-            return that cannot execute ends the run regardless of
-            ``fail_fast``.
-        """
-        failed_deps = sorted(
-            d
-            for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
-            if board[d].is_failed()
-        )
-        if not failed_deps:
-            return False
-
-        dep_str = ", ".join(str(d) for d in failed_deps)
-
-        if slot.tool == RETURN_TOOL_FULL_NAME:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step {slot.step} "
-                f"cannot execute; dependency step(s) {dep_str} failed."
-            )
-
-        slot.error = ToolAgentError(
-            f"{type(self).__name__}.{self.name}: step {slot.step} skipped — "
-            f"dependency step(s) {dep_str} failed."
-        )
-        slot.status = BlackboardSlot.FAILED
-        return True
-
-    # ------------------------------------------------------------------ #
-    # Shared generation-retry loop (PlanActAgent/ReActAgent think() bodies)
-    # ------------------------------------------------------------------ #
-    def _run_generation_retry_loop(
-        self,
-        *,
-        task: ToolAgentTask,
-        validate: Callable[[Any], Any],
-        json_error_template: str,
-        spec_error_template: str,
-    ) -> Any:
-        """
-        Shared retry loop for one-shot/per-step LLM generation: render, call
-        the engine, record the attempt, decode JSON, validate, and retry
-        with injected feedback on either failure category until success or
-        the retry budget (``self._generation_retries``, tracked via
-        ``task.retries_used``) is exhausted.
-
-        Parameters
-        ----------
-        task : ToolAgentTask
-            Supplies rendering context and accumulates ``llm_records``/
-            ``retries_used`` directly.
-        validate : Callable[[Any], Any]
-            The family-specific spec validator (``_process_plan_output`` or
-            ``_process_next_step_output``), called with only the ``parsed``
-            JSON value -- every other keyword argument is bound by the
-            caller's own closure. Returns the validated result on success,
-            or a plain feedback string on spec-validation failure.
-        json_error_template : str
-            ``.format(exc=...)`` -- the user-facing retry message when
-            ``_extract_from_json_string`` raises ``json.JSONDecodeError``.
-            Never receives ``raw_output`` -- that already goes into the
-            assistant-turn message alongside it; embedding it a second time
-            in the user text would just repeat what the model can already
-            see one turn up.
-        spec_error_template : str
-            ``.format(feedback=...)`` -- the user-facing retry message when
-            ``validate`` returns a feedback string. Never receives the
-            re-serialized ``parsed`` value, for the same reason.
-
-        Steps
-        -----
-        1. ``additional_messages`` starts empty.
-        2. Loop:
-           a. Render this attempt's send payload via ``render_task``.
-           b. Call the LLM engine; capture ``engine_result``.
-           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
-              to ``task.llm_records``.
-           d. Try JSON extraction. On ``json.JSONDecodeError``: budget-check
-              (raise if exhausted); else inject assistant/user feedback,
-              increment ``task.retries_used``, continue.
-           e. Call ``validate(parsed)``. On a string return (spec-validation
-              feedback): budget-check (raise if exhausted); else inject
-              assistant/user feedback, increment ``task.retries_used``,
-              continue.
-           f. On success: return the validated result.
-
-        Raises
-        ------
-        ToolAgentError
-            If either failure category's retry budget is exhausted.
-        """
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = self._llm_engine.invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": json_error_template.format(exc=exc)},
-                ]
-                task.retries_used += 1
-                continue
-
-            result = validate(parsed)
-            if isinstance(result, str):
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
-                    {"role": "user", "content": spec_error_template.format(feedback=result)},
-                ]
-                task.retries_used += 1
-                continue
-
-            return result
-
-    async def _arun_generation_retry_loop(
-        self,
-        *,
-        task: ToolAgentTask,
-        validate: Callable[[Any], Any],
-        json_error_template: str,
-        spec_error_template: str,
-    ) -> Any:
-        """Async mirror of ``_run_generation_retry_loop``: uses
-        ``async_invoke`` for the engine call; identical retry logic,
-        feedback injection, and parameters otherwise."""
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = await self._llm_engine.async_invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": json_error_template.format(exc=exc)},
-                ]
-                task.retries_used += 1
-                continue
-
-            result = validate(parsed)
-            if isinstance(result, str):
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
-                    {"role": "user", "content": spec_error_template.format(feedback=result)},
-                ]
-                task.retries_used += 1
-                continue
-
-            return result
-
-    # ------------------------------------------------------------------ #
-    # Finalization helpers
-    # ------------------------------------------------------------------ #
-    def update_blackboard(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Persist all non-empty run slots into the agent's persisted blackboard.
-
-        Called unconditionally by ``_build_record_from_task`` — whether or
-        not ``context_enabled`` is set. Always appends onto the *live*
-        ``self._blackboard``, read fresh right here rather than from a
-        stale invoke-start snapshot. This method already runs under
-        ``self._invoke_lock`` (via ``_commit_emit``), so reading live here
-        is the actual fix for the mutation-safety concern flagged during
-        1a's brainstorming: a stale snapshot as the append base could
-        otherwise silently clobber a concurrently-committed invocation's
-        own persisted results under the narrower 1a lock scope.
-        ``context_enabled`` controls only whether
-        ``valid_cache_indices``/``failed_cache_indices`` are populated in
-        ``_initialize_task`` (i.e. whether the LLM sees prior steps as
-        context) — never whether history is persisted.
-
-        All non-empty slots (EXECUTED and FAILED) are persisted so that global
-        blackboard indices remain contiguous and correct. FAILED slots are
-        included for index continuity; ``render_turn`` controls whether they
-        are surfaced to the LLM.
-
-        Persistence Policy
-        ~~~~~~~~~~~~~~~~~~
-        1. **Trim empty/unplanned tail**: Remove trailing empty slots from running blackboard
-           (slots with no tool assigned)
-        2. **Rewrite placeholders**: All ``<<__sN__>>`` step references in appended slots'
-           args are rewritten to ``<<__c{new_global_index}__>>`` cache references.
-           Applied to both EXECUTED and FAILED slots.
-        3. **Merge into cache**: Append all non-empty slots (EXECUTED and FAILED)
-           preserving status. FAILED slots keep their ``error`` and no ``result``.
-        4. **Trim cache tail**: Remove trailing empty slots from final cache
-
-        Placeholder Rewriting Example
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        Initial state:
-        - self._blackboard has 5 entries (indices 0-4)
-        - running_blackboard has 3 executed entries (indices 0-2)
-
-        Rewriting in appended slots:
-        - Step 0's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
-        - Step 1's args contain ``<<__s0__>>`` → rewritten to ``<<__c5__>>`` (5 + 0)
-        - Step 2's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
-
-        After persistence:
-        - self._blackboard now has 8 entries
-        - Future invokes can use ``<<__c5__>>``, ``<<__c6__>>``, ``<<__c7__>>``
-          to reference steps 0, 1, 2 respectively
-
-        Parameters
-        ----------
-        task : ToolAgentTask
-            Task with executed steps in running_blackboard.
-
-        Returns
-        -------
-        ToolAgentTask
-            Updated task after blackboard persistence.
-
-        Side Effects
-        ~~~~~~~~~~~~
-        - ``self._blackboard`` is replaced with merged cache + appended slots
-        """
-        base_cache: list[BlackboardSlot] = [slot.copy() for slot in self._blackboard]
-        base_len = len(base_cache)
-
-        running: list[BlackboardSlot] = list(task.running_blackboard)
-
-        # 1) Trim empty/unplanned tail from running plan to avoid caching unused slots.
-        last = len(running) - 1
-        while last >= 0 and running[last].is_empty():
-            last -= 1
-        running = running[: last + 1]
-
-        def rewrite_step_to_cache_placeholders(obj: Any) -> Any:
-            """
-            Rewrite <<__sj__>> -> <<__c{base_len + j}__>> recursively.
-            Leaves <<__ck__>> unchanged.
-            """
-            if isinstance(obj, str):
-                # exact placeholder: still rewrite as a string placeholder (we are rewriting args,
-                # not resolving)
-                def repl(m: re.Match[str]) -> str:
-                    j = int(m.group(1))
-                    return f"<<__c{base_len + j}__>>"
-
-                return self.STEP_REF_PATTERN.sub(repl, obj)
-
-            if isinstance(obj, list):
-                return [rewrite_step_to_cache_placeholders(v) for v in obj]
-            if isinstance(obj, tuple):
-                return tuple(rewrite_step_to_cache_placeholders(v) for v in obj)
-            if isinstance(obj, set):
-                return {rewrite_step_to_cache_placeholders(v) for v in obj}
-            if isinstance(obj, dict):
-                return {
-                    rewrite_step_to_cache_placeholders(k): rewrite_step_to_cache_placeholders(v)
-                    for k, v in obj.items()
-                }
-            return obj
-
-        # 2) Append all non-empty running slots with rewritten placeholders and global indices.
-        #    FAILED slots are included so local_i always equals the append offset.
-        appended: list[BlackboardSlot] = []
-        for local_i, slot in enumerate(running):
-            if slot.is_empty():
-                continue
-
-            new_slot = BlackboardSlot(
-                step=base_len + local_i,
-                tool=slot.tool,
-                args=rewrite_step_to_cache_placeholders(slot.args),
-                resolved_args=slot.resolved_args,
-                result=slot.result,
-                error=slot.error,
-                status=slot.status,
-                step_dependencies=slot.step_dependencies,
-                await_step=slot.await_step,
-            )
-            appended.append(new_slot)
-
-        combined = base_cache + appended
-
-        # 3) Trim empty tail from combined cache.
-        if combined:
-            last2 = len(combined) - 1
-            while last2 >= 0 and combined[last2].is_empty():
-                last2 -= 1
-            combined = combined[: last2 + 1]
-
-        self._blackboard = combined
-        return task
-
-    def _build_record_from_task(
-        self,
-        task: ToolAgentTask,
-        turns: list[AgentRecord],
-    ) -> ToolAgentRecord:
-        """
-        Assemble a completed ToolAgentRecord from a finished ToolAgentTask.
-
-        Persists the run's blackboard slots via ``update_blackboard`` and
-        captures the half-open span those slots landed in — mirrors how
-        base ``Agent`` always appends ``_records`` regardless of
-        ``context_enabled`` (that flag only gates
-        ``valid_cache_indices``/``failed_cache_indices`` in
-        ``_initialize_task``).
-        """
-        prev = turns[-1] if turns else None
-        blackboard_start = len(self._blackboard)
-        task = self.update_blackboard(task)
-        blackboard_end = len(self._blackboard)
-        return ToolAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
-            blackboard_start=blackboard_start,
-            blackboard_end=blackboard_end,
-        )
-
-    def build_result_from_record(
-        self,
-        record: ToolAgentRecord,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ToolAgentResult:
-        """
-        Construct this ToolAgent's ToolAgentResult envelope directly from a
-        completed ToolAgentRecord.
-
-        Extends ``Agent.build_result_from_record``: re-derives
-        ``tool_usage``/``exception_records`` from the record's persisted
-        blackboard span (``record.blackboard_start:record.blackboard_end``)
-        rather than from task-local bookkeeping — ``update_blackboard``
-        preserves each slot's ``status``/``tool`` verbatim and rewrites
-        ``step`` to its final global index, so tallying over the persisted
-        span gives results identical to tallying over
-        ``task.running_blackboard`` directly.
-        """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
-
-        span = self._blackboard[record.blackboard_start:record.blackboard_end]
-
-        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
-        exception_records: tuple[tuple[int, Exception], ...] = ()
-        if not self._fail_fast:
-            exception_records = tuple(
-                (slot.step, slot.error)
-                for slot in span
-                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
-            )
-
-        # Derive per-tool call counts from the persisted span.
-        _counts: dict[str, int] = {}
-        for slot in span:
-            if (
-                slot.is_executed()
-                and isinstance(slot.tool, str)
-                and slot.tool != RETURN_TOOL_FULL_NAME
-            ):
-                _counts[slot.tool] = _counts.get(slot.tool, 0) + 1
-        tool_usage = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in _counts.items()
-        )
-
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=ToolAgentResult,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            tool_usage=tool_usage,
-            exception_records=exception_records,
-        )
-
-    def _compute_cache_index_sets(
-        self,
-        turns: list[AgentRecord],
-    ) -> tuple[frozenset[int], frozenset[int]]:
-        """
-        Derive valid and failed cache index sets from the current conversation turns.
-
-        Walks every ``ToolAgentRecord`` in ``turns`` and collects the half-open
-        blackboard span ``[blackboard_start, blackboard_end)``. Executed slots
-        within those spans go into ``valid``; failed slots go into ``failed``.
-        When ``context_enabled=False`` the caller passes an empty turns list
-        (or turns with no blackboard spans), so both sets are empty — the LLM
-        sees no cache context even though ``self._blackboard`` itself may be
-        non-empty (persistence is unconditional; only visibility is gated).
-
-        Steps
-        -----
-        1. Iterate ``turns``.
-        2. Skip non-``ToolAgentRecord`` entries and entries where either boundary
-           is ``None``.
-        3. For each index in ``range(blackboard_start, blackboard_end)``:
-           - If the slot is FAILED → add to ``failed``.
-           - If the slot is EXECUTED → add to ``valid``.
-        4. Return ``(frozenset(valid), frozenset(failed))``.
-        """
-        valid: set[int] = set()
-        failed: set[int] = set()
-        for turn in turns:
-            if not isinstance(turn, ToolAgentRecord):
-                continue
-            if turn.blackboard_start is None or turn.blackboard_end is None:
-                continue
-            for idx in range(turn.blackboard_start, turn.blackboard_end):
-                if idx >= len(self._blackboard):
-                    continue
-                slot = self._blackboard[idx]
-                if slot.is_failed():
-                    failed.add(idx)
-                elif slot.is_executed():
-                    valid.add(idx)
-                else:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: internal error: persisted blackboard "
-                        f"slot {idx} has unexpected status {slot.status!r}; expected EXECUTED or FAILED."
-                    )
-        return frozenset(valid), frozenset(failed)
+        position = 0
+        node = turn
+        while node.prev is not None:
+            node = node.prev
+            position += 1
+        return position
 
     def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
-        """Render one stored ToolAgentRecord into LLM-facing user/assistant messages.
-
-        The base assistant response is rendered through `Agent.render_turn(...)`, preserving
-        its `response_preview_limit` behavior. If the turn has
-        a non-empty blackboard span and all slots executed, this method appends a
-        cached-step block (``CACHED STEPS`` section) with each produced step's unresolved args and
-        ``run_id``. When some slots are FAILED (``fail_fast=False``), the output splits into a
-        ``CACHED STEPS`` section for executed slots and a ``FAILED STEPS`` section for failed slots;
-        failed entries include step index, tool name, and truncated error string — no args.
-        Result previews are included only when `peek_at_cache=True` and are bounded by
-        `blackboard_preview_limit`.
         """
-        if not isinstance(turn, ToolAgentRecord):
-            raise ToolAgentError(
-                f"render_turn expected ToolAgentRecord, got {type(turn)!r}"
-            )
-
+        Labels a historic turn with its ``task_result_i`` address so a
+        model can reference it by name in a later plan -- base
+        ``Agent.render_turn`` renders the raw value with no such label.
+        """
         messages = super().render_turn(turn)
-        user_message = messages[0]
-        assistant_response = messages[1]["content"]
-
-        start = turn.blackboard_start
-        end = turn.blackboard_end
-        if start is None or end is None or start == end:
-            return messages
-
-        if start < 0 or end < start or end > len(self._blackboard):
-            raise ToolAgentError(
-                f"Invalid blackboard span for rendered turn: start={start!r}, end={end!r}, "
-                f"blackboard_length={len(self._blackboard)}."
-            )
-
-        executed: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-
-        for slot in self._blackboard[start:end]:
-            if slot.is_executed():
-                entry: dict[str, Any] = {
-                    STEP_FIELD: slot.step,
-                    TOOL_FIELD: slot.tool,
-                    ARGS_FIELD: slot.args,
-                    "run_id": slot.result.run_id,
-                }
-                if self.peek_at_cache:
-                    entry["result"] = self._preview_blackboard_result(slot.result.result)
-                executed.append(entry)
-            elif slot.is_failed():
-                err_str = str(slot.error)
-                if self.blackboard_preview_limit is not None:
-                    err_str = err_str[:self.blackboard_preview_limit]
-                failed.append({
-                    STEP_FIELD: slot.step,
-                    TOOL_FIELD: slot.tool,
-                    "error": err_str,
-                })
-            # Other statuses (PLANNED, PREPARED, EMPTY) cannot appear in a persisted
-            # blackboard span — silently skipped if present.
-
-        if not failed:
-            # All-executed path: format unchanged.
-            dump = pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
-            assistant_content = (
-                f"RESPONSE:\n{assistant_response}\n\n"
-                f"CACHED STEPS {list(range(start, end))} PRODUCED:\n\n{dump}"
-            )
-        else:
-            # Mixed path: two-section output.
-            parts = [f"RESPONSE:\n{assistant_response}"]
-            if executed:
-                ex_indices = [e[STEP_FIELD] for e in executed]
-                parts.append(
-                    f"CACHED STEPS {ex_indices} PRODUCED:\n\n"
-                    + pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
-                )
-            fa_indices = [f[STEP_FIELD] for f in failed]
-            parts.append(
-                f"FAILED STEPS {fa_indices}:\n\n"
-                + pprint.pformat(failed, indent=2, width=160, sort_dicts=False)
-            )
-            assistant_content = "\n\n".join(parts)
-
-        return [
-            user_message,
-            {"role": "assistant", "content": assistant_content},
-        ]
+        i = self._turn_position(turn)
+        label = f"task_result_{i}: {type(turn.generated_response).__name__} = "
+        messages[-1]["content"] = label + messages[-1]["content"]
+        return messages
 
     # ------------------------------------------------------------------ #
-    # String to JSON Objects helper
+    # Rendering
     # ------------------------------------------------------------------ #
-    def _extract_from_json_string(self, raw_text: str) -> Any:
+    def _extra_system_context(self) -> dict[str, str]:
         """
-        Extract the largest decodable JSON array/object from a possibly noisy string.
-
-        Thin delegating wrapper — see ``utils.agents.extract_json_object``
-        for the full contract (parsing logic lives there now, shared with
-        any other caller that needs to pull structured output out of
-        free-form LLM text).
-
-        Raises
-        ------
-        TypeError
-            If ``raw_text`` is not a string (engine contract violation).
-            Changed from ``ToolAgentError`` when the parsing logic was
-            promoted to ``extract_json_object`` — a ``ToolAgent``-specific
-            exception type no longer fit a shared utility.
-        json.JSONDecodeError
-            If ``raw_text`` is empty or contains no decodable JSON array/object.
+        Extra render-context entries a subclass's active system prompt
+        needs beyond ``{TOOLS}``/``{CONSTANTS}``. Default: none.
+        ``ScriptActAgent`` overrides this to add ``EXCLUDED_PY_BUILTINS``.
         """
-        return extract_json_object(raw_text, source_label=f"{type(self).__name__}.{self.name}")
+        return {}
 
-    # ------------------------------------------------------------------ #
-    # Dictionary Validation & Conversion Helpers
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _normalize_step_field_set(
-        fields: Collection[str],
-        *,
-        name: str,
-        require_non_empty: bool,
-    ) -> frozenset[str]:
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """
-        Normalize and validate a ToolAgent step-field schema set.
+        Render this agent's active system prompt with tool/constant context
+        injected, then append a trailing ``tool_instructions`` section if
+        one was registered. Returns ``[]`` when ``task.system_prompt_name``
+        is ``None``. Deliberately carries no budget content —
+        ``tool_calls_limit`` is a per-invocation fact, not a standing
+        instruction, so each family surfaces it in its own task-message
+        banner instead.
+        """
+        if task.system_prompt_name is None:
+            return []
+        render_context = {
+            self.TOOLS_FIELD: self.actions_context(),
+            self.CONSTANTS_FIELD: self.constants_context(),
+            **self._extra_system_context(),
+        }
+        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
 
-        This helper treats schema arguments as programmer-supplied bounds, not
-        LLM output. It rejects strings as a whole because a single string is
-        technically a collection of characters, but never a valid field set.
-        """
-        if isinstance(fields, str) or not isinstance(fields, Collection):
-            raise ToolAgentError(
-                f"{name} must be a collection of field-name strings; "
-                f"got {type(fields).__name__!r}."
+        # Appended post-render, never templated into the family prompts
+        # above -- zero added tokens for an agent that never set
+        # tool_instructions. Rendered against task.inputs merged with
+        # render_context (TOOLS/CONSTANTS/extra spread last) so a declared
+        # {name} field resolves from the invocation while TOOLS/CONSTANTS
+        # can never be shadowed by a caller-supplied input of the same name.
+        tool_instructions_config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
+        if tool_instructions_config is not None:
+            rendered_instructions = tool_instructions_config.render(
+                {**task.inputs, **render_context}
             )
+            rendered += TOOL_INSTRUCTIONS_BANNER.format(instructions=rendered_instructions)
 
-        normalized: set[str] = set()
-        for field_name in fields:
-            if not isinstance(field_name, str) or not field_name:
-                raise ToolAgentError(
-                    f"{name} must contain only non-empty strings; got {field_name!r}."
-                )
-            normalized.add(field_name)
-
-        if require_non_empty and not normalized:
-            raise ToolAgentError(f"{name} must not be empty.")
-
-        return frozenset(normalized)
-
-    def _validate_tool_step_dict(
-        self,
-        data: Mapping[str, Any],
-        *,
-        expected_step: int,
-        allowed_fields: Collection[str],
-        required_fields: Collection[str],
-        context: str,
-    ) -> dict[str, Any] | str:
-        """
-        Validate and normalize one raw LLM-produced ToolAgent step mapping.
-
-        The caller provides explicit field bounds:
-        - ``allowed_fields`` is the maximum allowed key set.
-        - ``required_fields`` is the minimum required key set.
-
-        ``context`` is only for error messages. This method does not infer PlanAct,
-        ReAct, or base-step behavior from context.
-
-        Runtime owns the authoritative step index. Any LLM-provided ``step`` value
-        is advisory and is always overwritten with ``expected_step``.
-
-        Returns
-        -------
-        dict[str, Any]
-            Validated and normalized step mapping on success.
-        str
-            LLM-facing feedback string describing the schema violation. No
-            class/name prefix. Returned (not raised) so the caller decides whether
-            to retry.
-        """
-        if type(expected_step) is not int or expected_step < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} expected_step must be an int >= 0; "
-                f"got {expected_step!r}."
-            )
-
-        if not isinstance(context, str) or not context.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: context must be a non-empty string."
-            )
-
-        allowed = self._normalize_step_field_set(
-            allowed_fields,
-            name="allowed_fields",
-            require_non_empty=True,
-        )
-        required = self._normalize_step_field_set(
-            required_fields,
-            name="required_fields",
-            require_non_empty=False,
-        )
-
-        required_not_allowed = required - allowed
-        if required_not_allowed:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: required_fields must be a subset of "
-                f"allowed_fields; invalid required field(s): {sorted(required_not_allowed)!r}."
-            )
-
-        data_keys = set(data)
-
-        extra = data_keys - allowed
-        if extra:
-            return f"plan step {expected_step} contains unsupported keys: {sorted(extra)!r}."
-
-        missing = required - data_keys
-        if missing:
-            return f"plan step {expected_step} is missing required keys: {sorted(missing)!r}."
-
-        normalized = dict(data)
-
-        # Advisory/fallback behavior:
-        # - If the LLM omitted "step", fill it.
-        # - If the LLM supplied a wrong/non-sequential "step", ignore it.
-        # Runtime order is authoritative.
-        normalized[STEP_FIELD] = expected_step
-
-        tool = normalized.get(TOOL_FIELD, NO_VAL)
-        if TOOL_FIELD in normalized or TOOL_FIELD in required:
-            if not isinstance(tool, str) or not tool.strip():
-                return f"plan step {expected_step} 'tool' must be a non-empty string."
-
-        args = normalized.get(ARGS_FIELD, NO_VAL)
-        if ARGS_FIELD in normalized or ARGS_FIELD in required:
-            if not isinstance(args, dict):
-                return f"plan step {expected_step} 'args' must be a dict; got {type(args).__name__!r}."
-
-        if AWAIT_FIELD in normalized:
-            await_step = normalized[AWAIT_FIELD]
-            if type(await_step) is not int or await_step < 0:
-                return f"plan step {expected_step} 'await' must be an int >= 0."
-
-            if tool == RETURN_TOOL_FULL_NAME:
-                return f"plan step {expected_step} is a return step and must not include 'await_step'."
-
-        return normalized
-
-    def _tool_step_dict_to_slot(
-        self,
-        data: Mapping[str, Any],
-        *,
-        step: int,
-        allowed_fields: Collection[str],
-        context: str,
-    ) -> BlackboardSlot:
-        """
-        Convert a normalized tool-step mapping into a planned BlackboardSlot.
-
-        This method is a converter, not the primary raw-LLM schema validator.
-        ``allowed_fields`` is validated as a well-formed programmer-supplied set
-        (via ``_normalize_step_field_set``). It does not filter ``data`` — callers
-        are responsible for ensuring ``data`` only contains expected keys before
-        calling this method. Required-field validation should already have happened
-        in ``_validate_tool_step_dict(...)``.
-        """
-        if type(step) is not int or step < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} step must be an int >= 0; "
-                f"got {step!r}."
-            )
-
-        if not isinstance(context, str) or not context.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: context must be a non-empty string."
-            )
-
-        self._normalize_step_field_set(
-            allowed_fields,
-            name="allowed_fields",
-            require_non_empty=True,
-        )
-
-        tool = data.get(TOOL_FIELD, NO_VAL)
-        args = data.get(ARGS_FIELD, NO_VAL)
-
-        await_step = NO_VAL
-        if AWAIT_FIELD in data:
-            await_step = data[AWAIT_FIELD]
-
-        deps: set[int] = set(
-            extract_dependencies(obj=args, placeholder_pattern=self.STEP_REF_PATTERN)
-        )
-
-        try:
-            return BlackboardSlot(
-                step=step,
-                tool=tool,
-                args=args,
-                resolved_args=NO_VAL,
-                status=BlackboardSlot.PLANNED,
-                step_dependencies=tuple(sorted(deps)),
-                await_step=await_step,
-            )
-        except Exception as exc:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to construct blackboard slot "
-                f"for {context} {step}: {exc}"
-            ) from exc
+        return [{"role": "system", "content": rendered}]
 
     # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks
+    # Task-lifecycle hooks -- stay fully abstract, no shared body
     # ------------------------------------------------------------------ #
     @abstractmethod
     def _initialize_task(
@@ -2119,276 +1021,67 @@ class ToolAgent(Agent, ABC):
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-    ) -> ToolAgentTask:
+    ) -> AgentTask:
         """
-        Re-declared abstract at this level: base ``Agent``'s concrete
-        implementation returns a bare ``AgentTask``, which isn't sufficient
-        here — only ``PlanActAgent``/``ReActAgent`` know how to build their
-        own richer ``ToolAgentTask``-family subclass.
-
-        Same three base parameters as ``Agent``'s own hook — no
-        ``valid_cache_indices``/``failed_cache_indices``; the real
-        implementation computes those internally via
-        ``_compute_cache_index_sets``.
+        Build and return this invocation's task. A concrete override is
+        responsible for seeding whatever cross-invocation context this
+        family's own task model needs directly from ``turns``.
         """
         ...
 
     @abstractmethod
-    def think(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Make this round's real decision via the LLM.
-
-        Hard-abstract — every ``ToolAgent`` family has genuine generation
-        work here, overriding base ``Agent``'s no-op default. A concrete
-        override renders via ``self.render_task(task)``, calls the engine,
-        parses/validates the raw output against this family's schema, and
-        stores the validated decision onto ``task``. Responsible for
-        guaranteeing, before any slot ever reaches ``prepare``: the tool
-        name is registered (``self.has_tool(...)``) and the decision as a
-        whole respects ``tool_calls_limit`` — neither is re-checked
-        downstream. May no-op on a later round once there's nothing
-        further to decide (e.g. a one-shot planner with an
-        already-compiled plan).
-        """
+    def think(self, task: AgentTask) -> AgentTask:
+        """Make this round's real decision via the LLM. Hard-abstract —
+        every family has genuine generation work here."""
         ...
 
     @abstractmethod
-    async def async_think(self, task: ToolAgentTask) -> ToolAgentTask:
-        """Async mirror of ``think``. No default — same rationale as base
-        ``Agent.async_act``: every family that reaches this hook performs
-        real I/O of its own."""
+    async def async_think(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``think``. No default — real I/O of its own."""
         ...
 
     @abstractmethod
-    def prepare(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Turn this round's decision into something ``act`` can run, with no
-        further LLM calls.
-
-        Hard-abstract — each family's resolve/cascade logic differs enough
-        (batch-cursor vs. step-cursor) that no shared body fits both. A
-        concrete override cascade-checks dependencies
-        (``self._check_cascade_failure``), resolves placeholders
-        (``self._resolve_placeholders``), marks surviving slots
-        ``PREPARED``, and populates ``task.prepared_steps`` — advancing
-        whatever cursor this family uses. ``act`` trusts this hook
-        completely: every index landing in ``task.prepared_steps`` must be
-        in-bounds, unique, not already executed, and (batch semantics)
-        contain at most one return call. An empty ``task.prepared_steps``
-        on return (a fully cascade-skipped round) is legal, not an error.
-        """
+    def prepare(self, task: AgentTask) -> AgentTask:
+        """Turn this round's decision into something ``act`` can run, with
+        no further LLM calls. Hard-abstract — each family's resolve/cascade
+        logic differs enough that no shared body fits."""
         ...
 
     @abstractmethod
-    async def async_prepare(self, task: ToolAgentTask) -> ToolAgentTask:
-        """Async mirror of ``prepare``. No default — a family with a real
-        per-step generation call folded in elsewhere may need this to be
-        genuinely async; no shared body fits both families."""
+    async def async_prepare(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``prepare``."""
         ...
 
-    def _render_system_message(self, task: ToolAgentTask) -> list[dict[str, str]]:
-        """
-        Render this ``ToolAgent``'s active system prompt with tool/constant
-        context injected.
+    @abstractmethod
+    def act(self, task: AgentTask) -> AgentTask:
+        """Execute this round's prepared work and apply results, advancing
+        ``task``. Hard-abstract — each family's dispatch shape genuinely
+        differs."""
+        ...
 
-        Overrides base ``Agent``'s ``task.inputs``-only rendering — neither
-        ``PLANNER_PROMPT`` nor ``ORCHESTRATOR_PROMPT`` ever uses an
-        input-derived placeholder, only ``{TOOLS}``/``{TOOL_CALLS_LIMIT}``/
-        ``{CONSTANTS}`` — so this builds that context directly instead of
-        merging with ``task.inputs``. Shared by every ``ToolAgent``
-        subclass; eliminates the identical ``render_context`` dict each one
-        built independently before this sub-pass.
-        """
-        if task.system_prompt_name is None:
-            return []
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            self.TOOLS_FIELD: self.actions_context(),
-            self.LIMIT_FIELD: limit_text,
-            self.CONSTANTS_FIELD: self.constants_context(),
-        }
-        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
-        return [{"role": "system", "content": rendered}]
+    @abstractmethod
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``act``."""
+        ...
 
-    def _render_task_banner(self, task: ToolAgentTask) -> dict[str, str]:
-        """
-        Return the "what is the task" user message shared by every
-        ``ToolAgent`` subclass's ``_render_task_messages``.
-
-        Deduplicates the identical ``===== CURRENT TASK =====`` banner
-        ``planact.py``/``react.py`` each built independently before this
-        sub-pass. No caller in this file — 1d/1e's own
-        ``_render_task_messages`` consumes it (directly as its own message,
-        or with an instruction appended onto its ``content``).
-        """
-        return {
-            "role": "user",
-            "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
-        }
-
-    def _apply_batch_results(
-        self,
-        task: ToolAgentTask,
-        indices: list[int],
-        board: list[BlackboardSlot],
-        raw_results: list[Any],
-    ) -> ToolAgentTask:
-        """
-        Shared post-gather bookkeeping for ``act``/``async_act``: partition
-        ``raw_results`` (paired positionally with ``indices``) into
-        failures/successes, apply ``fail_fast`` handling, mutate slots, and
-        check for run completion. Both callers differ only in *how*
-        ``raw_results`` was gathered (``run_coro_sync``-wrapped vs. awaited
-        directly) — everything after that point is identical, so it lives
-        here once instead of twice.
-
-        Failure handling: ``fail_fast=True`` (default) marks and raises on
-        the first failed step; ``fail_fast=False`` marks every failed slot
-        but only raises if the return tool itself failed, otherwise falling
-        through to record the surviving successes.
-        """
-        non_return_planned = 0
-        return_indices: list[int] = []
-        for idx in indices:
-            if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                return_indices.append(idx)
-            else:
-                non_return_planned += 1
-
-        pairs = list(zip(indices, raw_results))
-        failures = [(idx, raw) for idx, raw in pairs if isinstance(raw, BaseException)]
-        successes = [(idx, raw) for idx, raw in pairs if not isinstance(raw, BaseException)]
-
-        if failures:
-            if self._fail_fast:
-                idx, raw_error = failures[0]
-                if isinstance(raw_error, ToolInvocationError):
-                    board[idx].error = raw_error
-                    board[idx].status = BlackboardSlot.FAILED
-                    raise raw_error
-                wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                    f"for {board[idx].tool!r}: {raw_error}"
-                )
-                board[idx].error = wrapped
-                board[idx].status = BlackboardSlot.FAILED
-                raise wrapped from raw_error
-            else:
-                for idx, raw_error in failures:
-                    if isinstance(raw_error, ToolInvocationError):
-                        board[idx].error = raw_error
-                    else:
-                        board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                            f"for {board[idx].tool!r}: {raw_error}"
-                        )
-                    board[idx].status = BlackboardSlot.FAILED
-
-                for idx, raw_error in failures:
-                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                        err = board[idx].error
-                        if isinstance(raw_error, ToolInvocationError):
-                            raise err
-                        raise err from raw_error
-
-        for idx, tool_result in successes:
-            board[idx].result = tool_result
-            board[idx].error = NO_VAL
-            board[idx].status = BlackboardSlot.EXECUTED
-            task.executed_steps.add(idx)
-
-        task.tool_calls_used += non_return_planned
-        task.prepared_steps = []
-
-        if return_indices:
-            ret_idx = return_indices[0]
-            if board[ret_idx].is_executed():
-                task.generated_response = board[ret_idx].result.result
-                task.complete = True
-
-        return task
-
-    def act(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Execute the currently prepared batch concurrently, or no-op if
-        ``prepare`` produced nothing to run this round.
-
-        Concrete and final — no ``ToolAgent`` subclass overrides this.
-        Trusts ``prepare``'s (and, for tool existence/budget, ``think``'s)
-        contract completely: every index in ``task.prepared_steps`` is
-        assumed in-bounds, unique, not yet executed, marked ``PREPARED``,
-        naming a registered tool, and within ``tool_calls_limit`` — none of
-        that is re-validated here. A cascade-skipped round (``prepare``
-        left ``task.prepared_steps`` empty) is not an error: this method
-        just returns ``task`` unchanged and the outer loop tries again next
-        round.
-
-        Gathers results via a ``run_coro_sync``-wrapped coroutine (this
-        method itself is sync); ``_apply_batch_results`` does everything
-        after that, shared verbatim with ``async_act``.
-        """
-        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
-        if not task.prepared_steps:
-            return task
-
-        indices = list(task.prepared_steps)
-        board = task.running_blackboard
-
-        async def run_batch() -> list[Any]:
-            coros: list[Any] = []
-            for idx in indices:
-                slot = board[idx]
-                tool = self.get_tool(slot.tool)
-                logger.debug(
-                    f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
-                )
-                coros.append(tool.async_invoke(slot.resolved_args))
-            return await asyncio.gather(*coros, return_exceptions=True)
-
-        raw_results = run_coro_sync(run_batch())
-        return self._apply_batch_results(task, indices, board, raw_results)
-
-    async def async_act(self, task: ToolAgentTask) -> ToolAgentTask:
-        """Async mirror of ``act``; same trust/trim contract, awaits each
-        tool's ``async_invoke`` directly rather than wrapping in
-        ``run_coro_sync``. ``_apply_batch_results`` does everything past the
-        gather step, shared verbatim with ``act``."""
-        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
-        if not task.prepared_steps:
-            return task
-
-        indices = list(task.prepared_steps)
-        board = task.running_blackboard
-
-        coros: list[Any] = []
-        for idx in indices:
-            slot = board[idx]
-            tool = self.get_tool(slot.tool)
-            logger.debug(
-                f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
-            )
-            coros.append(tool.async_invoke(slot.resolved_args))
-
-        raw_results = await asyncio.gather(*coros, return_exceptions=True)
-        return self._apply_batch_results(task, indices, board, raw_results)
-
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.
 
-        Extends the base Agent snapshot with ToolAgent-specific toolbox and blackboard
-        diagnostics.
+        Extends the base Agent snapshot with tool/constant/knob diagnostics.
+        No ``fail_fast`` key here — that lives on each concrete subclass's
+        own ``to_dict()`` override instead.
         """
         d = super().to_dict()
         d.update({
             "tool_calls_limit": self.tool_calls_limit,
-            "fail_fast": self._fail_fast,
-            "generation_retries": self._generation_retries,
-            "peek_at_cache": self.peek_at_cache,
-            "blackboard_preview_limit": self.blackboard_preview_limit,
+            "regeneration_limit": self.regeneration_limit,
+            "tool_concurrency_limit": self.tool_concurrency_limit,
             "tools": {
                 name: tool.to_dict()
                 for name, tool in self._toolbox.items()
             },
-            "blackboard": self.blackboard_serialized(peek=False),
         })
         return d

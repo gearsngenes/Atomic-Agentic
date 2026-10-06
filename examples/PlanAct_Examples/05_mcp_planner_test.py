@@ -7,15 +7,10 @@ Expected local MCP endpoint:
 
 Updated to use PlanActAgent (formerly PlannerAgent).
 """
-from dotenv import load_dotenv
-
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
 
-load_dotenv()
-
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
+from shared_engine import llm_engine
 
 planner = PlanActAgent(
     name="MCP_Agent",
@@ -24,9 +19,9 @@ planner = PlanActAgent(
     llm_engine=llm_engine,
 )
 
-# Register all tools from MCP server (bulk discover via client= param).
-planner.batch_register(
-    client=MCPClientHub("streamable_http", persistent=False, endpoint="http://localhost:8000/mcp")
+# Register all tools from MCP server (bulk discover via a hub entry in the list).
+planner.register_tools(
+    [MCPClientHub("streamable_http", persistent=False, endpoint="http://localhost:8000/mcp")]
 )
 
 result = planner.invoke(

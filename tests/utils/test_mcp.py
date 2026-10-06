@@ -169,9 +169,9 @@ class TestBuildMcpToolMetadata:
 
         params = metadata["parameters"]
         assert [(p.name, p.kind, p.type, p.default, p.description) for p in params] == [
-            ("query", ParamSpec.KEYWORD_ONLY, ("str",), NO_VAL, "The search query."),
-            ("top_k", ParamSpec.KEYWORD_ONLY, ("int",), 5, None),
-            ("debug", ParamSpec.KEYWORD_ONLY, ("bool",), None, None),
+            ("query", ParamSpec.POSITIONAL_OR_KEYWORD, ("str",), NO_VAL, "The search query."),
+            ("top_k", ParamSpec.POSITIONAL_OR_KEYWORD, ("int",), 5, None),
+            ("debug", ParamSpec.POSITIONAL_OR_KEYWORD, ("bool",), None, None),
         ]
 
 

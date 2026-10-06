@@ -25,7 +25,7 @@ def main() -> None:
         context_enabled=False,
         tool_calls_limit=12,
     )
-    math_agent.batch_register(BASIC_MATH_TOOLS, name_collision_mode="raise")
+    math_agent.register_tools(BASIC_MATH_TOOLS, name_collision_policy="raise")
 
     host = PyA2AtomicHost(
         invokables=[math_agent],

@@ -2,143 +2,41 @@ from __future__ import annotations
 
 import ast
 import builtins
-import io
-import re
-import tokenize
 from typing import Any, Optional
 
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
-    CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     KWARGS_UNPACK_KEY,
-    LEADING_CODE_FENCE_PATTERN,
-    PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
-    TRAILING_CODE_FENCE_PATTERN,
-    UNSUPPORTED_EXPR_LABELS,
 )
 from ..exceptions import BlackboardParseError
-from ..models.agents.blackboard_models import CodeStatement
-from .agents import extract_identifiers
+from ..models.agents.blackboard_models import ToolStatement
+from .agents import (
+    evaluate_expr,
+    extract_identifiers,
+    is_dispatched,
+    reject_unsupported_forms,
+    strip_code_fence,
+)
 
 __all__ = [
     "parse_statement_to_slots",
-    "resolve_slot_args",
     "parse_generation",
     "rewrite_builtin_calls",
-    "is_dispatched_slot",
     "validate_references",
-    "compile_batches",
     "render_completed_as_python",
+    "render_failed_as_python",
     "render_cache_snapshot",
 ]
-
-
-def _strip_code_fence(raw_text: str) -> str:
-    """
-    Strip a markdown code fence wrapping the generation, if present --
-    defensive against a model wrapping otherwise-valid output in a code
-    fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line.
-
-    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
-    so its captured inner text is used as-is. If that doesn't match (a model
-    emitting only one side), falls back to stripping a leading and/or
-    trailing fence line independently. Either way, a fence appearing only
-    mid-text is left alone (``ast.parse`` will reject that on its own terms,
-    as a real structural problem).
-    """
-    full_match = CODE_FENCE_PATTERN.match(raw_text)
-    if full_match:
-        return full_match.group(1)
-    text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
-    text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
-    return text
-
-
-def _evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
-    """
-    Evaluate one parsed expression node against a namespace, with no
-    builtins available. Safe because every arg reaching this function is
-    guaranteed Call-free by the hoisting rule -- nothing reachable through
-    ``namespace`` can itself be invoked.
-
-    Raises whatever the evaluation naturally raises (``TypeError``,
-    ``ZeroDivisionError``, ``NameError``, ``KeyError``, ...), uncaught --
-    callers decide whether to wrap (parse-time constant folding) or let it
-    surface naturally (``resolve_slot_args``).
-    """
-    expr_wrapper = ast.Expression(body=node)
-    ast.fix_missing_locations(expr_wrapper)
-    code = compile(expr_wrapper, filename="<blackboard-slot-v2>", mode="eval")
-    return eval(code, {"__builtins__": {}}, namespace)
-
-
-def resolve_slot_args(
-    statement: CodeStatement, resolved: dict[str, Any],
-) -> tuple[list[Any], dict[str, Any]]:
-    """
-    Resolve one statement's ``args``/``kwargs`` into a plain
-    ``(positional, keyword)`` pair ready to splat into
-    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
-    ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
-    directly). Substitutes every unresolved ``ast.expr`` value with its
-    concrete value from ``resolved`` (identifier -> value), passing through
-    any already-plain (non-``ast.expr``) value unchanged (e.g. the
-    spliced-in builtin name string from ``rewrite_builtin_calls``). Purely
-    transient -- never persisted back onto a ``CodeStatement``.
-
-    Assumes every dependency is already present in ``resolved``; does not
-    itself check readiness (a ``prepare()``-phase caller's job, combining
-    ``extract_identifiers`` with an all-dependencies-have-results check
-    before ever calling this). A missing identifier is not defensively
-    guarded against here -- it surfaces as whatever ``_evaluate_expr``
-    naturally raises.
-
-    A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) has
-    its ``.value`` resolved and the result spliced into ``positional`` via
-    ``list.extend`` -- raises naturally (``TypeError``) if the resolved
-    value isn't iterable, uncaught here, same "let it surface" precedent
-    as everything else in this function. A keyword entry stored under
-    ``KWARGS_UNPACK_KEY`` (a ``**expr`` unpack) is resolved, checked for a
-    colliding key against the already-resolved named keywords -- raising
-    ``TypeError`` on overlap, matching real Python's own runtime behavior
-    for this exact collision (CPython raises rather than silently
-    favoring one side) -- then merged in.
-    """
-
-    def resolve_one(value: Any) -> Any:
-        return _evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
-
-    positional: list[Any] = []
-    for entry in statement.args:
-        if isinstance(entry, ast.Starred):
-            positional.extend(resolve_one(entry.value))
-        else:
-            positional.append(resolve_one(entry))
-
-    keyword: dict[str, Any] = {}
-    for name, value in statement.kwargs.items():
-        if name == KWARGS_UNPACK_KEY:
-            continue
-        keyword[name] = resolve_one(value)
-
-    if KWARGS_UNPACK_KEY in statement.kwargs:
-        unpacked = resolve_one(statement.kwargs[KWARGS_UNPACK_KEY])
-        overlap = set(unpacked) & set(keyword)
-        if overlap:
-            raise TypeError(
-                f"got multiple values for keyword argument(s): {sorted(overlap)!r}"
-            )
-        keyword.update(unpacked)
-
-    return positional, keyword
+# compile_batches, is_dispatched, and resolve_statement_args live in
+# utils/agents.py, shared with agents/planact.py and agents/react.py --
+# agents/scriptact.py imports them from there.
 
 
 def _process_call_args(
@@ -146,7 +44,7 @@ def _process_call_args(
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
+    hoisted: list[ToolStatement],
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """
     Build one call's final ``(args, kwargs)`` pair: hoists any nested call
@@ -160,7 +58,7 @@ def _process_call_args(
     A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) is
     never eagerly folded, regardless of whether its own inner expr has
     dependencies -- its Starred-ness must survive to resolve time
-    (``resolve_slot_args``), and an already-folded plain value has no way
+    (``resolve_statement_args``), and an already-folded plain value has no way
     to carry that tag. It still gets the same dependency-free dry-run
     validation as every other argument category, applied to its inner
     expr before it's wrapped back in ``ast.Starred``. A keyword entry whose
@@ -177,7 +75,7 @@ def _process_call_args(
             deps = extract_identifiers(inner)
             if not deps:
                 try:
-                    _evaluate_expr(inner, {})
+                    evaluate_expr(inner, {})
                 except Exception as e:
                     raise BlackboardParseError(
                         "* unpack is a constant expression that failed to "
@@ -192,7 +90,7 @@ def _process_call_args(
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                _evaluate_expr(processed, {})
+                evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     "positional argument is a constant expression that "
@@ -219,7 +117,7 @@ def _process_call_args(
         deps = extract_identifiers(processed_value)
         if not deps:
             try:
-                _evaluate_expr(processed_value, {})
+                evaluate_expr(processed_value, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"argument {key!r} is a constant expression that failed "
@@ -236,10 +134,10 @@ def _build_call_slot(
     identifier: Optional[str],
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
-) -> CodeStatement:
+    hoisted: list[ToolStatement],
+) -> ToolStatement:
     """
-    Build one ``CodeStatement`` for ``call_node``, branching on whether its
+    Build one ``ToolStatement`` for ``call_node``, branching on whether its
     ``func`` is a plain dotted-name chain (a registered tool/builtin id) or
     an ``ast.Attribute`` (a method call on some object). Shared by the
     top-level bare-unassigned-call and assignment (``name = call(...)``)
@@ -276,7 +174,7 @@ def _build_call_slot(
         obj_deps = extract_identifiers(obj_expr)
         if not obj_deps:
             try:
-                _evaluate_expr(obj_expr, {})
+                evaluate_expr(obj_expr, {})
             except Exception as e:
                 raise BlackboardParseError(
                     "attribute/method call's object expression is a constant "
@@ -285,7 +183,7 @@ def _build_call_slot(
         positional, keyword = _process_call_args(
             call_node, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        return CodeStatement(
+        return ToolStatement(
             identifier=identifier,
             tool=ATTR_CALL_ALIAS,
             args=(obj_expr, method_name, *positional),
@@ -298,12 +196,12 @@ def _build_call_slot(
     # ternary-with-call/await/dunder-attribute used directly as a call's
     # own callee (e.g. `(lambda x: x)(1)`) would silently produce a
     # nonsense tool id instead of a clean rejection here.
-    _reject_unsupported_forms(call_node.func)
+    reject_unsupported_forms(call_node.func)
     tool_name = ast.unparse(call_node.func)
     positional, keyword = _process_call_args(
         call_node, counter=counter, start_index=start_index, hoisted=hoisted
     )
-    return CodeStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
+    return ToolStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
 
 
 def _reject_await(node: ast.expr) -> None:
@@ -325,73 +223,25 @@ def _reject_await(node: ast.expr) -> None:
     )
 
 
-def _reject_unsupported_forms(node: ast.expr) -> None:
-    """
-    Walk ``node`` and raise on any of: a ternary (``ast.IfExp``) whose
-    either branch contains a ``Call``, an ``ast.Await`` anywhere, a
-    comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
-    ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    anywhere. Shared by ``_hoist_calls`` (called on every value it's about
-    to hoist calls within) and ``_build_call_slot``'s plain-tool branch
-    (called on ``call_node.func`` itself, the one position that reaches
-    neither ``_hoist_calls`` nor this scan otherwise -- a plain-tool call's
-    own callee is used verbatim via ``ast.unparse``, never routed through
-    ``_hoist_calls``, so without this explicit call a lambda used directly
-    as a call's own callee, e.g. ``(lambda x: x)(1)``, would silently
-    produce a nonsense ``tool`` id instead of a clean rejection here).
-
-    Raises before any hoisting/unparsing proceeds -- every check here is
-    unconditional over the whole tree passed in, at any depth, regardless
-    of whether it actually contains a ``Call``.
-    """
-    for candidate in ast.walk(node):
-        if isinstance(candidate, ast.IfExp) and (
-            any(isinstance(n, ast.Call) for n in ast.walk(candidate.body))
-            or any(isinstance(n, ast.Call) for n in ast.walk(candidate.orelse))
-        ):
-            raise BlackboardParseError(
-                "conditional expression branches must not contain tool "
-                "calls (wastes budget evaluating the untaken branch): "
-                f"{ast.unparse(candidate)!r} -- restructure as separate "
-                "statements or a pause."
-            )
-
-        if isinstance(candidate, ast.Await):
-            _reject_await(candidate)
-
-        label = UNSUPPORTED_EXPR_LABELS.get(type(candidate))
-        if label is not None:
-            raise BlackboardParseError(
-                f"{label} expressions are not supported: "
-                f"{ast.unparse(candidate)!r} -- rewrite as explicit "
-                "statements instead."
-            )
-
-        if isinstance(candidate, ast.Attribute) and DUNDER_ATTRIBUTE_PATTERN.fullmatch(candidate.attr):
-            raise BlackboardParseError(
-                f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
-            )
-
-
 def _hoist_calls(
     node: ast.expr,
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[CodeStatement],
+    hoisted: list[ToolStatement],
 ) -> ast.expr:
     """
     Post-order rewrite: replaces every ``Call`` node found anywhere within
     ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
     value, an f-string's embedded expression, a container literal element,
     ...) with a ``Name`` reference to a newly synthesized, hoisted
-    ``CodeStatement``, appended to ``hoisted`` in discovery order.
+    ``ToolStatement``, appended to ``hoisted`` in discovery order.
 
     ``ast.NodeTransformer.generic_visit`` recurses into a call's own
     children before ``visit_Call`` builds that call's own hoisted slot, so
     doubly/triply-nested calls flatten correctly bottom-up.
 
-    Rejects (before any hoisting) every form ``_reject_unsupported_forms``
+    Rejects (before any hoisting) every form ``reject_unsupported_forms``
     covers -- a ternary whose either branch contains a ``Call``, an
     ``ast.Await`` anywhere, a comprehension/lambda anywhere, and a dunder
     attribute access anywhere (including inside a to-be-hoisted call's own
@@ -403,7 +253,7 @@ def _hoist_calls(
     walked as a standalone ``ast.Attribute`` node here) and is checked
     separately, in ``_build_call_slot``.
     """
-    _reject_unsupported_forms(node)
+    reject_unsupported_forms(node)
 
     def _hoist_one_call(call_node: ast.Call) -> ast.Name:
         """Build one hoisted slot for `call_node` (appended to `hoisted`,
@@ -441,10 +291,10 @@ def _hoist_calls(
     return _CallHoister().visit(node)
 
 
-def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeStatement]:
+def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[ToolStatement]:
     """
     Parse one raw generated statement string into an ordered list of
-    ``CodeStatement`` objects: any auto-hoisted slots first (in
+    ``ToolStatement`` objects: any auto-hoisted slots first (in
     discovery/post-order), the statement's own slot last.
 
     Three top-level statement shapes are accepted: an assignment (case A/B
@@ -476,9 +326,9 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     # `return None`). No Python-grammar obstacle to a module-level Return
     # node here -- the "return outside function" check only fires at
     # compile()-to-bytecode time, which this pipeline never does to a whole
-    # statement (only to bare expressions, via _evaluate_expr).
+    # statement (only to bare expressions, via evaluate_expr).
     if isinstance(stmt, ast.Return):
-        hoisted: list[CodeStatement] = []
+        hoisted: list[ToolStatement] = []
         counter = [0]
         return_value = stmt.value if stmt.value is not None else ast.Constant(value=None)
         processed = _hoist_calls(
@@ -487,13 +337,13 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                _evaluate_expr(processed, {})
+                evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"return expression is a constant that failed to evaluate: {e!r}"
                 ) from e
         val: Any = processed
-        final_slot = CodeStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
+        final_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
         return [*hoisted, final_slot]
 
     # A bare top-level `await ...` never reaches `_hoist_calls` (this
@@ -546,7 +396,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         )
 
     rhs = stmt.value
-    hoisted: list[CodeStatement] = []
+    hoisted: list[ToolStatement] = []
     counter = [0]
 
     if isinstance(rhs, ast.Call):
@@ -573,7 +423,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     deps = extract_identifiers(processed)
     if not deps:
         try:
-            _evaluate_expr(processed, {})
+            evaluate_expr(processed, {})
         except Exception as e:
             raise BlackboardParseError(
                 f"expression is a constant that failed to evaluate: {e!r}"
@@ -581,171 +431,82 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     val: Any = processed
     args, kwargs = (), {"val": val}
 
-    final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
+    final_slot = ToolStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
     return [*hoisted, final_slot]
 
 
-def _find_pause_marker(text: str) -> tuple[int, int] | None:
+def parse_generation(raw_text: str) -> list[ToolStatement]:
     """
-    Locate the first real ``# PAUSE`` comment in ``text`` via ``tokenize``
-    rather than a raw-text regex scan, so a legal (freely-interspersed,
-    triple-quoted-preferred) reasoning-note string that happens to contain
-    the text "# PAUSE" on one of its own lines can never be misread as the
-    real sentinel -- ``tokenize`` never emits a ``COMMENT`` token from
-    inside a ``STRING`` token, unlike a plain regex over raw text, which
-    has no concept of "am I inside a string literal."
+    Parse one whole generation (a fresh plan, or a repair-triggered
+    continuation -- both use this same grammar; there is no separate
+    "continuation mode") into a flat slot sequence.
 
-    Only a comment that is the sole content on its line (nothing but
-    whitespace precedes it) counts, matching ``PAUSE_PATTERN``'s original
-    line-anchored intent -- a trailing comment after real code on the same
-    line is not a marker, unchanged from before this rewrite.
+    No pause marker of any kind exists anymore -- the entire generation is
+    always parsed, statement by statement, with two special any-position
+    cases: a bare string-literal statement (a reasoning note -- inert,
+    never stored or dispatched, legal anywhere, not just first; genuinely
+    valid Python this grammar has no other use for, so there is nothing to
+    validate beyond "it's a string"), and an ``ast.If`` node, which now
+    **always** raises, feeding regen-repair -- conditionals are permanently
+    forbidden in this grammar with no silent-truncation tolerance left for
+    them (there is no longer a second terminal, model-authored continuation,
+    for a truncation to hand off to).
 
-    Returns the marker's ``(row, col)`` start position (1-indexed row,
-    ``tokenize``'s own convention), or ``None`` if no real marker exists
-    (including when ``text`` fails to tokenize at all -- a genuine
-    lexical error surfaces downstream via ``ast.parse``, exactly as it
-    would have regardless of this function).
+    A ``return`` terminates immediately (whatever follows it, if anything,
+    is never even parsed) -- a later real call must never land in the same
+    batch as the return and execute anyway, and a second ``return`` must
+    never silently overwrite the first.
+
+    Falling off the end of the generation with neither a ``return`` nor an
+    ``ast.If`` simply means the plan is done as written -- the caller
+    (``ScriptActAgent._finalize_without_continuation``) infers ``None`` if
+    nothing was ever returned.
+
+    Returns the flat slot sequence (no longer a 2-tuple -- there is no
+    continuation signal left to report). Raises ``BlackboardParseError`` on
+    any structural failure (propagated from ``parse_statement_to_slots``, a
+    genuine ``ast.parse`` syntax error, or a conditional statement).
     """
-    lines = text.splitlines()
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-            if tok.type != tokenize.COMMENT or not PAUSE_PATTERN.match(tok.string):
-                continue
-            row, col = tok.start
-            if lines[row - 1][:col].strip():
-                continue
-            return tok.start
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return None
-    return None
+    text = strip_code_fence(raw_text)
 
-
-def parse_generation(
-    raw_text: str,
-) -> tuple[list[CodeStatement], bool]:
-    """
-    Parse one whole generation (a fresh plan, or a pause-triggered
-    continuation) into a flat slot sequence and whether a further
-    continuation round is needed.
-
-    Pause-splitting happens before any AST parsing -- ``# PAUSE`` is a
-    comment, and ``ast.parse`` strips comments, so a marker's position
-    can't be recovered from a parsed tree. Located via ``_find_pause_marker``
-    (``tokenize``-based, not a raw-text regex scan -- a legal reasoning-note
-    string containing the text "# PAUSE" is never misread as the real
-    sentinel). Only the FIRST marker matters: a generation has at most one
-    meaningful pause, since reaching one always terminates it (mirroring
-    how a ``return`` already terminates it) -- everything at or after it is
-    discarded, only ``before`` (everything strictly preceding it) is ever
-    parsed.
-
-    ``before`` is parsed and dispatched statement-by-statement exactly as
-    always, with two special any-position cases: a bare string-literal
-    statement (a reasoning note -- inert, never stored or dispatched, legal
-    anywhere, not just first; genuinely valid Python this grammar has no
-    other use for, so there is nothing to validate beyond "it's a string"),
-    and an ``ast.If`` node. The latter is a defensive backstop, not a taught
-    convention -- the prompt tells the model never to write one -- so a
-    model that does anyway is handled by silently truncating there (exactly
-    like a ``return``) rather than failing the whole generation, UNLESS
-    nothing real has been produced yet (``flat_slots`` still empty), in
-    which case there is no confident partial work to fall back to and this
-    is treated as a genuine structural error instead, feeding regen-repair.
-    The identical "nothing real yet" check applies to an explicit pause
-    marker found with an empty ``before`` -- both represent the same waste
-    (a whole planning round spent for zero progress).
-
-    A ``return`` also terminates immediately (whatever follows it in
-    ``before``, if anything, is never even parsed) -- for the same reason
-    a later real call must never land in the same batch as the return and
-    execute anyway, and a second `return` must never silently overwrite the
-    first. If a pause marker was ALSO found anywhere in the raw text
-    (``len(parts) == 2``), this is a structural error, not silently
-    resolved in ``return``'s favor: a generation writing both terminals is
-    self-contradictory (observed live -- a model hedging between "return
-    this" and "pause to reconsider" in the same breath), and letting
-    ``return`` silently win discards the pause with zero signal, risking a
-    premature/unverified final answer. Raises, feeding regen-repair so the
-    model is told directly to pick exactly one.
-
-    Whatever follows a found marker is never inspected at all -- ``# PAUSE``
-    is a bare, complete sentinel; no trailing note is expected, taught, or
-    parsed. Whatever a model writes past the marker is discarded without
-    complaint, same as any other post-terminal content.
-
-    Returns ``(flat_slots, continue_planning)``. Raises
-    ``BlackboardParseError`` on any structural failure (propagated from
-    ``parse_statement_to_slots``, a genuine ``ast.parse`` syntax error in
-    ``before``, or one of the two "nothing real yet" cases above).
-    """
-    text = _strip_code_fence(raw_text)
-    marker = _find_pause_marker(text)
-    if marker is None:
-        before = text
-    else:
-        row, col = marker
-        lines = text.splitlines(keepends=True)
-        before = "".join(lines[: row - 1]) + lines[row - 1][:col]
-    marker_found = marker is not None
-
-    flat_slots: list[CodeStatement] = []
+    flat_slots: list[ToolStatement] = []
     hoist_index = 0
 
-    if before.strip():
-        try:
-            tree = ast.parse(before, mode="exec")
-        except SyntaxError as e:
-            raise BlackboardParseError(str(e)) from e
+    if not text.strip():
+        return flat_slots
 
-        for node in tree.body:
-            if (
-                isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ):
-                continue
+    try:
+        tree = ast.parse(text, mode="exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(str(e)) from e
 
-            if isinstance(node, ast.If):
-                if not flat_slots:
-                    raise BlackboardParseError(
-                        "a plan cannot open with a conditional statement "
-                        "and no real work done yet; compute or check "
-                        "whatever the condition depends on first, as a "
-                        "real statement."
-                    )
-                return flat_slots, True
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
 
-            stmt_source = ast.unparse(node)
-            slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
-            flat_slots.extend(slots)
-            hoist_index += len(slots)
+        if isinstance(node, ast.If):
+            raise BlackboardParseError(
+                "conditional statements are not permitted in this grammar "
+                "-- compute both branches' own work directly, or "
+                "restructure without a conditional."
+            )
 
-            if slots and slots[-1].tool == RETURN_ALIAS:
-                if marker_found:
-                    raise BlackboardParseError(
-                        "a generation cannot contain both a return statement "
-                        "and a # PAUSE marker -- pick exactly one way to end: "
-                        "return a final value, or # PAUSE (with no return) to "
-                        "continue next round."
-                    )
-                return flat_slots, False
+        stmt_source = ast.unparse(node)
+        slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
+        flat_slots.extend(slots)
+        hoist_index += len(slots)
 
-    if not marker_found:
-        # No pause marker anywhere -- completes normally (or falls off the
-        # end with an inferred `None` result if no `return` ran).
-        return flat_slots, False
+        if slots and slots[-1].tool == RETURN_ALIAS:
+            return flat_slots
 
-    if not flat_slots:
-        raise BlackboardParseError(
-            "a pause cannot appear before any real work has been done; "
-            "write at least one real statement first, then pause only if "
-            "what follows still depends on something not yet known."
-        )
-
-    return flat_slots, True
+    return flat_slots
 
 
-def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
+def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
     """
     Rewrite eligible builtin-call slots in place to dispatch through the
     ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
@@ -755,7 +516,7 @@ def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
     A slot is eligible when its ``tool`` isn't already a sentinel and names
     a real Python builtin. A registered tool can no longer share a name
     with a real, non-excluded builtin at all (enforced at registration time
-    by ``ScriptAgent._validate_tool_alias``), so there is no precedence
+    by ``ScriptActAgent._validate_tool_alias``), so there is no precedence
     rule to apply here -- a name reaching this function is either a
     registered tool (never a builtin) or not, mutually exclusive by
     construction. An eligible slot gets its builtin name spliced in as a
@@ -790,21 +551,8 @@ def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
     return issues
 
 
-def is_dispatched_slot(slot: CodeStatement) -> bool:
-    """
-    True iff ``slot`` represents a real dispatched call (a registered tool
-    or an approved Python builtin) rather than an ``rhs_assign``/``return``
-    sentinel, which are never dispatched at all. Shared by
-    ``compile_batches`` (concurrency-batch accounting) and
-    ``validate_references`` (tool-call-budget accounting) -- both use the
-    identical predicate, since builtins count toward the budget the same
-    as registered tools (no per-category exemption).
-    """
-    return slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
-
-
 def validate_references(
-    slots: list[CodeStatement],
+    slots: list[ToolStatement],
     known_tools: frozenset[str],
     known_constants: frozenset[str],
     known_history: frozenset[str],
@@ -837,7 +585,7 @@ def validate_references(
 
     Separately, independent of the per-slot walk: if ``tool_calls_limit``
     is not ``None`` and the count of dispatched slots (registered tool
-    calls and approved-builtin calls combined, via ``is_dispatched_slot``;
+    calls and approved-builtin calls combined, via ``is_dispatched``;
     ``rhs_assign``/``return`` excluded, hoisted calls included) exceeds it,
     that's also collected as an issue -- one regen-repair round can report
     both a bad reference and an excess call count together. Tools and
@@ -892,7 +640,7 @@ def validate_references(
                 )
             bound.add(slot.identifier)
 
-    real_call_count = sum(1 for slot in slots if is_dispatched_slot(slot))
+    real_call_count = sum(1 for slot in slots if is_dispatched(slot))
     if tool_calls_limit is not None and real_call_count > tool_calls_limit:
         issues.append(
             f"the plan calls {real_call_count} tool(s)/builtin(s), "
@@ -902,95 +650,8 @@ def validate_references(
     return issues
 
 
-def compile_batches(
-    slots: list[CodeStatement],
-    max_concurrency: Optional[int] = None,
-    start_batch_index: int = 0,
-) -> list[list[CodeStatement]]:
-    """
-    Group ``slots`` into dependency batches for concurrent execution, and
-    stamp each slot's ``.batch_index`` with the batch it landed in.
-
-    A slot joins the currently-open batch only if none of its dependencies
-    were bound by a slot already sitting in that same open batch (i.e. every
-    dependency is satisfiable from an earlier, already-closed batch, a
-    registered tool, or a registered constant -- reference validity itself
-    is assumed already checked by ``validate_references``). Otherwise the
-    open batch closes first and this slot starts a new one.
-
-    Additionally, when about to add a *dispatched* slot (``is_dispatched_slot``
-    -- the same predicate ``validate_references`` now uses for its own
-    budget accounting) to a batch that already holds ``max_concurrency``
-    dispatched slots, the batch closes first -- a purely additive
-    concurrency cap, never replacing the dependency-conflict closure rule
-    above. ``max_concurrency=None`` means no cap (today's greedy default).
-
-    A ``RETURN_ALIAS`` slot is never grouped with anything else -- it always
-    closes the current batch, lands alone in a batch of its own, then closes
-    that batch too. This guarantees ``_apply_batch_results`` can never see a
-    return slot sharing a batch with an unrelated failing call, which would
-    otherwise let that failure suppress an already-resolved return.
-
-    Every slot in a batch is stamped with the same ``batch_index`` --
-    ``start_batch_index`` plus that batch's own 0-based position among the
-    batches this call produces -- the moment the batch closes. Lets a
-    caller running multiple generation rounds in one invoke
-    (``ScriptAgentTask.batch_counter``) keep indices globally unique across
-    rounds by passing the running total in as ``start_batch_index``.
-    """
-    batches: list[list[CodeStatement]] = []
-    current_batch: list[CodeStatement] = []
-    current_batch_identifiers: set[str] = set()
-    current_batch_dispatched = 0
-
-    def close_current() -> None:
-        nonlocal current_batch, current_batch_identifiers, current_batch_dispatched
-        if not current_batch:
-            return
-        index = start_batch_index + len(batches)
-        for slot in current_batch:
-            slot.batch_index = index
-        batches.append(current_batch)
-        current_batch = []
-        current_batch_identifiers = set()
-        current_batch_dispatched = 0
-
-    for slot in slots:
-        if slot.tool == RETURN_ALIAS:
-            # A return is never grouped with anything else -- closing
-            # before AND after guarantees it lands alone in its own batch,
-            # so an unrelated failure elsewhere can never suppress it (a
-            # partial-batch failure can only ever apply to slots that were
-            # actually batched alongside the failure).
-            close_current()
-            current_batch.append(slot)
-            close_current()
-            continue
-
-        deps = (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs))
-        if any(name in current_batch_identifiers for name in deps):
-            close_current()
-
-        is_dispatched = is_dispatched_slot(slot)
-        if (
-            is_dispatched
-            and max_concurrency is not None
-            and current_batch_dispatched >= max_concurrency
-        ):
-            close_current()
-
-        current_batch.append(slot)
-        if slot.identifier is not None:
-            current_batch_identifiers.add(slot.identifier)
-        if is_dispatched:
-            current_batch_dispatched += 1
-
-    close_current()
-    return batches
-
-
 def render_completed_as_python(
-    completed: list[CodeStatement],
+    completed: list[ToolStatement],
     show_batches: bool = False,
 ) -> str:
     """
@@ -1000,12 +661,12 @@ def render_completed_as_python(
 
     ``show_batches`` (default ``False``) controls whether output is
     grouped under a ``# Batch N:`` header per concurrently-dispatched
-    batch. Model-facing callers (``ScriptAgent``'s own continuation-message
+    batch. Model-facing callers (``ScriptActAgent``'s own continuation-message
     building) must leave this ``False`` -- ``# Batch N:`` headers appearing
     in text shown to the model were found, empirically, to get echoed and
     fabricated back into later generations. The grouped form remains
     available, opt-in, for standalone human inspection
-    (``ScriptAgentRecord.render_as_code``), where there is no such risk.
+    (``ScriptActAgentRecord.render_as_code``), where there is no such risk.
     Consecutive slots sharing the same ``.batch_index`` are already
     contiguous in ``completed`` (a batch drains fully before the next one
     starts), so grouping only needs to detect index changes, not sort.
@@ -1019,10 +680,6 @@ def render_completed_as_python(
     afterward) but is handled defensively rather than crashing. Returns
     the joined lines, or ``""`` for an empty ``completed``.
     """
-
-    def render_value(value: Any) -> str:
-        return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
-
     lines: list[str] = []
     current_index: Optional[int] = None
     for slot in completed:
@@ -1032,44 +689,34 @@ def render_completed_as_python(
             lines.append(f"# Batch {slot.batch_index}:")
             current_index = slot.batch_index
 
-        if slot.tool == RETURN_ALIAS:
-            lines.append(f"return {render_value(slot.kwargs['val'])}")
-            continue
-
-        prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
-        if slot.tool == RHS_ASSIGN_ALIAS:
-            lines.append(f"{prefix}{render_value(slot.kwargs['val'])}")
-            continue
-
-        # A py_builtin slot renders back as the original natural call
-        # syntax (`len(x)`), never the internal rewritten form
-        # (`py_builtin('len', x)`) -- unsplice the builtin name before
-        # falling into the same generic rendering as any real tool call. An
-        # attr_call slot gets the same treatment: `obj.method(args)`, not
-        # the internal (obj, "method", *args) shape.
-        if slot.tool == PY_BUILTIN_ALIAS:
-            call_name, call_args = slot.args[0], slot.args[1:]
-        elif slot.tool == ATTR_CALL_ALIAS:
-            call_name, call_args = f"{render_value(slot.args[0])}.{slot.args[1]}", slot.args[2:]
-        else:
-            call_name, call_args = slot.tool, slot.args
-
-        positional_tokens = [
-            f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
-            for entry in call_args
-        ]
-        keyword_tokens = [
-            f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
-            for name, value in slot.kwargs.items()
-        ]
-        args_source = ", ".join(positional_tokens + keyword_tokens)
-        lines.append(f"{prefix}{call_name}({args_source})")
+        lines.append(slot.to_code())
 
     return "\n".join(lines)
 
 
+def render_failed_as_python(failed: list[ToolStatement]) -> str:
+    """
+    Mirrors ``utils/sigils.py``'s ``render_failed_as_json`` shape exactly,
+    translated to this grammar's own source-line vocabulary: one line per
+    failed slot (via ``ToolStatement.to_code()``), each suffixed with its
+    own exception text. No batch-header grouping -- these are always all
+    from the one batch that most recently triggered a repair round, by
+    construction of the caller (``ScriptActAgent.prepare``/
+    ``_apply_batch_results``, which slice ``task.failed_statements`` down
+    to just that batch before ever calling this).
+
+    Returns ``""`` for an empty ``failed`` list, matching
+    ``render_completed_as_python``'s own empty-input contract.
+    """
+    if not failed:
+        return ""
+    return "\n".join(
+        f"{slot.to_code()}  # FAILED: {slot.exception!r}" for slot in failed
+    )
+
+
 def render_cache_snapshot(
-    completed: list[CodeStatement],
+    completed: list[ToolStatement],
     cache: dict[str, Any],
     preview_limit: Optional[int],
 ) -> str:
@@ -1077,11 +724,12 @@ def render_cache_snapshot(
     Render the current value of every identifier bound by ``completed``
     this round, as its own fenced block, separate from the reconstructed
     code (``render_completed_as_python``) -- keeps per-statement lines free
-    of inline value noise while still giving a continuation round real
+    of inline value noise while still giving a repair round real
     visibility into what a prior dispatched call actually returned (the
     one thing a bare ``name = tool(...)`` statement can never reveal on
-    its own; a reactive, content-driven pause decision -- e.g. reading a
-    reviewer's actual verdict -- depends on this).
+    its own; writing correct fresh code around an existing binding --
+    e.g. reusing a reviewer's actual verdict instead of a fabricated one --
+    depends on this).
 
     Identifiers are taken from ``completed`` in first-occurrence order,
     each looked up fresh in ``cache`` (so a reassigned name shows its

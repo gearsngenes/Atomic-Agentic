@@ -25,7 +25,7 @@ from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
-from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions, stringify_result
+from ..utils.agents import normalize_prompt_config, stringify_result
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
@@ -119,8 +119,7 @@ class ThinkingAgent(BasicAgent):
             Optional secondary engine used for thinking-round calls only
             (``think``/``async_think``). ``None`` (default) falls back to
             ``llm_engine`` -- every thinking round then uses the same
-            engine as the reply phase, identical to this class's behavior
-            before this parameter existed. The reply phase
+            engine as the reply phase. The reply phase
             (``act``/``async_act``) never consults this value under any
             setting.
         response_schema : dict[str, Any] | None
@@ -148,7 +147,8 @@ class ThinkingAgent(BasicAgent):
             When set, ``_initialize_task`` raises ``AgentInvocationError``
             if a caller-supplied ``thinking_rounds`` exceeds it. Exists to
             bound cost/latency when this agent is registered as a tool
-            under an orchestrating ``ToolAgent``, whose planner LLM would
+            under an orchestrating ``ToolAgent`` (``PlanActAgent``/
+            ``ReActAgent``/``ScriptActAgent``), whose planner LLM would
             otherwise be free to request any round count -- see
             ``_extra_description``, which is how that planner actually
             learns the cap. Mutable after construction via the
@@ -162,10 +162,22 @@ class ThinkingAgent(BasicAgent):
         parameter ``thinking_rounds`` (default ``1``, no ceiling here),
         validated in ``_initialize_task``.
         """
-        role_config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
+        role_config = normalize_prompt_config(
+            role_prompt,
+            default_template=self.DEFAULT_ROLE_PROMPT,
+            provided_description="Role prompt",
+            default_description="Default assistant role prompt",
+            error_label="role_prompt",
+        )
         role_params = list(role_config.parameters)
 
-        thinking_config = normalize_thinking_instructions(thinking_instructions, self.DEFAULT_THINKING_PROMPT)
+        thinking_config = normalize_prompt_config(
+            thinking_instructions,
+            default_template=self.DEFAULT_THINKING_PROMPT,
+            provided_description="Thinking instructions",
+            default_description="Default thinking instructions.",
+            error_label="thinking_instructions",
+        )
         thinking_params = list(thinking_config.parameters)
 
         # Reconcile role_prompt vs thinking_instructions BEFORE combining --
@@ -471,10 +483,9 @@ class ThinkingAgent(BasicAgent):
         return task.task_messages
 
     def _render_task_banner_text(self, task: ThinkingTask) -> str:
-        """``===== CURRENT TASK =====`` banner text, matching the
-        ``ToolAgent``/``_render_task_banner`` convention (``BasicAgent``
-        itself has no banner helper to inherit -- its single-message reply
-        never needed one)."""
+        """``===== CURRENT TASK =====`` banner text wrapping the user
+        prompt (``BasicAgent`` itself has no banner helper to inherit --
+        its single-message reply never needed one)."""
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod

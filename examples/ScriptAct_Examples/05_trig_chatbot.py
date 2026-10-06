@@ -1,8 +1,8 @@
 """06_trig_chatbot.py
 
 A fixed, scripted sequence of trig/geometry questions run as separate turns
-against the same context_enabled=True ScriptAgent -- testing whether it
-correctly reuses an EARLIER turn's result via ScriptAgent's own
+against the same context_enabled=True ScriptActAgent -- testing whether it
+correctly reuses an EARLIER turn's result via ScriptActAgent's own
 task_result_i cross-invocation addressing (render_turn/_initialize_task),
 rather than v1 ToolAgent's <<__cN__>> placeholder scheme.
 
@@ -35,7 +35,7 @@ not just the final numeric answer (which a lucky guess could also match).
 import logging
 import math
 
-from atomic_agentic.agents import ScriptAgent
+from atomic_agentic.agents import ScriptActAgent
 from atomic_agentic.tools.prebuilt import TRIG_TOOLS
 
 from shared_engine import llm_engine
@@ -48,7 +48,7 @@ logging.basicConfig(level=logging.INFO)
 _trig_by_name = {tool.name: tool for tool in TRIG_TOOLS}
 CORE_TRIG_TOOLS = [_trig_by_name[name] for name in ("sin", "cos", "tan", "asin", "acos", "atan")]
 
-chatbot = ScriptAgent(
+chatbot = ScriptActAgent(
     name="TrigChatbot",
     namespace="examples",
     description="Answers trig/geometry questions conversationally, reusing prior answers when relevant.",
