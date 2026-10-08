@@ -2,7 +2,11 @@
 import math
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
 
 from shared_engine import llm_engine
 

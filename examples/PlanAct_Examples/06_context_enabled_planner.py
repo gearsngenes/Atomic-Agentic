@@ -9,7 +9,11 @@ Updated to use PlanActAgent (formerly PlannerAgent).
 import logging
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, TRIG_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -25,6 +29,8 @@ my_planner = PlanActAgent(
 )
 
 my_planner.register_tools(BASIC_MATH_TOOLS)
+my_planner.register_tools(TRIG_TOOLS)
+my_planner.register_tools(EXPONENT_TOOLS)
 
 while True:
     query = input("Enter a planning task (or 'q' or 'exit' to quit): ")

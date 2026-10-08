@@ -11,22 +11,37 @@ from starlette.applications import Starlette
 
 from atomic_agentic.a2a import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+from atomic_agentic.tools import toolify
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS
 
 HOST = "127.0.0.1"
 PORT = 9000
 BASE_URL = f"http://{HOST}:{PORT}"
 
-# Plain Tools are AtomicInvokables too -- no Agent required to publish an
-# Atomic skill. A subset of MATH_TOOLS is exposed here, picked for parameter
-# variety: two floats (add), one float (sqrt), a list of floats (mean).
+# Plain functions are toolified on the fly here -- A2AtomicExecutor requires
+# real AtomicInvokable instances (calls .to_agent_card() directly, no
+# toolify step of its own), unlike Agent.register_tools which normalizes a
+# bare callable itself. A subset of BASIC_MATH_TOOLS is exposed, picked for
+# parameter variety: two floats (add), two floats (multiply). NOTE: "sqrt"
+# and "mean" below are pre-existing names in SKILL_NAMES that were never
+# actually in BASIC_MATH_TOOLS (sqrt/mean live in EXPONENT_TOOLS/STAT_TOOLS
+# instead) -- a latent no-op in the filter below, left as found, not fixed
+# here.
 SKILL_NAMES = {"add", "multiply", "sqrt", "mean"}
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    skills = [tool for tool in BASIC_MATH_TOOLS if tool.name in SKILL_NAMES]
+    skills = [
+        toolify(fn, namespace="Basic_Math")
+        for fn in BASIC_MATH_TOOLS
+        if fn.__name__ in SKILL_NAMES
+    ]
     executor = A2AtomicExecutor(skills)
 
     card = executor.to_agent_card(

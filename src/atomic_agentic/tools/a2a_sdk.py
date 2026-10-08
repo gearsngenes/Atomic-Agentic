@@ -126,9 +126,9 @@ class A2AProxyTool(Tool):
         """
         Turn a remote AgentCard's ``name`` into a usable namespace, or
         ``None`` if it doesn't sanitize into one. Case is preserved verbatim
-        -- no AA convention forces lowercase namespaces (``tools/prebuilt.py``
-        already ships ``"Math"``/``"Console"``). A ``None`` return means the
-        caller falls back to ``"a2a"``, never to an empty-string namespace.
+        -- no AA convention forces lowercase namespaces. A ``None`` return
+        means the caller falls back to ``"a2a"``, never to an empty-string
+        namespace.
         """
         candidate = _NAMESPACE_SEPARATOR_PATTERN.sub("_", card_name.strip())
         return candidate if IDENTIFIER_PATTERN.fullmatch(candidate) else None

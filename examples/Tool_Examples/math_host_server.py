@@ -7,7 +7,11 @@ from dotenv import load_dotenv
 from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS
 
 load_dotenv()
 

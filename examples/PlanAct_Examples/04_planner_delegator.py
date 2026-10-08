@@ -11,8 +11,12 @@ Updated to use PlanActAgent (ReWOO-style: plan once, then execute).
 import logging
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, EXPONENT_TOOLS, STAT_TOOLS
 from atomic_agentic.llm import OpenAIEngine
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, EXPONENT_TOOLS, STAT_TOOLS
 
 from shared_engine import llm_engine
 

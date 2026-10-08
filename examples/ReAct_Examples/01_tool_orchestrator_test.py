@@ -13,7 +13,11 @@ import math
 from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -27,6 +31,15 @@ orchestrator = ReActAgent(
     records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
     context_enabled=True,
+    tool_instructions="""
+    You are a mathematical assistant who solves lists of math problems and displays their results ONE AT A TIME.
+    Before printing your final answer, make sure you do ALL the necessary calculations and partial steps needed,
+    AND use the mathematical PI CONSTANT wherever applicable instead of a hard-coded number.
+    Each question and its answer should be printed in the format below:
+    "<question>: {{calculated_answer}}"
+    NEVER print the same question-answer pair twice.
+    """
+    
 )
 
 orchestrator.register_tools(BASIC_MATH_TOOLS)
@@ -39,13 +52,10 @@ orchestrator.register_constant(
 )
 
 task = """
-1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
-2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
-3) Compute the volume of a cylinder with radius of 2 and height of 10 [V(r, h) = pi * r^2 * h].
-
-Do NOT skip any steps, and do NOT attempt to combine them into a single calculation.
-
-Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
+Solve EACH question and print its result:
+1) The area of a circle with a radius of 5 (pi * r^2).
+2) The hypotenuse length of a triangle with legs a=3, b=4
+3) The volume of a cylinder with radius of 2 and height of 10 (pi * r^2 * h).
 """
 
 final_result = orchestrator.invoke({"prompt": task})

@@ -15,7 +15,11 @@ import logging
 from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, TRIG_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -32,6 +36,8 @@ reactor = ReActAgent(
 )
 
 reactor.register_tools(BASIC_MATH_TOOLS)
+reactor.register_tools(TRIG_TOOLS)
+reactor.register_tools(EXPONENT_TOOLS)
 
 while True:
     query = input("Enter a task (or 'q' / 'exit' to quit): ")

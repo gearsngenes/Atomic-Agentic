@@ -44,7 +44,11 @@ from typing import Any
 
 from atomic_agentic.agents import BasicAgent, ScriptActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, STAT_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import EXPONENT_TOOLS, STAT_TOOLS
 
 from shared_engine import llm_engine
 

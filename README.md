@@ -184,7 +184,14 @@ Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 ```python
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+def add(a: float, b: float) -> float:
+    """Return the sum of two numbers."""
+    return a + b
+
+def multiply(a: float, b: float) -> float:
+    """Return the product of two numbers."""
+    return a * b
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 
@@ -195,7 +202,7 @@ agent = PlanActAgent(
     llm_engine=engine,
 )
 
-agent.register_tools(BASIC_MATH_TOOLS)
+agent.register_tools([add, multiply])
 
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
 print(result.result)
@@ -222,7 +229,6 @@ needed.
 ```python
 from atomic_agentic.agents import ScriptActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 
@@ -233,11 +239,13 @@ agent = ScriptActAgent(
     llm_engine=engine,
 )
 
-agent.register_tools(BASIC_MATH_TOOLS)
-
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
 print(result.result)
 ```
+
+(No tools registered above -- `ScriptActAgent` solves bare arithmetic like
+this via its own restricted-grammar builtins; see `examples/ScriptAct_Examples/`
+for tool registration in context.)
 
 The grammar accepts positional args, keyword args, `*args`, and `**kwargs`
 unpacking, but deliberately rejects `for`/`while` loops, comprehensions,

@@ -36,7 +36,11 @@ import logging
 import math
 
 from atomic_agentic.agents import ScriptActAgent
-from atomic_agentic.tools.prebuilt import TRIG_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import TRIG_TOOLS
 
 from shared_engine import llm_engine
 
@@ -45,7 +49,7 @@ logging.basicConfig(level=logging.INFO)
 # Curated subset -- the 6 primary trig/inverse-trig functions. TRIG_TOOLS'
 # cotangent/hyperbolic variants add prompt surface without adding anything
 # this example is testing.
-_trig_by_name = {tool.name: tool for tool in TRIG_TOOLS}
+_trig_by_name = {fn.__name__: fn for fn in TRIG_TOOLS}
 CORE_TRIG_TOOLS = [_trig_by_name[name] for name in ("sin", "cos", "tan", "asin", "acos", "atan")]
 
 chatbot = ScriptActAgent(
