@@ -28,6 +28,10 @@ import logging
 
 from atomic_agentic.agents import ScriptActAgent
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)

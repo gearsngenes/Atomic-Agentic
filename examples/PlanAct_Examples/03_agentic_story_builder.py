@@ -4,6 +4,9 @@ import logging
 from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
