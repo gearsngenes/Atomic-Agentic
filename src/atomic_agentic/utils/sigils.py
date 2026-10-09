@@ -560,6 +560,14 @@ def render_cache_snapshot(
     ``type(value).__name__`` annotation on each line is kept regardless of
     which serialization path a given value took -- useful context either
     way, independent of how the value itself gets rendered.
+
+    Every rendered name is unconditionally prefixed with ``"$"`` -- the
+    literal token needed to reference it under PlanActAgent's/ReActAgent's
+    own ``$name``-sigil grammar. No flag is needed here (contrast
+    ``toolagent.py``'s ``_SIGIL_REFERENCES``): this function is called
+    exclusively from those two families' own ``_render_task_messages``,
+    never from ``ScriptActAgent``, which has its own separate, bare,
+    real-Python-identifier ``render_cache_snapshot`` in ``utils/script.py``.
     """
     ordered: dict[str, Any] = {}
     for call in completed:
@@ -579,7 +587,7 @@ def render_cache_snapshot(
         return text
 
     lines = [
-        f"{name}: {type(value).__name__} = {preview(value)}"
+        f"${name}: {type(value).__name__} = {preview(value)}"
         for name, value in ordered.items()
     ]
     return "```\nCached values:\n" + "\n".join(lines) + "\n```"

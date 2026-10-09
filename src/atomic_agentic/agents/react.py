@@ -102,6 +102,10 @@ class ReActAgent(ToolAgent):
         {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
     )
 
+    #: Same rationale as PlanActAgent -- see ToolAgent's own
+    #: _SIGIL_REFERENCES docstring.
+    _SIGIL_REFERENCES: ClassVar[bool] = True
+
     def __init__(
         self,
         name: str,

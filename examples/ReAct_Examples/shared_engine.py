@@ -39,7 +39,10 @@ from atomic_agentic.llm import (
 load_dotenv()
 
 PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
-    "o": (OpenAIEngine, {"api_key": os.getenv("OPENAI_API_KEY"), "model": "gpt-4o-mini"}),
+    # OPENAI_DEBUG_MODEL: temporary override for A/B-ing OpenAI model
+    # strength (e.g. "gpt-4o" vs the "gpt-4o-mini" default) during live
+    # debugging -- revert to the bare literal once the comparison is done.
+    "o": (OpenAIEngine, {"api_key": os.getenv("OPENAI_API_KEY"), "model": os.getenv("OPENAI_DEBUG_MODEL", "gpt-4o-mini")}),
     "g": (GeminiEngine, {"api_key": os.getenv("GOOGLE_API_KEY"), "model": "gemini-2.5-flash"}),
     "m": (MistralEngine, {"api_key": os.getenv("MISTRAL_API_KEY"), "model": "mistral-medium-latest"}),
     "a": (AnthropicEngine, {"api_key": os.getenv("ANTHROPIC_API_KEY"), "model": "claude-haiku-4-5"}),

@@ -8,6 +8,7 @@ import pytest
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.constants.agents import RETURN_TOOL_NAME, RETURN_VALUE_FIELD
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.blackboard_models import ConstantSpec
@@ -749,21 +750,38 @@ class TestConstantRegistration:
             agent.update_constant_description("A", "   ")
 
     def test_constants_context_hides_values_and_renders_metadata(self) -> None:
+        # _plain_agent() is a PlanActAgent, so this also exercises the
+        # sigiled form -- see test_constants_context_no_sigil_on_scriptact
+        # for the explicit sigil-off contrast.
         agent = _plain_agent()
         agent.register_constant("super-secret-value", alias="SECRET", description="Sensitive value.")
         agent.register_constant(3, alias="UNLABELED")
 
         context = agent.constants_context()
 
-        assert "K_SECRET: str" in context
+        assert "$K_SECRET: str" in context
         assert "Sensitive value." in context
-        assert "K_UNLABELED: int" in context
+        assert "$K_UNLABELED: int" in context
         assert "No details" in context
         assert "super-secret-value" not in context
 
     def test_constants_context_empty_registry_message(self) -> None:
         agent = _plain_agent()
         assert agent.constants_context() == "No constants registered."
+
+    def test_constants_context_no_sigil_on_scriptact(self) -> None:
+        agent = ScriptActAgent(
+            name="tests",
+            namespace="tests",
+            description="ScriptAct agent for sigil-off contrast.",
+            llm_engine=FakeLLMEngine(responses=[]),
+        )
+        agent.register_constant(1, alias="VALUE")
+
+        context = agent.constants_context()
+
+        assert "K_VALUE: int" in context
+        assert "$K_VALUE" not in context
 
 
 # --------------------------------------------------------------------------- #
@@ -919,8 +937,8 @@ class TestRenderTurnAndTurnPosition:
         first_messages = agent.render_turn(turns[0])
         second_messages = agent.render_turn(turns[1])
 
-        assert first_messages[-1]["content"].startswith("task_result_0: int = ")
-        assert second_messages[-1]["content"].startswith("task_result_1: int = ")
+        assert first_messages[-1]["content"].startswith("$task_result_0: int = ")
+        assert second_messages[-1]["content"].startswith("$task_result_1: int = ")
 
     def test_turn_position_is_zero_for_a_root_turn(self) -> None:
         agent = make_planact_agent([_scripted_plan(plan=[], return_value=1)], context_enabled=True)
@@ -929,6 +947,22 @@ class TestRenderTurnAndTurnPosition:
         turn = agent.get_conversation()[0]
 
         assert agent._turn_position(turn) == 0
+
+    def test_render_turn_no_sigil_on_scriptact(self) -> None:
+        agent = ScriptActAgent(
+            name="tests",
+            namespace="tests",
+            description="ScriptAct agent for sigil-off contrast.",
+            llm_engine=FakeLLMEngine(responses=["return 1"]),
+            context_enabled=True,
+        )
+        agent.invoke({"prompt": "only turn"})
+
+        turn = agent.get_conversation()[0]
+        messages = agent.render_turn(turn)
+
+        assert messages[-1]["content"].startswith("task_result_0: ")
+        assert not messages[-1]["content"].startswith("$task_result_0: ")
 
 
 class TestCopyForTaskNamespace:

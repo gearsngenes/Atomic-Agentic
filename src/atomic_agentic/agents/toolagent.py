@@ -105,6 +105,15 @@ class ToolAgent(Agent, ABC):
     #: that needs reserved tools overrides this.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset()
 
+    #: Whether ``constants_context``/``render_turn`` prefix a referenceable
+    #: name with ``"$"`` -- the literal token this family's own output
+    #: grammar needs to reference it. ``False`` on this base class (and
+    #: thus on ``ScriptActAgent``, which never overrides it): that family's
+    #: grammar uses real Python identifiers, no sigil. ``True`` on
+    #: ``PlanActAgent``/``ReActAgent``, whose ``$name``-sigil grammar
+    #: (``utils/sigils.py``) requires it.
+    _SIGIL_REFERENCES: ClassVar[bool] = False
+
     #: Shared by ``_copy_for_task_namespace`` -- known atomic-immutable types
     #: that never need a defensive deep copy.
     _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
@@ -904,18 +913,22 @@ class ToolAgent(Agent, ABC):
         triple-quoted docstring description, via ``_render_docstring_block``),
         matching ``actions_context``'s own docstring-style rendering. Names
         print exactly as stored (``K_<ALIAS>`` when aliased, or ``K_i`` when
-        auto-named) — no prefix synthesized here. Empty
-        registry renders a "no constants" message.
+        auto-named), prefixed with ``"$"`` when ``self._SIGIL_REFERENCES``
+        is set -- the exact literal token this family's active system
+        prompt already requires to reference the constant, shown here
+        instead of leaving the model to recall that rule from a separate
+        prose section. Empty registry renders a "no constants" message.
         """
         if not self._constants:
             return "No constants registered."
 
+        prefix = "$" if self._SIGIL_REFERENCES else ""
         rendered: list[str] = []
         for spec in self._constants.values():
             description = (
                 spec.description if spec.description is not None else "No description provided."
             )
-            rendered.append(f"{spec.name}: {spec.type}\n{self._render_docstring_block(description)}")
+            rendered.append(f"{prefix}{spec.name}: {spec.type}\n{self._render_docstring_block(description)}")
 
         return "\n\n".join(rendered)
 
@@ -959,10 +972,15 @@ class ToolAgent(Agent, ABC):
         Labels a historic turn with its ``task_result_i`` address so a
         model can reference it by name in a later plan -- base
         ``Agent.render_turn`` renders the raw value with no such label.
+        Prefixed with ``"$"`` when ``self._SIGIL_REFERENCES`` is set, same
+        rationale as ``constants_context``: ``task_result_i`` is a
+        referenceable name under this family's ``$name`` grammar, so its
+        label should show the literal form actually used to reference it.
         """
         messages = super().render_turn(turn)
         i = self._turn_position(turn)
-        label = f"task_result_{i}: {type(turn.generated_response).__name__} = "
+        prefix = "$" if self._SIGIL_REFERENCES else ""
+        label = f"{prefix}task_result_{i}: {type(turn.generated_response).__name__} = "
         messages[-1]["content"] = label + messages[-1]["content"]
         return messages
 

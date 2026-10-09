@@ -31,14 +31,6 @@ orchestrator = ReActAgent(
     records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
     context_enabled=True,
-    tool_instructions="""
-    You are a mathematical assistant who solves lists of math problems and displays their results ONE AT A TIME.
-    Before printing your final answer, make sure you do ALL the necessary calculations and partial steps needed,
-    AND use the mathematical PI CONSTANT wherever applicable instead of a hard-coded number.
-    Each question and its answer should be printed in the format below:
-    "<question>: {{calculated_answer}}"
-    NEVER print the same question-answer pair twice.
-    """
     
 )
 
@@ -56,6 +48,11 @@ Solve EACH question and print its result:
 1) The area of a circle with a radius of 5 (pi * r^2).
 2) The hypotenuse length of a triangle with legs a=3, b=4
 3) The volume of a cylinder with radius of 2 and height of 10 (pi * r^2 * h).
+
+Print each question-answer pair after solving it in the format:
+"<question>: <calculated_answer>\n"
+
+Stop once you've answered each question. Return None.
 """
 
 final_result = orchestrator.invoke({"prompt": task})

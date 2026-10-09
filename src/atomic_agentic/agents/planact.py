@@ -141,6 +141,11 @@ class PlanActAgent(ToolAgent):
         {"make_sequence", "make_dict"}
     )
 
+    #: This family's $name-sigil grammar (utils/sigils.py) requires "$" to
+    #: reference a constant or task_result_i -- see ToolAgent's own
+    #: _SIGIL_REFERENCES docstring.
+    _SIGIL_REFERENCES: ClassVar[bool] = True
+
     def __init__(
         self,
         name: str,
