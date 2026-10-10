@@ -82,7 +82,7 @@ class ToolAgent(Agent, ABC):
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
     - Shared rendering: ``actions_context``/``constants_context``/
-      ``_render_docstring_block``, ``_turn_position``/``render_turn``,
+      ``_render_docstring_block``, ``render_turn``,
       ``_copy_for_task_namespace``, and ``_render_system_message`` (built
       around a ``_extra_system_context()`` hook, default ``{}``).
     - ``to_dict()`` diagnostics for the above.
@@ -948,26 +948,7 @@ class ToolAgent(Agent, ABC):
             return value
         return copy.deepcopy(value)
 
-    # ------------------------------------------------------------------ #
-    # Cross-invocation result addressing
-    # ------------------------------------------------------------------ #
-    def _turn_position(self, turn: AgentRecord) -> int:
-        """
-        Walk ``turn.prev`` backward to the conversation root, counting
-        hops. The root itself is position 0, its child is 1, etc. --
-        matches the turn's actual index in ``get_conversation()``'s full
-        list, computed fresh from existing structure (correct even when
-        ``task.turns`` is a ``records_window``-truncated tail, since this
-        always walks all the way to the true root regardless of window).
-        """
-        position = 0
-        node = turn
-        while node.prev is not None:
-            node = node.prev
-            position += 1
-        return position
-
-    def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
+    def render_turn(self, turn: AgentRecord, **kwargs: Any) -> list[dict[str, str]]:
         """
         Labels a historic turn with its ``task_result_i`` address so a
         model can reference it by name in a later plan -- base
@@ -976,11 +957,21 @@ class ToolAgent(Agent, ABC):
         rationale as ``constants_context``: ``task_result_i`` is a
         referenceable name under this family's ``$name`` grammar, so its
         label should show the literal form actually used to reference it.
+
+        ``index = kwargs["index"]`` is required -- a missing key raises a
+        plain ``KeyError``, no default, no fallback recomputation. This is
+        framework-internal plumbing between ``_render_historic_messages``
+        and ``render_turn``, not a validated external boundary. ``index``
+        is the turn's 0-based position within *this invocation's*
+        ``task.turns`` (window-relative), never its absolute position in
+        the full stored conversation -- a model never perceives turns
+        truncated out of the window, so there is no "true" absolute
+        position to be faithful to from its own point of view.
         """
-        messages = super().render_turn(turn)
-        i = self._turn_position(turn)
+        index = kwargs["index"]
+        messages = super().render_turn(turn, **kwargs)
         prefix = "$" if self._SIGIL_REFERENCES else ""
-        label = f"{prefix}task_result_{i}: {type(turn.generated_response).__name__} = "
+        label = f"{prefix}task_result_{index}: {type(turn.generated_response).__name__} = "
         messages[-1]["content"] = label + messages[-1]["content"]
         return messages
 

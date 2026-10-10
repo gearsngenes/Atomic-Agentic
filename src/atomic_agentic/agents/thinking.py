@@ -518,6 +518,10 @@ class ThinkingAgent(BasicAgent):
         self,
         task: ThinkingTask,
         turns: list[AgentRecord],
+        *,
+        run_id: str,
+        started_at: datetime,
+        ended_at: datetime,
     ) -> ThinkingAgentRecord:
         """Persist ``task.thoughts`` directly onto the completed record --
         no agent-level accumulator, no span bookkeeping."""
@@ -525,6 +529,9 @@ class ThinkingAgent(BasicAgent):
         return ThinkingAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -536,6 +543,7 @@ class ThinkingAgent(BasicAgent):
         record: ThinkingAgentRecord,
         *,
         result: Any,
+        run_id: str,
         started_at: datetime,
         ended_at: datetime,
     ) -> ThinkingAgentResult:
@@ -549,6 +557,7 @@ class ThinkingAgent(BasicAgent):
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ThinkingAgentResult,
+            run_id=run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             thinking_rounds_used=len(record.thoughts),

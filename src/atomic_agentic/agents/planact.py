@@ -255,8 +255,8 @@ class PlanActAgent(ToolAgent):
         task = PlanActTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="plan_first",
         )
-        for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
+        for i, turn in enumerate(turns):
+            task.cache[f"task_result_{i}"] = self._copy_for_task_namespace(
                 turn.generated_response
             )
         for spec in self._constants.values():
@@ -747,6 +747,10 @@ class PlanActAgent(ToolAgent):
         self,
         task: PlanActTask,
         turns: list[AgentRecord],
+        *,
+        run_id: str,
+        started_at: datetime,
+        ended_at: datetime,
     ) -> ToolAgentRecord:
         """
         Assemble a completed ``ToolAgentRecord`` from a finished
@@ -757,6 +761,9 @@ class PlanActAgent(ToolAgent):
         return ToolAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -770,6 +777,7 @@ class PlanActAgent(ToolAgent):
         record: ToolAgentRecord,
         *,
         result: Any,
+        run_id: str,
         started_at: datetime,
         ended_at: datetime,
     ) -> ToolAgentResult:
@@ -793,6 +801,7 @@ class PlanActAgent(ToolAgent):
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ToolAgentResult,
+            run_id=run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             usage_report=usage_report,

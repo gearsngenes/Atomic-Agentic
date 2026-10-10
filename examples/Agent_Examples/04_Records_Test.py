@@ -14,9 +14,9 @@ def summarize_result(*, result: str) -> dict[str, Any]:
     """
     Non-default post-invoke hook.
 
-    The Agent stores both:
-    - raw_response: direct LLM text
-    - final_response: this structured dict
+    Only the raw LLM text (``generated_response``) persists on the
+    record — this structured dict is the live ``invoke()`` return value's
+    ``.result`` only; it is not recoverable from history afterward.
     """
     return {
         "text": result.strip(),
@@ -56,8 +56,8 @@ def main() -> None:
         pprint.pp(turn.user_prompt)
         print("raw_response:")
         pprint.pp(turn.generated_response)
-        print("final_response:")
-        pprint.pp(turn.final_result)
+        print("run_id:")
+        pprint.pp(turn.run_id)
 
     print("\n=== Rendered turn ===")
     pprint.pp(agent.render_turn(agent.get_conversation()[0]))

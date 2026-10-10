@@ -90,20 +90,27 @@ def package_reply(result: str, style: str = "friendly") -> dict:
 # Display helper
 # ---------------------------------------------------------------------------
 
-def print_chain(chain: list, label: str) -> None:
-    """Pretty-print a conversation chain returned by get_conversation()."""
+def print_chain(chain: list, label: str, results_by_run_id: dict) -> None:
+    """Pretty-print a conversation chain returned by get_conversation().
+
+    ``results_by_run_id`` supplies each turn's processed payload — no
+    longer recoverable from the record itself (AgentRecord only retains
+    identity/timing/raw generated_response, not the post-invoke result), so
+    the caller passes each turn's already-known AgentResult, captured at
+    call time, keyed by run_id.
+    """
     print(f"\n{'━' * _W}")
     print(f"  {label}")
     print(f"  {len(chain)} turn(s) in chain")
     print(f"{'━' * _W}")
 
     for i, record in enumerate(chain):
-        run_short  = record.final_result.run_id[:8]
+        run_short  = record.run_id[:8]
         prev_short = (
-            f"{record.prev.final_result.run_id[:8]}..."
+            f"{record.prev.run_id[:8]}..."
             if record.prev else "None  ← chain root"
         )
-        payload = record.final_result.result
+        payload = results_by_run_id[record.run_id].result
 
         print(f"\n  [Turn {i + 1}]  run: {run_short}...   parent: {prev_short}")
         print(f"  style: {payload['style']}  ·  {payload['char_count']} chars")
@@ -157,12 +164,15 @@ def main() -> None:
     print("  T0  ·  Root  —  common starting point for all branches")
     print(f"{'═' * _W}")
 
+    results_by_run_id: dict = {}
+
     r0 = agent(
         message="Hi, I'm Sam. Nice to meet you.",
         style="friendly",
         return_atomic_result_object = True
     )
     run_0 = r0.run_id
+    results_by_run_id[run_0] = r0
     print(f"  run  : {run_0[:8]}...   parent: None")
     print(f"  reply: {r0.result['reply']}")
 
@@ -179,6 +189,7 @@ def main() -> None:
         return_atomic_result_object = True
     )
     run_a1 = r_a1.run_id
+    results_by_run_id[run_a1] = r_a1
     print(f"  run  : {run_a1[:8]}...   parent: {run_0[:8]}...")
     print(f"  reply: {r_a1.result['reply']}")
 
@@ -195,6 +206,7 @@ def main() -> None:
         return_atomic_result_object = True
     )
     run_a2 = r_a2.run_id
+    results_by_run_id[run_a2] = r_a2
     print(f"  run  : {run_a2[:8]}...   parent: {run_a1[:8]}...")
     print(f"  reply: {r_a2.result['reply']}")
 
@@ -223,6 +235,7 @@ def main() -> None:
         return_atomic_result_object = True
     )
     run_b1 = r_b1.run_id
+    results_by_run_id[run_b1] = r_b1
     branch_b_key = next(iter(set(agent.conversation_names) - conversations_before))
     print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_key!r}")
     print(f"  reply: {r_b1.result['reply']}")
@@ -237,10 +250,12 @@ def main() -> None:
     print_chain(
         agent.get_conversation(),  # active ("default"): T0 -> T_A1 -> T_A2
         "Branch A  ·  root → fact revealed → fact recalled  (active conversation)",
+        results_by_run_id,
     )
     print_chain(
         agent.get_conversation(branch_b_key),
         "Branch B  ·  root → same question, no prior fact  (forked at T0)",
+        results_by_run_id,
     )
 
     # ------------------------------------------------------------------ #
@@ -259,9 +274,9 @@ def main() -> None:
         history = agent.get_conversation(name)
         print(f"\n  conversation {name!r}  ({len(history)} record(s))")
         for i, record in enumerate(history):
-            rid    = record.final_result.run_id
+            rid    = record.run_id
             parent = (
-                f"{record.prev.final_result.run_id[:8]}..."
+                f"{record.prev.run_id[:8]}..."
                 if record.prev else "None"
             )
             print(f"    [{i}]  {rid[:8]}...  parent: {parent:<18}  {labels.get(rid, '')}")

@@ -24,7 +24,7 @@ from atomic_agentic.models.agents.records import (
 from atomic_agentic.models.agents.blackboard_models import ToolStatement, ConstantSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
-from atomic_agentic.models.results.agents import AgentResult, ToolUsageRecord
+from atomic_agentic.models.results.agents import ToolUsageRecord
 
 
 def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> TokenUsage:
@@ -56,18 +56,6 @@ def make_llm_record(*, text: str = "generated text") -> LLMRecord:
     return LLMRecord(
         messages=({"role": "user", "content": "generate a response"},),
         llm_result=make_llm_result(text=text),
-    )
-
-
-def make_agent_result(*, value: Any = "final output") -> AgentResult:
-    started_at = datetime.now(timezone.utc)
-    return AgentResult(
-        result=value,
-        invoker_id="agent-1",
-        started_at=started_at,
-        ended_at=started_at + timedelta(seconds=1),
-        llm_token_usage=(make_token_usage(),),
-        llm_model_data=make_model_data(),
     )
 
 
@@ -243,43 +231,45 @@ class TestAgentRecord:
         )
         assert record.user_prompt == "write a summary"
         assert record.generated_response == "raw assistant text"
-        assert record.final_result is None
+        assert isinstance(record.run_id, str) and record.run_id
 
-    def test_final_result_accepts_agent_result(self) -> None:
-        agent_result = make_agent_result()
+    def test_run_id_and_timing_auto_fill_when_omitted(self) -> None:
+        record = AgentRecord(user_prompt="run", generated_response="raw")
+        assert isinstance(record.run_id, str) and record.run_id
+        assert isinstance(record.started_at, datetime)
+        assert isinstance(record.ended_at, datetime)
+
+    def test_run_id_and_timing_accept_explicit_values(self) -> None:
+        ts = datetime.now(timezone.utc)
         record = AgentRecord(
             user_prompt="run",
             generated_response="raw",
-            final_result=agent_result,
+            run_id="abc123",
+            started_at=ts,
+            ended_at=ts,
         )
-        assert record.final_result is agent_result
+        assert record.run_id == "abc123"
+        assert record.started_at == ts
+        assert record.ended_at == ts
 
-    def test_to_dict_with_none_final_result(self) -> None:
+    def test_to_dict_has_no_final_result_key(self) -> None:
         record = AgentRecord(
             user_prompt="run",
             generated_response="raw",
         )
-        assert record.to_dict() == {
+        d = record.to_dict()
+        assert "final_result" not in d
+        assert d == {
             "user_prompt": "run",
             "inputs": {},
             "generated_response": "raw",
-            "final_result": None,
+            "run_id": record.run_id,
+            "started_at": record.started_at.isoformat(),
+            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
         }
-
-    def test_to_dict_with_agent_result(self) -> None:
-        agent_result = make_agent_result(value="done")
-        record = AgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            final_result=agent_result,
-        )
-        d = record.to_dict()
-        assert d["user_prompt"] == "run"
-        assert d["generated_response"] == "raw"
-        assert d["final_result"] == agent_result.to_dict()
 
     def test_to_dict_includes_inputs_field(self) -> None:
         record = AgentRecord(
@@ -358,7 +348,6 @@ class TestAgentRecord:
         completed = AgentRecord(
             user_prompt="first",
             generated_response="response",
-            final_result=make_agent_result(),
         )
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
         assert record.prev is completed
@@ -376,24 +365,20 @@ class TestAgentRecord:
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.to_dict()["prev_run_id"] is None
 
-    def test_to_dict_prev_run_id_matches_prev_final_result_run_id(self) -> None:
-        agent_result = make_agent_result()
+    def test_to_dict_prev_run_id_matches_prev_run_id(self) -> None:
         prev_record = AgentRecord(
             user_prompt="first",
             generated_response="r1",
-            final_result=agent_result,
         )
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
-        assert record.to_dict()["prev_run_id"] == agent_result.run_id
+        assert record.to_dict()["prev_run_id"] == prev_record.run_id
 
     def test_children_defaults_to_empty_list(self) -> None:
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.children == []
 
     def test_children_accepts_agent_record_instances(self) -> None:
-        child = AgentRecord(
-            user_prompt="child", generated_response="r", final_result=make_agent_result()
-        )
+        child = AgentRecord(user_prompt="child", generated_response="r")
         record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
         assert record.children == [child]
 
@@ -411,16 +396,13 @@ class TestAgentRecord:
         # bookkeeping), so it must stay a real list, not a frozen tuple.
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert isinstance(record.children, list)
-        record.children.append(
-            AgentRecord(user_prompt="c", generated_response="r", final_result=make_agent_result())
-        )
+        record.children.append(AgentRecord(user_prompt="c", generated_response="r"))
         assert len(record.children) == 1
 
     def test_to_dict_child_ids_reflects_current_children(self) -> None:
-        child_result = make_agent_result()
-        child = AgentRecord(user_prompt="child", generated_response="r", final_result=child_result)
+        child = AgentRecord(user_prompt="child", generated_response="r")
         record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
-        assert record.to_dict()["child_ids"] == [child_result.run_id]
+        assert record.to_dict()["child_ids"] == [child.run_id]
 
 
 class TestToolAgentRecord:
@@ -563,11 +545,15 @@ class TestThinkingAgentRecord:
             generated_response="a poem",
             thoughts=["a thought", {"k": "v"}, 3],
         )
-        assert record.to_dict() == {
+        d = record.to_dict()
+        assert "final_result" not in d
+        assert d == {
             "user_prompt": "write a poem",
             "inputs": {},
             "generated_response": "a poem",
-            "final_result": None,
+            "run_id": record.run_id,
+            "started_at": record.started_at.isoformat(),
+            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],

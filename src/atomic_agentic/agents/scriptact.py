@@ -247,6 +247,10 @@ class ScriptActAgent(ToolAgent):
         self,
         task: ScriptActAgentTask,
         turns: list[AgentRecord],
+        *,
+        run_id: str,
+        started_at: datetime,
+        ended_at: datetime,
     ) -> ScriptActAgentRecord:
         """
         Assemble a completed ``ScriptActAgentRecord`` from a finished
@@ -259,6 +263,9 @@ class ScriptActAgent(ToolAgent):
         return ScriptActAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -273,6 +280,7 @@ class ScriptActAgent(ToolAgent):
         record: ScriptActAgentRecord,
         *,
         result: Any,
+        run_id: str,
         started_at: datetime,
         ended_at: datetime,
     ) -> ScriptActAgentResult:
@@ -294,6 +302,7 @@ class ScriptActAgent(ToolAgent):
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ScriptActAgentResult,
+            run_id=run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             usage_report=record.usage_report(),
@@ -341,8 +350,8 @@ class ScriptActAgent(ToolAgent):
         task = ScriptActAgentTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
-        for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
+        for i, turn in enumerate(turns):
+            task.cache[f"task_result_{i}"] = self._copy_for_task_namespace(
                 turn.generated_response
             )
         for spec in self._constants.values():

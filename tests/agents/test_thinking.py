@@ -600,7 +600,7 @@ class TestRecordAndResultConstruction:
         record = agent.get_conversation(turns=1)[0]
 
         assert record.thoughts == ("obs",)
-        assert record.final_result.run_id == result.run_id
+        assert record.run_id == result.run_id
 
     def test_second_invocation_records_its_own_thoughts_independently(self) -> None:
         engine = FakeLLMEngine(["first", "reply one", "second", "reply two"])

@@ -9,8 +9,8 @@ from typing import (
     Mapping,
     Optional,
 )
-from dataclasses import replace
 from datetime import datetime, timezone
+from uuid import uuid4
 import asyncio
 import logging
 
@@ -466,20 +466,26 @@ class Agent(AtomicInvokable, ABC):
         """
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         if turns:
-            for turn in turns:
-                messages.extend(self.render_turn(turn))
+            for i, turn in enumerate(turns):
+                messages.extend(self.render_turn(turn, index=i))
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    def render_turn(self, turn: AgentRecord) -> List[Dict[str, str]]:
+    def render_turn(self, turn: AgentRecord, **kwargs: Any) -> List[Dict[str, str]]:
         """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
         The assistant content is always ``turn.generated_response`` — the
-        LLM's own raw output, never ``post_invoke``'s transformed
-        ``final_result``. ``response_preview_limit`` is applied only to the
-        rendered text. ``turn.user_prompt`` is used verbatim as the user
-        message content — it is already a fully-resolved string, not a
-        template.
+        LLM's own raw output, never ``post_invoke``'s transformed result
+        (not retained on the record at all). ``response_preview_limit`` is
+        applied only to the rendered text. ``turn.user_prompt`` is used
+        verbatim as the user message content — it is already a
+        fully-resolved string, not a template.
+
+        ``**kwargs`` is accepted and ignored at this level — base rendering
+        has no family-specific use for it. A subclass override consumes
+        whatever keys it needs (e.g. ``ToolAgent``'s required ``index``)
+        and forwards ``**kwargs`` through its own ``super().render_turn``
+        call if it still wants this base behavior too.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
@@ -636,14 +642,20 @@ class Agent(AtomicInvokable, ABC):
         empty, ``task.historic_messages`` correctly stays empty — later
         calls re-checking an empty ``turns`` are a harmless no-op, not an
         ambiguous state.
+
+        Each turn is rendered with its 0-based position within *this
+        invocation's* ``task.turns`` passed as ``index`` — window-relative
+        (after any ``records_window`` truncation), not the turn's position
+        in the full stored conversation. Base rendering ignores it;
+        ``ToolAgent``'s override requires it.
         """
         if task.historic_messages:
             return task.historic_messages
         if not task.turns:
             return task.historic_messages
         rendered: list[dict[str, str]] = []
-        for turn in task.turns:
-            rendered.extend(self.render_turn(turn))
+        for i, turn in enumerate(task.turns):
+            rendered.extend(self.render_turn(turn, index=i))
         task.historic_messages = rendered
         return task.historic_messages
 
@@ -682,6 +694,10 @@ class Agent(AtomicInvokable, ABC):
         self,
         task: AgentTask,
         turns: list[AgentRecord],
+        *,
+        run_id: str,
+        started_at: datetime,
+        ended_at: datetime,
     ) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
@@ -689,16 +705,18 @@ class Agent(AtomicInvokable, ABC):
         ``ReActAgent``/``ScriptActAgent`` each override it directly (not via
         a shared ``ToolAgent`` implementation) to return their own richer
         ``ToolAgentRecord``-family (or, for ``ScriptActAgent``,
-        ``ScriptActAgentRecord``) subclass. ``final_result`` is
-        deliberately left at its dataclass default (``None``) — it is not
-        knowable until
-        ``build_result_from_record`` runs afterward; the caller attaches it
-        via ``dataclasses.replace(...)``.
+        ``ScriptActAgentRecord``) subclass. ``run_id``/``started_at``/
+        ``ended_at`` are minted once by ``_commit_emit`` and threaded
+        through here and into ``build_result_from_record`` — no draft
+        phase, the record is complete the moment it's constructed.
         """
         prev = turns[-1] if turns else None
         return AgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -712,6 +730,7 @@ class Agent(AtomicInvokable, ABC):
         record: AgentRecord,
         *,
         result: Any,
+        run_id: str,
         started_at: datetime,
         ended_at: datetime,
     ) -> AgentResult:
@@ -723,11 +742,11 @@ class Agent(AtomicInvokable, ABC):
         choose a more specific result class or add subclass-specific result
         fields.
 
-        ``result`` (the post-``post_invoke`` final caller-facing value) and
-        ``started_at``/``ended_at`` (the outer invocation's timing envelope)
-        are not derivable from the record, so both stay explicit parameters —
-        distinct from ``record.generated_response``, which is the
-        pre-``post_invoke`` raw value.
+        ``result`` (the post-``post_invoke`` final caller-facing value),
+        ``run_id``, and ``started_at``/``ended_at`` (the outer invocation's
+        identity/timing envelope) are not derivable from the record, so all
+        stay explicit parameters — distinct from ``record.generated_response``,
+        which is the pre-``post_invoke`` raw value.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
         llm_model_data = record.llm_records[-1].llm_result.model_data
@@ -737,6 +756,7 @@ class Agent(AtomicInvokable, ABC):
             started_at=started_at,
             ended_at=ended_at,
             result_cls=AgentResult,
+            run_id=run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
         )
@@ -763,11 +783,15 @@ class Agent(AtomicInvokable, ABC):
         completes -- ``turns`` was constructed by ``_resolve_context`` to
         always end exactly at that target.
 
-        1. ``record = self._build_record_from_task(task, turns)``, validated
-           as an ``AgentRecord``.
-        2. ``agent_result = self.build_result_from_record(record,
-           result=result, started_at=started_at, ended_at=ended_at)``.
-        3. ``record = replace(record, final_result=agent_result)``.
+        1. ``run_id = uuid4().hex``, minted once, up front -- before either
+           the record or the result exists.
+        2. ``record = self._build_record_from_task(task, turns,
+           run_id=run_id, started_at=started_at, ended_at=ended_at)``,
+           validated as an ``AgentRecord``. The record is already complete
+           (no draft phase) the moment this returns.
+        3. ``agent_result = self.build_result_from_record(record,
+           result=result, run_id=run_id, started_at=started_at,
+           ended_at=ended_at)``.
         4. Under ``self._invoke_lock``: if context/window is disabled,
            return ``agent_result`` with nothing stored. Otherwise, a fresh
            children check on ``record.prev`` decides append-vs-fork --
@@ -776,7 +800,10 @@ class Agent(AtomicInvokable, ABC):
            resolved conversation, with ``target.children`` updated to match.
         5. Return ``agent_result``.
         """
-        record = self._build_record_from_task(task, turns)
+        run_id = uuid4().hex
+        record = self._build_record_from_task(
+            task, turns, run_id=run_id, started_at=started_at, ended_at=ended_at
+        )
         if not isinstance(record, AgentRecord):
             raise AgentInvocationError(
                 f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
@@ -785,11 +812,10 @@ class Agent(AtomicInvokable, ABC):
         agent_result = self.build_result_from_record(
             record,
             result=result,
+            run_id=run_id,
             started_at=started_at,
             ended_at=ended_at,
         )
-
-        record = replace(record, final_result=agent_result)
 
         with self._invoke_lock:
             if not (self._context_enabled and self._records_window != 0):
@@ -804,7 +830,7 @@ class Agent(AtomicInvokable, ABC):
             if target is not None and target.children:
                 dest_key = self.fork_conversation(
                     conversation_id=active_key,
-                    run_id=target.final_result.run_id,
+                    run_id=target.run_id,
                     fork_name=None,
                 )
             else:
@@ -896,7 +922,7 @@ class Agent(AtomicInvokable, ABC):
         if run_id is None:
             return history[-1] if history else None
         return next(
-            (r for r in history if r.final_result.run_id == run_id), None
+            (r for r in history if r.run_id == run_id), None
         )
 
     def _resolve_context(self, run_id: str | None) -> tuple[str, list[AgentRecord]]:
@@ -1001,7 +1027,7 @@ class Agent(AtomicInvokable, ABC):
                 )
             source = self._conversations[conversation_id]
             target = next(
-                (r for r in source if r.final_result.run_id == run_id), None
+                (r for r in source if r.run_id == run_id), None
             )
             if target is None:
                 raise ValueError(

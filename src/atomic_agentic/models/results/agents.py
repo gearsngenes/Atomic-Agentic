@@ -282,7 +282,7 @@ class ThinkingAgentResult(AgentResult):
     needing the actual thought content reads it off the record instead
     (``agent.get_conversation(turns=1)[0].thoughts`` for the invocation
     just made; scan ``get_conversation(conversation_id, turns=None)`` and
-    match ``r.final_result.run_id`` for an older one).
+    match ``r.run_id`` for an older one).
 
     No ``__post_init__`` override needed -- plain ``int`` field, no
     cross-field validation, matching this class's existing precedent (the

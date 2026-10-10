@@ -786,7 +786,7 @@ class TestConstantRegistration:
 
 # --------------------------------------------------------------------------- #
 # Shared rendering surface (actions_context/constants_context helpers,
-# _render_system_message/_extra_system_context, render_turn/_turn_position,
+# _render_system_message/_extra_system_context, render_turn,
 # _copy_for_task_namespace) -- new 5 coverage: these are genuinely
 # ToolAgent-owned and were never directly tested anywhere else.
 # --------------------------------------------------------------------------- #
@@ -934,19 +934,11 @@ class TestRenderTurnAndTurnPosition:
         turns = agent.get_conversation()
         assert len(turns) == 2
 
-        first_messages = agent.render_turn(turns[0])
-        second_messages = agent.render_turn(turns[1])
+        first_messages = agent.render_turn(turns[0], index=0)
+        second_messages = agent.render_turn(turns[1], index=1)
 
         assert first_messages[-1]["content"].startswith("$task_result_0: int = ")
         assert second_messages[-1]["content"].startswith("$task_result_1: int = ")
-
-    def test_turn_position_is_zero_for_a_root_turn(self) -> None:
-        agent = make_planact_agent([_scripted_plan(plan=[], return_value=1)], context_enabled=True)
-        agent.invoke({"prompt": "only turn"})
-
-        turn = agent.get_conversation()[0]
-
-        assert agent._turn_position(turn) == 0
 
     def test_render_turn_no_sigil_on_scriptact(self) -> None:
         agent = ScriptActAgent(
@@ -959,7 +951,7 @@ class TestRenderTurnAndTurnPosition:
         agent.invoke({"prompt": "only turn"})
 
         turn = agent.get_conversation()[0]
-        messages = agent.render_turn(turn)
+        messages = agent.render_turn(turn, index=0)
 
         assert messages[-1]["content"].startswith("task_result_0: ")
         assert not messages[-1]["content"].startswith("$task_result_0: ")

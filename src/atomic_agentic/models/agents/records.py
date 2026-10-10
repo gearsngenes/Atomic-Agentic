@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
-from ..results.agents import AgentResult, ToolUsageRecord, ToolUsageReport
+from ..results.agents import ToolUsageRecord, ToolUsageReport
 from ..results.llm import LLMResult
 from .blackboard_models import ToolStatement
 
@@ -130,10 +132,13 @@ class AgentRecord:
     Canonical memory record for one completed Agent invocation.
 
     A record stores the lifecycle artifacts needed to reconstruct future
-    LLM-facing context. It is related to, but distinct from, AgentResult:
-    AgentResult is the public successful-invocation envelope carrying LLM
-    accounting; AgentRecord is the memory/rendering record. The completed
-    record points to its AgentResult via ``final_result``.
+    LLM-facing context. It carries its own identity (``run_id``) and timing
+    (``started_at``/``ended_at``) directly -- no attached ``AgentResult``.
+    A record's processed, post-``post_invoke`` output is deliberately NOT
+    recoverable from history: only ``run_id``/timing (identity + rendering
+    material) and the raw ``generated_response`` persist. A caller wanting
+    the processed result must capture it from ``invoke()``'s live return
+    value at call time.
 
     Records form a doubly-linked tree via ``prev``/``children``: each
     committed record points backward to the most recent record that was used
@@ -164,22 +169,29 @@ class AgentRecord:
         Raw post-engine response material for this invocation, prior to
         ``post_invoke`` processing.
 
-    final_result:
-        The completed ``AgentResult`` for this invocation. ``None`` during
-        the draft phase (between ``_build_record_from_task`` and
-        ``build_result_from_record`` completion); an ``AgentResult``
-        instance on all stored records.
+    run_id:
+        This record's own identity. Optional at construction
+        (``None``-default, keyword-only) -- auto-minted via ``uuid4().hex``
+        in ``__post_init__`` if omitted, mirroring ``AtomicResult.run_id``'s
+        own precedent. ``Agent._commit_emit`` always passes an explicit
+        value in production; the default exists purely for bare-
+        construction convenience (tests, ad-hoc usage).
+
+    started_at, ended_at:
+        This invocation's timing envelope. Same optional/auto-fill shape as
+        ``run_id`` -- both default to a single shared
+        ``datetime.now(timezone.utc)`` call in ``__post_init__`` if either
+        is omitted. No type/shape validation beyond the fill logic itself --
+        framework-internal plumbing, not a validated external boundary.
 
     llm_records:
         Complete record of every LLM generation that contributed to this
-        invocation. Empty tuple during the draft phase; populated by
-        ``_build_record_from_task`` from the task's accumulated
-        ``llm_records``.
+        invocation, populated by ``_build_record_from_task`` from the
+        task's accumulated ``llm_records``.
 
     prev:
         The most recent ``AgentRecord`` that was used as context for this
-        invocation, or ``None`` if no prior context was used. Always points
-        to a completed (non-draft) record on any record committed to history.
+        invocation, or ``None`` if no prior context was used.
 
     children:
         Every ``AgentRecord`` (across every conversation) that named this
@@ -195,8 +207,10 @@ class AgentRecord:
 
     user_prompt: str
     generated_response: Any
+    run_id: str | None = field(default=None, kw_only=True)
+    started_at: datetime | None = field(default=None, kw_only=True)
+    ended_at: datetime | None = field(default=None, kw_only=True)
     inputs: dict = field(default_factory=dict, hash=False, compare=False)
-    final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
     children: list["AgentRecord"] = field(default_factory=list, hash=False, compare=False)
@@ -208,6 +222,15 @@ class AgentRecord:
                 f"got {type(self.user_prompt).__name__}."
             )
         object.__setattr__(self, "inputs", dict(self.inputs))
+
+        # Identity/timing auto-fill -- mirrors AtomicResult.run_id's own
+        # None-default-then-mint precedent. Production (_commit_emit) always
+        # supplies explicit values; this exists purely for bare-construction
+        # convenience.
+        object.__setattr__(self, "run_id", self.run_id or uuid4().hex)
+        now = datetime.now(timezone.utc) if self.started_at is None or self.ended_at is None else None
+        object.__setattr__(self, "started_at", self.started_at or now)
+        object.__setattr__(self, "ended_at", self.ended_at or now)
 
         if not isinstance(self.llm_records, (tuple, list)) or isinstance(self.llm_records, (str, bytes)):
             raise TypeError(
@@ -228,11 +251,6 @@ class AgentRecord:
                 raise TypeError(
                     f"AgentRecord.prev must be an AgentRecord or None, "
                     f"got {type(self.prev).__name__}."
-                )
-            if self.prev.final_result is None:
-                raise ValueError(
-                    "AgentRecord.prev must point to a completed record "
-                    "(final_result is not None); cannot link to a draft."
                 )
 
         if not isinstance(self.children, (list, tuple)) or isinstance(self.children, (str, bytes)):
@@ -257,10 +275,12 @@ class AgentRecord:
             "user_prompt": self.user_prompt,
             "inputs": self.inputs,
             "generated_response": self.generated_response,
-            "final_result": self.final_result.to_dict() if self.final_result is not None else None,
+            "run_id": self.run_id,
+            "started_at": self.started_at.isoformat(),
+            "ended_at": self.ended_at.isoformat(),
             "llm_records": [r.to_dict() for r in self.llm_records],
-            "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
-            "child_ids": [c.final_result.run_id for c in self.children],
+            "prev_run_id": self.prev.run_id if self.prev is not None else None,
+            "child_ids": [c.run_id for c in self.children],
         }
 
 
