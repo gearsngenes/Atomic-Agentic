@@ -32,7 +32,7 @@ Key concepts shown
 Conversation storage (v2.0.0, conversation-storage-refactor)
 --------------------------------------------------------------
 Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
-a ``dict[str, list[AgentRecord]]`` -- the agent's active conversation
+a ``dict[str, Conversation]`` -- the agent's active conversation
 ("default" here, since ``set_active_conversation`` is never called in this
 example) keeps growing in place for T0/T_A1/T_A2, while re-targeting T0 for
 T_B1 (T0 already has a child, T_A1) implicitly forks a new, auto-named

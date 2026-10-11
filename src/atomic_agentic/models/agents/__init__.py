@@ -7,6 +7,7 @@ from .records import (
     ScriptActAgentToolUsage,
     ThinkingAgentRecord,
 )
+from .conversations import Conversation
 from .blackboard_models import ToolStatement, ConstantSpec
 from .tasks import (
     AgentTask,
@@ -25,6 +26,7 @@ __all__ = [
     "ScriptActAgentRecord",
     "ScriptActAgentToolUsage",
     "ThinkingAgentRecord",
+    "Conversation",
     "ToolStatement",
     "ConstantSpec",
     "AgentTask",

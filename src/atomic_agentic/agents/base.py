@@ -27,6 +27,7 @@ from ..tools import toolify
 from ..models.agents.records import AgentRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
+from ..models.agents.conversations import Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -138,15 +139,15 @@ class Agent(AtomicInvokable, ABC):
     Conversation storage
     --------------------
     History is stored per-conversation in ``self._conversations: dict[str,
-    list[AgentRecord]]``, seeded with a single empty ``"default"``
-    conversation at construction. Exactly one conversation is "active" at a
-    time (``self._active_conversation``); ``invoke``/``async_invoke`` always
-    read from and (when they commit) write to whichever conversation is
-    active at call time. ``run_id`` targets a specific record *within the
-    active conversation only* -- an unknown ``run_id`` raises ``ValueError``.
+    Conversation]``, seeded with a single empty ``"default"`` conversation
+    at construction. Exactly one conversation is "active" at a time
+    (``self._active_conversation``); ``invoke``/``async_invoke`` always read
+    from and (when they commit) write to whichever conversation is active at
+    call time. ``run_id`` targets a specific record *within the active
+    conversation only* -- an unknown ``run_id`` raises ``ValueError``.
     Continuing from a childless record appends in place; continuing from a
     record that already has children forks a new conversation instead
-    (``create_conversation``/``fork_conversation``/
+    (``create_conversation``/``clone_conversation``/``get_record``/
     ``set_active_conversation``/``delete_conversation`` provide the explicit,
     non-invocation-triggered counterparts to this implicit fork-on-invoke
     behavior).
@@ -303,8 +304,10 @@ class Agent(AtomicInvokable, ABC):
             raise AgentError("records_window must be an int >= 0 or be 'None'.")
         self._records_window: Optional[int] = records_window
 
-        self._conversations: dict[str, List[AgentRecord]] = {
-            DEFAULT_CONVERSATION_NAME: []
+        self._conversations: dict[str, Conversation] = {
+            DEFAULT_CONVERSATION_NAME: Conversation(
+                name=DEFAULT_CONVERSATION_NAME, records=[]
+            )
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
         self._branch_counter: int = 0
@@ -795,9 +798,10 @@ class Agent(AtomicInvokable, ABC):
         4. Under ``self._invoke_lock``: if context/window is disabled,
            return ``agent_result`` with nothing stored. Otherwise, a fresh
            children check on ``record.prev`` decides append-vs-fork --
-           delegating fork construction to the same ``fork_conversation``
+           delegating fork construction to the same ``clone_conversation``
            primitive exposed publicly -- and the record is appended to the
-           resolved conversation, with ``target.children`` updated to match.
+           resolved conversation's ``.records``, with ``target.children``
+           updated to match.
         5. Return ``agent_result``.
         """
         run_id = uuid4().hex
@@ -828,15 +832,14 @@ class Agent(AtomicInvokable, ABC):
             # child and forks instead of colliding.
             target = record.prev
             if target is not None and target.children:
-                dest_key = self.fork_conversation(
-                    conversation_id=active_key,
-                    run_id=target.run_id,
-                    fork_name=None,
+                dest_conv = self.clone_conversation(
+                    source=active_key,
+                    end_id=target.run_id,
                 )
             else:
-                dest_key = active_key
+                dest_conv = self._conversations[active_key]
 
-            self._conversations[dest_key].append(record)
+            dest_conv.records.append(record)
             if target is not None:
                 target.children.append(record)
 
@@ -859,7 +862,11 @@ class Agent(AtomicInvokable, ABC):
         conversation key this reset just removed.
         """
         with self._invoke_lock:
-            self._conversations = {DEFAULT_CONVERSATION_NAME: []}
+            self._conversations = {
+                DEFAULT_CONVERSATION_NAME: Conversation(
+                    name=DEFAULT_CONVERSATION_NAME, records=[]
+                )
+            }
             self._active_conversation = DEFAULT_CONVERSATION_NAME
 
     def get_conversation(
@@ -899,7 +906,7 @@ class Agent(AtomicInvokable, ABC):
                 f"get_conversation: unknown conversation {key!r}."
             )
 
-        history = self._conversations[key]
+        history = self._conversations[key].records
         return list(history) if turns is None else list(history[-turns:])
 
     def _find_in_conversation(
@@ -918,7 +925,7 @@ class Agent(AtomicInvokable, ABC):
         ``_resolve_context`` to resolve a ``run_id`` (or ``None``) against a
         specific conversation's history.
         """
-        history = self._conversations[conversation_id]
+        history = self._conversations[conversation_id].records
         if run_id is None:
             return history[-1] if history else None
         return next(
@@ -953,7 +960,7 @@ class Agent(AtomicInvokable, ABC):
         if not (self._context_enabled and self._records_window != 0):
             return active_key, []
 
-        history = self._conversations[active_key]
+        history = self._conversations[active_key].records
         target = self._find_in_conversation(active_key, run_id)
         if run_id is not None and target is None:
             raise ValueError(
@@ -969,14 +976,14 @@ class Agent(AtomicInvokable, ABC):
         turns = prefix if window is None else prefix[-window:]
         return active_key, turns
 
-    def create_conversation(self, name: str) -> bool:
+    def create_conversation(self, name: str) -> Conversation:
         """Create a new, empty conversation.
 
         ``name`` must be alphanumeric-plus-underscore and must not end in
         ``_<digits>`` (that suffix shape is reserved for auto-generated fork
-        names) -- an invalid shape raises ``ValueError``. Returns ``True`` on
-        success, ``False`` if ``name`` already exists (never auto-activates
-        either way).
+        names) -- an invalid shape raises ``ValueError``. A name that already
+        exists raises ``AgentInvocationError`` -- matches ``register()``'s
+        collision behavior elsewhere in AA; never auto-activates either way.
         """
         with self._invoke_lock:
             if not CONVERSATION_NAME_PATTERN.fullmatch(name):
@@ -985,68 +992,166 @@ class Agent(AtomicInvokable, ABC):
                     "alphanumeric/underscore, must not end in _<digits>)."
                 )
             if name in self._conversations:
-                return False
-            self._conversations[name] = []
-            return True
+                raise AgentInvocationError(
+                    f"create_conversation: name {name!r} already exists."
+                )
+            conv = Conversation(name=name, records=[])
+            self._conversations[name] = conv
+            return conv
 
-    def fork_conversation(
+    def get_record(
         self,
-        conversation_id: str,
-        run_id: str,
-        fork_name: str | None = None,
-    ) -> str:
-        """Fork a new conversation off an existing one at a specific record.
+        *,
+        run_id: str | None = None,
+        conversation: str | None = None,
+        index: int | None = None,
+    ) -> AgentRecord:
+        """Single-record lookup by exactly one of two addressing modes.
 
-        Always performs a real, unconditional fork -- unlike the implicit
-        fork-on-invoke path, this method has no "continue in place" outcome.
-        Never changes ``self._active_conversation``.
+        Direct addressing only, not a search/query-by-criteria API: either
+        ``run_id`` alone, or ``conversation`` + ``index`` together. Any other
+        combination (one of the pair alone, both modes together, all
+        ``None``) raises ``ValueError``.
 
-        Parameters
-        ----------
-        conversation_id:
-            Source conversation key. Unknown key raises
-            ``AgentInvocationError``.
-        run_id:
-            Fork point within ``conversation_id``. Unknown run_id raises
-            ``ValueError`` (implies ``conversation_id`` is non-empty).
-        fork_name:
-            Explicit name for the new conversation, validated the same as
-            ``create_conversation``'s ``name`` -- an invalid shape or an
-            existing collision both raise ``ValueError`` (this is an
-            explicit, deliberate name the caller chose, unlike
-            ``create_conversation``'s softer boolean-return-on-collision).
-            When omitted, auto-derived from ``conversation_id`` (its own
-            existing trailing ``_<digits>`` suffix stripped first) plus the
-            next value from one shared, ever-increasing, never-reused
-            counter.
+        ``run_id`` mode scans every conversation (no global index backs
+        this -- see the conversation-model-rebuild proposal's rationale for
+        why); an unresolvable ``run_id`` raises ``ValueError``, matching the
+        existing run_id-not-found convention used elsewhere (distinct from
+        the ``AgentInvocationError`` convention for unknown *conversation
+        keys*). ``conversation`` + ``index`` mode resolves via direct list
+        indexing; an unknown ``conversation`` raises ``AgentInvocationError``,
+        an out-of-range ``index`` raises the natural ``IndexError``.
+        """
+        run_id_mode = run_id is not None
+        pair_mode = conversation is not None and index is not None
+        if run_id_mode and (conversation is not None or index is not None):
+            raise ValueError(
+                "get_record: run_id may not be combined with conversation/index."
+            )
+        if not run_id_mode and not pair_mode:
+            raise ValueError(
+                "get_record: must supply either run_id alone, or both "
+                "conversation and index."
+            )
+
+        if run_id_mode:
+            for key in self._conversations:
+                found = self._find_in_conversation(key, run_id)
+                if found is not None:
+                    return found
+            raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
+
+        if conversation not in self._conversations:
+            raise AgentInvocationError(
+                f"get_record: unknown conversation {conversation!r}."
+            )
+        return self._conversations[conversation].records[index]
+
+    def clone_conversation(
+        self,
+        source: str,
+        *,
+        start: int | None = None,
+        end: int | None = None,
+        start_id: str | None = None,
+        end_id: str | None = None,
+        name: str | None = None,
+    ) -> Conversation:
+        """Clone an arbitrary ``[start, end]`` range of an existing conversation.
+
+        Replaces ``fork_conversation``; generalizes its always-"root through
+        a named record" behavior to an arbitrary range, addressed either by
+        plain list index (``start``/``end``, negative indices resolved the
+        normal Python way) or by run_id (``start_id``/``end_id``). Exactly
+        one pair may have any non-None member -- mixing members from both
+        raises ``ValueError``. All four ``None`` clones the whole
+        conversation (including an empty one). A cheap reference-copy slice
+        -- no deep copy, no rebuilt ``prev`` chains.
+
+        Out-of-range bounds raise ``IndexError``; a resolved ``start`` after
+        ``end`` raises ``ValueError`` -- neither is silently
+        clamped/emptied.
+
+        ``name``, if given, is validated/collision-checked exactly like
+        ``create_conversation``'s ``name`` (either failure raises
+        ``ValueError``); if omitted, a name is auto-derived from ``source``
+        the same way ``fork_conversation`` used to.
         """
         with self._invoke_lock:
-            if conversation_id not in self._conversations:
+            if source not in self._conversations:
                 raise AgentInvocationError(
-                    f"fork_conversation: unknown conversation {conversation_id!r}."
+                    f"clone_conversation: unknown conversation {source!r}."
                 )
-            source = self._conversations[conversation_id]
-            target = next(
-                (r for r in source if r.run_id == run_id), None
-            )
-            if target is None:
-                raise ValueError(
-                    f"fork_conversation: no record with run_id {run_id!r} "
-                    f"found in conversation {conversation_id!r}."
-                )
+            source_conv = self._conversations[source]
+            records = source_conv.records
 
-            if fork_name is not None:
-                if not CONVERSATION_NAME_PATTERN.fullmatch(fork_name):
-                    raise ValueError(
-                        f"fork_conversation: invalid fork_name {fork_name!r}."
-                    )
-                if fork_name in self._conversations:
-                    raise ValueError(
-                        f"fork_conversation: name {fork_name!r} already exists."
-                    )
-                resolved_name = fork_name
+            if start is None and end is None and start_id is None and end_id is None:
+                new_records = list(records)
             else:
-                base = TRAILING_FORK_INDEX_PATTERN.sub("", conversation_id)
+                index_pair_given = start is not None or end is not None
+                id_pair_given = start_id is not None or end_id is not None
+                if index_pair_given and id_pair_given:
+                    raise ValueError(
+                        "clone_conversation: start/end and start_id/end_id "
+                        "may not be mixed."
+                    )
+
+                if id_pair_given:
+                    if start_id is None:
+                        start_idx = 0
+                    else:
+                        target = self._find_in_conversation(source, start_id)
+                        if target is None:
+                            raise ValueError(
+                                f"clone_conversation: no record with run_id "
+                                f"{start_id!r} found in conversation {source!r}."
+                            )
+                        start_idx = records.index(target)
+                    if end_id is None:
+                        end_idx = len(records) - 1
+                    else:
+                        target = self._find_in_conversation(source, end_id)
+                        if target is None:
+                            raise ValueError(
+                                f"clone_conversation: no record with run_id "
+                                f"{end_id!r} found in conversation {source!r}."
+                            )
+                        end_idx = records.index(target)
+                else:
+                    start_idx = 0 if start is None else (
+                        start if start >= 0 else len(records) + start
+                    )
+                    end_idx = len(records) - 1 if end is None else (
+                        end if end >= 0 else len(records) + end
+                    )
+
+                if not (0 <= start_idx <= len(records) - 1) or not (
+                    0 <= end_idx <= len(records) - 1
+                ):
+                    raise IndexError(
+                        f"clone_conversation: resolved range "
+                        f"[{start_idx}, {end_idx}] out of bounds for "
+                        f"conversation {source!r} of length {len(records)}."
+                    )
+                if start_idx > end_idx:
+                    raise ValueError(
+                        f"clone_conversation: resolved start {start_idx} is "
+                        f"after resolved end {end_idx}."
+                    )
+                new_records = list(records[start_idx : end_idx + 1])
+
+            if name is not None:
+                if not CONVERSATION_NAME_PATTERN.fullmatch(name):
+                    raise ValueError(
+                        f"clone_conversation: invalid name {name!r}."
+                    )
+                if name in self._conversations:
+                    raise ValueError(
+                        f"clone_conversation: name {name!r} already exists."
+                    )
+                resolved_name = name
+            else:
+                base = TRAILING_FORK_INDEX_PATTERN.sub("", source)
                 candidate = f"{base}_{self._branch_counter}"
                 self._branch_counter += 1
                 while candidate in self._conversations:
@@ -1054,9 +1159,9 @@ class Agent(AtomicInvokable, ABC):
                     self._branch_counter += 1
                 resolved_name = candidate
 
-            idx = source.index(target)
-            self._conversations[resolved_name] = list(source[: idx + 1])
-            return resolved_name
+            new_conv = Conversation(name=resolved_name, records=new_records)
+            self._conversations[resolved_name] = new_conv
+            return new_conv
 
     def set_active_conversation(self, key: str) -> None:
         """Switch the active conversation. Unknown key raises ``AgentInvocationError``."""
@@ -1067,15 +1172,15 @@ class Agent(AtomicInvokable, ABC):
                 )
             self._active_conversation = key
 
-    def delete_conversation(self, key: str) -> list[AgentRecord]:
-        """Remove and return a conversation's full history.
+    def delete_conversation(self, key: str) -> Conversation:
+        """Remove and return a conversation.
 
         ``"default"`` is never actually removed -- regardless of whether
-        it is currently active, deleting it resets its list to ``[]`` in
-        place and returns the prior history; the key itself always stays
-        present. Any other conversation is refused while it is the active
-        conversation (switch active first); otherwise it is popped and
-        its history returned.
+        it is currently active, deleting it resets it to an empty
+        ``Conversation`` in place and returns the prior one; the key itself
+        always stays present. Any other conversation is refused while it is
+        the active conversation (switch active first); otherwise it is
+        popped and returned.
         """
         with self._invoke_lock:
             if key not in self._conversations:
@@ -1084,7 +1189,9 @@ class Agent(AtomicInvokable, ABC):
                 )
             if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
-                self._conversations[key] = []
+                self._conversations[key] = Conversation(
+                    name=DEFAULT_CONVERSATION_NAME, records=[]
+                )
                 return old
             if key == self._active_conversation:
                 raise AgentInvocationError(
@@ -1314,7 +1421,7 @@ class Agent(AtomicInvokable, ABC):
             "records_window": self.records_window,
             "response_preview_limit": self.response_preview_limit,
             "conversations": {
-                key: [r.to_dict() for r in records]
-                for key, records in self._conversations.items()},
+                key: [r.to_dict() for r in conv.records]
+                for key, conv in self._conversations.items()},
         })
         return d

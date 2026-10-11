@@ -10,7 +10,7 @@ from ..constants.core import IDENTIFIER_PATTERN_TEXT
 # =============================================================================
 # Used by:
 # - agents/base.py: Agent's per-conversation storage (_conversations dict,
-#   create_conversation, fork_conversation) and its name-shape validation.
+#   create_conversation, clone_conversation) and its name-shape validation.
 #
 # "default" is the always-present conversation key -- Agent seeds
 # {"default": []} at construction and delete_conversation refuses to ever
@@ -24,7 +24,7 @@ CONVERSATION_NAME_PATTERN: re.Pattern[str] = re.compile(
     rf"^(?!.*_\d+$){IDENTIFIER_PATTERN_TEXT}$"
 )
 """Valid shape for an explicitly-given conversation name (create_conversation's
-`name`, or an explicit `fork_conversation(fork_name=...)`): alphanumeric +
+`name`, or an explicit `clone_conversation(name=...)`): alphanumeric +
 underscore (same as IDENTIFIER_PATTERN), and must NOT end in `_<digits>` --
 that suffix shape is reserved for auto-generated fork names, which
 guarantees "ends in _<digits> iff auto-generated" holds everywhere."""
