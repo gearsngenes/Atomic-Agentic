@@ -77,10 +77,10 @@ class ThinkingAgent(BasicAgent):
 
     @classmethod
     def get_reserved_parameters(cls) -> list[ParamSpec]:
-        """Prepend ``thinking_rounds`` onto the base ``run_id`` reservation,
-        per ``Agent.get_reserved_parameters``'s own documented subclass-
-        extension convention -- keeps ``run_id`` sorting last among
-        reserved keyword-only parameters in the declared schema."""
+        """Prepend ``thinking_rounds`` onto whatever this hierarchy's own
+        reserved-parameter list already is (base ``Agent`` currently
+        reserves nothing), per ``Agent.get_reserved_parameters``'s subclass-
+        extension convention."""
         return [THINKING_ROUNDS_PARAM] + super().get_reserved_parameters()
 
     def __init__(

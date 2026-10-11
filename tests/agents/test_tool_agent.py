@@ -918,7 +918,7 @@ class TestSystemMessageRendering:
         assert "3" not in baseline_content
 
 
-class TestRenderTurnAndTurnPosition:
+class TestRenderTurn:
     def test_render_turn_labels_turns_by_position(self) -> None:
         agent = make_planact_agent(
             [
