@@ -12,23 +12,11 @@ from atomic_agentic.constants.agents import (
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
-    RUN_ID_PARAM,
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
-
-
-class TestRunIdParam:
-    def test_run_id_param_has_non_empty_description(self) -> None:
-        assert isinstance(RUN_ID_PARAM.description, str)
-        assert RUN_ID_PARAM.description.strip() != ""
-
-    def test_run_id_param_identity(self) -> None:
-        assert RUN_ID_PARAM.name == "run_id"
-        assert RUN_ID_PARAM.kind == "KEYWORD_ONLY"
-        assert RUN_ID_PARAM.default is None
 
 
 class TestScriptAgentSentinelLiterals:

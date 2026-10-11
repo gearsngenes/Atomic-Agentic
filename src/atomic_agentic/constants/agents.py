@@ -37,17 +37,10 @@ before a fresh one is appended (prevents suffix accumulation like
 # =============================================================================
 # Agent framework-reserved parameters
 # =============================================================================
-# RUN_ID_PARAM is the canonical ParamSpec grafted onto every Agent subclass
-# schema via Agent.get_reserved_parameters(). It is defined here so that the
-# reserved-name reconciliation machinery in Agent.__init__ can compare
-# caller-declared params against the authoritative definition without
-# re-constructing it inline.
-
-RUN_ID_PARAM: ParamSpec = ParamSpec(
-    name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
-    type=("None", "str"), default=None,
-    description="Optional UUID hexstring used to point to a specific historical run of this agent. Do NOT provide natural-language instructions here; this is a reserved parameter to programatically select where in an agent's history to resume execution."
-)
+# A subclass's own reserved ParamSpec constants (e.g. THINKING_ROUNDS_PARAM
+# below) are defined here so that the reserved-name reconciliation machinery
+# in Agent.__init__ can compare caller-declared params against the
+# authoritative definition without re-constructing it inline.
 
 THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
     name="thinking_rounds", index=0, kind=ParamSpec.KEYWORD_ONLY,
@@ -337,7 +330,6 @@ __all__ = [
     "CONVERSATION_NAME_PATTERN",
     "TRAILING_FORK_INDEX_PATTERN",
     # Framework-reserved parameters
-    "RUN_ID_PARAM",
     "THINKING_ROUNDS_PARAM",
     # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",

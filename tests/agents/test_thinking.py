@@ -9,7 +9,7 @@ import pytest
 from .conftest import FakeLLMEngine
 
 from atomic_agentic.agents.thinking import ThinkingAgent, _THINKING_FRAMING, _THINKING_CONTINUATION_NUDGE
-from atomic_agentic.constants.agents import RUN_ID_PARAM, THINKING_ROUNDS_PARAM
+from atomic_agentic.constants.agents import THINKING_ROUNDS_PARAM
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.results.agents import ThinkingAgentResult
@@ -163,12 +163,12 @@ class TestConstruction:
         assert "audience" in names
         assert "angle" in names
 
-    def test_get_reserved_parameters_orders_thinking_rounds_before_run_id(self) -> None:
-        assert ThinkingAgent.get_reserved_parameters() == [THINKING_ROUNDS_PARAM, RUN_ID_PARAM]
+    def test_reserved_parameters_is_thinking_rounds_only(self) -> None:
+        assert ThinkingAgent.get_reserved_parameters() == [THINKING_ROUNDS_PARAM]
 
         agent = make_agent()
         names = [p.name for p in agent.parameters]
-        assert names.index("thinking_rounds") < names.index("run_id")
+        assert "thinking_rounds" in names
 
 
 class TestThinkingRoundsLimit:

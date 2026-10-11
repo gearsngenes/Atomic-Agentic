@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
 from ..constants.agents import (
-    RUN_ID_PARAM,
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TRAILING_FORK_INDEX_PATTERN,
@@ -65,16 +64,16 @@ class Agent(AtomicInvokable, ABC):
     ``invoke(inputs)`` follows this sequence:
 
     1. ``filter_inputs`` collects declared keys and injects defaults.
-    2. Reserved names (``run_id`` by default; see ``get_reserved_parameters``)
-       are read non-destructively — ``inputs`` itself is never mutated.
+    2. Reserved names (see ``get_reserved_parameters``; none by default on
+       base ``Agent``) are read non-destructively — ``inputs`` itself is
+       never mutated.
     3. Remaining inputs are sliced into ``pre_inputs`` / ``post_inputs`` by
        name membership against ``pre_invoke`` / ``post_invoke``'s own
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
-    5. Turns are selected from the active conversation via
+    5. Turns are selected from the active conversation's own tail via
        ``_resolve_context`` if ``context_enabled`` is True and
-       ``records_window != 0``; ``run_id`` is resolved only within that
-       conversation.
+       ``records_window != 0``.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
        anything; then, every round, unconditionally: ``task = think(task);
@@ -99,7 +98,7 @@ class Agent(AtomicInvokable, ABC):
       ``BasicAgent`` passes its role-prompt placeholders as this agent's
       sole ``extra_parameters`` source).
     - This (sub)class's reserved parameters (``get_reserved_parameters()``;
-      ``run_id`` by default), grafted last.
+      empty by default on base ``Agent``), grafted last.
 
     Reserved-name overlaps in pre_invoke/post_invoke/extra_parameters are
     resolved first, independently per source (never against each other): a
@@ -130,7 +129,7 @@ class Agent(AtomicInvokable, ABC):
     -------------------
     ``True``:  ``_resolve_context`` selects prior turns from the active
     conversation for each invocation, and may trigger a fork.
-    ``False``: turns are always ``[]``; ``run_id`` is ignored.
+    ``False``: turns are always ``[]``.
     ``records_window == 0`` behaves the same as ``context_enabled=False``
     for a given invocation. In either case, nothing is stored -- no record
     is appended to any conversation -- though the invocation still returns
@@ -143,14 +142,16 @@ class Agent(AtomicInvokable, ABC):
     at construction. Exactly one conversation is "active" at a time
     (``self._active_conversation``); ``invoke``/``async_invoke`` always read
     from and (when they commit) write to whichever conversation is active at
-    call time. ``run_id`` targets a specific record *within the active
-    conversation only* -- an unknown ``run_id`` raises ``ValueError``.
-    Continuing from a childless record appends in place; continuing from a
-    record that already has children forks a new conversation instead
-    (``create_conversation``/``clone_conversation``/``get_record``/
-    ``set_active_conversation``/``delete_conversation`` provide the explicit,
-    non-invocation-triggered counterparts to this implicit fork-on-invoke
-    behavior).
+    call time -- always its own current tail, never an arbitrary earlier
+    record. Retargeting to an earlier point requires an explicit
+    ``clone_conversation``/``set_active_conversation`` call before invoking
+    (``create_conversation``/``get_record``/``delete_conversation`` round
+    out the rest of the explicit conversation-management API). The one
+    remaining *implicit* behavior is a concurrency-safety detail, not a
+    caller-facing feature: two invocations racing to extend the same tail
+    resolve safely via a fresh children check taken under
+    ``self._invoke_lock`` at commit time -- whichever commits second
+    automatically forks instead of colliding.
     """
 
     # ------------------------------------------------------------------ #
@@ -160,18 +161,17 @@ class Agent(AtomicInvokable, ABC):
     def get_reserved_parameters(cls) -> list[ParamSpec]:
         """Return this Agent (sub)class's framework-reserved parameters.
 
-        Base ``Agent`` reserves only ``run_id``. A subclass with its own
+        Base ``Agent`` reserves nothing by default. A subclass with its own
         fixed/reserved parameter overrides this as
         ``return [MY_RESERVED_PARAM] + super().get_reserved_parameters()``
         -- prepended, not appended -- so the same collision/overlap/graft
         machinery in ``__init__`` covers its reserved name too, without base
-        ``Agent`` needing advance knowledge of it, and so that ``run_id``
-        (the most generic reservation, defined here at the root) keeps
-        sorting last among reserved keyword-only parameters in the final
-        schema no matter how many subclass levels each prepend their own
-        more-specific reservation ahead of it.
+        ``Agent`` needing advance knowledge of it, and so that each
+        subclass level's own reservation keeps sorting ahead of any
+        reservation declared further up its ancestry, no matter how many
+        levels deep the prepending goes.
         """
-        return [RUN_ID_PARAM]
+        return []
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -910,29 +910,27 @@ class Agent(AtomicInvokable, ABC):
         return list(history) if turns is None else list(history[-turns:])
 
     def _find_in_conversation(
-        self, conversation_id: str, run_id: str | None
+        self, conversation_id: str, run_id: str
     ) -> AgentRecord | None:
         """Pure query for a record within a given conversation; never raises.
 
-        ``None`` resolves to that conversation's most recent record (or
-        ``None`` if it's empty); an explicit ``run_id`` resolves to the
-        matching record, or ``None`` if no record in that conversation has
-        it. Takes ``conversation_id`` explicitly rather than reading
-        ``self._active_conversation`` internally -- ``_resolve_context``
-        must be able to pass its own already-snapshotted key so a
-        concurrent ``set_active_conversation`` can never make this method's
-        search and its caller's own snapshot disagree. Used by
-        ``_resolve_context`` to resolve a ``run_id`` (or ``None``) against a
-        specific conversation's history.
+        Resolves ``run_id`` to the matching record, or ``None`` if no
+        record in that conversation has it. Takes ``conversation_id``
+        explicitly rather than reading ``self._active_conversation``
+        internally, matching every other conversation-keyed helper on this
+        class. Its only remaining caller is ``get_record``'s ``run_id``
+        mode, which scans every conversation via this method -- always
+        with a real, caller-supplied ``run_id`` (never ``None``; there is
+        no "most recent record" shorthand anymore, since nothing else
+        needs one now that ``_resolve_context`` no longer resolves an
+        arbitrary target).
         """
         history = self._conversations[conversation_id].records
-        if run_id is None:
-            return history[-1] if history else None
         return next(
             (r for r in history if r.run_id == run_id), None
         )
 
-    def _resolve_context(self, run_id: str | None) -> tuple[str, list[AgentRecord]]:
+    def _resolve_context(self) -> tuple[str, list[AgentRecord]]:
         """Resolve this invocation's active-conversation snapshot and context turns.
 
         Called unlocked, early in ``invoke``/``async_invoke``, before the
@@ -942,38 +940,20 @@ class Agent(AtomicInvokable, ABC):
         commits.
 
         1. Snapshot ``active_key = self._active_conversation``.
-        2. If context/window is disabled, ``run_id`` is ignored entirely and
-           nothing is selected.
-        3. Otherwise resolve ``run_id`` within ``active_key`` specifically
-           (via ``_find_in_conversation(active_key, run_id)``, never the
-           live ``self._active_conversation``) -- this is what keeps
-           ``history`` and ``target`` from a concurrent
-           ``set_active_conversation`` race ever disagreeing. An
-           unresolvable explicit ``run_id`` raises ``ValueError`` (not
-           ``AgentInvocationError`` -- deliberately distinct from
-           ``get_conversation``'s unknown-lookup convention).
-        4. The returned turns always end exactly at the resolved target
-           (or are ``[]`` when there is none), sliced to ``records_window``
-           from the end.
+        2. If context/window is disabled, return ``(active_key, [])``.
+        3. Otherwise read ``active_key``'s full history and window it
+           directly from the end -- every invocation always continues from
+           the active conversation's own tail; retargeting to an earlier
+           point is only ever done explicitly, via ``clone_conversation``/
+           ``set_active_conversation``, before calling here.
         """
         active_key = self._active_conversation
         if not (self._context_enabled and self._records_window != 0):
             return active_key, []
 
         history = self._conversations[active_key].records
-        target = self._find_in_conversation(active_key, run_id)
-        if run_id is not None and target is None:
-            raise ValueError(
-                f"invoke: no record with run_id {run_id!r} found in the "
-                f"active conversation {active_key!r}."
-            )
-        if target is None:
-            return active_key, []
-
-        idx = history.index(target)
-        prefix = history[: idx + 1]
         window = self._records_window
-        turns = prefix if window is None else prefix[-window:]
+        turns = history if window is None else history[-window:]
         return active_key, turns
 
     def create_conversation(self, name: str) -> Conversation:
@@ -1211,8 +1191,7 @@ class Agent(AtomicInvokable, ABC):
         ``_commit_emit`` performs no I/O and never awaits), letting
         concurrent ``async_invoke`` calls against the same instance
         genuinely overlap everywhere else. See ``invoke``'s own docstring
-        for the full reasoning and the accepted ``run_id=None`` branching
-        consequence.
+        for the full reasoning.
         """
         logger.info(f"[Async {self.full_name} started]")
         started_at = datetime.now(timezone.utc)
@@ -1220,9 +1199,8 @@ class Agent(AtomicInvokable, ABC):
         # 1. Filter inputs.
         inputs = self.filter_inputs(inputs)
 
-        # 2. Reserved names + non-destructive run_id read.
+        # 2. Reserved names (exclusion only).
         reserved_names = {p.name for p in self.get_reserved_parameters()}
-        run_id = inputs.get("run_id")
 
         # 3. Slice pre/post inputs, excluding reserved names.
         pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
@@ -1252,9 +1230,9 @@ class Agent(AtomicInvokable, ABC):
             )
         prompt = raw_prompt
 
-        # 5. History -- resolved within the active conversation only.
+        # 5. History -- the active conversation's own tail.
         logger.debug(f"Agent.{self.name} selecting turns")
-        active_key, turns = self._resolve_context(run_id)
+        active_key, turns = self._resolve_context()
 
         # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing async logic")
@@ -1309,14 +1287,15 @@ class Agent(AtomicInvokable, ABC):
         Steps
         -----
         1. ``filter_inputs`` — collect declared keys; inject defaults.
-        2. Read reserved names (``run_id`` by default) non-destructively via
-           ``inputs.get(...)`` — ``inputs`` is never mutated.
+        2. Collect reserved names (see ``get_reserved_parameters``; none by
+           default) for exclusion purposes only — ``inputs`` is never
+           mutated.
         3. Slice ``pre_inputs`` / ``post_inputs`` from ``inputs`` by name
            membership against ``pre_invoke`` / ``post_invoke``'s own
            declared parameters, excluding reserved names.
         4. ``pre_invoke`` → prompt string (validated).
-        5. ``_resolve_context(run_id)`` selects conversation turns from the
-           active conversation, snapshotting the active-conversation key.
+        5. ``_resolve_context()`` selects conversation turns from the
+           active conversation's own tail, snapshotting the active-conversation key.
         6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
            ``task = think(task); task = prepare(task); task = act(task)``
            until ``task.complete``.
@@ -1335,9 +1314,8 @@ class Agent(AtomicInvokable, ABC):
         # 1. Filter inputs.
         inputs = self.filter_inputs(inputs)
 
-        # 2. Reserved names + non-destructive run_id read.
+        # 2. Reserved names (exclusion only).
         reserved_names = {p.name for p in self.get_reserved_parameters()}
-        run_id = inputs.get("run_id")
 
         # 3. Slice pre/post inputs, excluding reserved names.
         pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
@@ -1367,9 +1345,9 @@ class Agent(AtomicInvokable, ABC):
             )
         prompt = raw_prompt
 
-        # 5. History -- resolved within the active conversation only.
+        # 5. History -- the active conversation's own tail.
         logger.debug(f"Agent.{self.name} selecting turns")
-        active_key, turns = self._resolve_context(run_id)
+        active_key, turns = self._resolve_context()
 
         # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing logic")

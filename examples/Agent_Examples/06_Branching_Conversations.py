@@ -1,6 +1,7 @@
-﻿# 06_Branching_Conversations.py
+# 06_Branching_Conversations.py
 """
-Demonstrates conversation branching via the ``run_id`` parameter.
+Demonstrates conversation branching via the explicit conversation-
+management API.
 
 The scenario uses grounded, verifiable facts so the agent's context isolation
 is unambiguous — it cannot invent the right answer if the fact was never in
@@ -14,30 +15,40 @@ Conversation tree
     T_A1  reveal dog name                │
         │                                │
     T_A2  "what do you know             T_B1  "what's my dog's
-          about my dog?"                        name?" (fork from T0)
+          about my dog?"                        name?" (cloned from T0)
           → agent recalls Biscuit               → agent: "you haven't
                                                   told me"
 
 Key concepts shown
 ------------------
-- ``run_id=<run_id>``   target any prior turn, not just the tail
-- Targeting a turn that already has a child forks a brand-new, separately
-  named conversation instead of appending a second, ambiguous child in
-  place -- targeting a still-childless turn (or passing ``run_id=None``)
-  just continues in place, no fork.
+- ``Agent.clone_conversation(source, *, end_id=...)``   explicitly clone a
+  conversation up through any prior turn, not just the tail.
+- ``Agent.set_active_conversation(name)``   switch which conversation
+  subsequent calls read from and write to. Cloning never changes the active
+  conversation by itself -- the caller switches explicitly.
+- A record's ``children`` list is shared across every conversation it
+  belongs to, not scoped to any one of them -- T0 already has a child
+  (T_A1) in "default" before Branch B ever exists, so continuing from T0 in
+  the freshly-cloned branch still trips the same commit-time auto-fork
+  safety check (two commits targeting the same already-childed point never
+  collide; the second always lands in a brand-new conversation instead).
+  The clone is only a *seed* for rendering the right context going in --
+  the turn actually lands one conversation further out, discovered the
+  same way an implicit fork's name always was: diffing
+  ``conversation_names`` around the call. The now-empty seed is discarded
+  with ``delete_conversation`` afterward.
 - ``Agent.get_conversation(conversation_id)``   each conversation is its own
   stored list under ``Agent.conversation_names``; reading one back is a
   plain dict lookup, not a reconstruction walk.
 
-Conversation storage (v2.0.0, conversation-storage-refactor)
+Conversation storage (v2.0.0, agent-memory-refactor)
 --------------------------------------------------------------
 Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
 a ``dict[str, Conversation]`` -- the agent's active conversation
-("default" here, since ``set_active_conversation`` is never called in this
-example) keeps growing in place for T0/T_A1/T_A2, while re-targeting T0 for
-T_B1 (T0 already has a child, T_A1) implicitly forks a new, auto-named
-conversation instead -- discovered below by diffing ``conversation_names``
-before/after that call. Forking never changes which conversation is active.
+("default" here) keeps growing in place for T0/T_A1/T_A2. There is no
+implicit, invoke-time forking mechanism anymore -- every branch starts from
+an explicit ``clone_conversation`` call (see Branch B below for the full,
+slightly subtle sequence this now takes).
 
 Post-invoke parameters are no longer declared via ``passthrough_inputs``.
 Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
@@ -211,34 +222,44 @@ def main() -> None:
     print(f"  reply: {r_a2.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Branch B — T_B1: fork from T0, ask the same recall question
+    # Branch B — T_B1: clone from T0, ask the same recall question
     #
     # This branch's context is T0 only. T_A1 and T_A2 never happened here.
     # The agent cannot know Biscuit's name.
     # ------------------------------------------------------------------ #
     print(f"\n{'═' * _W}")
-    print("  T_B1  ·  Branch B  —  forked from T0  (run_id=run_0)")
+    print("  T_B1  ·  Branch B  —  cloned from T0  (clone_conversation(end_id=run_0))")
     print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
     print(f"{'═' * _W}")
 
-    # T0 already has a child (T_A1) by this point, so re-targeting it here
-    # implicitly forks a brand-new conversation instead of appending a
-    # second child in place. The active conversation (still "default")
-    # never changes; diff conversation_names before/after to discover the
-    # new fork's auto-generated name.
-    conversations_before = set(agent.conversation_names)
+    # Explicitly clone "default" up through T0 -- this seed conversation
+    # exists only to give the upcoming call the right context (T0 alone) to
+    # render from. T0 already has a child in "default" (T_A1), and
+    # AgentRecord.children is shared across every conversation a record
+    # belongs to -- so continuing from T0 here still trips the same
+    # commit-time auto-fork safety check. The turn doesn't land in the seed
+    # itself; it lands in a further, auto-named conversation, discovered the
+    # same way an implicit fork's name always was: diffing
+    # conversation_names around the call.
+    seed = agent.clone_conversation("default", end_id=run_0)
+    agent.set_active_conversation(seed.name)
 
+    conversations_before = set(agent.conversation_names)
     r_b1 = agent(
         message="What's my dog's name?",
         style="friendly",
-        run_id=run_0,
         return_atomic_result_object = True
     )
+    branch_b_name = next(iter(set(agent.conversation_names) - conversations_before))
     run_b1 = r_b1.run_id
     results_by_run_id[run_b1] = r_b1
-    branch_b_key = next(iter(set(agent.conversation_names) - conversations_before))
-    print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_key!r}")
+    print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_name!r}")
     print(f"  reply: {r_b1.result['reply']}")
+
+    # Switch back to "default" before discarding the now-empty seed --
+    # delete_conversation refuses to remove the active conversation.
+    agent.set_active_conversation("default")
+    agent.delete_conversation(seed.name)
 
     # ------------------------------------------------------------------ #
     # Display each conversation's stored chain
@@ -253,8 +274,8 @@ def main() -> None:
         results_by_run_id,
     )
     print_chain(
-        agent.get_conversation(branch_b_key),
-        "Branch B  ·  root → same question, no prior fact  (forked at T0)",
+        agent.get_conversation(branch_b_name),
+        "Branch B  ·  root → same question, no prior fact  (cloned at T0)",
         results_by_run_id,
     )
 
@@ -268,7 +289,7 @@ def main() -> None:
         run_0:  "T0     root",
         run_a1: "T_A1   branch A — fact revealed",
         run_a2: "T_A2   branch A — fact recalled",
-        run_b1: "T_B1   branch B — parallel fork from T0",
+        run_b1: "T_B1   branch B — parallel clone from T0",
     }
     for name in agent.conversation_names:
         history = agent.get_conversation(name)

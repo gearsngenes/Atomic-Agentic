@@ -88,13 +88,13 @@ class TestBasicAgentSchemaComposition:
         agent = make_basic_agent(role_prompt=config)
 
         names = [p.name for p in agent.parameters]
-        assert names == ["prompt", "persona", "run_id"]
+        assert names == ["prompt", "persona"]
 
     def test_static_role_prompt_produces_no_extra_params(self) -> None:
         agent = make_basic_agent(role_prompt="You are a generic assistant.")
 
         names = [p.name for p in agent.parameters]
-        assert names == ["prompt", "run_id"]
+        assert names == ["prompt"]
 
     def test_placeholder_default_from_field_specs_is_preserved(self) -> None:
         config = PromptConfig(

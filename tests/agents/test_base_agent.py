@@ -11,7 +11,6 @@ from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, SchemaError
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.constants.agents import RUN_ID_PARAM
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -22,6 +21,17 @@ from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
+
+_DUMMY_RESERVED_PARAM: ParamSpec = ParamSpec(
+    name="dummy_reserved", index=0, kind=ParamSpec.KEYWORD_ONLY,
+    type=("None", "str"), default=None,
+    description="Test-only reserved parameter standing in for a real "
+                 "framework reservation.",
+)
+"""Base Agent reserves nothing by default (post run-id-param-removal) --
+this stands in for whatever a real reservation would be, so the generic
+reserved-parameter graft/collision/ordering machinery below still has
+something concrete to exercise."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,8 +44,15 @@ class _MinimalAgent(Agent):
     that never call invoke() don't need this to run. No ``_initialize_task``
     override -- Agent's concrete base implementation (bare AgentTask,
     ``system_prompt_name=None``) is sufficient. ``think``/``prepare`` stay
-    inherited no-ops.
+    inherited no-ops. Declares one reserved parameter
+    (``_DUMMY_RESERVED_PARAM``) rather than inheriting base ``Agent``'s own
+    empty default, so tests exercising the generic reserved-parameter
+    machinery have a concrete reservation to work against.
     """
+
+    @classmethod
+    def get_reserved_parameters(cls) -> list[ParamSpec]:
+        return [_DUMMY_RESERVED_PARAM]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
@@ -133,7 +150,8 @@ class _ExtraReservedAgent(_MinimalAgent):
     """Concrete Agent subclass declaring one additional reserved parameter.
 
     Exercises the ``get_reserved_parameters`` override contract: a subclass
-    adds its own reserved name on top of the base ``[RUN_ID_PARAM]`` list.
+    adds its own reserved name on top of ``_MinimalAgent``'s own
+    ``[_DUMMY_RESERVED_PARAM]`` list.
     """
 
     EXTRA_RESERVED = ParamSpec(
@@ -390,7 +408,6 @@ class TestAgentPipeline:
         assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
-            ("run_id", "KEYWORD_ONLY", None),
         ]
         assert agent.return_type == "dict[str, Any]"
 
@@ -408,7 +425,6 @@ class TestAgentSchemaComposition:
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("suffix", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
-            ("run_id", "KEYWORD_ONLY", None),
         ]
 
     def test_auto_grafted_param_preserves_post_default(self) -> None:
@@ -442,11 +458,21 @@ class TestAgentSchemaComposition:
         # Dropped this pass: post-only VAR_POSITIONAL/VAR_KEYWORD params are no
         # longer excluded from grafting -- insert_by_category places them in
         # their own valid ordering slot (after POSITIONAL_OR_KEYWORD, before
-        # KEYWORD_ONLY) like any other kind.
-        agent = make_agent(post_invoke=post_with_post_only_args)
+        # KEYWORD_ONLY) like any other kind. Built on _MinimalAgent directly
+        # (not make_agent()'s _EchoAgent, which has no reserved params) so a
+        # real KEYWORD_ONLY reserved param is present to demonstrate "before
+        # KEYWORD_ONLY" against.
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            pre_invoke=build_prompt,
+            post_invoke=post_with_post_only_args,
+        )
 
         names = [p.name for p in agent.parameters]
-        assert names == ["topic", "tone", "extras", "run_id"]
+        assert names == ["topic", "tone", "extras", "dummy_reserved"]
         extras_param = next(p for p in agent.parameters if p.name == "extras")
         assert extras_param.kind == "VAR_POSITIONAL"
 
@@ -524,12 +550,12 @@ class TestAgentPostInvokeRouting:
 
         assert agent.post_result_key == "items"
 
-    def test_post_result_key_run_id_raises(self) -> None:
-        # "run_id" is never a legal post_result_key here: it's simply not
-        # among post_invoke's own declared parameter names at all (resolved
-        # against post_tool.parameters directly, unstripped).
+    def test_post_result_key_naming_an_undeclared_name_raises(self) -> None:
+        # "not_a_param" is never a legal post_result_key here: it's simply
+        # not among post_invoke's own declared parameter names at all
+        # (resolved against post_tool.parameters directly, unstripped).
         with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_result_key="run_id")
+            make_agent(post_result_key="not_a_param")
 
     def test_post_result_key_matching_pre_invoke_name_no_longer_raises(self) -> None:
         # Spec-mandated behavior change: the old pairwise "post_result_key
@@ -890,32 +916,6 @@ class TestConversationManagement:
 
         assert second_clone_name != first_clone_name
 
-    def test_continuing_from_childless_record_appends_in_place(self) -> None:
-        agent = make_agent(context_enabled=True)
-        first = agent.invoke({"topic": "first", "tone": "strict"})
-
-        agent.invoke({"topic": "second", "tone": "strict", "run_id": first.run_id})
-
-        assert agent.conversation_names == ["default"]
-        assert len(agent.get_conversation("default")) == 2
-
-    def test_continuing_from_record_with_children_forks_instead(self) -> None:
-        agent = make_agent(context_enabled=True)
-        first = agent.invoke({"topic": "first", "tone": "strict"})
-        agent.invoke({"topic": "second", "tone": "strict", "run_id": first.run_id})
-
-        # first.run_id now already has a child (the "second" turn) -- a third
-        # invocation continuing from the same point must fork, not append.
-        agent.invoke({"topic": "third", "tone": "strict", "run_id": first.run_id})
-
-        assert len(agent.conversation_names) == 2
-        # "default" is untouched by the fork.
-        assert len(agent.get_conversation("default")) == 2
-        forked_name = next(n for n in agent.conversation_names if n != "default")
-        forked = agent.get_conversation(forked_name)
-        assert len(forked) == 2
-        assert forked[0].inputs["topic"] == "first"
-        assert forked[1].inputs["topic"] == "third"
 
 
 class TestAgentValidation:
@@ -1173,7 +1173,7 @@ class TestAgentMutableRuntimeProperties:
     def test_constructor_with_custom_pre_invoke_builds_parameters(self) -> None:
         agent = make_agent(pre_invoke=pre_with_two_fields)
 
-        assert [param.name for param in agent.parameters] == ["subject", "style", "run_id"]
+        assert [param.name for param in agent.parameters] == ["subject", "style"]
         assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
@@ -1184,15 +1184,15 @@ class TestAgentMutableRuntimeProperties:
 class TestGetReservedParameters:
     """Coverage for Agent.get_reserved_parameters() -- default and override."""
 
-    def test_base_agent_default_is_run_id_only(self) -> None:
-        assert Agent.get_reserved_parameters.__func__(Agent) == [RUN_ID_PARAM]
+    def test_base_agent_default_is_empty(self) -> None:
+        assert Agent.get_reserved_parameters.__func__(Agent) == []
 
-    def test_minimal_agent_default_is_run_id_only(self) -> None:
-        assert _MinimalAgent.get_reserved_parameters() == [RUN_ID_PARAM]
+    def test_minimal_agent_default_is_dummy_reserved_only(self) -> None:
+        assert _MinimalAgent.get_reserved_parameters() == [_DUMMY_RESERVED_PARAM]
 
     def test_subclass_override_extends_base_reserved_list(self) -> None:
         reserved = _ExtraReservedAgent.get_reserved_parameters()
-        assert reserved == [RUN_ID_PARAM, _ExtraReservedAgent.EXTRA_RESERVED]
+        assert reserved == [_DUMMY_RESERVED_PARAM, _ExtraReservedAgent.EXTRA_RESERVED]
 
     def test_subclass_reserved_param_is_grafted_into_schema(self) -> None:
         agent = _ExtraReservedAgent(
@@ -1202,7 +1202,7 @@ class TestGetReservedParameters:
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         names = [p.name for p in agent.parameters]
-        assert "run_id" in names
+        assert "dummy_reserved" in names
         assert "trace_id" in names
 
 
@@ -1217,8 +1217,8 @@ class TestExtraParametersNormalization:
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         # "prompt" comes from the default identity_pre_tool; no extra_parameters
-        # means nothing else is grafted beyond the reserved run_id.
-        assert [p.name for p in agent.parameters] == ["prompt", "run_id"]
+        # means nothing else is grafted beyond the reserved dummy_reserved.
+        assert [p.name for p in agent.parameters] == ["prompt", "dummy_reserved"]
 
     def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
         agent = _MinimalAgent(
@@ -1294,9 +1294,9 @@ class TestReservedNameReconciliation:
     """
 
     def test_identical_reserved_param_in_extra_parameters_is_silently_stripped(self) -> None:
-        # RUN_ID_PARAM itself, declared verbatim -- guaranteed field-for-field
-        # identical (name/type/kind/default/description all match). Silent
-        # strip, no warning at all (dropped this pass).
+        # _DUMMY_RESERVED_PARAM itself, declared verbatim -- guaranteed
+        # field-for-field identical (name/type/kind/default/description all
+        # match). Silent strip, no warning at all (dropped this pass).
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             agent = _MinimalAgent(
@@ -1304,17 +1304,17 @@ class TestReservedNameReconciliation:
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                extra_parameters=[RUN_ID_PARAM],
+                extra_parameters=[_DUMMY_RESERVED_PARAM],
             )
         assert caught == []
-        # Only one run_id entry survives in the final schema (the framework's).
-        assert [p.name for p in agent.parameters].count("run_id") == 1
+        # Only one dummy_reserved entry survives in the final schema (the framework's).
+        assert [p.name for p in agent.parameters].count("dummy_reserved") == 1
 
-    def test_pre_invoke_compatible_but_not_identical_run_id_now_raises(self) -> None:
+    def test_pre_invoke_compatible_but_not_identical_dummy_reserved_now_raises(self) -> None:
         # Under the old three-tier scheme this warned ("compatible but not
         # identical"); under the new two-outcome model, anything short of
         # exact semantic identity raises -- there is no middle tier anymore.
-        def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:
+        def pre_with_compatible_dummy_reserved(prompt: str, *, dummy_reserved: Any = "unset") -> str:
             return prompt
 
         with pytest.raises(AgentError, match="not identical"):
@@ -1323,11 +1323,11 @@ class TestReservedNameReconciliation:
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                pre_invoke=pre_with_compatible_run_id,
+                pre_invoke=pre_with_compatible_dummy_reserved,
             )
 
-    def test_pre_invoke_incompatible_run_id_raises(self) -> None:
-        def pre_with_bad_run_id(prompt: str, run_id: int) -> str:
+    def test_pre_invoke_incompatible_dummy_reserved_raises(self) -> None:
+        def pre_with_bad_dummy_reserved(prompt: str, dummy_reserved: int) -> str:
             return prompt
 
         with pytest.raises(AgentError, match="not identical"):
@@ -1336,15 +1336,15 @@ class TestReservedNameReconciliation:
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                pre_invoke=pre_with_bad_run_id,
+                pre_invoke=pre_with_bad_dummy_reserved,
             )
 
-    def test_post_invoke_incompatible_run_id_raises_independently_of_clean_pre(self) -> None:
+    def test_post_invoke_incompatible_dummy_reserved_raises_independently_of_clean_pre(self) -> None:
         # A clean pre_invoke (no reserved-name overlap at all) must not mask
         # a non-identical reserved-name collision detected independently in
         # post_invoke -- each of the three sources (pre/post/extra) is
         # checked entirely on its own, never against each other.
-        def post_with_bad_run_id(result: str, run_id: int) -> str:
+        def post_with_bad_dummy_reserved(result: str, dummy_reserved: int) -> str:
             return result
 
         with warnings.catch_warnings(record=True):
@@ -1356,11 +1356,11 @@ class TestReservedNameReconciliation:
                     description="d",
                     llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                     pre_invoke=build_prompt,
-                    post_invoke=post_with_bad_run_id,
+                    post_invoke=post_with_bad_dummy_reserved,
                 )
 
-    def test_extra_parameters_incompatible_run_id_raises(self) -> None:
-        bad = ParamSpec(name="run_id", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", default=NO_VAL)
+    def test_extra_parameters_incompatible_dummy_reserved_raises(self) -> None:
+        bad = ParamSpec(name="dummy_reserved", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", default=NO_VAL)
         with pytest.raises(AgentError, match="not identical"):
             _MinimalAgent(
                 name="a",
@@ -1371,19 +1371,19 @@ class TestReservedNameReconciliation:
             )
 
     def test_variadic_param_named_like_reserved_is_exempt_from_the_reserved_check(self) -> None:
-        # A VAR_KEYWORD catch-all happens to be named "run_id" -- exempt from
-        # the reserved-overlap check entirely: never checked, never stripped,
-        # regardless of the name collision (a catch-all's bucket name is a
-        # naming coincidence, not the same declared slot). The final
-        # signature still can't legally contain two params both literally
-        # named "run_id" (this VAR_KEYWORD bucket and the framework's own
-        # KEYWORD_ONLY graft), so construction still fails overall -- but via
-        # the pre-existing structural duplicate-name invariant every
-        # AtomicInvokable already enforces (SchemaError from
+        # A VAR_KEYWORD catch-all happens to be named "dummy_reserved" --
+        # exempt from the reserved-overlap check entirely: never checked,
+        # never stripped, regardless of the name collision (a catch-all's
+        # bucket name is a naming coincidence, not the same declared slot).
+        # The final signature still can't legally contain two params both
+        # literally named "dummy_reserved" (this VAR_KEYWORD bucket and the
+        # framework's own KEYWORD_ONLY graft), so construction still fails
+        # overall -- but via the pre-existing structural duplicate-name
+        # invariant every AtomicInvokable already enforces (SchemaError from
         # insert_by_category's final _validate_parameter_order call), never
         # via the reserved-overlap policy's own AgentError. That distinction
         # is the point of the exemption.
-        def pre_with_run_id_kwargs(prompt: str, **run_id: Any) -> str:
+        def pre_with_dummy_reserved_kwargs(prompt: str, **dummy_reserved: Any) -> str:
             return prompt
 
         with pytest.raises(SchemaError, match="Duplicate"):
@@ -1392,7 +1392,7 @@ class TestReservedNameReconciliation:
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                pre_invoke=pre_with_run_id_kwargs,
+                pre_invoke=pre_with_dummy_reserved_kwargs,
             )
 
     def test_multiple_compatible_but_not_identical_overlaps_emit_exactly_one_grouped_warning(self) -> None:
@@ -1487,13 +1487,22 @@ class TestPostResultKeyResolution:
         # happens to be a reserved name is caught by the dedicated new guard
         # (step 6), with a message identifying the actual problem (not the
         # old generic "not a declared parameter" message this would
-        # otherwise surface as, since "run_id" IS a real declared parameter
-        # of post_with_run_id_param below).
-        def post_with_run_id_param(result: str, run_id: str = "x") -> str:
+        # otherwise surface as, since "dummy_reserved" IS a real declared
+        # parameter of post_with_dummy_reserved_param below). Built on
+        # _MinimalAgent (not make_agent()'s _EchoAgent, which has no
+        # reserved params) so there's a real reserved name to collide with.
+        def post_with_dummy_reserved_param(result: str, dummy_reserved: str = "x") -> str:
             return result
 
         with pytest.raises(AgentError, match="framework-reserved"):
-            make_agent(post_invoke=post_with_run_id_param, post_result_key="run_id")
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                post_invoke=post_with_dummy_reserved_param,
+                post_result_key="dummy_reserved",
+            )
 
 
 class TestPreVsPostReconciliation:
@@ -1547,7 +1556,7 @@ class TestPreVsPostReconciliation:
         # ahead of tone (pre, defaulted) within the POSITIONAL_OR_KEYWORD
         # category -- insert_by_category enforces required-before-defaulted
         # regardless of which source declared the parameter.
-        assert names == ["topic", "suffix", "tone", "run_id"]
+        assert names == ["topic", "suffix", "tone"]
 
 
 class TestCombinedVsExtraReconciliation:
@@ -1613,7 +1622,7 @@ class TestCombinedVsExtraReconciliation:
             ],
         )
         names = [p.name for p in agent.parameters]
-        assert names == ["subject", "style", "flag", "run_id"]
+        assert names == ["subject", "style", "flag", "dummy_reserved"]
 
 
 def pre_with_dict_shared(shared: dict[str, int]) -> str:
@@ -1720,12 +1729,22 @@ class TestNWayWitnessOrderIndependence:
 
 class TestFinalReservedGraftOrdering:
     def test_reserved_graft_valid_ordering_with_positional_only_pre(self) -> None:
+        # Built on _MinimalAgent (not make_agent()'s _EchoAgent, which has no
+        # reserved params) so the reserved graft's ordering claim has a real
+        # KEYWORD_ONLY reserved param to land after the POSITIONAL_ONLY pre
+        # param.
         def pre_positional_only(subject: str, /) -> str:
             return subject
 
-        agent = make_agent(pre_invoke=pre_positional_only)
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            pre_invoke=pre_positional_only,
+        )
         names = [p.name for p in agent.parameters]
-        assert names == ["subject", "run_id"]
+        assert names == ["subject", "dummy_reserved"]
         assert agent.parameters[0].kind == "POSITIONAL_ONLY"
         assert agent.parameters[-1].kind == "KEYWORD_ONLY"
 
@@ -1743,8 +1762,8 @@ class TestFinalReservedGraftOrdering:
         # "prompt" (default identity_pre_tool, KEYWORD_ONLY) and "lang" (extra,
         # KEYWORD_ONLY) both sort at the same category tier; combined-vs-extra
         # reconciliation appends extra's remainder after pre's, and the final
-        # reserved graft appends run_id last.
-        assert names == ["prompt", "lang", "run_id"]
+        # reserved graft appends dummy_reserved last.
+        assert names == ["prompt", "lang", "dummy_reserved"]
 
 
 class TestUpdatePrompt:
@@ -1798,15 +1817,28 @@ class TestAgentRecordsNeverStoredWhenContextDisabled:
 
 class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_follows_base_getter(self) -> None:
-        agent = make_agent()
+        # Built on _MinimalAgent (not make_agent()'s _EchoAgent, which has
+        # no reserved params) so the description-bullet-augmentation
+        # mechanism has a real described reserved param to demonstrate.
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="Deterministic writer test agent.",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+        )
 
         assert agent.description.startswith("Deterministic writer test agent.")
-        assert "- run_id:" in agent.description
+        assert "- dummy_reserved:" in agent.description
 
-    def test_agent_description_contains_run_id_description_text(self) -> None:
-        agent = make_agent()
+    def test_agent_description_contains_dummy_reserved_description_text(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="Deterministic writer test agent.",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+        )
 
-        assert "Optional UUID hexstring" in agent.description
+        assert "Test-only reserved parameter" in agent.description
 
     def test_agent_to_dict_description_is_raw(self) -> None:
         agent = make_agent()
@@ -1815,22 +1847,8 @@ class TestAgentDescriptionOverrideRemoval:
 
 
 class TestInvocationLifecycle:
-    """Non-destructive run_id read, reserved-name exclusion from pre/post
-    slices, full inputs threading to _initialize_task, and
-    AgentRecord.inputs widening."""
-
-    def test_run_id_read_does_not_mutate_caller_inputs_dict(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="tests",
-            description="d",
-            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-        )
-        caller_inputs = {"prompt": "hello", "run_id": None}
-        agent.invoke(caller_inputs)
-        # The caller's own dict object is untouched (filter_inputs works on
-        # a copy internally; this just confirms invoke never mutates in place).
-        assert caller_inputs == {"prompt": "hello", "run_id": None}
+    """Reserved-name exclusion from pre/post slices, full inputs threading
+    to _initialize_task, and AgentRecord.inputs widening."""
 
     def test_invoke_receives_full_unsliced_inputs_in_invoke_arg(self) -> None:
         captured: dict[str, Any] = {}
@@ -1851,7 +1869,7 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
-        assert captured == {"prompt": "hi", "lang": "French", "run_id": None}
+        assert captured == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
 
     def test_reserved_name_excluded_from_pre_invoke_slice_even_if_declared_identically(self) -> None:
         """A source declaring a reserved param byte-for-byte identical to the
@@ -1859,17 +1877,17 @@ class TestInvocationLifecycle:
         warning -- under the old three-tier scheme this was merely
         "compatible," which is no longer a survivable outcome on its own;
         exact identity is required now). But surviving construction must not
-        mean the framework's real run_id value gets slotted into that
+        mean the framework's real reserved value gets slotted into that
         source's own declaration at invoke time -- the exclusion applies at
         every invoke() regardless. This is invoke-time routing behavior,
         distinct from what TestReservedNameReconciliation covers
         (construction-time strip/raise only)."""
         seen: list[Any] = []
 
-        def pre_with_identical_run_id(
-            prompt: str, *, run_id: Annotated[Optional[str], RUN_ID_PARAM.description] = None
+        def pre_with_identical_dummy_reserved(
+            prompt: str, *, dummy_reserved: Annotated[Optional[str], _DUMMY_RESERVED_PARAM.description] = None
         ) -> str:
-            seen.append(run_id)
+            seen.append(dummy_reserved)
             return prompt
 
         with warnings.catch_warnings(record=True) as caught:
@@ -1879,21 +1897,20 @@ class TestInvocationLifecycle:
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                pre_invoke=pre_with_identical_run_id,
+                pre_invoke=pre_with_identical_dummy_reserved,
                 context_enabled=True,
             )
         assert caught == []
 
-        first = agent.invoke({"prompt": "hi"})
-        real_run_id = first.run_id
-        agent.invoke({"prompt": "again", "run_id": real_run_id})
+        agent.invoke({"prompt": "hi"})
+        agent.invoke({"prompt": "again", "dummy_reserved": "some-value"})
 
         # Even on the second call, where the caller explicitly supplies a
-        # real, non-default run_id string to fork from, pre_invoke's own
-        # declaration never receives it -- both calls see only pre_invoke's
-        # own default (None), confirming the exclusion holds at invoke time
-        # and isn't just an artifact of the value happening to be None on a
-        # single, default-only call.
+        # real, non-default reserved value, pre_invoke's own declaration
+        # never receives it -- both calls see only pre_invoke's own default
+        # (None), confirming the exclusion holds at invoke time and isn't
+        # just an artifact of the value happening to be None on a single,
+        # default-only call.
         assert seen == [None, None]
 
     def test_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
@@ -1908,7 +1925,7 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
-        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
 
     def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
@@ -1922,7 +1939,7 @@ class TestInvocationLifecycle:
         )
         asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
 
-        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
 
     def test_inputs_isolated_across_invocations(self) -> None:
         agent = _MinimalAgent(
