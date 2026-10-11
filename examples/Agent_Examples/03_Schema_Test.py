@@ -130,7 +130,7 @@ def main(use_permissive: bool = False) -> None:
         description="Builds lesson plans from structured inputs.",
         llm_engine=engine,
         role_prompt="You are an expert teacher who writes concise, practical lesson plans.",
-        context_enabled=True,
+        record_enabled=True,
         records_window=8,
         pre_invoke=(permissive_tool if use_permissive else strict_tool),
     )

@@ -81,7 +81,7 @@ def main() -> None:
         description="Demonstrates post-invoke parameter auto-grafting.",
         llm_engine=llm,
         role_prompt="You are a concise assistant.",
-        context_enabled=False,
+        record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,
         post_result_key="raw_answer",

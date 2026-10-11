@@ -22,7 +22,7 @@ async_tester = PlanActAgent(
     namespace="examples",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    record_enabled=False,
 )
 
 # Register the callable under an explicit alias.

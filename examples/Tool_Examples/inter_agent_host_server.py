@@ -27,7 +27,7 @@ def main() -> None:
         namespace="inter_agent_host",
         description="A planner that orchestrates remote trivia and math agents through PyA2AtomicTool proxies.",
         llm_engine=llm,
-        context_enabled=False,
+        record_enabled=False,
         tool_calls_limit=16,
     )
 

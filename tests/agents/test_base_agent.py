@@ -294,7 +294,7 @@ class NonStringAsyncLLMEngine(FakeLLMEngine):
 def make_agent(
     *,
     engine: FakeLLMEngine | None = None,
-    context_enabled: bool = False,
+    record_enabled: bool = False,
     records_window: int | None = None,
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
@@ -308,7 +308,7 @@ def make_agent(
         description="Deterministic writer test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         system_prompt=system_prompt,
-        context_enabled=context_enabled,
+        record_enabled=record_enabled,
         records_window=records_window,
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
@@ -391,7 +391,7 @@ class TestAgentPipeline:
             description="Identity agent.",
             llm_engine=engine,
             system_prompt=ROLE_PROMPT,
-            context_enabled=False,
+            record_enabled=False,
         )
 
         result = agent.invoke({"prompt": "Hello from identity."})
@@ -574,9 +574,9 @@ class TestAgentPostInvokeRouting:
 
 
 class TestAgentContext:
-    def test_context_disabled_does_not_resend_history_and_does_not_store_records(self) -> None:
+    def test_record_disabled_does_not_store_records(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=False)
+        agent = make_agent(engine=engine, record_enabled=False)
 
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         second = agent.invoke({"topic": "agents", "tone": "concise"})
@@ -584,7 +584,8 @@ class TestAgentContext:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        # context_enabled=False means nothing is stored in any conversation.
+        # record_enabled=False means nothing is stored in any conversation,
+        # regardless of records_window.
         assert agent.get_conversation() == []
 
         assert len(engine.calls) == 2
@@ -593,9 +594,9 @@ class TestAgentContext:
         assert engine.calls[0][-1]["content"] == "Write about pytest in a strict tone."
         assert engine.calls[1][-1]["content"] == "Write about agents in a concise tone."
 
-    def test_context_enabled_stores_history(self) -> None:
+    def test_record_enabled_stores_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=True)
+        agent = make_agent(engine=engine, record_enabled=True)
 
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         second = agent.invoke({"topic": "agents", "tone": "concise"})
@@ -613,7 +614,7 @@ class TestAgentContext:
         # generated_response must round-trip back into history as valid
         # JSON, not Python repr syntax (single-quoted keys, True/None) --
         # see utils.agents.stringify_result.
-        agent = make_agent(engine=FakeLLMEngine([]), context_enabled=True)
+        agent = make_agent(engine=FakeLLMEngine([]), record_enabled=True)
         record = AgentRecord(
             user_prompt="hello",
             generated_response={"summary": "ok", "confident": True, "score": None},
@@ -624,9 +625,9 @@ class TestAgentContext:
         assert rendered[1]["content"] == '{"summary": "ok", "confident": true, "score": null}'
         assert json.loads(rendered[1]["content"]) == {"summary": "ok", "confident": True, "score": None}
 
-    def test_context_enabled_resends_prior_history_on_second_call(self) -> None:
+    def test_record_enabled_resends_prior_history_on_second_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=True)
+        agent = make_agent(engine=engine, record_enabled=True)
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
         agent.invoke({"topic": "agents", "tone": "concise"})
@@ -648,7 +649,7 @@ class TestAgentContext:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
-            context_enabled=True,
+            record_enabled=True,
             records_window=None,
         )
 
@@ -675,7 +676,7 @@ class TestAgentContext:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
-            context_enabled=True,
+            record_enabled=True,
             records_window=1,
         )
 
@@ -696,11 +697,11 @@ class TestAgentContext:
         assert "second topic" in joined_contents
         assert "third topic" in joined_contents
 
-    def test_records_window_zero_sends_no_prior_turns_and_does_not_store_history(self) -> None:
+    def test_records_window_zero_sends_no_prior_turns_but_still_stores_when_record_enabled(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
-            context_enabled=True,
+            record_enabled=True,
             records_window=0,
         )
 
@@ -715,13 +716,26 @@ class TestAgentContext:
         ]
         assert second_call_messages[-1]["content"] == "Write about second topic in a plain tone."
 
-        # records_window == 0 is one of the two disabling conditions -- like
-        # context_enabled=False, nothing is stored in any conversation.
-        assert agent.get_conversation() == []
+        # records_window == 0 only gates reads now -- record_enabled=True
+        # (the default here) still persists both turns.
+        assert len(agent.get_conversation()) == 2
+
+    def test_record_disabled_reads_full_history_without_storing(self) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = make_agent(engine=engine, record_enabled=True)  # seed one turn
+        agent.invoke({"topic": "first topic", "tone": "plain"})
+
+        agent.record_enabled = False
+        agent.invoke({"topic": "second topic", "tone": "plain"})
+
+        second_call_messages = engine.calls[1]
+        joined_contents = "\n".join(m["content"] for m in second_call_messages)
+        assert "first topic" in joined_contents  # read still happens
+        assert len(agent.get_conversation()) == 1  # second turn not persisted
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=True)
+        agent = make_agent(engine=engine, record_enabled=True)
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
@@ -758,7 +772,7 @@ class TestConversationManagement:
         assert agent.active_conversation == "default"
 
     def test_create_conversation_raises_on_existing_name_no_mutation(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.create_conversation("scratch")
         agent.set_active_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -796,14 +810,14 @@ class TestConversationManagement:
             agent.get_conversation("nope")
 
     def test_get_conversation_turns_zero_raises(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         with pytest.raises(ValueError):
             agent.get_conversation(turns=0)
 
     def test_get_conversation_turns_returns_trailing_slice(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "first", "tone": "strict"})
         agent.invoke({"topic": "second", "tone": "strict"})
         agent.invoke({"topic": "third", "tone": "strict"})
@@ -814,7 +828,7 @@ class TestConversationManagement:
         assert [r.inputs["topic"] for r in tail] == ["second", "third"]
 
     def test_get_conversation_return_value_is_independent_of_storage(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         history = agent.get_conversation()
@@ -837,7 +851,7 @@ class TestConversationManagement:
             agent.delete_conversation("scratch")
 
     def test_delete_conversation_removes_non_active_conversation(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.create_conversation("scratch")
         agent.set_active_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -850,7 +864,7 @@ class TestConversationManagement:
         assert "scratch" not in agent.conversation_names
 
     def test_delete_conversation_default_resets_in_place_never_removed(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         removed = agent.delete_conversation("default")
@@ -867,14 +881,14 @@ class TestConversationManagement:
             agent.clone_conversation("nope", end_id="whatever")
 
     def test_clone_conversation_unknown_run_id_raises(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         with pytest.raises(ValueError):
             agent.clone_conversation("default", end_id="nonexistent")
 
     def test_clone_conversation_never_changes_active_conversation(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
 
         agent.clone_conversation("default", end_id=first.run_id)
@@ -882,7 +896,7 @@ class TestConversationManagement:
         assert agent.active_conversation == "default"
 
     def test_clone_conversation_explicit_name_collision_raises(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         agent.create_conversation("taken")
 
@@ -890,7 +904,7 @@ class TestConversationManagement:
             agent.clone_conversation("default", end_id=first.run_id, name="taken")
 
     def test_clone_conversation_result_is_independent_copy(self) -> None:
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
 
         cloned = agent.clone_conversation("default", end_id=first.run_id)
@@ -905,7 +919,7 @@ class TestConversationManagement:
         # self._branch_counter is deliberately not reset by clear_memory(),
         # so an auto-generated name must never be reissued across a clear
         # even though the old name becomes technically free again.
-        agent = make_agent(context_enabled=True)
+        agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         first_clone_name = agent.clone_conversation("default", end_id=first.run_id).name
 
@@ -945,11 +959,11 @@ class TestAgentValidation:
 
         assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
-    def test_context_enabled_setter_rejects_non_bool(self) -> None:
+    def test_record_enabled_setter_rejects_non_bool(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(ValueError, match="context_enabled"):
-            agent.context_enabled = "yes"  # type: ignore[assignment]
+        with pytest.raises(ValueError, match="record_enabled"):
+            agent.record_enabled = "yes"  # type: ignore[assignment]
 
     def test_records_window_setter_rejects_negative_values(self) -> None:
         agent = make_agent()
@@ -1001,7 +1015,7 @@ class TestAgentSerialization:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
-            context_enabled=True,
+            record_enabled=True,
             records_window=1,
         )
 
@@ -1012,7 +1026,7 @@ class TestAgentSerialization:
         assert data["type"] == "_EchoAgent"
         assert data["name"] == "writer_agent"
         assert data["description"] == "Deterministic writer test agent."
-        assert data["context_enabled"] is True
+        assert data["record_enabled"] is True
         assert data["records_window"] == 1
         assert data["conversations"][agent.active_conversation] == [
             turn.to_dict() for turn in agent.get_conversation()
@@ -1064,9 +1078,9 @@ class TestAgentAsyncInvoke:
             ]
         ]
 
-    def test_async_context_enabled_stores_history(self) -> None:
+    def test_async_record_enabled_stores_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=True)
+        agent = make_agent(engine=engine, record_enabled=True)
 
         first = asyncio.run(
             agent.async_invoke({"topic": "pytest", "tone": "strict"})
@@ -1083,9 +1097,9 @@ class TestAgentAsyncInvoke:
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
 
-    def test_async_context_enabled_resends_prior_history_on_second_call(self) -> None:
+    def test_async_record_enabled_resends_prior_history_on_second_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(engine=engine, context_enabled=True)
+        agent = make_agent(engine=engine, record_enabled=True)
 
         asyncio.run(agent.async_invoke({"topic": "pytest", "tone": "strict"}))
         asyncio.run(agent.async_invoke({"topic": "agents", "tone": "concise"}))
@@ -1780,15 +1794,15 @@ class TestUpdatePrompt:
         assert "mutated" not in agent.system_prompts
 
 
-class TestAgentRecordsNeverStoredWhenContextDisabled:
-    def test_context_disabled_records_never_stored(self) -> None:
+class TestAgentRecordsNeverStoredWhenRecordDisabled:
+    def test_record_disabled_records_never_stored(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=engine,
-            context_enabled=False,
+            record_enabled=False,
         )
 
         agent.invoke({"prompt": "hello"})
@@ -1796,18 +1810,22 @@ class TestAgentRecordsNeverStoredWhenContextDisabled:
 
         assert agent.get_conversation() == []
 
-    def test_context_disabled_turns_always_empty(self) -> None:
+    def test_records_window_set_to_zero_at_runtime_suppresses_reads(self) -> None:
+        # record_enabled no longer has any bearing on reads post-decoupling
+        # -- records_window is the only runtime knob that can suppress them,
+        # which this test now exercises instead (same intent: toggling a
+        # knob mid-stream stops prior turns from being read back).
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=engine,
-            context_enabled=True,
+            record_enabled=True,
         )
         agent.invoke({"prompt": "first"})
 
-        agent.context_enabled = False
+        agent.records_window = 0
         agent.invoke({"prompt": "second"})
 
         # Second call's messages should have no prior-turn content
@@ -1898,7 +1916,7 @@ class TestInvocationLifecycle:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_identical_dummy_reserved,
-                context_enabled=True,
+                record_enabled=True,
             )
         assert caught == []
 

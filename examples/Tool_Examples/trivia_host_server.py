@@ -26,7 +26,7 @@ def main() -> None:
             "When given a prompt or topic, return one accurate and interesting trivia fact "
             "in 2-4 sentences."
         ),
-        context_enabled=False,
+        record_enabled=False,
     )
 
     host = PyA2AtomicHost(

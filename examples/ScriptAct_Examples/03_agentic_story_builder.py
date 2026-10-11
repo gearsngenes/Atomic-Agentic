@@ -135,7 +135,7 @@ writer = BasicAgent(
     description="Writes a first draft from an outline, then revises using only reviewer notes.",
     llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=writer_pre,
 )
 
@@ -150,7 +150,7 @@ reviewer = BasicAgent(
     description="Reviews drafts and provides revision notes.",
     llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=reviewer_pre,
 )
 
@@ -165,7 +165,7 @@ orch = ScriptActAgent(
     namespace="examples",
     description="One-shot agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=1,
     pre_invoke=planner_prestep,
     tool_instructions=ORCHESTRATION_INSTRUCTIONS,

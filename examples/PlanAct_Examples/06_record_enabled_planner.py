@@ -1,4 +1,4 @@
-﻿"""06_context_enabled_planner.py
+"""06_record_enabled_planner.py
 
 Interactive PlanActAgent with context memory enabled.
 
@@ -20,11 +20,11 @@ from shared_engine import llm_engine
 logging.basicConfig(level=logging.INFO)
 
 my_planner = PlanActAgent(
-    name="Context_Enabled_Planner",
+    name="Record_Enabled_Planner",
     namespace="examples",
     description="Creates plans utilizing context memory",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     regeneration_limit=3,
 )
 
@@ -43,5 +43,5 @@ while True:
     from pprint import pprint
     print("Executed calls:")
     record = my_planner.get_conversation()[-1]
-    pprint(record.statements)
+    print(record.render_as_code())
     print("-" * 40 + "\n")

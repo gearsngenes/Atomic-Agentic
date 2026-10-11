@@ -159,7 +159,7 @@ def main() -> None:
             "say clearly that you don't have that information — "
             "never guess or invent details."
         ),
-        context_enabled=True,
+        record_enabled=True,
         records_window=None,
         pre_invoke=build_message,
         post_invoke=package_reply,

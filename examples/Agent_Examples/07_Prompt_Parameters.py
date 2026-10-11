@@ -97,7 +97,7 @@ def main() -> None:
             description=f"{label}-style tutor persona demo agent.",
             llm_engine=engine,
             role_prompt=role_config,
-            context_enabled=False,
+            record_enabled=False,
         )
         agents.append((label, agent))
 

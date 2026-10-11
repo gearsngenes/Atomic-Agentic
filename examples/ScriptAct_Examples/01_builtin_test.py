@@ -34,7 +34,7 @@ agent = ScriptActAgent(
     namespace="examples",
     description="Testing the prebuilt tool lists with one-shot planning + execution.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=2,
 )
 

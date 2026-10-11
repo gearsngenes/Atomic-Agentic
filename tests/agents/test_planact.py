@@ -88,7 +88,7 @@ class TestPlanActInvokeRoundTrip:
         ]
         agent = make_planact_agent(
             [scripted(plan=plan, return_value="$c")],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run plan"})
@@ -184,7 +184,7 @@ class TestPlanActConstantAndCrossTurnReferences:
                 scripted(plan=first_plan, return_value="$a"),
                 scripted(plan=[], return_value="$task_result_0"),
             ],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         first = agent.invoke({"prompt": "first"})
@@ -204,7 +204,7 @@ class TestPlanActGenerationRetry:
         agent = make_planact_agent(
             [invalid, valid],
             regeneration_limit=1,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -237,7 +237,7 @@ class TestPlanActGenerationRetry:
             [too_many, ok],
             tool_calls_limit=1,
             regeneration_limit=1,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -274,7 +274,7 @@ class TestPlanActCascadeFailures:
         agent = make_planact_agent(
             [scripted(plan=self._cascade_plan(), return_value="$indep")],
             fail_fast=False,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "cascade"})
@@ -338,7 +338,7 @@ class TestPlanActRecordAndResultShape:
         ]
         agent = make_planact_agent(
             [scripted(plan=plan, return_value="$b")],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -366,7 +366,7 @@ class TestPlanActRecordAndResultShape:
         agent = make_planact_agent(
             [scripted(plan=plan, return_value="$indep")],
             fail_fast=False,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})

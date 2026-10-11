@@ -1,7 +1,7 @@
 """06_trig_chatbot.py
 
 A fixed, scripted sequence of trig/geometry questions run as separate turns
-against the same context_enabled=True ScriptActAgent -- testing whether it
+against the same record_enabled=True ScriptActAgent -- testing whether it
 correctly reuses an EARLIER turn's result via ScriptActAgent's own
 task_result_i cross-invocation addressing (render_turn/_initialize_task),
 rather than v1 ToolAgent's <<__cN__>> placeholder scheme.
@@ -57,7 +57,7 @@ chatbot = ScriptActAgent(
     namespace="examples",
     description="Answers trig/geometry questions conversationally, reusing prior answers when relevant.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     tool_calls_limit=5,
 )
 chatbot.register_tools(CORE_TRIG_TOOLS)

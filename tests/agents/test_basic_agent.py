@@ -15,7 +15,7 @@ def make_basic_agent(
     *,
     engine: FakeLLMEngine | None = None,
     role_prompt: str | PromptConfig | None = None,
-    context_enabled: bool = False,
+    record_enabled: bool = False,
     **kwargs: Any,
 ) -> BasicAgent:
     return BasicAgent(
@@ -24,7 +24,7 @@ def make_basic_agent(
         description="BasicAgent under test.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=role_prompt,
-        context_enabled=context_enabled,
+        record_enabled=record_enabled,
         **kwargs,
     )
 
@@ -170,7 +170,7 @@ class TestBasicAgentInvoke:
         assert result.result == "ECHO: Hello."
 
     def test_invoke_appends_record_with_correct_prompt(self) -> None:
-        agent = make_basic_agent(context_enabled=True)
+        agent = make_basic_agent(record_enabled=True)
 
         agent.invoke({"prompt": "What is AI?"})
 
@@ -178,7 +178,7 @@ class TestBasicAgentInvoke:
         assert agent.get_conversation()[0].user_prompt == "What is AI?"
 
     def test_invoke_record_llm_record_has_system_prompt_name_role(self) -> None:
-        agent = make_basic_agent(context_enabled=True)
+        agent = make_basic_agent(record_enabled=True)
 
         agent.invoke({"prompt": "test"})
 
@@ -187,7 +187,7 @@ class TestBasicAgentInvoke:
         assert record.llm_records[0].system_prompt_name == "role"
 
     def test_invoke_record_messages_contains_last_user_message(self) -> None:
-        agent = make_basic_agent(context_enabled=True)
+        agent = make_basic_agent(record_enabled=True)
 
         agent.invoke({"prompt": "hello"})
 
@@ -195,7 +195,7 @@ class TestBasicAgentInvoke:
         assert llm_record.messages == ({"role": "user", "content": "hello"},)
 
     def test_invoke_never_stores_record_when_context_disabled(self) -> None:
-        agent = make_basic_agent(context_enabled=False)
+        agent = make_basic_agent(record_enabled=False)
 
         agent.invoke({"prompt": "test 1"})
         agent.invoke({"prompt": "test 2"})
@@ -230,7 +230,7 @@ class TestBasicAgentAsyncInvoke:
         assert engine.calls[0][0]["content"] == "You are a pirate."
 
     def test_async_invoke_llm_record_has_system_prompt_name_role(self) -> None:
-        agent = make_basic_agent(context_enabled=True)
+        agent = make_basic_agent(record_enabled=True)
 
         asyncio.run(agent.async_invoke({"prompt": "async test"}))
 

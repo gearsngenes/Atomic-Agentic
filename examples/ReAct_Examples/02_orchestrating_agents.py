@@ -69,7 +69,7 @@ builder = BasicAgent(
         "the form '#- path/to/module.py' (including the first module). Put each module's "
         "source after its header, then begin the next module with the next header."
     ),
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=builder_prestep,
     records_window=10,
 )
@@ -109,7 +109,7 @@ reviewer = BasicAgent(
         "- 'Outstanding': clean and idiomatic, free of the issues above -- nothing left to fix.\n"
         "In 'feedback', return ONLY specific revision critiques that justify the grade -- no rewriting."
     ),
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=reviewer_prestep,
     records_window=10,
     response_schema={
@@ -146,7 +146,7 @@ orchestrator = ReActAgent(
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm_engine,
     tool_calls_limit=10,
-    context_enabled=True,
+    record_enabled=True,
     tool_instructions=ORCHESTRATION_INSTRUCTIONS,
     response_preview_limit=10,
 )

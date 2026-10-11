@@ -20,7 +20,7 @@ agent = PlanActAgent(
     namespace="examples",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 # Register tool lists

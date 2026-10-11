@@ -26,7 +26,7 @@ def main() -> None:
         namespace="math_host",
         description="A tool-using planner that solves problems with the local math tools.",
         llm_engine=llm,
-        context_enabled=False,
+        record_enabled=False,
         tool_calls_limit=12,
     )
     math_agent.register_tools(BASIC_MATH_TOOLS, name_collision_policy="raise")

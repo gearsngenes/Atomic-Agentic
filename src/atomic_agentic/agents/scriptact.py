@@ -101,7 +101,7 @@ class ScriptActAgent(ToolAgent):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         regeneration_limit: int = 5,
         tool_calls_limit: Optional[int] = None,
@@ -137,7 +137,7 @@ class ScriptActAgent(ToolAgent):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
@@ -337,8 +337,8 @@ class ScriptActAgent(ToolAgent):
         active, its ``cache`` pre-seeded with every visible prior turn's
         result under ``task_result_{i}`` -- unconditional over whatever
         ``turns`` contains (empty when there's nothing to seed; already
-        gated upstream by conversation-resolution/``context_enabled``/
-        ``records_window``) -- and its ``constant_values`` pre-seeded from
+        gated upstream by conversation-resolution/``records_window``) --
+        and its ``constant_values`` pre-seeded from
         every registered constant. Both are copied via
         ``_copy_for_task_namespace`` exactly once here, not re-derived
         later, so a mutation is visible for the rest of this invocation's

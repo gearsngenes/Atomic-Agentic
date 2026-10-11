@@ -72,8 +72,7 @@ class Agent(AtomicInvokable, ABC):
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
     5. Turns are selected from the active conversation's own tail via
-       ``_resolve_context`` if ``context_enabled`` is True and
-       ``records_window != 0``.
+       ``_resolve_context`` if ``records_window != 0``.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
        anything; then, every round, unconditionally: ``task = think(task);
@@ -125,15 +124,18 @@ class Agent(AtomicInvokable, ABC):
     new parameter lands at the position that preserves a valid Python-style
     signature ordering, regardless of its declared kind.
 
-    ``context_enabled``
-    -------------------
-    ``True``:  ``_resolve_context`` selects prior turns from the active
-    conversation for each invocation, and may trigger a fork.
-    ``False``: turns are always ``[]``.
-    ``records_window == 0`` behaves the same as ``context_enabled=False``
-    for a given invocation. In either case, nothing is stored -- no record
-    is appended to any conversation -- though the invocation still returns
-    a normal ``AgentResult``.
+    ``record_enabled`` / ``records_window``
+    ----------------------------------------
+    Two fully independent axes. ``record_enabled`` (write): ``True``
+    persists the completed turn; ``False`` stores nothing, regardless of
+    ``records_window``. ``records_window`` (read): ``0`` means no prior
+    turns are read this call; ``N`` means the last ``N``; ``None`` means
+    full history -- independent of ``record_enabled``.
+
+        record_enabled=True,  records_window=None  -- read all, persist (default)
+        record_enabled=False, records_window=0     -- read nothing, persist nothing
+        record_enabled=False, records_window=None  -- read all, persist nothing (judge/probe)
+        record_enabled=True,  records_window=0     -- read nothing, persist anyway
 
     Conversation storage
     --------------------
@@ -182,7 +184,7 @@ class Agent(AtomicInvokable, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = True,
+        record_enabled: bool = True,
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
@@ -298,7 +300,7 @@ class Agent(AtomicInvokable, ABC):
 
         # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
-        self._context_enabled: bool = context_enabled
+        self._record_enabled: bool = record_enabled
 
         if records_window is not None and (not type(records_window) is int or records_window < 0):
             raise AgentError("records_window must be an int >= 0 or be 'None'.")
@@ -397,20 +399,23 @@ class Agent(AtomicInvokable, ABC):
         self._llm_engine = engine
 
     @property
-    def context_enabled(self) -> bool:
-        """Whether the agent feeds prior turns into each invocation.
+    def record_enabled(self) -> bool:
+        """Whether this agent persists each invocation's completed turn.
 
-        When ``False``, turns are always ``[]`` and nothing is stored in any
-        conversation for that invocation, though a normal ``AgentResult`` is
-        still returned.
+        Write-only axis, independent of ``records_window`` (the read
+        axis). ``True``: the completed turn is appended (or auto-forked,
+        per the existing commit-time children check) into the active
+        conversation. ``False``: a normal ``AgentResult`` is still
+        returned, but nothing is stored in any conversation for that
+        invocation -- regardless of ``records_window``.
         """
-        return self._context_enabled
+        return self._record_enabled
 
-    @context_enabled.setter
-    def context_enabled(self, value: bool) -> None:
+    @record_enabled.setter
+    def record_enabled(self, value: bool) -> None:
         if type(value) is not bool:
-            raise ValueError("context_enabled must be a bool.")
-        self._context_enabled = value
+            raise ValueError("record_enabled must be a bool.")
+        self._record_enabled = value
 
     @property
     def records_window(self) -> Optional[int]:
@@ -795,7 +800,7 @@ class Agent(AtomicInvokable, ABC):
         3. ``agent_result = self.build_result_from_record(record,
            result=result, run_id=run_id, started_at=started_at,
            ended_at=ended_at)``.
-        4. Under ``self._invoke_lock``: if context/window is disabled,
+        4. Under ``self._invoke_lock``: if ``record_enabled`` is False,
            return ``agent_result`` with nothing stored. Otherwise, a fresh
            children check on ``record.prev`` decides append-vs-fork --
            delegating fork construction to the same ``clone_conversation``
@@ -822,7 +827,7 @@ class Agent(AtomicInvokable, ABC):
         )
 
         with self._invoke_lock:
-            if not (self._context_enabled and self._records_window != 0):
+            if not self._record_enabled:
                 return agent_result
 
             # Fresh (not stale) children check, taken under the same lock as
@@ -940,7 +945,8 @@ class Agent(AtomicInvokable, ABC):
         commits.
 
         1. Snapshot ``active_key = self._active_conversation``.
-        2. If context/window is disabled, return ``(active_key, [])``.
+        2. If ``records_window == 0``, return ``(active_key, [])`` -- the
+           read axis's only gate, independent of ``record_enabled``.
         3. Otherwise read ``active_key``'s full history and window it
            directly from the end -- every invocation always continues from
            the active conversation's own tail; retargeting to an earlier
@@ -948,7 +954,7 @@ class Agent(AtomicInvokable, ABC):
            ``set_active_conversation``, before calling here.
         """
         active_key = self._active_conversation
-        if not (self._context_enabled and self._records_window != 0):
+        if self._records_window == 0:
             return active_key, []
 
         history = self._conversations[active_key].records
@@ -1395,7 +1401,7 @@ class Agent(AtomicInvokable, ABC):
             "post_invoke": self.post_invoke.to_dict(),
             "post_result_key": self.post_result_key,
             "llm": self._llm_engine.to_dict(),
-            "context_enabled": self.context_enabled,
+            "record_enabled": self.record_enabled,
             "records_window": self.records_window,
             "response_preview_limit": self.response_preview_limit,
             "conversations": {

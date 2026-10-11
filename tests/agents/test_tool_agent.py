@@ -925,7 +925,7 @@ class TestRenderTurnAndTurnPosition:
                 _scripted_plan(plan=[], return_value=1),
                 _scripted_plan(plan=[], return_value=2),
             ],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         agent.invoke({"prompt": "first"})
@@ -946,7 +946,7 @@ class TestRenderTurnAndTurnPosition:
             namespace="tests",
             description="ScriptAct agent for sigil-off contrast.",
             llm_engine=FakeLLMEngine(responses=["return 1"]),
-            context_enabled=True,
+            record_enabled=True,
         )
         agent.invoke({"prompt": "only turn"})
 

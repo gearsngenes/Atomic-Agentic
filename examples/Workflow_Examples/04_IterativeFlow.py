@@ -76,7 +76,7 @@ writer_agent = BasicAgent(
         "Return only the revised story text and never include bullet points, explanations, or editor notes."
     ),
     pre_invoke=writer_pre,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 writer = StructuredInvokable(
@@ -117,7 +117,7 @@ critic_agent = BasicAgent(
         "and should not meander into abstract literary theory."
     ),
     pre_invoke=critic_pre,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 critic = StructuredInvokable(

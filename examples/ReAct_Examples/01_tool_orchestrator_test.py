@@ -30,7 +30,7 @@ orchestrator = ReActAgent(
     llm_engine=llm_engine,
     records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
-    context_enabled=True,
+    record_enabled=True,
     
 )
 

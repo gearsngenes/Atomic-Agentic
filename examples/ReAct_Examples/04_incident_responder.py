@@ -134,7 +134,7 @@ responder = ReActAgent(
     # example.
     fail_fast=False,
     tool_calls_limit=8,
-    context_enabled=True,
+    record_enabled=True,
 )
 responder.register_tools([check_service_health, check_dependencies, restart_service, page_oncall])
 

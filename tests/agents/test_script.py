@@ -375,7 +375,7 @@ class TestScriptActAgentOneShotLifecycle:
 
     def test_bare_call_and_literal_return(self) -> None:
         engine = FakeLLMEngine(responses=["log_message(message='hi')\nreturn 42"])
-        agent = _make_agent(engine, tools=[log_message], context_enabled=True)
+        agent = _make_agent(engine, tools=[log_message], record_enabled=True)
 
         final = agent.invoke({"prompt": "log then return"})
 
@@ -448,7 +448,7 @@ class TestScriptActAgentRepairRounds:
             "x = 'hello'\ny = add(a=x + 1, b=2)\nreturn y",
             "return add(a=1, b=1)",
         ])
-        agent = _make_agent(engine, tools=[add], replanning_limit=1, context_enabled=True)
+        agent = _make_agent(engine, tools=[add], replanning_limit=1, record_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
@@ -467,7 +467,7 @@ class TestScriptActAgentRepairRounds:
             "a = add(a=1, b=1)\nb = fail_tool(x=1)\nreturn a",
             "return a",
         ])
-        agent = _make_agent(engine, tools=[add, fail_tool], replanning_limit=1, context_enabled=True)
+        agent = _make_agent(engine, tools=[add, fail_tool], replanning_limit=1, record_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
@@ -550,7 +550,7 @@ class TestScriptActAgentBudgets:
         engine = FakeLLMEngine(responses=[
             "a = add(a=1, b=1)\nb = add(a=2, b=2)\nreturn a",
         ])
-        agent = _make_agent(engine, tools=[add], tool_concurrency_limit=1, context_enabled=True)
+        agent = _make_agent(engine, tools=[add], tool_concurrency_limit=1, record_enabled=True)
 
         final = agent.invoke({"prompt": "do something"})
 
@@ -605,7 +605,7 @@ class TestScriptActAgentMutationSafety:
             "x = task_result_0.append(99)\nreturn task_result_0",
             "return task_result_0",
         ])
-        agent = _make_agent(engine, context_enabled=True)
+        agent = _make_agent(engine, record_enabled=True)
 
         first = agent.invoke({"prompt": "make a list"})
         second = agent.invoke({"prompt": "mutate it"})
@@ -681,7 +681,7 @@ class TestScriptActAgentDispatch:
             "f = c + d\n"
             "return f"
         ])
-        agent = _make_agent(engine, tools=[add], context_enabled=True)
+        agent = _make_agent(engine, tools=[add], record_enabled=True)
         agent.register_constant({"a": 1}, alias="mydict")
 
         final = agent.invoke({"prompt": "combine"})

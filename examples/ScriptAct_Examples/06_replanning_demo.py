@@ -52,7 +52,7 @@ agent = ScriptActAgent(
     namespace="examples",
     description="Testing framework-only repair rounds via a coerced divide-by-zero.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=2,
     fail_fast=False,
 )

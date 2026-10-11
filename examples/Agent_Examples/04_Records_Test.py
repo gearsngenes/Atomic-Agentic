@@ -34,7 +34,7 @@ def main() -> None:
         description="Basic Agent demo showing canonical turn history and rendering.",
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",
-        context_enabled=True,
+        record_enabled=True,
         records_window=None,
         post_invoke=summarize_result,
         response_preview_limit=300,

@@ -126,7 +126,7 @@ class ToolAgent(Agent, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
@@ -145,7 +145,7 @@ class ToolAgent(Agent, ABC):
         """
         Parameters
         ----------
-        name, namespace, description, llm_engine, context_enabled
+        name, namespace, description, llm_engine, record_enabled
             Forwarded to ``Agent.__init__`` unchanged.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
@@ -219,7 +219,7 @@ class ToolAgent(Agent, ABC):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,

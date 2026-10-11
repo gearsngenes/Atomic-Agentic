@@ -44,7 +44,7 @@ writer = BasicAgent(
     ),
     pre_invoke=writer_pre,
     post_invoke=writer_post,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 
@@ -77,7 +77,7 @@ critic = BasicAgent(
     ),
     pre_invoke=critic_pre,
     post_invoke=critic_post,
-    context_enabled=False,
+    record_enabled=False,
 )
 
 if __name__ == "__main__":

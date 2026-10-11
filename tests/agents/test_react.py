@@ -214,7 +214,7 @@ class TestReActAutoNaming:
                 rstep(call="return", arguments=[arg("val", "$__r1__")]),
             ],
             tool_calls_limit=2,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -233,7 +233,7 @@ class TestReActAutoNaming:
             ],
             tool_calls_limit=2,
             fail_fast=False,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -246,7 +246,7 @@ class TestReActAutoNaming:
     def test_return_call_identifier_forced_to_none_even_when_model_names_it(self) -> None:
         agent = make_react_agent(
             [rstep(call="return", arguments=[arg("val", 42)], result_name="my_result")],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -263,7 +263,7 @@ class TestReActAutoNaming:
                 rstep(call="return", arguments=[arg("val", "$sum_value")]),
             ],
             tool_calls_limit=1,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -338,7 +338,7 @@ class TestReActGenerationRetry:
         agent = make_react_agent(
             [invalid, valid],
             regeneration_limit=1,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -354,7 +354,7 @@ class TestReActGenerationRetry:
         agent = make_react_agent(
             [invalid, valid],
             regeneration_limit=1,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         agent.invoke({"prompt": "run"})
@@ -410,7 +410,7 @@ class TestReActDispatchFailure:
             ],
             tool_calls_limit=2,
             fail_fast=False,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -475,7 +475,7 @@ class TestReActRecordAndResultShape:
                 rstep(call="return", arguments=[arg("val", "$b")]),
             ],
             tool_calls_limit=2,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -503,7 +503,7 @@ class TestReActRecordAndResultShape:
             ],
             tool_calls_limit=2,
             fail_fast=False,
-            context_enabled=True,
+            record_enabled=True,
         )
 
         result = agent.invoke({"prompt": "run"})
@@ -515,7 +515,7 @@ class TestReActRecordAndResultShape:
     def test_llm_record_system_prompt_name_is_reason_then_act(self) -> None:
         agent = make_react_agent(
             [rstep(call="return", arguments=[arg("val", 1)])],
-            context_enabled=True,
+            record_enabled=True,
         )
 
         agent.invoke({"prompt": "run"})
