@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,7 +21,8 @@ from atomic_agentic.models.agents.records import (
     ThinkingAgentRecord,
     ToolAgentRecord,
 )
-from atomic_agentic.models.agents.blackboard_models import ToolStatement, ConstantSpec
+from atomic_agentic.models.agents.blackboard_models import ToolStatement
+from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
 from atomic_agentic.models.results.agents import ToolUsageRecord
@@ -59,41 +60,37 @@ def make_llm_record(*, text: str = "generated text") -> LLMRecord:
     )
 
 
-class TestConstantSpec:
+class TestContextVariable:
     def test_valid_spec_normalizes_name_description_and_derives_type(self) -> None:
         value = {"items": [1, 2]}
 
-        spec = ConstantSpec(
+        spec = ContextVariable(
             name=" PAYLOAD ",
             value=value,
             description=" Runtime payload. ",
-            inline_limit=20,
         )
 
         assert spec.name == "PAYLOAD"
         assert spec.value is value
         assert spec.description == "Runtime payload."
-        assert spec.inline_limit == 20
         assert spec.type == "dict"
 
     def test_blank_description_normalizes_to_none(self) -> None:
-        spec = ConstantSpec(name="VALUE", value=1, description="   ")
+        spec = ContextVariable(name="VALUE", value=1, description="   ")
 
         assert spec.description is None
 
     def test_to_dict_includes_value_metadata_and_derived_type(self) -> None:
-        spec = ConstantSpec(
+        spec = ContextVariable(
             name="THRESHOLD",
             value=0.75,
             description="Decision threshold.",
-            inline_limit=8,
         )
 
         assert spec.to_dict() == {
             "name": "THRESHOLD",
             "value": 0.75,
             "description": "Decision threshold.",
-            "inline_limit": 8,
             "type": "float",
         }
 
@@ -102,24 +99,28 @@ class TestConstantSpec:
         ["", " ", "1VALUE", "bad-name", "bad name", None],
     )
     def test_rejects_invalid_name(self, name: Any) -> None:
-        with pytest.raises(ValueError, match="ConstantSpec.name"):
-            ConstantSpec(name=name, value=1)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="ContextVariable.name"):
+            ContextVariable(name=name, value=1)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("description", [1, True, object()])
     def test_rejects_non_string_description(self, description: Any) -> None:
         with pytest.raises(TypeError, match="description"):
-            ConstantSpec(name="VALUE", value=1, description=description)  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("inline_limit", [0, -1, 1.5, True, "5"])
-    def test_rejects_invalid_inline_limit(self, inline_limit: Any) -> None:
-        with pytest.raises(ValueError, match="inline_limit"):
-            ConstantSpec(name="VALUE", value=1, inline_limit=inline_limit)  # type: ignore[arg-type]
+            ContextVariable(name="VALUE", value=1, description=description)  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        spec = ConstantSpec(name="VALUE", value=1)
+        spec = ContextVariable(name="VALUE", value=1)
 
         with pytest.raises(FrozenInstanceError):
             spec.name = "OTHER"  # type: ignore[misc]
+
+    def test_type_tracks_value_through_replace(self) -> None:
+        spec = ContextVariable(name="X", value=1)
+        assert spec.type == "int"
+
+        updated = replace(spec, value="now a string")
+
+        assert updated.type == "str"
+        assert spec.type == "int"
 
 
 class TestLLMRecord:

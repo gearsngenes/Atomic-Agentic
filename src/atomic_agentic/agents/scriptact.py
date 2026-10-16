@@ -475,7 +475,7 @@ class ScriptActAgent(ToolAgent):
         # here with a specific message instead of validate_references'
         # generic "unregistered tool" one.
         builtin_issues = rewrite_builtin_calls(flat_slots)
-        # Derived from each ConstantSpec's own .name (always already
+        # Derived from each ContextVariable's own .name (always already
         # K_-prefixed -- "K_i" auto-named, "K_{ALIAS}" aliased; see
         # register_constant/register_constants), never reconstructed via a
         # fresh f"K_{...}" here -- that would double-prefix an aliased name,

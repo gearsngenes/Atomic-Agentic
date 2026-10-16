@@ -41,7 +41,7 @@ from typing import (
 
 from .base import Agent
 from ..models.agents.records import AgentRecord
-from ..models.agents.blackboard_models import ConstantSpec
+from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask
 from ..exceptions import (
     ToolAgentError,
@@ -229,7 +229,7 @@ class ToolAgent(Agent, ABC):
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
-        self._constants: dict[str, ConstantSpec] = {}
+        self._constants: dict[str, ContextVariable] = {}
         self._constant_counter: int = 0
 
         if type(regeneration_limit) is not int or regeneration_limit < 0:
@@ -666,7 +666,7 @@ class ToolAgent(Agent, ABC):
     # Constants Helpers
     # ------------------------------------------------------------------ #
     @property
-    def constants(self) -> dict[str, ConstantSpec]:
+    def constants(self) -> dict[str, ContextVariable]:
         """Shallow copy of registered constants, keyed by the bare uppercase alias."""
         return dict(self._constants)
 
@@ -680,10 +680,10 @@ class ToolAgent(Agent, ABC):
     ) -> bool:
         """
         Register one named runtime constant. ``alias`` is optional: given,
-        stored under ``alias.upper()`` (wire-facing ``ConstantSpec.name`` is
+        stored under ``alias.upper()`` (wire-facing ``ContextVariable.name`` is
         ``f"K_{alias.upper()}"``); omitted, auto-named from
         ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict
-        key and ``ConstantSpec.name`` are this same string, then the counter
+        key and ``ContextVariable.name`` are this same string, then the counter
         increments). The counter never decrements, so a retired auto-name is
         never reissued.
 
@@ -736,7 +736,7 @@ class ToolAgent(Agent, ABC):
                 name = f"K_{key}"
             # "replace" falls through to the unconditional overwrite below.
 
-        self._constants[key] = ConstantSpec(name=name, value=constant, description=effective_description)
+        self._constants[key] = ContextVariable(name=name, value=constant, description=effective_description)
         return True
 
     def register_constants(
@@ -778,7 +778,7 @@ class ToolAgent(Agent, ABC):
                 f"length as constants; got {len(descriptions)} vs {len(constants)}."
             )
 
-        candidates: dict[str, ConstantSpec] = {}
+        candidates: dict[str, ContextVariable] = {}
         for index, value in enumerate(constants):
             alias = aliases[index] if aliases is not None else None
             raw_description = descriptions[index] if descriptions is not None else None
@@ -818,12 +818,12 @@ class ToolAgent(Agent, ABC):
                 key = candidate_key
                 name = f"K_{key}"
 
-            candidates[key] = ConstantSpec(name=name, value=value, description=effective_description)
+            candidates[key] = ContextVariable(name=name, value=value, description=effective_description)
 
         # Cross-check against the existing registry per policy. "suffix"
         # entries never trigger anything here -- already resolved above.
         any_skipped = False
-        vetted: dict[str, ConstantSpec] = {}
+        vetted: dict[str, ContextVariable] = {}
         for key, spec in candidates.items():
             if key in self._constants and policy != "suffix":
                 if policy == "raise":
@@ -844,7 +844,7 @@ class ToolAgent(Agent, ABC):
         """Return whether a constant is registered under ``alias`` (case-insensitive)."""
         return alias.upper() in self._constants
 
-    def get_constant(self, alias: str) -> ConstantSpec:
+    def get_constant(self, alias: str) -> ContextVariable:
         """Return the registered constant for ``alias`` (case-insensitive).
 
         Raises ``ToolAgentError`` if no constant is registered under it.

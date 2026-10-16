@@ -11,7 +11,7 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.constants.agents import RETURN_TOOL_NAME, RETURN_VALUE_FIELD
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
-from atomic_agentic.models.agents.blackboard_models import ConstantSpec
+from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
@@ -591,7 +591,7 @@ class TestConstantRegistration:
         assert registered is True
         assert agent.has_constant("user_context") is True
         spec = agent.get_constant("USER_CONTEXT")
-        assert isinstance(spec, ConstantSpec)
+        assert isinstance(spec, ContextVariable)
         assert spec.name == "K_USER_CONTEXT"
         assert spec.value == {"user": "Ada"}
         assert spec.description == "Current user context."

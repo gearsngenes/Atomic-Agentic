@@ -8,7 +8,8 @@ from .records import (
     ThinkingAgentRecord,
 )
 from .conversations import Conversation
-from .blackboard_models import ToolStatement, ConstantSpec
+from .blackboard_models import ToolStatement
+from .context import ContextVariable
 from .tasks import (
     AgentTask,
     ToolAgentTask,
@@ -28,7 +29,7 @@ __all__ = [
     "ThinkingAgentRecord",
     "Conversation",
     "ToolStatement",
-    "ConstantSpec",
+    "ContextVariable",
     "AgentTask",
     "ToolAgentTask",
     "ScriptActAgentTask",
