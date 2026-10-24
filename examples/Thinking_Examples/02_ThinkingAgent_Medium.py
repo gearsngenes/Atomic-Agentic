@@ -98,7 +98,7 @@ result = story_agent.invoke({
     ),
 })
 
-record = story_agent.get_conversation(turns=1)[0]
+record = story_agent.get_conversation().records[-1:][0]
 
 print(f"TASK: {task}\n")
 print("THINKING THOUGHTS (scoping the twist before writing, via the cheaper thinking engine):")

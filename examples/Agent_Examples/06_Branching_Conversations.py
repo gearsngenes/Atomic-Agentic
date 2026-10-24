@@ -23,7 +23,7 @@ Key concepts shown
 ------------------
 - ``Agent.clone_conversation(source, *, end_id=...)``   explicitly clone a
   conversation up through any prior turn, not just the tail.
-- ``Agent.set_active_conversation(name)``   switch which conversation
+- ``Agent.switch_conversation(name)``   switch which conversation
   subsequent calls read from and write to. Cloning never changes the active
   conversation by itself -- the caller switches explicitly.
 - A record's ``children`` list is shared across every conversation it
@@ -37,7 +37,7 @@ Key concepts shown
   same way an implicit fork's name always was: diffing
   ``conversation_names`` around the call. The now-empty seed is discarded
   with ``delete_conversation`` afterward.
-- ``Agent.get_conversation(conversation_id)``   each conversation is its own
+- ``Agent.get_conversation(conversation_id)``   (a Conversation snapshot) each conversation is its own
   stored list under ``Agent.conversation_names``; reading one back is a
   plain dict lookup, not a reconstruction walk.
 
@@ -102,7 +102,7 @@ def package_reply(result: str, style: str = "friendly") -> dict:
 # ---------------------------------------------------------------------------
 
 def print_chain(chain: list, label: str, results_by_run_id: dict) -> None:
-    """Pretty-print a conversation chain returned by get_conversation().
+    """Pretty-print a conversation chain from get_conversation().records.
 
     ``results_by_run_id`` supplies each turn's processed payload — no
     longer recoverable from the record itself (AgentRecord only retains
@@ -242,7 +242,7 @@ def main() -> None:
     # same way an implicit fork's name always was: diffing
     # conversation_names around the call.
     seed = agent.clone_conversation("default", end_id=run_0)
-    agent.set_active_conversation(seed.name)
+    agent.switch_conversation(seed.name)
 
     conversations_before = set(agent.conversation_names)
     r_b1 = agent(
@@ -258,7 +258,7 @@ def main() -> None:
 
     # Switch back to "default" before discarding the now-empty seed --
     # delete_conversation refuses to remove the active conversation.
-    agent.set_active_conversation("default")
+    agent.switch_conversation("default")
     agent.delete_conversation(seed.name)
 
     # ------------------------------------------------------------------ #
@@ -269,12 +269,12 @@ def main() -> None:
     print(f"{'═' * _W}")
 
     print_chain(
-        agent.get_conversation(),  # active ("default"): T0 -> T_A1 -> T_A2
+        agent.get_conversation().records,  # active ("default"): T0 -> T_A1 -> T_A2
         "Branch A  ·  root → fact revealed → fact recalled  (active conversation)",
         results_by_run_id,
     )
     print_chain(
-        agent.get_conversation(branch_b_name),
+        agent.get_conversation(branch_b_name).records,
         "Branch B  ·  root → same question, no prior fact  (cloned at T0)",
         results_by_run_id,
     )
@@ -292,7 +292,7 @@ def main() -> None:
         run_b1: "T_B1   branch B — parallel clone from T0",
     }
     for name in agent.conversation_names:
-        history = agent.get_conversation(name)
+        history = agent.get_conversation(name).records
         print(f"\n  conversation {name!r}  ({len(history)} record(s))")
         for i, record in enumerate(history):
             rid    = record.run_id

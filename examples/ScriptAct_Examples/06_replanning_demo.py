@@ -83,7 +83,7 @@ print("\n=== BUDGET ACCOUNTING (new this pass) ===")
 print(f"regenerations_used: {result.regenerations_used}")
 print(f"repair_rounds_used: {result.repair_rounds_used}")
 
-record = agent.get_conversation()[-1]
+record = agent.get_conversation().records[-1]
 print("\n=== EXECUTED SCRIPT (successful statements only) ===")
 print(record.render_as_code())
 

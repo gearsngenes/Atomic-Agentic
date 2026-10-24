@@ -48,7 +48,7 @@ while True:
     result = reactor.invoke({"prompt": query})
     print(f"Result: {result.result}\n")
 
-    record = reactor.get_conversation()[-1]
+    record = reactor.get_conversation().records[-1]
     print(f"LLM calls this turn: {len(record.llm_records)}")
     print("Executed calls:")
     pprint(record.statements)

@@ -148,7 +148,7 @@ result = puzzle_agent.invoke({
     ),
 })
 
-record = puzzle_agent.get_conversation(turns=1)[0]
+record = puzzle_agent.get_conversation().records[-1:][0]
 
 print(f"TASK: {task}\n")
 print("THINKING THOUGHTS (structured leads explored per stage):")

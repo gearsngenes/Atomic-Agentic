@@ -50,7 +50,7 @@ def main() -> None:
     pprint.pp(result.result)
 
     print("\n=== Canonical turn history: agent.get_conversation() ===")
-    for i, turn in enumerate(agent.get_conversation()):
+    for i, turn in enumerate(agent.get_conversation().records):
         print(f"\nTurn {i}")
         print("prompt:")
         pprint.pp(turn.user_prompt)
@@ -60,12 +60,12 @@ def main() -> None:
         pprint.pp(turn.run_id)
 
     print("\n=== Rendered turn ===")
-    pprint.pp(agent.render_turn(agent.get_conversation()[0]))
+    pprint.pp(agent.render_turn(agent.get_conversation().records[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(
         system_prompt = agent.role_prompt,
-        turns = agent.get_conversation(),
+        turns = agent.get_conversation().records,
         prompt = "Now explain why turn-native memory is useful."
     )
     pprint.pp(next_messages)

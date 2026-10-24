@@ -155,7 +155,7 @@ final_result = responder.invoke({"prompt": task})
 
 print(f"\nIncident summary: {final_result.result}")
 
-record = responder.get_conversation()[-1]
+record = responder.get_conversation().records[-1]
 print("\nCalls made:")
 print(record.render_as_code())
 

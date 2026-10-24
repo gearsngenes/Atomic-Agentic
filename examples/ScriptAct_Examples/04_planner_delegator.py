@@ -157,6 +157,6 @@ if __name__ == "__main__":
     elapsed = time.time() - start
     print(f"\nTotal elapsed: {elapsed:.2f}s")
 
-    record = delegator.get_conversation()[-1]
+    record = delegator.get_conversation().records[-1]
     print("\n=== EXECUTED SCRIPT ===")
     print(record.render_as_code())

@@ -380,7 +380,7 @@ class TestScriptActAgentOneShotLifecycle:
         final = agent.invoke({"prompt": "log then return"})
 
         assert final.result == 42
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert any(s.tool == "log_message" for s in record.statements)
 
 
@@ -457,7 +457,7 @@ class TestScriptActAgentRepairRounds:
         round2_content = "\n".join(m["content"] for m in engine.calls[1])
         assert "THIS BATCH FAILED" in round2_content
         assert "Continue planning the rest of this task" in round2_content
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.repair_rounds_used == 1
         assert not any(s.identifier == "y" for s in record.statements)
         assert any(s.identifier == "y" for s in record.failed_statements)
@@ -475,7 +475,7 @@ class TestScriptActAgentRepairRounds:
         assert engine.call_count == 2
         round2_content = "\n".join(m["content"] for m in engine.calls[1])
         assert "simulated tool failure" in round2_content
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.repair_rounds_used == 1
         assert any(s.identifier == "a" for s in record.statements)
         assert any(s.tool == "fail_tool" for s in record.failed_statements)
@@ -556,7 +556,7 @@ class TestScriptActAgentBudgets:
 
         assert final.result == 2
         assert engine.call_count == 1
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         a_stmt = next(s for s in record.statements if s.identifier == "a")
         b_stmt = next(s for s in record.statements if s.identifier == "b")
         assert a_stmt.batch_index != b_stmt.batch_index
@@ -688,7 +688,7 @@ class TestScriptActAgentDispatch:
 
         assert final.result == 6
         assert engine.call_count == 1
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         breakdown = record.dispatch_breakdown()
         assert breakdown.registered_tool_calls == 1
         assert breakdown.builtin_calls == 1

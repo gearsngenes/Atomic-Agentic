@@ -169,7 +169,7 @@ task = (
 )
 
 result = orchestrator.invoke({"prompt": task}).result
-record = orchestrator.get_conversation()[-1]
+record = orchestrator.get_conversation().records[-1]
 serialized_record = json.dumps(record.to_dict(), indent=2)
 
 out_dir = Path("examples/output_markdowns")

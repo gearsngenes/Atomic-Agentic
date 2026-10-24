@@ -95,7 +95,7 @@ class TestPlanActInvokeRoundTrip:
 
         assert result.result == 25
 
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         by_identifier = {s.identifier: s.batch_index for s in record.statements if s.identifier is not None}
         # a and b are independent -- same concurrency batch.
         assert by_identifier["a"] == by_identifier["b"]
@@ -210,7 +210,7 @@ class TestPlanActGenerationRetry:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 7
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.regenerations_used == 1
         assert len(record.llm_records) == 2
 
@@ -243,7 +243,7 @@ class TestPlanActGenerationRetry:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 3
-        assert agent.get_conversation()[-1].regenerations_used == 1
+        assert agent.get_conversation().records[-1].regenerations_used == 1
 
     def test_tool_calls_limit_exceeded_budget_exhausted_raises(self) -> None:
         too_many = scripted(
@@ -280,7 +280,7 @@ class TestPlanActCascadeFailures:
         result = agent.invoke({"prompt": "cascade"})
 
         assert result.result == 12
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert [s.identifier for s in record.failed_statements] == ["f"]
         identifiers = [s.identifier for s in record.statements]
         assert "indep" in identifiers
@@ -345,7 +345,7 @@ class TestPlanActRecordAndResultShape:
 
         assert result.result == 6
 
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert len(record.statements) == 3  # a, b, return
         assert record.failed_statements == ()
         assert record.regenerations_used == 0

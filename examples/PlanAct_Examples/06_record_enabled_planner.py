@@ -42,6 +42,6 @@ while True:
     print(f"Result: {result.result}\n")
     from pprint import pprint
     print("Executed calls:")
-    record = my_planner.get_conversation()[-1]
+    record = my_planner.get_conversation().records[-1]
     print(record.render_as_code())
     print("-" * 40 + "\n")

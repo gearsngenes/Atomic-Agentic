@@ -60,4 +60,4 @@ final_result = orchestrator.invoke({"prompt": task})
 print(f"\nFinal Result: {final_result.result}")
 
 print("\nExecuted calls:\n")
-print(orchestrator.get_conversation()[-1].render_as_code())
+print(orchestrator.get_conversation().records[-1].render_as_code())

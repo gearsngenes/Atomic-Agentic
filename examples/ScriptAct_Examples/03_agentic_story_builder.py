@@ -193,7 +193,7 @@ if __name__ == "__main__":
     print("\n========== FINAL DRAFT ==========\n")
     print(final_draft_md)
 
-    record = orch.get_conversation()[-1]
+    record = orch.get_conversation().records[-1]
     print("\n=== EXECUTED SCRIPT ===")
     print(record.render_as_code())
 

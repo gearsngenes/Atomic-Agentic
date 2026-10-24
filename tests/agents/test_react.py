@@ -220,7 +220,7 @@ class TestReActAutoNaming:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 50
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         identifiers = [s.identifier for s in record.statements]
         assert identifiers == ["__r0__", "__r1__", None]
 
@@ -239,7 +239,7 @@ class TestReActAutoNaming:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 3
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         identifiers = [s.identifier for s in record.statements]
         assert identifiers == ["__r0__", None]
 
@@ -252,7 +252,7 @@ class TestReActAutoNaming:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 42
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.statements[-1].tool == "return"
         assert record.statements[-1].identifier is None
 
@@ -269,7 +269,7 @@ class TestReActAutoNaming:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 5
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.statements[0].identifier == "sum_value"
 
 
@@ -344,7 +344,7 @@ class TestReActGenerationRetry:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 7
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.regenerations_used == 1
         assert len(record.llm_records) == 2
 
@@ -359,7 +359,7 @@ class TestReActGenerationRetry:
 
         agent.invoke({"prompt": "run"})
 
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert record.failed_statements == ()
 
     def test_unresolvable_reference_budget_exhausted_raises(self) -> None:
@@ -416,7 +416,7 @@ class TestReActDispatchFailure:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == 3
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert len(record.failed_statements) == 1
         assert record.failed_statements[0].tool == "fail_tool"
 
@@ -482,7 +482,7 @@ class TestReActRecordAndResultShape:
 
         assert result.result == 6
 
-        record = agent.get_conversation()[-1]
+        record = agent.get_conversation().records[-1]
         assert len(record.statements) == 3  # a, b, return
         assert record.failed_statements == ()
         assert record.regenerations_used == 0
@@ -520,5 +520,5 @@ class TestReActRecordAndResultShape:
 
         agent.invoke({"prompt": "run"})
 
-        for rec in agent.get_conversation()[-1].llm_records:
+        for rec in agent.get_conversation().records[-1].llm_records:
             assert rec.system_prompt_name == "reason_then_act"

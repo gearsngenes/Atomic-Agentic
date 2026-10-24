@@ -52,4 +52,4 @@ print("\nFinal Result:\n", final.result)
 # Optional: inspect the executed plan (even if record_enabled=False, the view is useful for debugging)
 from pprint import pprint
 print("\nExecuted calls:\n")
-pprint(agent.get_conversation()[-1].statements)
+pprint(agent.get_conversation().records[-1].statements)

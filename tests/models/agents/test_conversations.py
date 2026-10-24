@@ -8,8 +8,16 @@ from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.conversations import Conversation
 
 
+class _A:
+    pass
+
+
+class _B:
+    pass
+
+
 def make_conv(**variables: ContextVariable) -> Conversation:
-    return Conversation(name="c", context=dict(variables))
+    return Conversation(name="c", agent_type=_A, context=dict(variables))
 
 
 def cv(name: str, value: object = 1, **kwargs: object) -> ContextVariable:
@@ -18,7 +26,7 @@ def cv(name: str, value: object = 1, **kwargs: object) -> ContextVariable:
 
 class TestConversationContextConstruction:
     def test_defaults_to_empty_read_only_view(self) -> None:
-        conv = Conversation(name="c")
+        conv = Conversation(name="c", agent_type=_A)
 
         assert isinstance(conv.context, MappingProxyType)
         assert len(conv.context) == 0
@@ -29,7 +37,7 @@ class TestConversationContextConstruction:
         var = cv("x", [1])
         source = {"x": var}
 
-        conv = Conversation(name="c", context=source)
+        conv = Conversation(name="c", agent_type=_A, context=source)
         source["y"] = cv("y")
 
         assert "y" not in conv.context
@@ -38,23 +46,34 @@ class TestConversationContextConstruction:
 
     def test_rejects_bad_context(self) -> None:
         with pytest.raises(ValueError, match="Mapping"):
-            Conversation(name="c", context=[])  # type: ignore[arg-type]
+            Conversation(name="c", agent_type=_A, context=[])  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="ContextVariable"):
-            Conversation(name="c", context={"x": 1})  # type: ignore[dict-item]
+            Conversation(name="c", agent_type=_A, context={"x": 1})  # type: ignore[dict-item]
         with pytest.raises(ValueError, match="must equal"):
-            Conversation(name="c", context={"y": cv("x")})
+            Conversation(name="c", agent_type=_A, context={"y": cv("x")})
 
-    def test_equality_and_hash_ignore_context(self) -> None:
-        a = Conversation(name="c", context={"x": cv("x")})
-        b = Conversation(name="c")
+    def test_agent_type_must_be_a_class(self) -> None:
+        with pytest.raises(TypeError, match="agent_type"):
+            Conversation(name="c", agent_type="_A")  # type: ignore[arg-type]
 
-        assert a == b
-        assert hash(a) == hash(b)
+    def test_equality_is_by_value_over_every_field(self) -> None:
+        a = Conversation(name="c", agent_type=_A, context={"x": cv("x")})
+        same = Conversation(name="c", agent_type=_A, context={"x": cv("x")})
+
+        assert a == same
+        assert a != Conversation(name="d", agent_type=_A, context={"x": cv("x")})
+        assert a != Conversation(name="c", agent_type=_B, context={"x": cv("x")})
+        assert a != Conversation(name="c", agent_type=_A)
+        assert a != Conversation(name="c", agent_type=_A, context={"x": cv("x", 2)})
+
+    def test_unhashable(self) -> None:
+        with pytest.raises(TypeError):
+            hash(Conversation(name="c", agent_type=_A))
 
 
 class TestRemember:
     def test_new_key_defaults_not_readonly(self) -> None:
-        conv = Conversation(name="c")
+        conv = Conversation(name="c", agent_type=_A)
 
         conv.remember("x", 5, "five")
 
@@ -62,7 +81,7 @@ class TestRemember:
         assert conv.context["x"].readonly is False
 
     def test_readonly_creation_and_key_normalization(self) -> None:
-        conv = Conversation(name="c")
+        conv = Conversation(name="c", agent_type=_A)
 
         conv.remember(" x ", 1, readonly=True)
 
@@ -142,7 +161,7 @@ class TestForget:
 
     def test_unknown_key_raises(self) -> None:
         with pytest.raises(KeyError):
-            Conversation(name="c").forget("x")
+            Conversation(name="c", agent_type=_A).forget("x")
 
     def test_readonly_can_be_forgotten(self) -> None:
         conv = make_conv(x=cv("x", readonly=True))

@@ -45,7 +45,7 @@ question = (
     "for Best Picture in the same year 'Inception' was released?"
 )
 result = trivia_agent.invoke({"prompt": question, "thinking_rounds": 6})
-record = trivia_agent.get_conversation(turns=1)[0]
+record = trivia_agent.get_conversation().records[-1:][0]
 
 print(f"QUESTION: {question}\n")
 print("THINKING THOUGHTS:")

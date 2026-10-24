@@ -931,7 +931,7 @@ class TestRenderTurn:
         agent.invoke({"prompt": "first"})
         agent.invoke({"prompt": "second"})
 
-        turns = agent.get_conversation()
+        turns = agent.get_conversation().records
         assert len(turns) == 2
 
         first_messages = agent.render_turn(turns[0], index=0)
@@ -950,7 +950,7 @@ class TestRenderTurn:
         )
         agent.invoke({"prompt": "only turn"})
 
-        turn = agent.get_conversation()[0]
+        turn = agent.get_conversation().records[0]
         messages = agent.render_turn(turn, index=0)
 
         assert messages[-1]["content"].startswith("task_result_0: ")

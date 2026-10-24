@@ -77,6 +77,6 @@ if __name__ == "__main__":
         result = chatbot.invoke({"prompt": turn})
         print(f"Bot: {result.result}")
 
-        record = chatbot.get_conversation()[-1]
+        record = chatbot.get_conversation().records[-1]
         print("--- Executed script this turn ---")
         print(record.render_as_code())

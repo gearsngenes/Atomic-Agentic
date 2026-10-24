@@ -174,15 +174,15 @@ class TestBasicAgentInvoke:
 
         agent.invoke({"prompt": "What is AI?"})
 
-        assert len(agent.get_conversation()) == 1
-        assert agent.get_conversation()[0].user_prompt == "What is AI?"
+        assert len(agent.get_conversation().records) == 1
+        assert agent.get_conversation().records[0].user_prompt == "What is AI?"
 
     def test_invoke_record_llm_record_has_system_prompt_name_role(self) -> None:
         agent = make_basic_agent(record_enabled=True)
 
         agent.invoke({"prompt": "test"})
 
-        record = agent.get_conversation()[0]
+        record = agent.get_conversation().records[0]
         assert len(record.llm_records) == 1
         assert record.llm_records[0].system_prompt_name == "role"
 
@@ -191,7 +191,7 @@ class TestBasicAgentInvoke:
 
         agent.invoke({"prompt": "hello"})
 
-        llm_record = agent.get_conversation()[0].llm_records[0]
+        llm_record = agent.get_conversation().records[0].llm_records[0]
         assert llm_record.messages == ({"role": "user", "content": "hello"},)
 
     def test_invoke_never_stores_record_when_context_disabled(self) -> None:
@@ -200,7 +200,7 @@ class TestBasicAgentInvoke:
         agent.invoke({"prompt": "test 1"})
         agent.invoke({"prompt": "test 2"})
 
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
 
 class TestBasicAgentAsyncInvoke:
@@ -234,7 +234,7 @@ class TestBasicAgentAsyncInvoke:
 
         asyncio.run(agent.async_invoke({"prompt": "async test"}))
 
-        assert agent.get_conversation()[0].llm_records[0].system_prompt_name == "role"
+        assert agent.get_conversation().records[0].llm_records[0].system_prompt_name == "role"
 
 
 class TestBasicAgentResponseSchema:

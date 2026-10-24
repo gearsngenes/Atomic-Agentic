@@ -150,7 +150,7 @@ class TestAgentStructuredBasicPipeline:
         assert step_result.result == result.result
         # This agent is constructed with record_enabled=False (the
         # make_agent_sequential_flow default), so nothing is stored.
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
         _engine, _agent, structured_agent = make_structured_agent()

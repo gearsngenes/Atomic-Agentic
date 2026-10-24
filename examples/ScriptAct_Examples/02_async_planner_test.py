@@ -65,6 +65,6 @@ if __name__ == "__main__":
 
     print("Time taken:", end - start, "seconds")
 
-    record = async_tester.get_conversation()[-1]
+    record = async_tester.get_conversation().records[-1]
     print("\n=== EXECUTED SCRIPT (grouped by concurrent batch) ===")
     print(record.render_as_code())

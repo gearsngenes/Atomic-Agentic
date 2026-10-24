@@ -280,8 +280,8 @@ class ThinkingAgentResult(AgentResult):
     rounds -- mirrors how ``llm_token_usage`` is already a derived
     reduction of ``record.llm_records``, not a duplicate of it. A caller
     needing the actual thought content reads it off the record instead
-    (``agent.get_conversation(turns=1)[0].thoughts`` for the invocation
-    just made; scan ``get_conversation(conversation_id, turns=None)`` and
+    (``agent.get_conversation().records[-1].thoughts`` for the invocation
+    just made; scan ``get_conversation(conversation_id).records`` and
     match ``r.run_id`` for an older one).
 
     No ``__post_init__`` override needed -- plain ``int`` field, no

@@ -13,6 +13,7 @@ from atomic_agentic.exceptions import AgentError, AgentInvocationError, SchemaEr
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
+from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.models.parameters import ParamSpec
@@ -301,8 +302,9 @@ def make_agent(
     post_result_key: str | None = None,
     system_prompt: str = ROLE_PROMPT,
     response_preview_limit: int | None = None,
+    agent_cls: type[_EchoAgent] = _EchoAgent,
 ) -> _EchoAgent:
-    return _EchoAgent(
+    return agent_cls(
         name="writer_agent",
         namespace="tests",
         description="Deterministic writer test agent.",
@@ -586,7 +588,7 @@ class TestAgentContext:
 
         # record_enabled=False means nothing is stored in any conversation,
         # regardless of records_window.
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
         assert len(engine.calls) == 2
         assert [message["role"] for message in engine.calls[0]] == ["system", "user"]
@@ -604,7 +606,7 @@ class TestAgentContext:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        rendered = agent.render_turn(agent.get_conversation()[0])
+        rendered = agent.render_turn(agent.get_conversation().records[0])
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
@@ -718,7 +720,7 @@ class TestAgentContext:
 
         # records_window == 0 only gates reads now -- record_enabled=True
         # (the default here) still persists both turns.
-        assert len(agent.get_conversation()) == 2
+        assert len(agent.get_conversation().records) == 2
 
     def test_record_disabled_reads_full_history_without_storing(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -731,7 +733,7 @@ class TestAgentContext:
         second_call_messages = engine.calls[1]
         joined_contents = "\n".join(m["content"] for m in second_call_messages)
         assert "first topic" in joined_contents  # read still happens
-        assert len(agent.get_conversation()) == 1  # second turn not persisted
+        assert len(agent.get_conversation().records) == 1  # second turn not persisted
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -739,11 +741,11 @@ class TestAgentContext:
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        assert agent.get_conversation()
+        assert agent.get_conversation().records
 
         agent.clear_memory()
 
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
 
 class TestConversationManagement:
@@ -756,7 +758,7 @@ class TestConversationManagement:
 
         assert agent.conversation_names == ["default"]
         assert agent.active_conversation == "default"
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
     def test_create_conversation_returns_conversation_on_fresh_name(self) -> None:
         agent = make_agent()
@@ -767,20 +769,20 @@ class TestConversationManagement:
         assert created.name == "scratch"
         assert created.records == []
         assert "scratch" in agent.conversation_names
-        assert agent.get_conversation("scratch") == []
+        assert agent.get_conversation("scratch").records == []
         # create_conversation never auto-activates.
         assert agent.active_conversation == "default"
 
     def test_create_conversation_raises_on_existing_name_no_mutation(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.create_conversation("scratch")
-        agent.set_active_conversation("scratch")
+        agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         with pytest.raises(AgentInvocationError):
             agent.create_conversation("scratch")
         # The existing conversation's history survives the rejected collision.
-        assert len(agent.get_conversation("scratch")) == 1
+        assert len(agent.get_conversation("scratch").records) == 1
 
     @pytest.mark.parametrize("bad_name", ["bad name", "1bad", "name_5", ""])
     def test_create_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
@@ -789,52 +791,49 @@ class TestConversationManagement:
         with pytest.raises(ValueError):
             agent.create_conversation(bad_name)
 
-    def test_set_active_conversation_switches_active(self) -> None:
+    def test_switch_conversation_switches_active(self) -> None:
         agent = make_agent()
         agent.create_conversation("scratch")
 
-        agent.set_active_conversation("scratch")
+        agent.switch_conversation("scratch")
 
         assert agent.active_conversation == "scratch"
 
-    def test_set_active_conversation_unknown_key_raises(self) -> None:
+    def test_switch_conversation_unknown_key_raises(self) -> None:
         agent = make_agent()
 
         with pytest.raises(AgentInvocationError):
-            agent.set_active_conversation("nope")
+            agent.switch_conversation("nope")
 
     def test_get_conversation_unknown_key_raises(self) -> None:
         agent = make_agent()
 
         with pytest.raises(AgentInvocationError):
-            agent.get_conversation("nope")
+            agent.get_conversation("nope").records
 
-    def test_get_conversation_turns_zero_raises(self) -> None:
-        agent = make_agent(record_enabled=True)
-        agent.invoke({"topic": "pytest", "tone": "strict"})
-
-        with pytest.raises(ValueError):
-            agent.get_conversation(turns=0)
-
-    def test_get_conversation_turns_returns_trailing_slice(self) -> None:
+    def test_get_conversation_returns_tagged_snapshot(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "first", "tone": "strict"})
         agent.invoke({"topic": "second", "tone": "strict"})
-        agent.invoke({"topic": "third", "tone": "strict"})
 
-        tail = agent.get_conversation(turns=2)
+        snap = agent.get_conversation()
 
-        assert len(tail) == 2
-        assert [r.inputs["topic"] for r in tail] == ["second", "third"]
+        assert isinstance(snap, Conversation)
+        assert snap.name == "default"
+        assert snap.agent_type is type(agent)
+        assert [r.inputs["topic"] for r in snap.records[-1:]] == ["second"]
 
-    def test_get_conversation_return_value_is_independent_of_storage(self) -> None:
+    def test_get_conversation_snapshot_is_independent_of_storage(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        history = agent.get_conversation()
-        history.append("not a real record")  # type: ignore[arg-type]
+        snap = agent.get_conversation()
+        snap.records.append("not a real record")  # type: ignore[arg-type]
+        snap.remember("x", 1)
 
-        assert len(agent.get_conversation()) == 1
+        fresh = agent.get_conversation()
+        assert len(fresh.records) == 1
+        assert "x" not in fresh.context
 
     def test_delete_conversation_unknown_key_raises(self) -> None:
         agent = make_agent()
@@ -845,7 +844,7 @@ class TestConversationManagement:
     def test_delete_conversation_refuses_active_conversation(self) -> None:
         agent = make_agent()
         agent.create_conversation("scratch")
-        agent.set_active_conversation("scratch")
+        agent.switch_conversation("scratch")
 
         with pytest.raises(AgentInvocationError):
             agent.delete_conversation("scratch")
@@ -853,9 +852,9 @@ class TestConversationManagement:
     def test_delete_conversation_removes_non_active_conversation(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.create_conversation("scratch")
-        agent.set_active_conversation("scratch")
+        agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
-        agent.set_active_conversation("default")
+        agent.switch_conversation("default")
 
         removed = agent.delete_conversation("scratch")
 
@@ -872,7 +871,7 @@ class TestConversationManagement:
         assert isinstance(removed, Conversation)
         assert len(removed.records) == 1
         assert "default" in agent.conversation_names
-        assert agent.get_conversation("default") == []
+        assert agent.get_conversation("default").records == []
 
     def test_clone_conversation_unknown_source_raises(self) -> None:
         agent = make_agent()
@@ -908,12 +907,12 @@ class TestConversationManagement:
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
 
         cloned = agent.clone_conversation("default", end_id=first.run_id)
-        agent.set_active_conversation(cloned.name)
+        agent.switch_conversation(cloned.name)
         agent.invoke({"topic": "forked-only", "tone": "strict"})
 
         # The clone's own new turn must never appear back in "default".
-        assert len(agent.get_conversation("default")) == 1
-        assert len(agent.get_conversation(cloned.name)) == 2
+        assert len(agent.get_conversation("default").records) == 1
+        assert len(agent.get_conversation(cloned.name).records) == 2
 
     def test_clone_conversation_auto_name_survives_clear_memory(self) -> None:
         # self._branch_counter is deliberately not reset by clear_memory(),
@@ -930,6 +929,189 @@ class TestConversationManagement:
 
         assert second_clone_name != first_clone_name
 
+
+class _OtherEchoAgent(_EchoAgent):
+    pass
+
+
+class TestConversationContextWrappers:
+    def test_wrappers_target_active_conversation_by_default(self) -> None:
+        agent = make_agent()
+        agent.create_conversation("scratch")
+        agent.switch_conversation("scratch")
+
+        agent.remember("x", 1, "one")
+        agent.describe("x", "uno")
+        agent.remember_many([ContextVariable(name="y", value=2)])
+
+        scratch = agent.get_conversation("scratch").context
+        assert scratch["x"].value == 1 and scratch["x"].description == "uno"
+        assert scratch["y"].value == 2
+        assert len(agent.get_conversation("default").context) == 0
+
+    def test_wrappers_target_named_conversation(self) -> None:
+        agent = make_agent()
+        agent.create_conversation("scratch")
+
+        agent.remember("x", 1, conversation="scratch")
+        agent.remember_many([ContextVariable(name="y", value=2)], conversation="scratch")
+        agent.forget("x", conversation="scratch")
+        agent.forget_many(["y"], conversation="scratch")
+
+        assert len(agent.get_conversation("scratch").context) == 0
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda a: a.remember("x", 1, conversation="nope"),
+            lambda a: a.describe("x", "d", conversation="nope"),
+            lambda a: a.forget("x", conversation="nope"),
+            lambda a: a.remember_many([], conversation="nope"),
+            lambda a: a.forget_many([], conversation="nope"),
+        ],
+    )
+    def test_unknown_conversation_raises(self, call: Any) -> None:
+        with pytest.raises(AgentInvocationError):
+            call(make_agent())
+
+    def test_conversation_errors_surface_unchanged(self) -> None:
+        agent = make_agent()
+        agent.remember("x", 1, readonly=True)
+
+        with pytest.raises(ValueError, match="readonly"):
+            agent.remember("x", 2)
+        with pytest.raises(KeyError):
+            agent.forget("nope")
+        with pytest.raises(KeyError):
+            agent.forget_many(["x", "nope"])
+        assert agent.get_conversation().context["x"].value == 1
+
+    def test_resets_empty_context_and_keep_tag(self) -> None:
+        agent = make_agent()
+        agent.remember("x", 1)
+
+        agent.delete_conversation("default")
+        assert len(agent.get_conversation().context) == 0
+        assert agent.get_conversation().agent_type is _EchoAgent
+
+        agent.remember("y", 1)
+        agent.clear_memory()
+        assert len(agent.get_conversation().context) == 0
+        assert agent.get_conversation().agent_type is _EchoAgent
+
+    def test_every_created_conversation_is_tagged(self) -> None:
+        agent = make_agent(record_enabled=True)
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+        agent.create_conversation("scratch")
+        cloned = agent.clone_conversation("default", end_id=first.run_id)
+
+        for name in ("default", "scratch", cloned.name):
+            assert agent.get_conversation(name).agent_type is _EchoAgent
+
+
+class TestImportConversation:
+    def _source(self) -> tuple[_EchoAgent, list[str]]:
+        agent = make_agent(record_enabled=True)
+        ids = [
+            agent.invoke({"topic": t, "tone": "strict"}).run_id
+            for t in ("a", "b", "c")
+        ]
+        agent.remember("k", [1], "kay")
+        return agent, ids
+
+    def test_whole_conversation_is_new_tagged_and_shares_records(self) -> None:
+        source, _ = self._source()
+        target = make_agent()
+
+        imported = target.import_conversation(source.get_conversation(), name="imp")
+
+        assert target.get_conversation("imp").agent_type is _EchoAgent
+        assert imported.records == source.get_conversation().records
+        assert all(a is b for a, b in zip(imported.records, source.get_conversation().records))
+        assert target.active_conversation == "default"
+
+    def test_index_and_run_id_ranges(self) -> None:
+        source, ids = self._source()
+        snap = source.get_conversation()
+        target = make_agent()
+
+        by_index = target.import_conversation(snap, start=1, end=-1, name="i")
+        by_id = target.import_conversation(snap, start_id=ids[1], name="j")
+
+        assert [r.run_id for r in by_index.records] == ids[1:]
+        assert [r.run_id for r in by_id.records] == ids[1:]
+
+    def test_range_errors(self) -> None:
+        source, ids = self._source()
+        snap = source.get_conversation()
+        target = make_agent()
+
+        with pytest.raises(ValueError, match="mixed"):
+            target.import_conversation(snap, start=0, end_id=ids[0])
+        with pytest.raises(IndexError):
+            target.import_conversation(snap, start=5)
+        with pytest.raises(ValueError):
+            target.import_conversation(snap, start=2, end=0)
+        with pytest.raises(ValueError, match="run_id"):
+            target.import_conversation(snap, end_id="nope")
+        assert target.conversation_names == ["default"]
+
+    def test_context_is_copied_into_independent_container(self) -> None:
+        source, _ = self._source()
+        target = make_agent()
+        imported = target.import_conversation(source.get_conversation(), name="imp")
+
+        assert imported.context["k"] is source.get_conversation().context["k"]
+        target.remember("only_target", 1, conversation="imp")
+        source.forget("k")
+
+        assert "only_target" not in source.get_conversation().context
+        assert "k" in target.get_conversation("imp").context
+
+    def test_name_rules(self) -> None:
+        source, _ = self._source()
+        snap = source.get_conversation()
+        target = make_agent()
+        target.create_conversation("taken")
+
+        with pytest.raises(ValueError):
+            target.import_conversation(snap, name="bad name")
+        with pytest.raises(ValueError):
+            target.import_conversation(snap, name="taken")
+        auto = target.import_conversation(snap)
+        assert auto.name == "default_0"
+
+    def test_wrong_agent_type_raises_and_creates_nothing(self) -> None:
+        source, _ = self._source()
+        other = make_agent(agent_cls=_OtherEchoAgent)
+
+        with pytest.raises(TypeError, match="_EchoAgent"):
+            other.import_conversation(source.get_conversation())
+        assert other.conversation_names == ["default"]
+
+    def test_non_conversation_raises(self) -> None:
+        with pytest.raises(TypeError):
+            make_agent().import_conversation(make_agent())  # type: ignore[arg-type]
+
+    def test_clone_carries_context(self) -> None:
+        source, ids = self._source()
+
+        cloned = source.clone_conversation("default", end_id=ids[0], name="cl")
+
+        assert cloned.context["k"].value == [1]
+        assert len(cloned.records) == 1
+
+    def test_commit_auto_fork_carries_context(self) -> None:
+        agent = make_agent(record_enabled=True)
+        first = agent.invoke({"topic": "a", "tone": "strict"})
+        agent.remember("k", 1)
+        agent.invoke({"topic": "b", "tone": "strict"})
+        agent.clone_conversation("default", end_id=first.run_id, name="back")
+        agent.switch_conversation("back")
+
+        agent.invoke({"topic": "c", "tone": "strict"})
+        agent.switch_conversation("default")
+        assert agent.get_conversation("back").context["k"].value == 1
 
 
 class TestAgentValidation:
@@ -1029,7 +1211,7 @@ class TestAgentSerialization:
         assert data["record_enabled"] is True
         assert data["records_window"] == 1
         assert data["conversations"][agent.active_conversation] == [
-            turn.to_dict() for turn in agent.get_conversation()
+            turn.to_dict() for turn in agent.get_conversation().records
         ]
         assert "system_prompts" in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
@@ -1092,7 +1274,7 @@ class TestAgentAsyncInvoke:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        rendered = agent.render_turn(agent.get_conversation()[0])
+        rendered = agent.render_turn(agent.get_conversation().records[0])
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
@@ -1808,7 +1990,7 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         agent.invoke({"prompt": "hello"})
         agent.invoke({"prompt": "world"})
 
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
     def test_records_window_set_to_zero_at_runtime_suppresses_reads(self) -> None:
         # record_enabled no longer has any bearing on reads post-decoupling
@@ -1943,7 +2125,7 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
-        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
+        assert agent.get_conversation().records[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
 
     def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
@@ -1957,7 +2139,7 @@ class TestInvocationLifecycle:
         )
         asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
 
-        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
+        assert agent.get_conversation().records[0].inputs == {"prompt": "hi", "lang": "French", "dummy_reserved": None}
 
     def test_inputs_isolated_across_invocations(self) -> None:
         agent = _MinimalAgent(
@@ -1971,5 +2153,5 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi"})
         agent.invoke({"prompt": "yo"})
-        history = agent.get_conversation()
+        history = agent.get_conversation().records
         assert history[0].inputs is not history[1].inputs

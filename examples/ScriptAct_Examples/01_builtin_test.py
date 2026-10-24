@@ -60,6 +60,6 @@ result = agent.invoke({"prompt": task_prompt})
 print("\n=== FINAL AGENT RESULT ===")
 print(result.result)
 
-record = agent.get_conversation()[-1]
+record = agent.get_conversation().records[-1]
 print("\n=== EXECUTED SCRIPT ===")
 print(record.render_as_code())

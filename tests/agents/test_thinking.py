@@ -55,7 +55,7 @@ def make_agent(
 def last_thoughts(agent: ThinkingAgent) -> tuple:
     """Convenience: thoughts of the active conversation's most recent
     record -- what every example now does after a single invoke()."""
-    return agent.get_conversation(turns=1)[0].thoughts
+    return agent.get_conversation().records[-1:][0].thoughts
 
 
 class TestConstruction:
@@ -597,7 +597,7 @@ class TestRecordAndResultConstruction:
         agent = make_agent(engine=engine)
 
         result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
-        record = agent.get_conversation(turns=1)[0]
+        record = agent.get_conversation().records[-1:][0]
 
         assert record.thoughts == ("obs",)
         assert record.run_id == result.run_id
@@ -609,7 +609,7 @@ class TestRecordAndResultConstruction:
         agent.invoke({"prompt": "first", "thinking_rounds": 1})
         agent.invoke({"prompt": "second", "thinking_rounds": 1})
 
-        first_record, second_record = agent.get_conversation()
+        first_record, second_record = agent.get_conversation().records
         assert first_record.thoughts == ("first",)
         assert second_record.thoughts == ("second",)
 
