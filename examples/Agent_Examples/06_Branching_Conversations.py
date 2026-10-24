@@ -27,16 +27,10 @@ Key concepts shown
   subsequent calls read from and write to. Cloning never changes the active
   conversation by itself -- the caller switches explicitly.
 - A record's ``children`` list is shared across every conversation it
-  belongs to, not scoped to any one of them -- T0 already has a child
-  (T_A1) in "default" before Branch B ever exists, so continuing from T0 in
-  the freshly-cloned branch still trips the same commit-time auto-fork
-  safety check (two commits targeting the same already-childed point never
-  collide; the second always lands in a brand-new conversation instead).
-  The clone is only a *seed* for rendering the right context going in --
-  the turn actually lands one conversation further out, discovered the
-  same way an implicit fork's name always was: diffing
-  ``conversation_names`` around the call. The now-empty seed is discarded
-  with ``delete_conversation`` afterward.
+  belongs to: T0 already has a child (T_A1) in "default", and continuing
+  from T0 in the cloned branch adds a second child (T_B1). That is
+  provenance only -- the clone is a real conversation of its own, and the
+  new turn is appended to it in place (there is no implicit forking).
 - ``Agent.get_conversation(conversation_id)``   (a Conversation snapshot) each conversation is its own
   stored list under ``Agent.conversation_names``; reading one back is a
   plain dict lookup, not a reconstruction walk.
@@ -46,9 +40,8 @@ Conversation storage (v2.0.0, agent-memory-refactor)
 Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
 a ``dict[str, Conversation]`` -- the agent's active conversation
 ("default" here) keeps growing in place for T0/T_A1/T_A2. There is no
-implicit, invoke-time forking mechanism anymore -- every branch starts from
-an explicit ``clone_conversation`` call (see Branch B below for the full,
-slightly subtle sequence this now takes).
+implicit, invoke-time forking mechanism -- every branch starts from an
+explicit ``clone_conversation`` call and is continued in place.
 
 Post-invoke parameters are no longer declared via ``passthrough_inputs``.
 Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
@@ -232,34 +225,23 @@ def main() -> None:
     print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
     print(f"{'═' * _W}")
 
-    # Explicitly clone "default" up through T0 -- this seed conversation
-    # exists only to give the upcoming call the right context (T0 alone) to
-    # render from. T0 already has a child in "default" (T_A1), and
-    # AgentRecord.children is shared across every conversation a record
-    # belongs to -- so continuing from T0 here still trips the same
-    # commit-time auto-fork safety check. The turn doesn't land in the seed
-    # itself; it lands in a further, auto-named conversation, discovered the
-    # same way an implicit fork's name always was: diffing
-    # conversation_names around the call.
-    seed = agent.clone_conversation("default", end_id=run_0)
-    agent.switch_conversation(seed.name)
+    # Explicitly clone "default" up through T0, switch into the clone, and
+    # continue there -- the new turn is appended to the clone in place.
+    branch_b = agent.clone_conversation("default", end_id=run_0)
+    branch_b_name = branch_b.name
+    agent.switch_conversation(branch_b_name)
 
-    conversations_before = set(agent.conversation_names)
     r_b1 = agent(
         message="What's my dog's name?",
         style="friendly",
         return_atomic_result_object = True
     )
-    branch_b_name = next(iter(set(agent.conversation_names) - conversations_before))
     run_b1 = r_b1.run_id
     results_by_run_id[run_b1] = r_b1
     print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_name!r}")
     print(f"  reply: {r_b1.result['reply']}")
 
-    # Switch back to "default" before discarding the now-empty seed --
-    # delete_conversation refuses to remove the active conversation.
     agent.switch_conversation("default")
-    agent.delete_conversation(seed.name)
 
     # ------------------------------------------------------------------ #
     # Display each conversation's stored chain

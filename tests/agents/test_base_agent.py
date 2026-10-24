@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Annotated, Any, Mapping, Optional
 import warnings
@@ -746,9 +747,9 @@ class TestAgentContext:
 
 
 class TestConversationManagement:
-    """Named-conversation branching: create/fork/delete/set_active plus the
-    implicit fork-on-invoke path (continuing from a record that already has
-    children forks instead of appending in place)."""
+    """Named-conversation branching: create/clone/delete/switch. Invoking in a
+    conversation always appends to it in place -- there is no implicit fork,
+    even when the record it continues from already has children elsewhere."""
 
     def test_fresh_agent_has_single_default_active_conversation(self) -> None:
         agent = make_agent()
@@ -1098,7 +1099,7 @@ class TestImportConversation:
         assert cloned.context["k"].value == [1]
         assert len(cloned.records) == 1
 
-    def test_commit_auto_fork_carries_context(self) -> None:
+    def test_continuing_a_clone_appends_in_place_and_keeps_its_context(self) -> None:
         agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "a", "tone": "strict"})
         agent.remember("k", 1)
@@ -1107,8 +1108,24 @@ class TestImportConversation:
         agent.switch_conversation("back")
 
         agent.invoke({"topic": "c", "tone": "strict"})
-        agent.switch_conversation("default")
+        agent.invoke({"topic": "d", "tone": "strict"})
+
+        assert set(agent.conversation_names) == {"default", "back"}
+        assert len(agent.get_conversation("back").records) == 3
+        assert len(agent.get_conversation("default").records) == 2
         assert agent.get_conversation("back").context["k"].value == 1
+
+    def test_clone_of_whole_conversation_continues_after_original_advances(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke(_INPUTS)
+        agent.clone_conversation("default", name="whole")
+        agent.invoke(_INPUTS)  # the original advances past the shared tail
+
+        agent.switch_conversation("whole")
+        agent.invoke(_INPUTS)
+
+        assert set(agent.conversation_names) == {"default", "whole"}
+        assert len(agent.get_conversation("whole").records) == 2
 
 
 class TestAgentValidation:
@@ -2174,7 +2191,7 @@ def _run_until_post(agent: Agent, inputs: Mapping[str, Any]) -> tuple[AgentTask,
 
 
 class TestCreateTask:
-    def test_binds_conversation_mints_identity_and_leaves_context_empty(self) -> None:
+    def test_binds_conversation_and_mints_identity(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.create_conversation("side")
         agent.switch_conversation("side")
@@ -2349,7 +2366,7 @@ class TestPostProcessAndRecord:
         assert second.run_id == second_task.run_id and second.prev is first
         assert first.children == [second]
 
-    def test_record_forks_when_the_read_point_already_has_a_child(self) -> None:
+    def test_racing_calls_both_append_in_commit_order_without_forking(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke(_INPUTS)
         slow_task, _ = _run_until_post(agent, _INPUTS)  # read the 1-record tail
@@ -2357,12 +2374,13 @@ class TestPostProcessAndRecord:
 
         agent.record(slow_task)
 
-        assert len(agent.get_conversation().records) == 2  # default untouched
-        forks = [n for n in agent._conversations if n != "default"]
-        assert len(forks) == 1
-        assert agent._conversations[forks[0]].records[-1].run_id == slow_task.run_id
+        records = agent.get_conversation().records
+        assert list(agent._conversations) == ["default"]
+        assert [r.run_id for r in records][-1] == slow_task.run_id
+        assert len(records) == 3
+        assert records[0].children == [records[1], records[2]]
 
-    def test_record_at_window_zero_appends_a_root_without_forking(self) -> None:
+    def test_record_at_window_zero_appends_a_root(self) -> None:
         agent = make_agent(record_enabled=True, records_window=0)
         agent.invoke(_INPUTS)
         slow_task, _ = _run_until_post(agent, _INPUTS)
@@ -2385,3 +2403,127 @@ class TestPostProcessAndRecord:
         assert result.result == auto_result.result
         m, a = manual.get_conversation().records[0], automatic.get_conversation().records[0]
         assert (m.user_prompt, m.generated_response, m.inputs) == (a.user_prompt, a.generated_response, a.inputs)
+
+
+
+class TestContextLifecycle:
+    @staticmethod
+    def _bump(task: AgentTask, key: str, value: Any) -> None:
+        task.context[key] = dataclasses.replace(task.context[key], value=value)
+
+    def test_seed_is_a_distinct_equal_copy(self) -> None:
+        agent = make_agent()
+        agent.remember("k", 1)
+        conv = agent.get_conversation()
+
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+
+        assert task.context == dict(conv.context)
+        assert task.context["k"] is conv.context["k"]
+        task.context["x"] = ContextVariable(name="x", value=1)
+        assert "x" not in agent.get_conversation().context
+
+    def test_seed_is_a_snapshot_at_create_task(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        agent.remember("k", 1)
+        assert "k" not in task.context
+
+    def test_unmodified_call_leaves_context_equal(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1, "d")
+        before = dict(agent.get_conversation().context)
+
+        agent.invoke(_INPUTS)
+
+        assert dict(agent.get_conversation().context) == before
+
+    def test_changed_value_is_written_back(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        self._bump(task, "k", 2)
+
+        agent.record(task)
+
+        assert agent.get_conversation().context["k"].value == 2
+
+    def test_readonly_destination_is_skipped_without_failing(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1, readonly=True)
+        agent.remember("m", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        self._bump(task, "k", 2)
+        self._bump(task, "m", 2)
+
+        agent.record(task)
+
+        ctx = agent.get_conversation().context
+        assert ctx["k"].value == 1 and ctx["m"].value == 2
+        assert len(agent.get_conversation().records) == 1
+
+    def test_key_forgotten_mid_call_is_not_resurrected(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        agent.forget("k")
+
+        agent.record(task)
+
+        assert "k" not in agent.get_conversation().context
+
+    def test_scratch_key_is_dropped(self) -> None:
+        agent = make_agent(record_enabled=True)
+        task, _ = _run_until_post(agent, _INPUTS)
+        task.context["new"] = ContextVariable(name="new", value=1)
+
+        agent.record(task)
+
+        assert "new" not in agent.get_conversation().context
+
+    def test_write_back_targets_the_bound_conversation(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        agent.create_conversation("side")
+        agent.switch_conversation("side")  # active changes mid-call
+        self._bump(task, "k", 9)
+
+        agent.record(task)
+
+        assert agent.get_conversation("default").context["k"].value == 9
+        assert len(agent.get_conversation("default").records) == 1
+        assert agent.get_conversation("side").records == []
+
+    def test_record_disabled_writes_nothing(self) -> None:
+        agent = make_agent(record_enabled=False)
+        agent.remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        self._bump(task, "k", 2)
+
+        agent.record(task)
+
+        assert agent.get_conversation().context["k"].value == 1
+
+    def test_hand_assembled_equals_invoke(self) -> None:
+        manual = make_agent(record_enabled=True)
+        manual.remember("k", 1, "d")
+        task, _ = _run_until_post(manual, _INPUTS)
+        manual.record(task)
+        automatic = make_agent(record_enabled=True)
+        automatic.remember("k", 1, "d")
+        automatic.invoke(_INPUTS)
+
+        assert dict(manual.get_conversation().context) == dict(
+            automatic.get_conversation().context
+        )
+
+    def test_writer_marked_readonly_persists_readonly(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        task.context["k"] = dataclasses.replace(task.context["k"], readonly=True)
+
+        agent.record(task)
+
+        assert agent.get_conversation().context["k"].readonly is True

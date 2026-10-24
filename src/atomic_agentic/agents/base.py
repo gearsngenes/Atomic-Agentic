@@ -79,10 +79,9 @@ class Agent(AtomicInvokable, ABC):
        prepare(task); task = act(task)`` — until ``task.complete``.
     6. ``post_process`` transforms the raw response through ``post_invoke``
        and builds the final ``AgentResult`` from the task.
-    7. ``record`` builds the ``AgentRecord`` from the task and either
-       appends it in place or forks a new conversation -- decided by a
-       fresh children check under the lock -- unless ``record_enabled`` is
-       false, in which case nothing is stored at all.
+    7. ``record`` builds the ``AgentRecord`` from the task and appends it to
+       the conversation the task is bound to, under the lock, unless
+       ``record_enabled`` is false, in which case nothing is stored at all.
     8. The step-6 result is returned.
 
     Schema composition
@@ -148,12 +147,10 @@ class Agent(AtomicInvokable, ABC):
     record. Retargeting to an earlier point requires an explicit
     ``clone_conversation``/``switch_conversation`` call before invoking
     (``create_conversation``/``get_record``/``delete_conversation`` round
-    out the rest of the explicit conversation-management API). The one
-    remaining *implicit* behavior is a concurrency-safety detail, not a
-    caller-facing feature: two invocations racing to extend the same tail
-    resolve safely via a fresh children check taken under
-    ``self._invoke_lock`` at commit time -- whichever commits second
-    automatically forks instead of colliding.
+    out the rest of the explicit conversation-management API). There is no
+    implicit forking: two invocations racing to extend the same tail both
+    append to their bound conversation in commit order (``_invoke_lock``
+    serializes the commits), each with ``prev`` set to the record it read.
     """
 
     # ------------------------------------------------------------------ #
@@ -410,9 +407,8 @@ class Agent(AtomicInvokable, ABC):
         """Whether this agent persists each invocation's completed turn.
 
         Write-only axis, independent of ``records_window`` (the read
-        axis). ``True``: the completed turn is appended (or auto-forked,
-        per the existing commit-time children check) into the active
-        conversation. ``False``: a normal ``AgentResult`` is still
+        axis). ``True``: the completed turn is appended to the conversation
+        the call was bound to. ``False``: a normal ``AgentResult`` is still
         returned, but nothing is stored in any conversation for that
         invocation -- regardless of ``records_window``.
         """
@@ -540,8 +536,12 @@ class Agent(AtomicInvokable, ABC):
         ``switch_conversation`` cannot retarget this call), ``turns`` (a
         pinned copy of the window: ``records_window == 0`` -> ``[]``,
         ``None`` -> all, ``N`` -> the last ``N``), ``inputs`` (the same full
-        mapping, untouched), the ``pre_inputs``/``post_inputs``/
-        ``agentic_inputs`` views, ``run_id`` and ``started_at``.
+        mapping, untouched), ``context`` (a shallow copy of the bound
+        conversation's context taken here -- the seed point; a later
+        ``remember()`` is not visible to the task), the ``pre_inputs``/
+        ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
+        ``started_at``. The base loop never writes ``task.context``; a
+        subclass writer must check a variable's ``readonly`` flag itself.
 
         The three views are slices of ``inputs`` by name -- views, not a
         partition: a name consumed by several buckets goes into each. Reserved
@@ -556,7 +556,8 @@ class Agent(AtomicInvokable, ABC):
         seeding. Not overridden by subclasses. Pure computation, no I/O.
         """
         active_key = self._active_conversation
-        history = self._conversations[active_key].records
+        conversation = self._conversations[active_key]
+        history = conversation.records
         window = self._records_window
         if window == 0:
             turns: list[AgentRecord] = []
@@ -579,6 +580,7 @@ class Agent(AtomicInvokable, ABC):
             inputs=inputs,
             system_prompt_name=self._INITIAL_PROMPT_NAME,
             conversation=active_key,
+            context=dict(conversation.context),
             pre_inputs={k: v for k, v in inputs.items() if k in pre_names},
             post_inputs={k: v for k, v in inputs.items() if k in post_names},
             agentic_inputs={k: v for k, v in inputs.items() if k in agentic_names},
@@ -848,18 +850,31 @@ class Agent(AtomicInvokable, ABC):
         1. The record is built from the task (independent of the result) and
            validated as an ``AgentRecord``.
         2. Under ``self._invoke_lock``: if ``record_enabled`` is False,
-           nothing is stored. Otherwise a fresh children check on
-           ``record.prev`` decides append-vs-fork -- delegating fork
-           construction to the same ``clone_conversation`` primitive exposed
-           publicly -- and the record is appended to the resolved
-           conversation's ``.records``, with ``target.children`` updated to
-           match.
+           nothing is stored. Otherwise the record is appended to
+           ``task.conversation``'s ``.records`` (the conversation bound at
+           ``create_task``, even if the active one has since changed), and
+           appended to ``record.prev.children`` when ``prev`` is set. There
+           is no implicit forking: branching happens only through explicit
+           ``clone_conversation``/``import_conversation``.
+        3. Context write-back, same lock, same conversation: every ``task.context`` variable whose name is in the
+           destination's context and whose destination variable is not
+           ``readonly`` is written with one ``remember_many``. Scratch keys
+           and keys ``forget``-ed mid-call are dropped; readonly ones are
+           skipped silently. Every eligible key is written, changed or not.
 
-        ``prev`` is "the last turn this call read" (``task.turns[-1]``).
-        Turn selection never uses ``prev``; it feeds only this fork check and
-        ``to_dict``. So with ``records_window == 0`` (nothing read) the record
-        is a chain root appended in commit order, and the fork check cannot
-        fire -- there is no read point to fork from.
+        Context limitations: last-writer-wins for keys this call started
+        with (a mid-call ``remember()`` or another call's commit to such a
+        key is overwritten); stored values are shared by reference. A
+        variable a writer marked ``readonly=True`` persists as readonly when
+        the destination's was not.
+
+        ``prev`` is "the last turn this call read" (``task.turns[-1]``) and is
+        provenance only: turn selection slices the conversation's record list
+        and never uses ``prev``. ``children`` is likewise provenance, shared
+        by every conversation that contains a record, so a record continued
+        in two conversations (or by two racing calls) simply has two
+        children. Records land in commit order; with ``records_window == 0``
+        (nothing read) the record is a chain root (``prev=None``).
         """
         record = self._build_record_from_task(task)
         if not isinstance(record, AgentRecord):
@@ -871,23 +886,23 @@ class Agent(AtomicInvokable, ABC):
             if not self._record_enabled:
                 return
 
-            # Fresh (not stale) children check, taken under the same lock as
-            # the mutation below -- this is what makes two concurrent
-            # commits targeting the same childless point resolve safely:
-            # whichever commits second observes the first's already-appended
-            # child and forks instead of colliding.
-            target = record.prev
-            if target is not None and target.children:
-                dest_conv = self.clone_conversation(
-                    source=task.conversation,
-                    end_id=target.run_id,
-                )
-            else:
-                dest_conv = self._conversations[task.conversation]
-
+            dest_conv = self._conversations[task.conversation]
             dest_conv.records.append(record)
-            if target is not None:
-                target.children.append(record)
+            if record.prev is not None:
+                record.prev.children.append(record)
+
+            # Context write-back. The destination's flags are read fresh under
+            # the lock, so they are authoritative even if a writer ignored
+            # `readonly`. A task key absent from the destination (call-local
+            # scratch, or forgotten mid-call) is dropped; a readonly
+            # destination variable is skipped silently.
+            dest_context = dest_conv.context
+            dest_conv.remember_many(
+                variable
+                for variable in task.context.values()
+                if variable.name in dest_context
+                and not dest_context[variable.name].readonly
+            )
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -976,7 +991,7 @@ class Agent(AtomicInvokable, ABC):
         the context, tagged with the same ``agent_type``; mutating it (its
         list, or calling its mutators) never affects the agent -- the
         ``Agent`` wrappers are the only locked write path. ``conversation_id``
-        is a dict key, not a record identity: once forking exists, a single
+        is a dict key, not a record identity: once cloning exists, a single
         ``AgentRecord`` can legitimately belong to more than one
         conversation's list.
 
@@ -1019,7 +1034,7 @@ class Agent(AtomicInvokable, ABC):
         """Create a new, empty conversation.
 
         ``name`` must be alphanumeric-plus-underscore and must not end in
-        ``_<digits>`` (that suffix shape is reserved for auto-generated fork
+        ``_<digits>`` (that suffix shape is reserved for auto-generated clone
         names) -- an invalid shape raises ``ValueError``. A name that already
         exists raises ``AgentInvocationError`` -- matches ``register()``'s
         collision behavior elsewhere in AA; never auto-activates either way.
@@ -1340,12 +1355,10 @@ class Agent(AtomicInvokable, ABC):
         pinned turn copy ``create_task`` takes up front). Narrowing the lock
         this way lets true concurrent execution of the actual work happen
         for both sync and async callers sharing one instance. A deliberate,
-        accepted consequence: two concurrent calls targeting the same
-        childless point may race, since nothing serializes the
-        read-tail-then-commit span as a whole -- resolved not by preventing
-        the race but by ``record``'s fresh children check at commit time,
-        which automatically upgrades whichever commits second into a real
-        fork instead of colliding.
+        accepted consequence: two concurrent calls reading the same tail may
+        race, since nothing serializes the read-tail-then-commit span as a
+        whole -- both simply append in commit order, each with ``prev`` set
+        to the record it read (so that record has two children).
 
         The lifecycle, spelled out -- each step is public, so this is also the
         recipe for assembling your own::

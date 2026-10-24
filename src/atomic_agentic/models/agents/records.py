@@ -147,8 +147,9 @@ class AgentRecord:
     (``children``). ``prev=None`` marks a chain root (first invocation or a
     fresh start). Walking ``prev`` backward from any record reconstructs the
     exact conversation branch that produced it; a target with more than one
-    child marks a fork point where more than one conversation continued from
-    the same record.
+    child marks a branch point where more than one conversation (or racing
+    call) continued from the same record. Provenance only: turn selection
+    never reads it.
 
     Fields
     ------

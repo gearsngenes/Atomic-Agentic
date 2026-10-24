@@ -89,8 +89,11 @@ class AgentTask:
         the lifecycle populates it (Pass 8a).
 
     context : dict[str, ContextVariable]
-        Per-call working copy of the bound conversation's context, written
-        only by subclass loop steps and written back at record time.
+        Per-call working copy of the bound conversation's context, seeded by
+        ``create_task`` (a shallow copy; the variables are shared frozen
+        objects) and written back by ``record`` -- see its docstring for the
+        rules. Written only by subclass loop steps, which must skip or raise
+        on a ``readonly`` variable themselves; this dict is not guarded.
 
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,

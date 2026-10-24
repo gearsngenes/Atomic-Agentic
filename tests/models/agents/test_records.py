@@ -408,7 +408,7 @@ class TestAgentRecord:
 
     def test_children_not_normalized_to_tuple(self) -> None:
         # Deliberately mutable -- unlike llm_records, children is appended to
-        # in place after construction (Agent.record's fork-vs-continue
+        # in place after construction (Agent.record's children
         # bookkeeping), so it must stay a real list, not a frozen tuple.
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert isinstance(record.children, list)

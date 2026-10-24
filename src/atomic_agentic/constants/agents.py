@@ -26,7 +26,7 @@ CONVERSATION_NAME_PATTERN: re.Pattern[str] = re.compile(
 """Valid shape for an explicitly-given conversation name (create_conversation's
 `name`, or an explicit `clone_conversation(name=...)`): alphanumeric +
 underscore (same as IDENTIFIER_PATTERN), and must NOT end in `_<digits>` --
-that suffix shape is reserved for auto-generated fork names, which
+that suffix shape is reserved for auto-generated clone names, which
 guarantees "ends in _<digits> iff auto-generated" holds everywhere."""
 
 TRAILING_FORK_INDEX_PATTERN: re.Pattern[str] = re.compile(r"_(\d+)$")
