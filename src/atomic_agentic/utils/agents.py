@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from collections.abc import Iterable
 from typing import Any, Optional
 
 
@@ -22,6 +23,7 @@ from ..constants.core import NO_VAL
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
+from ..models.results.agents import ToolUsageRecord, ToolUsageReport
 
 __all__ = [
     "evaluate_expr",
@@ -33,6 +35,7 @@ __all__ = [
     "strip_code_fence",
     "is_dispatched",
     "tool_identity",
+    "build_usage_report",
     "compile_batches",
     "resolve_statement_args",
 ]
@@ -332,6 +335,41 @@ def tool_identity(call: ToolStatement) -> str:
     if call.tool == ATTR_CALL_ALIAS:
         return call.args[1]
     return call.tool
+
+
+def build_usage_report(
+    statements: Iterable[ToolStatement],
+    failed_statements: Iterable[ToolStatement],
+) -> ToolUsageReport:
+    """
+    Compute per-tool call-count accounting -- one ``ToolUsageRecord`` per
+    distinct real tool identity actually dispatched, ordered by first-call
+    order, ``call_count >= 1`` each (an identity with zero dispatched calls
+    never produces an entry) -- plus ``total_dispatched``/``total_failed``
+    summary counts, bundled into a single ``ToolUsageReport``.
+
+    Walks ``statements`` then ``failed_statements``, in that order, counting
+    only dispatched calls (``is_dispatched``) under their real identity
+    (``tool_identity``). Shared by ``ToolAgentRecord.usage_report()`` and
+    each ``ToolAgent`` family's ``build_result_from_task``, so a result can
+    be built from a task without a record.
+    """
+    failed_statements = tuple(failed_statements)
+    counts: dict[str, int] = {}
+    for call in (*statements, *failed_statements):
+        if is_dispatched(call):
+            identity = tool_identity(call)
+            counts[identity] = counts.get(identity, 0) + 1
+
+    by_tool = tuple(
+        ToolUsageRecord(tool_name=name, call_count=count)
+        for name, count in counts.items()
+    )
+    return ToolUsageReport(
+        by_tool=by_tool,
+        total_dispatched=sum(r.call_count for r in by_tool),
+        total_failed=sum(1 for call in failed_statements if is_dispatched(call)),
+    )
 
 
 def compile_batches(

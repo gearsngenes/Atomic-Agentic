@@ -356,7 +356,9 @@ class TestScriptActAgentPromptContextRendering:
     def test_system_message_includes_excluded_builtins(self) -> None:
         agent = _make_agent(FakeLLMEngine(responses=[]))
 
-        task = agent._initialize_task(turns=[], prompt="x", inputs={})
+        task = agent.create_task({})
+
+        task.user_prompt = "x"
         messages = agent.render_task(task)
 
         system_msg = next(m["content"] for m in messages if m["role"] == "system")
@@ -595,8 +597,9 @@ class TestScriptActAgentMutationSafety:
         original = "hello"
         agent.register_constant(original, alias="mystr")
 
-        task = agent._initialize_task(turns=[], prompt="x", inputs={})
+        task = agent.create_task({})
 
+        task.user_prompt = "x"
         assert task.constant_values["K_MYSTR"] is original
 
     def test_task_result_mutation_does_not_persist_across_invocations(self) -> None:
@@ -716,7 +719,8 @@ class TestScriptActAgentPrepareActEdgeCases:
         # unconditionally on an empty `pending`, with no special-case for a
         # manually-forced needs_repair=True.
         agent = _make_agent(FakeLLMEngine(responses=[]))
-        task = agent._initialize_task(turns=[], prompt="x", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "x"
         task.pending = []
         task.needs_repair = True
 

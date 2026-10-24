@@ -22,7 +22,7 @@ class Conversation:
     ``records`` is a mutable list despite the frozen dataclass -- same
     treatment as ``AgentRecord.children``/``.inputs``: the field bindings are
     frozen; the list's own contents are appended to in place by
-    ``Agent._commit_emit`` and read via direct indexing/slicing elsewhere.
+    ``Agent.record`` and read via direct indexing/slicing elsewhere.
 
     Equality is by value over every field (context values are compared with
     ``==``, so a value with an unusual ``__eq__`` surfaces naturally).

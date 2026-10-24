@@ -160,7 +160,8 @@ class TestReActThinkPrepareHandoff:
             [rstep(call="add", arguments=[arg("x", 1), arg("y", 2)])],
             tool_calls_limit=1,
         )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "run"
         assert task.generated_step is None
         assert task.resolved_args is None
 
@@ -174,7 +175,8 @@ class TestReActThinkPrepareHandoff:
         agent = make_react_agent(
             [rstep(call="return", arguments=[arg("val", 1)])],
         )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "run"
         task = agent.think(task)
         generated_before = task.generated_step
         resolved_before = task.resolved_args
@@ -190,7 +192,8 @@ class TestReActThinkPrepareHandoff:
             [rstep(call="add", arguments=[arg("x", 1), arg("y", 2)])],
             tool_calls_limit=1,
         )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "run"
         task = agent.think(task)
         task = agent.prepare(task)
 
@@ -434,7 +437,8 @@ class TestReActDispatchFailure:
             [rstep(call="fail_tool", arguments=[])],
             fail_fast=False,
         )
-        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "run"
         task = agent.think(task)
         task = agent.act(task)
 

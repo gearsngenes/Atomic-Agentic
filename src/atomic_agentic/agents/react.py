@@ -20,7 +20,7 @@ Distinguishing features relative to ``PlanActAgent``:
   specifically: ``RETURN_TOOL_NAME`` and ``RETURN_ALIAS`` are the identical
   literal string ``"return"`` (`constants/agents.py`), so anywhere else
   ``is_dispatched`` is consulted for *accounting* purposes (see
-  ``build_result_from_record`` below), a real, successful ``return`` call
+  ``build_result_from_task`` below), a real, successful ``return`` call
   is still indistinguishable from the sentinel and gets excluded --
   correctly, per ``ToolUsageRecord.call_count``'s own "non-return
   executions" contract, but via the same string coincidence, not a
@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from typing import Any, Callable, ClassVar, Optional
 
 from .toolagent import ToolAgent
@@ -52,9 +51,9 @@ from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import ReActTask
-from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
+from ..models.agents.records import ToolAgentRecord, LLMRecord
 from ..models.results.agents import ToolAgentResult
-from ..utils.agents import resolve_statement_args
+from ..utils.agents import build_usage_report, resolve_statement_args
 from ..utils.sigils import (
     build_react_schema,
     parse_react_call,
@@ -105,6 +104,9 @@ class ReActAgent(ToolAgent):
     #: Same rationale as PlanActAgent -- see ToolAgent's own
     #: _SIGIL_REFERENCES docstring.
     _SIGIL_REFERENCES: ClassVar[bool] = True
+
+    _TASK_CLS = ReActTask
+    _INITIAL_PROMPT_NAME = "reason_then_act"
 
     def __init__(
         self,
@@ -205,30 +207,6 @@ class ReActAgent(ToolAgent):
     # Shared per-invocation helpers
     # ------------------------------------------------------------------ #
     # _copy_for_task_namespace now inherited from ToolAgent unchanged.
-
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ReActTask:
-        """
-        Build a bare ``ReActTask``, seed its ``cache`` with every visible
-        prior turn's result under ``task_result_{i}``, and seed
-        ``constant_values`` from every registered constant. Mirrors
-        ``PlanActAgent._initialize_task`` exactly.
-        """
-        task = ReActTask(
-            turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="reason_then_act",
-        )
-        for i, turn in enumerate(turns):
-            task.cache[f"task_result_{i}"] = self._copy_for_task_namespace(
-                turn.generated_response
-            )
-        for spec in self._constants.values():
-            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
-        return task
 
     # ------------------------------------------------------------------ #
     # Rendering
@@ -603,27 +581,19 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Record / result construction
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: ReActTask,
-        turns: list[AgentRecord],
-        *,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ToolAgentRecord:
+    def _build_record_from_task(self, task: ReActTask) -> ToolAgentRecord:
         """
         Assemble a completed ``ToolAgentRecord`` from a finished
         ``ReActTask``. Mirrors ``PlanActAgent._build_record_from_task``
         exactly -- no agent-level global blackboard to persist into.
         """
-        prev = turns[-1] if turns else None
+        prev = task.turns[-1] if task.turns else None
         return ToolAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=ended_at,
+            run_id=task.run_id,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -632,34 +602,24 @@ class ReActAgent(ToolAgent):
             regenerations_used=task.regenerations_used,
         )
 
-    def build_result_from_record(
-        self,
-        record: ToolAgentRecord,
-        *,
-        result: Any,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ToolAgentResult:
+    def build_result_from_task(self, task: ReActTask, result: Any) -> ToolAgentResult:
         """
-        Construct this agent's ``ToolAgentResult`` envelope directly
-        from a completed ``ToolAgentRecord``. Mirrors
-        ``PlanActAgent.build_result_from_record`` exactly.
+        Construct this agent's ``ToolAgentResult`` envelope directly from a
+        finished ``ReActTask``. Mirrors ``PlanActAgent.build_result_from_task``
+        exactly.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
-
-        usage_report = record.usage_report()
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = task.llm_records[-1].llm_result.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ToolAgentResult,
-            run_id=run_id,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            usage_report=usage_report,
-            failed_call_count=len(record.failed_statements),
-            regenerations_used=record.regenerations_used,
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
         )

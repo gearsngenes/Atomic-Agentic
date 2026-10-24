@@ -24,7 +24,7 @@ class AgentTask:
     """
     Base run-task contract for one Agent invocation.
 
-    Drives an invocation through ``_initialize_task`` then
+    Drives an invocation through ``create_task`` then
     ``think``/``prepare``/``act`` each round. ``BasicAgent`` uses this base
     class directly; it needs nothing beyond these fields.
 
@@ -32,8 +32,8 @@ class AgentTask:
     ------
     turns : list[AgentRecord]
         The selected conversation turns for this invocation (same list
-        ``_initialize_task`` received). Used for ``prev`` linkage when
-        building the completed record.
+        ``create_task`` pinned). Used for ``prev`` linkage when
+        building the completed record (``turns[-1]``, if any).
 
     inputs : dict[str, Any]
         The full, untouched ``inputs`` mapping from the base ``Agent``
@@ -72,7 +72,7 @@ class AgentTask:
 
     historic_messages : list[dict[str, str]]
         Rendered ``turns``, built lazily once per invoke by
-        ``Agent._render_historic_messages`` and reused for the rest of it.
+        ``Agent.summarize`` and reused for the rest of it.
         Never rebuilt mid-invoke — turn-rendering is phase-invariant,
         governed only by ``response_preview_limit``, itself static
         per-agent config.
@@ -142,11 +142,11 @@ class ToolAgentTask(AgentTask):
 
     cache : dict[str, Any]
         identifier -> resolved value for every call in ``completed``, plus
-        ``task_result_i`` entries seeded once at ``_initialize_task``.
+        ``task_result_i`` entries seeded once by ``_seed_task``.
 
     constant_values : dict[str, Any]
         Registered-constant name -> value, populated once by each concrete
-        agent's own ``_initialize_task`` and never touched again.
+        agent's own ``_seed_task`` and never touched again.
 
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
@@ -410,7 +410,7 @@ class ThinkingTask(AgentTask):
 
     thinking_rounds : int
         Validated per-invocation round budget, resolved once by
-        ``ThinkingAgent._initialize_task`` from the reserved
+        ``ThinkingAgent._seed_task`` from the reserved
         ``thinking_rounds`` runtime parameter and never changed for the
         rest of this task's lifetime. Declared with a default of ``1``
         only because Python dataclass field ordering requires every field

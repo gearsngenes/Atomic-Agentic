@@ -12,7 +12,6 @@ not a construction-time knob -- before replying. There is no early exit.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
 from .base import Agent
@@ -21,7 +20,7 @@ from ..constants.agents import THINKING_ROUNDS_PARAM
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.prompts import PromptConfig
-from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
+from ..models.agents.records import LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
@@ -68,6 +67,9 @@ class ThinkingAgent(BasicAgent):
     """
 
     THINKING_PROMPT_NAME = "thinking"
+
+    _TASK_CLS = ThinkingTask
+    _INITIAL_PROMPT_NAME = THINKING_PROMPT_NAME
 
     DEFAULT_THINKING_PROMPT: str = (
         "You are a thinking assistant that produces various thoughts, "
@@ -144,7 +146,7 @@ class ThinkingAgent(BasicAgent):
             Optional ceiling on the reserved runtime ``thinking_rounds``
             parameter for this instance. ``None`` (default) means
             unlimited -- identical to this parameter not existing.
-            When set, ``_initialize_task`` raises ``AgentInvocationError``
+            When set, ``_seed_task`` raises ``AgentInvocationError``
             if a caller-supplied ``thinking_rounds`` exceeds it. Exists to
             bound cost/latency when this agent is registered as a tool
             under an orchestrating ``ToolAgent`` (``PlanActAgent``/
@@ -160,7 +162,7 @@ class ThinkingAgent(BasicAgent):
         The number of thinking rounds run per invocation is not a
         construction-time parameter -- it is the reserved runtime
         parameter ``thinking_rounds`` (default ``1``, no ceiling here),
-        validated in ``_initialize_task``.
+        validated in ``_seed_task``.
         """
         role_config = normalize_prompt_config(
             role_prompt,
@@ -270,7 +272,7 @@ class ThinkingAgent(BasicAgent):
     def thinking_rounds_limit(self) -> int | None:
         """Ceiling on the reserved runtime ``thinking_rounds`` parameter
         for this instance, or ``None`` if unset (unlimited). Enforced by
-        ``_initialize_task``, which raises ``AgentInvocationError`` if a
+        ``_seed_task``, which raises ``AgentInvocationError`` if a
         caller-supplied ``thinking_rounds`` exceeds it."""
         return self._thinking_rounds_limit
 
@@ -283,28 +285,22 @@ class ThinkingAgent(BasicAgent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ThinkingTask:
+    def _seed_task(self, task: ThinkingTask) -> None:
         """
-        Validate the reserved ``thinking_rounds`` runtime parameter and
-        seed the task with it -- no LLM call here. ``inputs["thinking_rounds"]``
-        is always present (``filter_inputs`` already injected
-        ``THINKING_ROUNDS_PARAM``'s default of ``1`` if the caller omitted
-        it, same guarantee ``run_id`` relies on). An invalid value raises
-        here, before any round runs, rather than deeper inside ``think()``.
+        Validate the reserved ``thinking_rounds`` runtime parameter and seed
+        the task with it -- no LLM call here. ``task.agentic_inputs[
+        "thinking_rounds"]`` is always present (``filter_inputs`` already
+        injected ``THINKING_ROUNDS_PARAM``'s default of ``1`` if the caller
+        omitted it). An invalid value raises here, before any round runs,
+        rather than deeper inside ``think()``.
 
-        The task always starts in the thinking phase; ``thinking_rounds == 0``
-        means ``think()``'s own round-budget check
+        The task always starts in the thinking phase (``_INITIAL_PROMPT_NAME``);
+        ``thinking_rounds == 0`` means ``think()``'s own round-budget check
         (``len(task.thoughts) >= task.thinking_rounds``, true even before
         any round runs) switches straight to the reply phase on the very
         first call, without ever invoking the engine.
         """
-        thinking_rounds = inputs["thinking_rounds"]
+        thinking_rounds = task.agentic_inputs["thinking_rounds"]
         if type(thinking_rounds) is not int or thinking_rounds < 0:
             raise AgentInvocationError(
                 f"{self.full_name}: thinking_rounds must be a concrete int "
@@ -315,14 +311,7 @@ class ThinkingAgent(BasicAgent):
                 f"{self.full_name}: thinking_rounds ({thinking_rounds}) exceeds "
                 f"this instance's thinking_rounds_limit ({self._thinking_rounds_limit})."
             )
-
-        return ThinkingTask(
-            turns=turns,
-            inputs=inputs,
-            user_prompt=prompt,
-            system_prompt_name=self.THINKING_PROMPT_NAME,
-            thinking_rounds=thinking_rounds,
-        )
+        task.thinking_rounds = thinking_rounds
 
     def think(self, task: ThinkingTask) -> ThinkingTask:
         """
@@ -514,53 +503,37 @@ class ThinkingAgent(BasicAgent):
     # ------------------------------------------------------------------ #
     # Finalization
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: ThinkingTask,
-        turns: list[AgentRecord],
-        *,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ThinkingAgentRecord:
+    def _build_record_from_task(self, task: ThinkingTask) -> ThinkingAgentRecord:
         """Persist ``task.thoughts`` directly onto the completed record --
         no agent-level accumulator, no span bookkeeping."""
-        prev = turns[-1] if turns else None
+        prev = task.turns[-1] if task.turns else None
         return ThinkingAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=ended_at,
+            run_id=task.run_id,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
             thoughts=tuple(task.thoughts),
         )
 
-    def build_result_from_record(
-        self,
-        record: ThinkingAgentRecord,
-        *,
-        result: Any,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ThinkingAgentResult:
+    def build_result_from_task(self, task: ThinkingTask, result: Any) -> ThinkingAgentResult:
         """Construct this agent's ``ThinkingAgentResult`` directly from a
-        completed ``ThinkingAgentRecord``."""
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
+        finished ``ThinkingTask``."""
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = task.llm_records[-1].llm_result.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ThinkingAgentResult,
-            run_id=run_id,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            thinking_rounds_used=len(record.thoughts),
+            thinking_rounds_used=len(task.thoughts),
         )
 
     # ------------------------------------------------------------------ #

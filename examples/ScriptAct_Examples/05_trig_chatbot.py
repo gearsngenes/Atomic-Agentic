@@ -3,7 +3,7 @@
 A fixed, scripted sequence of trig/geometry questions run as separate turns
 against the same record_enabled=True ScriptActAgent -- testing whether it
 correctly reuses an EARLIER turn's result via ScriptActAgent's own
-task_result_i cross-invocation addressing (render_turn/_initialize_task),
+task_result_i cross-invocation addressing (render_turn/_seed_task),
 rather than v1 ToolAgent's <<__cN__>> placeholder scheme.
 
 ONESHOT_PLANNER_PROMPT's STRICT RULES #3 already instructs the model to

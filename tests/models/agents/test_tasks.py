@@ -295,7 +295,7 @@ class TestScriptActAgentTask:
 class TestScriptActAgentTaskConstantValuesSeeding:
     """
     Integration-level: constant_values is populated by
-    ScriptActAgent._initialize_task, not by bare ScriptActAgentTask
+    ScriptActAgent.create_task, not by bare ScriptActAgentTask
     construction. Cross-invocation/cross-round mutation-persistence
     behavior belongs to tests/agents/test_script.py's
     TestScriptActAgentMutationSafety -- these cases stay focused on the
@@ -309,8 +309,9 @@ class TestScriptActAgentTaskConstantValuesSeeding:
         )
         agent.register_constant([1, 2, 3], alias="mylist")
 
-        task = agent._initialize_task(turns=[], prompt="test", inputs={})
+        task = agent.create_task({})
 
+        task.user_prompt = "test"
         constant_name = agent.get_constant("mylist").name
         assert task.constant_values == {constant_name: [1, 2, 3]}
 
@@ -322,8 +323,9 @@ class TestScriptActAgentTaskConstantValuesSeeding:
         )
         agent.register_constant(original, alias="mylist")
 
-        task = agent._initialize_task(turns=[], prompt="test", inputs={})
+        task = agent.create_task({})
 
+        task.user_prompt = "test"
         constant_name = agent.get_constant("mylist").name
         assert task.constant_values[constant_name] is not original
 

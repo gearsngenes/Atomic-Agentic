@@ -12,7 +12,7 @@ execution knobs common to both grammars (``tool_calls_limit``,
 ``regeneration_limit``, ``tool_concurrency_limit``).
 
 Deliberately owns no execution engine and no lifecycle body of any kind --
-every ``_initialize_task``/``think``/``prepare``/``act`` (+ async mirror)
+every ``think``/``prepare``/``act`` (+ async mirror)
 hook stays ``@abstractmethod`` here, purely for base-``Agent``-compatible
 type-narrowing/documentation (no new enforcement beyond what ``Agent``'s own
 abstracts already require). Each concrete family's generation/resolution/
@@ -42,7 +42,7 @@ from typing import (
 from .base import Agent
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
-from ..models.agents.tasks import AgentTask
+from ..models.agents.tasks import AgentTask, ToolAgentTask
 from ..exceptions import (
     ToolAgentError,
     ToolRegistrationError,
@@ -960,7 +960,7 @@ class ToolAgent(Agent, ABC):
 
         ``index = kwargs["index"]`` is required -- a missing key raises a
         plain ``KeyError``, no default, no fallback recomputation. This is
-        framework-internal plumbing between ``_render_historic_messages``
+        framework-internal plumbing between ``summarize``
         and ``render_turn``, not a validated external boundary. ``index``
         is the turn's 0-based position within *this invocation's*
         ``task.turns`` (window-relative), never its absolute position in
@@ -1021,22 +1021,25 @@ class ToolAgent(Agent, ABC):
         return [{"role": "system", "content": rendered}]
 
     # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks -- stay fully abstract, no shared body
+    # Task seeding (shared) and lifecycle hooks (abstract, no shared body)
     # ------------------------------------------------------------------ #
-    @abstractmethod
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
+    def _seed_task(self, task: ToolAgentTask) -> None:
         """
-        Build and return this invocation's task. A concrete override is
-        responsible for seeding whatever cross-invocation context this
-        family's own task model needs directly from ``turns``.
+        Seed a freshly built task, in place: ``cache`` with every visible
+        prior turn's result under ``task_result_{i}`` (unconditional over
+        whatever ``task.turns`` contains -- every committed turn is
+        definitionally a completed success under this model) and
+        ``constant_values`` from every registered constant. Both copied via
+        ``_copy_for_task_namespace`` exactly once here, so a mutation is
+        visible for the rest of this invocation's own rounds but never
+        reaches the real constant or a future invocation.
         """
-        ...
+        for i, turn in enumerate(task.turns):
+            task.cache[f"task_result_{i}"] = self._copy_for_task_namespace(
+                turn.generated_response
+            )
+        for spec in self._constants.values():
+            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
 
     @abstractmethod
     def think(self, task: AgentTask) -> AgentTask:

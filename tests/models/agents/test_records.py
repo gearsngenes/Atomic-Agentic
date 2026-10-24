@@ -408,7 +408,7 @@ class TestAgentRecord:
 
     def test_children_not_normalized_to_tuple(self) -> None:
         # Deliberately mutable -- unlike llm_records, children is appended to
-        # in place after construction (Agent._commit_emit's fork-vs-continue
+        # in place after construction (Agent.record's fork-vs-continue
         # bookkeeping), so it must stay a real list, not a frozen tuple.
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert isinstance(record.children, list)
@@ -519,6 +519,18 @@ class TestToolAgentRecord:
 
         assert report.total_dispatched == 1
         assert report.by_tool == (ToolUsageRecord(tool_name="add", call_count=1),)
+
+    def test_usage_report_is_build_usage_report_over_the_record_statements(self) -> None:
+        from atomic_agentic.utils.agents import build_usage_report
+
+        statements = (ToolStatement(identifier="a", tool="add"),)
+        failed = (ToolStatement(identifier="b", tool="sub", exception=ValueError("boom")),)
+        record = ToolAgentRecord(
+            user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
+        )
+
+        assert record.usage_report() == build_usage_report(statements, failed)
+        assert build_usage_report([], []).by_tool == ()
 
 
 class TestThinkingAgentRecord:

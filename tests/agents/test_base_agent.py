@@ -42,7 +42,7 @@ class _MinimalAgent(Agent):
     """Trivial concrete Agent used to test abstract Agent construction and API.
 
     ``act`` performs a single engine call and completes the task; tests
-    that never call invoke() don't need this to run. No ``_initialize_task``
+    that never call invoke() don't need this to run. No ``create_task``
     override -- Agent's concrete base implementation (bare AgentTask,
     ``system_prompt_name=None``) is sufficient. ``think``/``prepare`` stay
     inherited no-ops. Declares one reserved parameter
@@ -506,10 +506,7 @@ class TestAgentPostInvokeRouting:
     def test_missing_required_auto_grafted_param_fails_at_invoke_time(self) -> None:
         agent = make_agent(post_invoke=post_with_suffix)
 
-        with pytest.raises(
-            AgentInvocationError,
-            match="post_invoke Tool failed:.*missing required",
-        ):
+        with pytest.raises(TypeError, match="missing required"):
             agent.invoke({"topic": "pytest", "tone": "strict"})
 
     def test_custom_post_result_key_routes_raw_result(self) -> None:
@@ -2048,15 +2045,15 @@ class TestAgentDescriptionOverrideRemoval:
 
 class TestInvocationLifecycle:
     """Reserved-name exclusion from pre/post slices, full inputs threading
-    to _initialize_task, and AgentRecord.inputs widening."""
+    to create_task, and AgentRecord.inputs widening."""
 
     def test_invoke_receives_full_unsliced_inputs_in_invoke_arg(self) -> None:
         captured: dict[str, Any] = {}
 
         class CapturingAgent(_MinimalAgent):
-            def _initialize_task(self, *, turns, prompt, inputs):  # type: ignore[override]
+            def create_task(self, inputs):  # type: ignore[override]
                 captured.update(inputs)
-                return super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+                return super().create_task(inputs)
 
         agent = CapturingAgent(
             name="a",
@@ -2155,3 +2152,236 @@ class TestInvocationLifecycle:
         agent.invoke({"prompt": "yo"})
         history = agent.get_conversation().records
         assert history[0].inputs is not history[1].inputs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public lifecycle steps (create_task / summarize / pre_process / post_process
+# / record)
+# ─────────────────────────────────────────────────────────────────────────────
+_INPUTS = {"topic": "pytest", "tone": "strict"}
+
+
+def _run_until_post(agent: Agent, inputs: Mapping[str, Any]) -> tuple[AgentTask, Any]:
+    """Hand-assembled lifecycle up to (not including) ``record``."""
+    task = agent.create_task(agent.filter_inputs(inputs))
+    task = agent.summarize(task)
+    task = agent.pre_process(task)
+    while not task.complete:
+        task = agent.think(task)
+        task = agent.prepare(task)
+        task = agent.act(task)
+    return task, agent.post_process(task)
+
+
+class TestCreateTask:
+    def test_binds_conversation_mints_identity_and_leaves_context_empty(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.create_conversation("side")
+        agent.switch_conversation("side")
+
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+
+        assert task.conversation == "side"
+        assert task.run_id and task.started_at is not None and task.ended_at is None
+        assert task.context == {}
+        assert task.user_prompt == ""
+
+    def test_run_ids_are_distinct_per_task(self) -> None:
+        agent = make_agent()
+        inputs = agent.filter_inputs(_INPUTS)
+        assert agent.create_task(inputs).run_id != agent.create_task(inputs).run_id
+
+    @pytest.mark.parametrize(
+        ("window", "expected_topics"),
+        [(None, ["a", "b", "c"]), (2, ["b", "c"]), (0, [])],
+    )
+    def test_turns_follow_records_window(self, window, expected_topics) -> None:
+        agent = make_agent(record_enabled=True)
+        for topic in ("a", "b", "c"):
+            agent.invoke({"topic": topic, "tone": "plain"})
+        agent.records_window = window
+
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+
+        assert [t.inputs["topic"] for t in task.turns] == expected_topics
+
+    def test_turns_are_a_pinned_copy(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke({"topic": "a", "tone": "plain"})
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+
+        agent.invoke({"topic": "b", "tone": "plain"})
+
+        assert len(task.turns) == 1
+
+    def test_task_inputs_is_the_full_filtered_mapping(self) -> None:
+        agent = make_agent()
+        inputs = agent.filter_inputs(_INPUTS)
+        assert agent.create_task(inputs).inputs is inputs
+
+    def test_views_are_slices_not_a_partition(self) -> None:
+        def pre(subject: str, shared: str = "p") -> str:
+            return f"{subject}:{shared}"
+
+        def post(result: str, shared: str = "q", only_post: str = "z") -> str:
+            return f"{result}{shared}{only_post}"
+
+        agent = _MinimalAgent(
+            name="a", namespace="tests", description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            pre_invoke=pre, post_invoke=post,
+            extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
+        )
+        inputs = agent.filter_inputs(
+            {"subject": "s", "shared": "x", "only_post": "y", "lang": "fr"}
+        )
+
+        task = agent.create_task(inputs)
+
+        assert task.pre_inputs == {"subject": "s", "shared": "x"}
+        assert task.post_inputs == {"shared": "x", "only_post": "y"}
+        # reserved + extra_parameters names only; the reserved name is in no
+        # other view.
+        assert task.agentic_inputs == {"lang": "fr", "dummy_reserved": None}
+        assert "dummy_reserved" not in task.pre_inputs
+        assert "dummy_reserved" not in task.post_inputs
+
+
+class TestSummarizeAndPreProcess:
+    def test_summarize_renders_window_relative_history(self) -> None:
+        agent = make_agent(record_enabled=True, records_window=1)
+        agent.invoke({"topic": "a", "tone": "plain"})
+        agent.invoke({"topic": "b", "tone": "plain"})
+
+        task = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS)))
+
+        assert [m["role"] for m in task.historic_messages] == ["user", "assistant"]
+        assert "b" in task.historic_messages[0]["content"]
+
+    def test_summarize_with_no_turns_leaves_history_empty(self) -> None:
+        agent = make_agent()
+        task = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS)))
+        assert task.historic_messages == []
+
+    def test_async_summarize_matches_sync(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke({"topic": "a", "tone": "plain"})
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        expected = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS))).historic_messages
+
+        task = asyncio.run(agent.async_summarize(task))
+
+        assert task.historic_messages == expected
+
+    def test_pre_process_sets_and_overwrites_user_prompt(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        task.user_prompt = "stale"
+
+        task = agent.pre_process(task)
+
+        assert task.user_prompt == "Write about pytest in a strict tone."
+
+    def test_pre_process_non_string_raises(self) -> None:
+        def pre_any(prompt: str) -> Any:
+            return 123
+
+        agent = make_agent(pre_invoke=pre_any)
+        task = agent.create_task(agent.filter_inputs({"prompt": "x"}))
+        with pytest.raises(AgentInvocationError, match="non-string"):
+            agent.pre_process(task)
+
+    def test_async_pre_process_matches_sync(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        task = asyncio.run(agent.async_pre_process(task))
+        assert task.user_prompt == "Write about pytest in a strict tone."
+
+
+class TestPostProcessAndRecord:
+    def test_post_process_builds_result_from_the_task(self) -> None:
+        agent = make_agent()
+        task, result = _run_until_post(agent, _INPUTS)
+
+        assert result.run_id == task.run_id
+        assert result.started_at == task.started_at
+        assert result.ended_at == task.ended_at and task.ended_at is not None
+        assert result.result["final"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_post_process_does_not_mutate_post_inputs(self) -> None:
+        agent = make_agent(post_invoke=post_with_suffix)
+        task = agent.pre_process(agent.create_task(agent.filter_inputs({**_INPUTS, "suffix": "!"})))
+        while not task.complete:
+            task = agent.act(task)
+        before = dict(task.post_inputs)
+
+        agent.post_process(task)
+
+        assert task.post_inputs == before
+
+    def test_async_post_process_matches_sync(self) -> None:
+        agent = make_agent()
+        task = agent.pre_process(agent.create_task(agent.filter_inputs(_INPUTS)))
+        while not task.complete:
+            task = agent.act(task)
+        sync = agent.post_process(task)
+
+        asynchronous = asyncio.run(agent.async_post_process(task))
+
+        assert asynchronous.result == sync.result
+        assert asynchronous.run_id == sync.run_id
+
+    def test_record_disabled_stores_nothing(self) -> None:
+        agent = make_agent(record_enabled=False)
+        task, _ = _run_until_post(agent, _INPUTS)
+        agent.record(task)
+        assert agent.get_conversation().records == []
+
+    def test_record_appends_with_task_identity_and_prev(self) -> None:
+        agent = make_agent(record_enabled=True)
+        first_task, _ = _run_until_post(agent, _INPUTS)
+        agent.record(first_task)
+        second_task, _ = _run_until_post(agent, _INPUTS)
+        agent.record(second_task)
+
+        first, second = agent.get_conversation().records
+        assert first.run_id == first_task.run_id and first.prev is None
+        assert second.run_id == second_task.run_id and second.prev is first
+        assert first.children == [second]
+
+    def test_record_forks_when_the_read_point_already_has_a_child(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke(_INPUTS)
+        slow_task, _ = _run_until_post(agent, _INPUTS)  # read the 1-record tail
+        agent.invoke(_INPUTS)  # a racing call commits first
+
+        agent.record(slow_task)
+
+        assert len(agent.get_conversation().records) == 2  # default untouched
+        forks = [n for n in agent._conversations if n != "default"]
+        assert len(forks) == 1
+        assert agent._conversations[forks[0]].records[-1].run_id == slow_task.run_id
+
+    def test_record_at_window_zero_appends_a_root_without_forking(self) -> None:
+        agent = make_agent(record_enabled=True, records_window=0)
+        agent.invoke(_INPUTS)
+        slow_task, _ = _run_until_post(agent, _INPUTS)
+        agent.invoke(_INPUTS)
+
+        agent.record(slow_task)
+
+        records = agent.get_conversation().records
+        assert len(records) == 3 and list(agent._conversations) == ["default"]
+        assert all(r.prev is None for r in records)
+
+    def test_hand_assembled_lifecycle_matches_invoke(self) -> None:
+        manual = make_agent(record_enabled=True)
+        task, result = _run_until_post(manual, _INPUTS)
+        manual.record(task)
+
+        automatic = make_agent(record_enabled=True)
+        auto_result = automatic.invoke(_INPUTS)
+
+        assert result.result == auto_result.result
+        m, a = manual.get_conversation().records[0], automatic.get_conversation().records[0]
+        assert (m.user_prompt, m.generated_response, m.inputs) == (a.user_prompt, a.generated_response, a.inputs)

@@ -341,7 +341,8 @@ class TestThinkPhase:
     def test_noops_once_in_role_phase(self) -> None:
         engine = FakeLLMEngine([])
         agent = make_agent(engine=engine)
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         task.system_prompt_name = "role"
 
         updated = agent.think(task)
@@ -361,7 +362,8 @@ class TestThinkPhase:
 class TestActPhase:
     def test_act_no_ops_while_still_thinking(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         assert task.system_prompt_name != "role"
 
         updated = agent.act(task)
@@ -371,8 +373,8 @@ class TestActPhase:
 
     def test_async_act_no_ops_while_still_thinking(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
-
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         updated = asyncio.run(agent.async_act(task))
 
         assert updated is task
@@ -381,7 +383,8 @@ class TestActPhase:
     def test_act_delegates_to_basic_agent_body_once_in_reply_phase(self) -> None:
         engine = FakeLLMEngine(["reply text"])
         agent = make_agent(engine=engine)
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 0})
+        task = agent.create_task({"thinking_rounds": 0})
+        task.user_prompt = "hello"
         task = agent.think(task)  # thinking_rounds=0 -> switches straight to "role"
         assert task.system_prompt_name == "role"
 
@@ -482,23 +485,24 @@ class TestResponseSchema:
 class TestRenderPipeline:
     def test_thinking_system_message_renders_default_prompt_when_no_instructions_given(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]), thinking_instructions=None)
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
-
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         rendered = agent._render_system_message(task)
 
         assert rendered[0]["content"] == ThinkingAgent.DEFAULT_THINKING_PROMPT
 
     def test_thinking_system_message_renders_given_instructions_verbatim(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]), thinking_instructions="Focus on edge cases.")
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
-
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         rendered = agent._render_system_message(task)
 
         assert rendered[0]["content"] == "Focus on edge cases."
 
     def test_role_phase_system_message_delegates_to_role_prompt(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]), role_prompt="You are a distinctly-worded persona.")
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 0})
+        task = agent.create_task({"thinking_rounds": 0})
+        task.user_prompt = "hello"
         task = agent.think(task)  # switches to "role"
 
         rendered = agent._render_system_message(task)
@@ -507,8 +511,8 @@ class TestRenderPipeline:
 
     def test_thinking_task_messages_banner_only_on_first_round(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
-
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         rendered = agent._render_task_messages(task)
 
         assert len(rendered) == 1
@@ -517,7 +521,8 @@ class TestRenderPipeline:
 
     def test_thinking_task_messages_one_message_pair_per_completed_thought(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         task.thoughts.append("first thought")
         task.thoughts.append({"a": 1})
 
@@ -534,7 +539,8 @@ class TestRenderPipeline:
 
     def test_thinking_phase_messages_never_contain_round_headers(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         task.thoughts.append("first thought")
         task.thoughts.append({"a": 1})
 
@@ -544,7 +550,8 @@ class TestRenderPipeline:
 
     def test_role_phase_task_messages_include_thoughts_snapshot_and_respond_instruction(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
         task.thoughts.append("reasoned thing")
         task.system_prompt_name = "role"
 
@@ -557,7 +564,8 @@ class TestRenderPipeline:
 
     def test_role_phase_task_messages_banner_only_when_no_thoughts(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
-        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 0})
+        task = agent.create_task({"thinking_rounds": 0})
+        task.user_prompt = "hello"
         task.system_prompt_name = "role"
 
         rendered = agent._render_task_messages(task)

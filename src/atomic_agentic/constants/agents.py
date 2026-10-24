@@ -87,7 +87,7 @@ RETURN_TOOL_FULL_NAME = (
 # - utils/script.py: parse_statement_to_slots hoisting/rhs_assign/return/
 #   task-result-reference logic
 # - agents/toolagent.py: ToolAgent.render_turn cross-invocation result
-#   addressing (TASK_RESULT_PREFIX); agents/scriptact.py: _initialize_task
+#   addressing (TASK_RESULT_PREFIX); agents/toolagent.py: _seed_task
 #   seeds the same addressing into task.cache
 #
 # Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/

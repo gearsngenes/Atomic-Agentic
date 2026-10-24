@@ -6,7 +6,7 @@ import logging
 
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import LLMRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
 from ..utils.agents import normalize_prompt_config
@@ -34,6 +34,9 @@ class BasicAgent(Agent):
     """
 
     DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
+
+    _TASK_CLS = AgentTask
+    _INITIAL_PROMPT_NAME = "role"
 
     def __init__(
         self,
@@ -107,23 +110,6 @@ class BasicAgent(Agent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """Build this invocation's task, stamping the role-prompt name.
-
-        ``Agent``'s concrete base implementation builds a bare ``AgentTask``
-        from ``turns``/``prompt``/``inputs``; this override adds only the
-        ``system_prompt_name`` stamp ``render_task`` needs.
-        """
-        task = super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
-        task.system_prompt_name = "role"
-        return task
-
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.
 

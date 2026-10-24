@@ -215,14 +215,14 @@ class TestToolAgentConstruction:
 class TestToolAgentAbstractContract:
     """ToolAgent re-abstracts every Agent task-lifecycle hook -- confirmed
     live via `ToolAgent.__abstractmethods__` (8 entries, no shared body for
-    any of them): _initialize_task/think/async_think/prepare/async_prepare/
+    any of them): think/async_think/prepare/async_prepare/
     act/async_act/_render_task_messages. There is no concrete, final act()/
     async_act() on ToolAgent anymore -- that shared generic loop was removed;
     each concrete family (PlanActAgent/ReActAgent/ScriptActAgent) owns its
     own full lifecycle now."""
 
     _EXPECTED_ABSTRACTMETHODS = frozenset({
-        "_initialize_task", "think", "async_think", "prepare", "async_prepare",
+        "think", "async_think", "prepare", "async_prepare",
         "act", "async_act", "_render_task_messages",
     })
 
@@ -243,9 +243,6 @@ class TestToolAgentAbstractContract:
 
     def test_subclass_missing_hooks_cannot_instantiate(self) -> None:
         class _IncompleteAgent(ToolAgent):
-            def _initialize_task(self, *, turns, prompt, inputs):  # type: ignore[override]
-                raise NotImplementedError
-
             def think(self, task):  # type: ignore[override]
                 return task
 
@@ -816,8 +813,8 @@ class TestSystemMessageRendering:
         agent = _plain_agent()
         agent.register_tool(add)
         agent.register_constant(7, alias="SEVEN", description="Lucky number.")
-        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
-
+        task = agent.create_task({})
+        task.user_prompt = "do work"
         rendered = agent._render_system_message(task)
 
         assert len(rendered) == 1
@@ -827,23 +824,24 @@ class TestSystemMessageRendering:
 
     def test_render_system_message_empty_when_system_prompt_name_none(self) -> None:
         agent = _plain_agent()
-        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
+        task = agent.create_task({})
+        task.user_prompt = "do work"
         task.system_prompt_name = None
 
         assert agent._render_system_message(task) == []
 
     def test_render_system_message_omits_banner_when_tool_instructions_unset(self) -> None:
         agent = _plain_agent()
-        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
-
+        task = agent.create_task({})
+        task.user_prompt = "do work"
         content = agent._render_system_message(task)[0]["content"]
 
         assert "ADDITIONAL TOOL INSTRUCTIONS" not in content
 
     def test_render_system_message_appends_tool_instructions_banner_when_set(self) -> None:
         agent = _plain_agent(tool_instructions="Always say hi.")
-        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
-
+        task = agent.create_task({})
+        task.user_prompt = "do work"
         content = agent._render_system_message(task)[0]["content"]
 
         assert "ADDITIONAL TOOL INSTRUCTIONS" in content
@@ -854,8 +852,8 @@ class TestSystemMessageRendering:
         config = PromptConfig(template="See: {TOOLS}", description="d")
         agent = _plain_agent(tool_instructions=config)
         agent.register_tool(add)
-        task = agent._initialize_task(turns=[], prompt="do work", inputs={})
-
+        task = agent.create_task({})
+        task.user_prompt = "do work"
         content = agent._render_system_message(task)[0]["content"]
 
         banner = content[content.index("ADDITIONAL TOOL INSTRUCTIONS"):]
@@ -867,9 +865,7 @@ class TestSystemMessageRendering:
 
     def test_render_system_message_tool_instructions_renders_against_task_inputs(self) -> None:
         agent = _plain_agent(tool_instructions="Repeat {loops} times.")
-        task = agent._initialize_task(
-            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
-        )
+        task = agent.create_task({"prompt": "do work", "loops": 3})
 
         content = agent._render_system_message(task)[0]["content"]
 
@@ -899,15 +895,11 @@ class TestSystemMessageRendering:
 
     def test_render_system_message_base_prompt_unaffected_by_task_inputs(self) -> None:
         agent = _plain_agent(tool_instructions="Repeat {loops} times.")
-        task = agent._initialize_task(
-            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
-        )
+        task = agent.create_task({"prompt": "do work", "loops": 3})
         content = agent._render_system_message(task)[0]["content"]
 
         baseline_agent = _plain_agent()
-        baseline_task = baseline_agent._initialize_task(
-            turns=[], prompt="do work", inputs={"prompt": "do work", "loops": 3}
-        )
+        baseline_task = baseline_agent.create_task({"prompt": "do work", "loops": 3})
         baseline_content = baseline_agent._render_system_message(baseline_task)[0]["content"]
 
         # The base prompt's own rendering (TOOLS/CONSTANTS only) is a
@@ -916,6 +908,27 @@ class TestSystemMessageRendering:
         # leaks into that shared prefix.
         assert content.startswith(baseline_content)
         assert "3" not in baseline_content
+
+
+class TestCreateTaskSeeding:
+    def test_agentic_inputs_exclude_render_context_names(self) -> None:
+        agent = _plain_agent()
+        task = agent.create_task(agent.filter_inputs({"prompt": "do work"}))
+
+        assert task.agentic_inputs == {}
+        assert agent.TOOLS_FIELD not in task.agentic_inputs
+
+    def test_seed_task_copies_prior_turn_results_and_constants(self) -> None:
+        agent = make_planact_agent(
+            [_scripted_plan(plan=[], return_value=7)], record_enabled=True
+        )
+        agent.register_constant(3, alias="limit")
+        agent.invoke({"prompt": "first"})
+
+        task = agent.create_task(agent.filter_inputs({"prompt": "second"}))
+
+        assert task.cache == {"task_result_0": 7}
+        assert task.constant_values == {"K_LIMIT": 3}
 
 
 class TestRenderTurn:

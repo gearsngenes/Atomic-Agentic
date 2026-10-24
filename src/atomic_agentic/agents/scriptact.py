@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import builtins
-from datetime import datetime
 from typing import Any, Callable, Optional
 
 from ..mcp.MCPClientHub import MCPClientHub
@@ -16,7 +15,7 @@ from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
-from ..models.agents.records import AgentRecord, LLMRecord, ScriptActAgentRecord
+from ..models.agents.records import LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
@@ -33,7 +32,7 @@ from ..exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
-from ..utils.agents import compile_batches, is_dispatched, resolve_statement_args
+from ..utils.agents import build_usage_report, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
     parse_generation,
@@ -94,6 +93,9 @@ class ScriptActAgent(ToolAgent):
     base (``fail_fast`` is independently declared here, same pattern as
     ``PlanActAgent``'s/``ReActAgent``'s own, different semantics).
     """
+
+    _TASK_CLS = ScriptActAgentTask
+    _INITIAL_PROMPT_NAME = "planner"
 
     def __init__(
         self,
@@ -243,29 +245,19 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Record construction
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: ScriptActAgentTask,
-        turns: list[AgentRecord],
-        *,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ScriptActAgentRecord:
+    def _build_record_from_task(self, task: ScriptActAgentTask) -> ScriptActAgentRecord:
         """
         Assemble a completed ``ScriptActAgentRecord`` from a finished
-        ``ScriptActAgentTask``. No agent-level global blackboard to persist
-        into (unlike the legacy v1 blackboard agent's span-tracking
-        ``update_blackboard`` append) -- each record owns its own slots
-        outright, so this is a direct field copy.
+        ``ScriptActAgentTask``. Each record owns its own slots outright, so
+        this is a direct field copy.
         """
-        prev = turns[-1] if turns else None
+        prev = task.turns[-1] if task.turns else None
         return ScriptActAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=ended_at,
+            run_id=task.run_id,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
@@ -275,40 +267,29 @@ class ScriptActAgent(ToolAgent):
             repair_rounds_used=task.repair_rounds_used,
         )
 
-    def build_result_from_record(
-        self,
-        record: ScriptActAgentRecord,
-        *,
-        result: Any,
-        run_id: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ScriptActAgentResult:
+    def build_result_from_task(self, task: ScriptActAgentTask, result: Any) -> ScriptActAgentResult:
         """
-        Construct this agent's ``ScriptActAgentResult`` envelope directly
-        from a completed ``ScriptActAgentRecord`` -- surfaces
-        ``regenerations_used``/``repair_rounds_used`` past the ephemeral
-        task, mirroring ``PlanActAgent.build_result_from_record``'s own
-        pattern for ``regenerations_used``. Also populates ``usage_report``
-        (via ``record.usage_report()``) and ``failed_call_count`` (via
-        ``len(record.failed_statements)``), both required fields inherited
-        from ``ToolAgentResult``.
+        Construct this agent's ``ScriptActAgentResult`` envelope directly from
+        a finished ``ScriptActAgentTask`` -- surfaces ``regenerations_used``/
+        ``repair_rounds_used`` past the ephemeral task. Also populates
+        ``usage_report`` (via ``build_usage_report``) and ``failed_call_count``,
+        both required fields inherited from ``ToolAgentResult``.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = task.llm_records[-1].llm_result.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ScriptActAgentResult,
-            run_id=run_id,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            usage_report=record.usage_report(),
-            failed_call_count=len(record.failed_statements),
-            regenerations_used=record.regenerations_used,
-            repair_rounds_used=record.repair_rounds_used,
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
+            repair_rounds_used=task.repair_rounds_used,
         )
 
     # ------------------------------------------------------------------ #
@@ -326,38 +307,6 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ScriptActAgentTask:
-        """Return a ``ScriptActAgentTask`` with the planner system prompt
-        active, its ``cache`` pre-seeded with every visible prior turn's
-        result under ``task_result_{i}`` -- unconditional over whatever
-        ``turns`` contains (empty when there's nothing to seed; already
-        gated upstream by conversation-resolution/``records_window``) --
-        and its ``constant_values`` pre-seeded from
-        every registered constant. Both are copied via
-        ``_copy_for_task_namespace`` exactly once here, not re-derived
-        later, so a mutation is visible for the rest of this invocation's
-        own rounds but never reaches the real constant or a future
-        invocation. No other field needs seeding -- completed/pending/
-        resolved_args/needs_repair/repair_rounds_used/tool_calls_used/
-        repair_batch_start/failed_statements all start at their dataclass
-        defaults."""
-        task = ScriptActAgentTask(
-            turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
-        )
-        for i, turn in enumerate(turns):
-            task.cache[f"task_result_{i}"] = self._copy_for_task_namespace(
-                turn.generated_response
-            )
-        for spec in self._constants.values():
-            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
-        return task
-
     def _render_current_task_message(self, task: ScriptActAgentTask) -> dict[str, str]:
         """Bare "what is the task" user message -- reused verbatim for
         round 1 and every repair round's opening message, deduping a
@@ -485,7 +434,7 @@ class ScriptActAgent(ToolAgent):
         known_constants = frozenset(spec.name for spec in self._constants.values())
         # Every key already in task.cache is safe to reference by name here:
         # cross-invocation task_result_i entries (seeded in
-        # _initialize_task) AND, on a continuation round, every identifier
+        # create_task/_seed_task) AND, on a continuation round, every identifier
         # bound by an earlier round's own completed slots this same
         # invoke -- the exact names the "work completed so far" snapshot
         # (_render_task_messages) shows the model. Not scoped to the
@@ -712,7 +661,7 @@ class ScriptActAgent(ToolAgent):
         # Constants are validated as known references (validate_references'
         # known_constants) and rendered to the model (constants_context()),
         # but their actual runtime values live in task.constant_values --
-        # a per-invocation copy seeded once by _initialize_task, never
+        # a per-invocation copy seeded once by _seed_task, never
         # re-derived from self._constants here (that would hand out the
         # live, shared constant object fresh every batch, defeating the
         # "a mutation stays visible for the rest of this invocation, never

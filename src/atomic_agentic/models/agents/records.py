@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
-from ..results.agents import ToolUsageRecord, ToolUsageReport
+from ..results.agents import ToolUsageReport
 from ..results.llm import LLMResult
 from .blackboard_models import ToolStatement
 
@@ -24,7 +24,7 @@ from .blackboard_models import ToolStatement
 # utils.script to already be fully initialized -- they aren't yet, since
 # we're still inside their own top-level import statement. Deferring to
 # call time breaks the cycle with no behavior change (every such function is
-# only ever invoked well after import time). ToolUsageRecord (imported at
+# only ever invoked well after import time). ToolUsageReport (imported at
 # module level above) is a different, proven-safe case -- it comes from
 # ..results.agents, which never imports back into models.agents at all, so
 # no cycle exists for it.
@@ -160,7 +160,7 @@ class AgentRecord:
     inputs:
         The full filtered top-level inputs mapping for this invocation (post
         ``filter_inputs``, pre pre/post-invoke slicing) — the same dict the
-        task's ``_initialize_task`` received. Retained for
+        task's ``create_task`` pinned. Retained for
         provenance/observability only; not consumed when reconstructing this
         turn's rendered content (``render_turn`` uses ``user_prompt``
         verbatim).
@@ -173,7 +173,7 @@ class AgentRecord:
         This record's own identity. Optional at construction
         (``None``-default, keyword-only) -- auto-minted via ``uuid4().hex``
         in ``__post_init__`` if omitted, mirroring ``AtomicResult.run_id``'s
-        own precedent. ``Agent._commit_emit`` always passes an explicit
+        own precedent. ``Agent.record`` always passes an explicit
         value in production; the default exists purely for bare-
         construction convenience (tests, ad-hoc usage).
 
@@ -224,7 +224,7 @@ class AgentRecord:
         object.__setattr__(self, "inputs", dict(self.inputs))
 
         # Identity/timing auto-fill -- mirrors AtomicResult.run_id's own
-        # None-default-then-mint precedent. Production (_commit_emit) always
+        # None-default-then-mint precedent. Production (Agent.record) always
         # supplies explicit values; this exists purely for bare-construction
         # convenience.
         object.__setattr__(self, "run_id", self.run_id or uuid4().hex)
@@ -389,26 +389,9 @@ class ToolAgentRecord(AgentRecord):
         sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
         statement, whose ``tool`` is already the real identity).
         """
-        from ...utils.agents import is_dispatched, tool_identity
+        from ...utils.agents import build_usage_report
 
-        counts: dict[str, int] = {}
-        for call in (*self.statements, *self.failed_statements):
-            if is_dispatched(call):
-                identity = tool_identity(call)
-                counts[identity] = counts.get(identity, 0) + 1
-
-        by_tool = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in counts.items()
-        )
-        total_dispatched = sum(r.call_count for r in by_tool)
-        total_failed = sum(1 for call in self.failed_statements if is_dispatched(call))
-
-        return ToolUsageReport(
-            by_tool=by_tool,
-            total_dispatched=total_dispatched,
-            total_failed=total_failed,
-        )
+        return build_usage_report(self.statements, self.failed_statements)
 
 
 @dataclass(frozen=True, slots=True)

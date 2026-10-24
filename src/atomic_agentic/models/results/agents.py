@@ -197,8 +197,8 @@ class ToolAgentResult(AgentResult):
     usage_report:
         ``ToolUsageReport`` summarizing per-tool call counts plus
         ``total_dispatched``/``total_failed`` for the invocation. Re-derived
-        (by the caller, e.g. ``PlanActAgent.build_result_from_record``) from
-        ``record.usage_report()`` rather than a blackboard span.
+        (by the caller, e.g. ``PlanActAgent.build_result_from_task``) via
+        ``utils.agents.build_usage_report`` over the task's statements.
 
     failed_call_count:
         Count of calls whose dispatch actually raised this run -- a cheap
@@ -238,9 +238,9 @@ class ScriptActAgentResult(ToolAgentResult):
     Successful ScriptActAgent invocation result, a ``ToolAgentResult``
     subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
     are all real, inherited, required fields -- ``agents/scriptact.py``'s
-    ``build_result_from_record`` populates ``usage_report``/
-    ``failed_call_count`` via ``record.usage_report()``/
-    ``len(record.failed_statements)``, mirroring ``PlanActAgent``'s/
+    ``build_result_from_task`` populates ``usage_report``/
+    ``failed_call_count`` via ``build_usage_report``/
+    ``len(task.failed_statements)``, mirroring ``PlanActAgent``'s/
     ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
     genuinely ``ScriptActAgent``-specific.
 
