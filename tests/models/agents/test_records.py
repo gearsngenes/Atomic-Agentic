@@ -91,6 +91,7 @@ class TestContextVariable:
             "name": "THRESHOLD",
             "value": 0.75,
             "description": "Decision threshold.",
+            "readonly": False,
             "type": "float",
         }
 
@@ -121,6 +122,20 @@ class TestContextVariable:
 
         assert updated.type == "str"
         assert spec.type == "int"
+
+    def test_readonly_defaults_false_and_rejects_non_bool(self) -> None:
+        assert ContextVariable(name="X", value=1).readonly is False
+
+        for bad in (0, 1, "yes", None):
+            with pytest.raises(TypeError, match="readonly"):
+                ContextVariable(name="X", value=1, readonly=bad)  # type: ignore[arg-type]
+
+    def test_readonly_survives_replace_and_appears_in_to_dict_and_equality(self) -> None:
+        spec = ContextVariable(name="X", value=1, readonly=True)
+
+        assert replace(spec, value=2).readonly is True
+        assert spec.to_dict()["readonly"] is True
+        assert spec != ContextVariable(name="X", value=1)
 
 
 class TestLLMRecord:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
 from .blackboard_models import ToolStatement
+from .context import ContextVariable
 from .records import AgentRecord, LLMRecord
 
 __all__ = [
@@ -39,7 +41,9 @@ class AgentTask:
 
     user_prompt : str
         The fully-resolved prompt string produced by ``pre_invoke`` for this
-        invocation (matches ``AgentRecord.user_prompt`` 1:1).
+        invocation (matches ``AgentRecord.user_prompt`` 1:1). Defaults to
+        ``""`` so a task can exist before ``pre_process`` runs; ``pre_process``
+        always overwrites it.
 
     system_prompt_name : str | None
         Identifies which entry in ``self._system_prompts`` governs the
@@ -79,17 +83,43 @@ class AgentTask:
         across generation retries within one phase. Cleared by the owning
         subclass at its own phase boundary (e.g. ``PlanActAgent`` once
         planning finishes; ``ReActAgent`` after each step commits).
+
+    conversation : str | None
+        Name of the conversation this invocation is bound to. ``None`` until
+        the lifecycle populates it (Pass 8a).
+
+    context : dict[str, ContextVariable]
+        Per-call working copy of the bound conversation's context, written
+        only by subclass loop steps and written back at record time.
+
+    pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
+        Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
+        agent-specific). A name consumed by more than one goes into every
+        bucket that declares it.
+
+    run_id, started_at, ended_at : str | None, datetime | None, datetime | None
+        Identity and timing shared by the result and the record built from
+        this task. ``None`` until the lifecycle mints them (Pass 8a).
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
-    user_prompt: str
     system_prompt_name: str | None
 
+    user_prompt: str = ""
     llm_records: list[LLMRecord] = field(default_factory=list)
     complete: bool = False
     generated_response: Any = NO_VAL
     historic_messages: list[dict[str, str]] = field(default_factory=list)
     task_messages: list[dict[str, str]] = field(default_factory=list)
+
+    conversation: str | None = None
+    context: dict[str, ContextVariable] = field(default_factory=dict)
+    pre_inputs: dict[str, Any] = field(default_factory=dict)
+    post_inputs: dict[str, Any] = field(default_factory=dict)
+    agentic_inputs: dict[str, Any] = field(default_factory=dict)
+    run_id: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
 
 
 @dataclass(slots=True)

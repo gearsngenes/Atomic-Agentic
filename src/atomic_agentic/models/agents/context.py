@@ -35,11 +35,18 @@ class ContextVariable:
         Optional human-readable context. Normalized: blank/whitespace-only
         collapses to ``None`` in ``__post_init__``. Non-string, non-``None``
         raises ``TypeError``.
+
+    readonly : bool
+        Never overwritten: ``Conversation.remember``/``remember_many``/
+        ``describe`` and a task's write-back all refuse or skip a readonly
+        variable. It can still be forgotten. Must be a ``bool``
+        (``TypeError`` otherwise).
     """
 
     name: str
     value: Any
     description: str | None = None
+    readonly: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -61,6 +68,9 @@ class ContextVariable:
                     "ContextVariable.description must be a string or None."
                 )
             normalized_description = self.description.strip() or None
+
+        if not isinstance(self.readonly, bool):
+            raise TypeError("ContextVariable.readonly must be a bool.")
 
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "description", normalized_description)
@@ -90,5 +100,6 @@ class ContextVariable:
             "name": self.name,
             "value": self.value,
             "description": self.description,
+            "readonly": self.readonly,
             "type": self.type,
         }

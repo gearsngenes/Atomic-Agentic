@@ -12,6 +12,7 @@ from atomic_agentic.models.agents.tasks import (
     ThinkingTask,
 )
 from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.models.agents.context import ContextVariable
 from ...fake_engines import FakeLLMEngine
 
 
@@ -325,3 +326,42 @@ class TestScriptActAgentTaskConstantValuesSeeding:
 
         constant_name = agent.get_constant("mylist").name
         assert task.constant_values[constant_name] is not original
+
+
+class TestAgentTaskContextFields:
+    def test_new_fields_default(self) -> None:
+        task = AgentTask(turns=[], inputs={}, system_prompt_name="role")
+
+        assert task.user_prompt == ""
+        assert task.conversation is None
+        assert task.context == {}
+        assert task.pre_inputs == {}
+        assert task.post_inputs == {}
+        assert task.agentic_inputs == {}
+        assert task.run_id is None
+        assert task.started_at is None
+        assert task.ended_at is None
+
+    def test_new_mutable_fields_are_per_instance(self) -> None:
+        first = AgentTask(turns=[], inputs={}, system_prompt_name="role")
+        second = AgentTask(turns=[], inputs={}, system_prompt_name="role")
+
+        first.context["x"] = ContextVariable(name="x", value=1)
+        first.pre_inputs["a"] = 1
+        first.post_inputs["b"] = 2
+        first.agentic_inputs["c"] = 3
+
+        assert second.context == {}
+        assert second.pre_inputs == {}
+        assert second.post_inputs == {}
+        assert second.agentic_inputs == {}
+
+    @pytest.mark.parametrize(
+        "task_cls", [ToolAgentTask, ScriptActAgentTask, PlanActTask, ReActTask, ThinkingTask]
+    )
+    def test_subclass_tasks_inherit_new_fields(self, task_cls: type[AgentTask]) -> None:
+        task = task_cls(turns=[], inputs={}, system_prompt_name="role")
+
+        assert task.user_prompt == ""
+        assert task.context == {}
+        assert task.conversation is None
