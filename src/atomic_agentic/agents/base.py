@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Set as AbstractSet
 from typing import (
     Any,
     Callable,
@@ -30,8 +30,6 @@ from ..models.agents.tasks import AgentTask
 from ..models.agents.conversations import Conversation
 from ..models.agents.context import ContextVariable
 
-logger = logging.getLogger(__name__)
-
 from .tools import identity_pre_tool
 from ..constants.core import IDENTIFIER_PATTERN
 from ..constants.agents import (
@@ -48,6 +46,8 @@ from ..utils.parameters import (
     apply_parameter_reports,
 )
 from ..utils.agents import stringify_result
+
+logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -67,25 +67,10 @@ class Agent(AtomicInvokable, ABC):
 
     Lifecycle
     ---------
-    ``invoke(inputs)`` follows this sequence (``async_invoke`` mirrors it):
-
-    1. ``filter_inputs`` collects declared keys and injects defaults.
-    2. ``create_task`` binds the active conversation, pins the windowed
-       turns, mints ``run_id``/``started_at``, slices the filtered ``inputs``
-       into the ``pre_inputs``/``post_inputs``/``agentic_inputs`` views
-       (reserved names are excluded from the pre/post views), and builds
-       this family's task.
-    3. ``summarize`` renders ``task.turns`` into ``task.historic_messages``.
-    4. ``pre_process`` converts ``task.pre_inputs`` to the prompt string.
-    5. Every round, unconditionally: ``task = think(task); task =
-       prepare(task); task = act(task)`` — until ``task.complete``.
-    6. ``post_process`` resolves ``bind_response_to``, transforms the raw
-       response through ``post_invoke`` (or returns it as-is when there is no
-       post stage), and builds the final ``AgentResult`` from the task.
-    7. ``record`` builds the ``AgentRecord`` from the task and appends it to
-       the conversation the task is bound to, under the lock, unless
-       ``record_enabled`` is false, in which case nothing is stored at all.
-    8. The step-6 result is returned.
+    ``invoke(inputs)`` runs the public steps spelled out in its docstring
+    (``async_invoke`` mirrors it); each can also be called by hand to assemble
+    a custom lifecycle. ``record`` is the only step that runs under the lock,
+    and nothing is stored at all when ``record_enabled`` is false.
 
     Schema composition
     -------------------
@@ -241,72 +226,72 @@ class Agent(AtomicInvokable, ABC):
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
 
-        self._reject_var_keyword(pre_tool, "pre_invoke")
-        if post_tool is not None:
-            self._reject_var_keyword(post_tool, "post_invoke")
+        for tool, label in ((pre_tool, "pre_invoke"), (post_tool, "post_invoke")):
+            for p in () if tool is None else tool.parameters:
+                if p.kind == ParamSpec.VAR_KEYWORD:
+                    raise AgentError(
+                        f"Agent.{label} must not declare a **kwargs parameter "
+                        f"({p.name!r}); every name it consumes must be enumerable at "
+                        "construction. Wrap the callable to drop it."
+                    )
 
-        # 3. Reserved parameters for this (sub)class, computed once.
+        # ── Reserved and extra parameters ────────────────────────────────────
         reserved = self.get_reserved_parameters()
         reserved_names = {p.name for p in reserved}
 
-        # 4. Normalize extra_parameters; reject variadic entries.
         extra_raw = to_paramspec_list(extra_parameters)
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
         for p in extra_raw:
-            if p.kind in variadic_kinds:
+            if p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
                 raise AgentError(
                     f"extra_parameters entry {p.name!r} must not be variadic; "
                     f"got kind {p.kind!r}."
                 )
 
-        # 5. Normalize + validate the binding knob (needs reserved_names).
+        # ── Response bindings ────────────────────────────────────────────────
+        # A bound post parameter that no other source declares is fed by the
+        # response alone, so it leaves the public signature. One that
+        # pre_invoke/extra_parameters also declares stays in the reconciliation
+        # below: when the response lacks its key, the caller's value is what the
+        # post receives, so the declarations must be compatible.
         bindings = self._normalize_bind_response_to(bind_response_to, reserved_names)
-
-        # 6. Response-filled set: destinations that name a post parameter.
-        post_param_names = (
-            {p.name for p in post_tool.parameters} if post_tool is not None else set()
-        )
         bound_names = (
             set() if bindings is None
             else {bindings} if isinstance(bindings, str)
             else set(bindings.values())
         )
-        response_filled = bound_names & post_param_names
+        declared_elsewhere = {p.name for p in pre_tool.parameters} | {
+            p.name for p in extra_raw
+        }
+        response_filled = bound_names - declared_elsewhere
 
-        # 7. Post-only parameters: the post's parameters not filled by a binding.
-        post_only_raw = (
-            [p for p in post_tool.parameters if p.name not in response_filled]
-            if post_tool is not None else []
-        )
-
-        # 8. Reserved-overlap pass, fully independent per source (never
-        # compared against each other for a reserved name).
+        # ── Schema composition ───────────────────────────────────────────────
+        # Reserved overlaps are resolved per source, independently; the three
+        # sources are then reconciled N-way (pre_invoke > post_invoke >
+        # extra_parameters), raising on the first genuine conflict and warning
+        # once for compatible-but-not-identical names.
+        post_params = list(post_tool.parameters) if post_tool is not None else []
         pre_params = self._strip_reserved_overlaps(
             list(pre_tool.parameters), reserved, "pre_invoke"
         )
-        post_only = self._strip_reserved_overlaps(post_only_raw, reserved, "post_invoke")
+        post_only = self._strip_reserved_overlaps(
+            [p for p in post_params if p.name not in response_filled],
+            reserved,
+            "post_invoke",
+        )
         extra_params = self._strip_reserved_overlaps(extra_raw, reserved, "extra_parameters")
-        self._extra_names: frozenset[str] = frozenset(p.name for p in extra_params)
-
-        # 9. N-way peer reconciliation: pre_invoke > post_invoke > extra_parameters.
         reports = build_parameter_reports([pre_params, post_only, extra_params])
-
-        # 10. Apply reports: raises on the first genuine conflict; emits at
-        # most one grouped UserWarning for compatible-but-not-identical names.
         constructed = apply_parameter_reports(
             reports, ("pre_invoke", "post_invoke", "extra_parameters"), error_cls=AgentError, stacklevel=4
         )
+        agent_parameters = insert_by_category(insert_by_category([], constructed), reserved)
 
-        # 11. Category-normalize the reconciled peer schema.
-        combined = insert_by_category([], constructed)
-
-        # 12. Final reserved-parameter graft — produces the schema directly.
-        agent_parameters = insert_by_category(combined, reserved)
-
-        # Store lifecycle components.
+        # Lifecycle components and the per-consumer name sets create_task slices by.
         self._pre_invoke = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
         self._bind_response_to = bindings  # None | str | dict[Any, str]
+        self._pre_names = frozenset(p.name for p in pre_tool.parameters) - reserved_names
+        self._post_names = frozenset(p.name for p in post_params) - reserved_names
+        self._agentic_names = frozenset(reserved_names | {p.name for p in extra_params})
 
         # System prompt registry — subclasses populate after super().__init__.
         self._system_prompts: dict[str, PromptConfig] = {}
@@ -395,29 +380,15 @@ class Agent(AtomicInvokable, ABC):
         return [p for p in params if p.name not in stripped_names]
 
     @staticmethod
-    def _reject_var_keyword(tool: AtomicInvokable, label: str) -> None:
-        """Raise ``AgentError`` if ``tool`` declares a ``**kwargs`` parameter.
-
-        Every name a reconciled hook consumes must be enumerable at
-        construction. ``*args`` is allowed and not inspected here.
-        """
-        for p in tool.parameters:
-            if p.kind == ParamSpec.VAR_KEYWORD:
-                raise AgentError(
-                    f"Agent.{label} must not declare a **kwargs parameter "
-                    f"({p.name!r}); every name it consumes must be enumerable at "
-                    "construction. Wrap the callable to drop it."
-                )
-
-    @staticmethod
     def _normalize_bind_response_to(
         value: Any, reserved_names: set[str]
     ) -> Optional[str | dict[Any, str]]:
         """Validate ``bind_response_to`` and return its normalized form.
 
         1. ``None`` -> ``None``; ``str`` -> the str itself (whole response);
-           ``Mapping`` -> ``dict(value)``; list/tuple -> ``{d: d}``;
-           set/frozenset -> same, in sorted order; anything else raises.
+           ``Mapping`` -> ``dict(value)``; any other non-bytes iterable of
+           names (list, tuple, set, dict view, generator...) -> ``{d: d}``,
+           sorted when unordered; anything else raises.
         2. An empty collection/mapping normalizes to ``None``.
         3. Destinations are stripped of surrounding whitespace (as
            ``ContextVariable``/``ParamSpec`` names are), then each must be an
@@ -429,56 +400,43 @@ class Agent(AtomicInvokable, ABC):
             return None
 
         if isinstance(value, str):
-            destinations = [value]
+            selectors, names = None, [value]
         elif isinstance(value, Mapping):
-            destinations = list(value.values())
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            destinations = list(value)
-            if isinstance(value, (set, frozenset)) and all(isinstance(i, str) for i in destinations):
-                destinations.sort()
+            selectors, names = list(value), list(value.values())
+        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            selectors, names = None, list(value)
+            if isinstance(value, AbstractSet) and all(isinstance(n, str) for n in names):
+                names.sort()  # unordered: store deterministically
         else:
             raise AgentError(
                 "bind_response_to must be None, a str, a collection of str, "
                 f"or a mapping of selector -> str; got {type(value).__name__}."
             )
 
-        if not destinations:
+        if not names:
             return None
 
-        destinations = [d.strip() if isinstance(d, str) else d for d in destinations]
-        for d in destinations:
-            if not (isinstance(d, str) and IDENTIFIER_PATTERN.fullmatch(d)):
+        names = [n.strip() if isinstance(n, str) else n for n in names]
+        for n in names:
+            if not (isinstance(n, str) and IDENTIFIER_PATTERN.fullmatch(n)):
                 raise AgentError(
-                    f"bind_response_to destination {d!r} must be a valid identifier string."
+                    f"bind_response_to destination {n!r} must be a valid identifier string."
                 )
-            if d.startswith(TASK_RESULT_PREFIX):
+            if n.startswith(TASK_RESULT_PREFIX) or n in reserved_names:
                 raise AgentError(
-                    f"bind_response_to destination {d!r} must not start with "
-                    f"{TASK_RESULT_PREFIX!r}."
+                    f"bind_response_to destination {n!r} is reserved (a framework-reserved "
+                    f"parameter name or a {TASK_RESULT_PREFIX!r} name)."
                 )
-            if d in reserved_names:
-                raise AgentError(
-                    f"bind_response_to destination {d!r} is a framework-reserved "
-                    "parameter name."
-                )
-        if len(set(destinations)) != len(destinations):
+        if len(set(names)) != len(names):
             raise AgentError("bind_response_to has duplicate destinations.")
 
         if isinstance(value, str):
-            return destinations[0]
-        if isinstance(value, Mapping):
-            return dict(zip(value, destinations))
-        return {d: d for d in destinations}
+            return names[0]
+        return dict(zip(names if selectors is None else selectors, names))
 
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
-    @property
-    def bind_response_to(self) -> Optional[str | dict[Any, str]]:
-        """Normalized response bindings: None, one destination name (the whole
-        response), or {selector: destination}."""
-        return self._bind_response_to
-
     @property
     def llm_engine(self) -> LLMEngine:
         """LLMEngine used for this agent."""
@@ -608,14 +566,12 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Task-lifecycle steps
     # ------------------------------------------------------------------ #
-    # Every step of invoke()/async_invoke() is a public method that takes the
-    # task (or, for create_task, the filtered inputs), so a caller can
-    # assemble their own lifecycle: filter_inputs -> create_task -> summarize
-    # -> pre_process -> (think -> prepare -> act)* -> post_process -> record.
-    # create_task is concrete and never overridden; a family varies it only
-    # through _TASK_CLS / _INITIAL_PROMPT_NAME and the _seed_task hook.
-    # think/prepare ship as no-ops; act stays hard-abstract -- every
-    # subclass's advance-by-one-round execution logic genuinely differs.
+    # Every step of invoke()/async_invoke() is a public method (see invoke's
+    # docstring for the sequence). create_task is concrete and never
+    # overridden; a family varies it only through _TASK_CLS /
+    # _INITIAL_PROMPT_NAME and the _seed_task hook. think/prepare ship as
+    # no-ops; act stays hard-abstract -- every subclass's advance-by-one-round
+    # execution logic genuinely differs.
     def create_task(self, inputs: Mapping[str, Any]) -> AgentTask:
         """Build this invocation's task from the filtered ``inputs``.
 
@@ -636,8 +592,8 @@ class Agent(AtomicInvokable, ABC):
         partition: a name consumed by several buckets goes into each. Reserved
         names are excluded from pre/post. Post receives the caller inputs for
         its declared parameters, with bound values overlaid by ``post_process``.
-        ``agentic_inputs`` holds the
-        reserved parameters plus the ``extra_parameters``-sourced names
+        ``agentic_inputs`` holds the reserved parameters plus the
+        ``extra_parameters``-sourced names
         (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
 
@@ -656,23 +612,15 @@ class Agent(AtomicInvokable, ABC):
         else:
             turns = history[-window:]
 
-        reserved_names = {p.name for p in self.get_reserved_parameters()}
-        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
-        post_names = (
-            {p.name for p in self._post_invoke.parameters} - reserved_names
-            if self._post_invoke is not None else set()
-        )
-        agentic_names = reserved_names | self._extra_names
-
         task = self._TASK_CLS(
             turns=turns,
             inputs=inputs,
             system_prompt_name=self._INITIAL_PROMPT_NAME,
             conversation=active_key,
             context=dict(conversation.context),
-            pre_inputs={k: v for k, v in inputs.items() if k in pre_names},
-            post_inputs={k: v for k, v in inputs.items() if k in post_names},
-            agentic_inputs={k: v for k, v in inputs.items() if k in agentic_names},
+            pre_inputs={k: v for k, v in inputs.items() if k in self._pre_names},
+            post_inputs={k: v for k, v in inputs.items() if k in self._post_names},
+            agentic_inputs={k: v for k, v in inputs.items() if k in self._agentic_names},
             run_id=uuid4().hex,
             started_at=datetime.now(timezone.utc),
         )
@@ -853,47 +801,37 @@ class Agent(AtomicInvokable, ABC):
         """
         ...
 
-    def _resolve_bindings(self, response: Any) -> dict[str, Any]:
-        """Resolve ``bind_response_to`` against ``response`` (pure, no I/O).
+    def _bind_response(self, task: AgentTask) -> None:
+        """Slice the generated response onto ``task.post_inputs``.
 
-        1. ``None`` -> ``{}``; ``str`` -> ``{name: response}``.
-        2. ``dict`` -> each selector is indexed out of the response and stored
-           under its destination; a missing key/index is skipped, a present
-           ``None`` is bound, other errors propagate. A ``str``/``bytes``
-           response raises ``AgentInvocationError`` (it would index characters).
-        Covers every destination; it does not look at post parameters.
+        1. ``None`` binding -> nothing. A ``str`` binds the whole response; a
+           mapping indexes each selector out of it (a missing key/index is
+           skipped, a present ``None`` is bound, other errors propagate; a
+           ``str``/``bytes`` response raises ``AgentInvocationError`` since it
+           would index characters).
+        2. Bound values named after post parameters overwrite those entries of
+           ``task.post_inputs``; other bound names are not added (10b gives
+           them the context sink). With no post stage nothing matches.
         """
         spec = self._bind_response_to
         if spec is None:
-            return {}
+            return
+        response = task.generated_response
         if isinstance(spec, str):
-            return {spec: response}
-        if isinstance(response, (str, bytes)):
-            raise AgentInvocationError(
-                "bind_response_to selectors cannot index a str/bytes response; "
-                "use the str form to bind the whole response."
-            )
-        bound: dict[str, Any] = {}
-        for selector, destination in spec.items():
-            try:
-                bound[destination] = response[selector]
-            except (KeyError, IndexError):
-                continue
-        return bound
-
-    def _bind_response(self, task: AgentTask) -> dict[str, Any]:
-        """Slice the generated response onto the task's post inputs.
-
-        Resolves ``bind_response_to`` against ``task.generated_response``; with
-        a post stage, the bound values named after post parameters overwrite
-        those entries of ``task.post_inputs`` (bound names matching no post
-        parameter are not added). Returns every bound value for the caller.
-        """
-        bound = self._resolve_bindings(task.generated_response)
-        if self._post_invoke is not None:
-            post_names = {p.name for p in self._post_invoke.parameters}
-            task.post_inputs.update({k: v for k, v in bound.items() if k in post_names})
-        return bound
+            bound = {spec: response}
+        else:
+            if isinstance(response, (str, bytes)):
+                raise AgentInvocationError(
+                    "bind_response_to selectors cannot index a str/bytes response; "
+                    "use the str form to bind the whole response."
+                )
+            bound = {}
+            for selector, destination in spec.items():
+                try:
+                    bound[destination] = response[selector]
+                except (KeyError, IndexError):
+                    continue
+        task.post_inputs.update({k: v for k, v in bound.items() if k in self._post_names})
 
     def post_process(self, task: AgentTask) -> AgentResult:
         """Resolve response bindings, run ``post_invoke``, and build the result.
@@ -995,9 +933,10 @@ class Agent(AtomicInvokable, ABC):
            appended to ``record.prev.children`` when ``prev`` is set. There
            is no implicit forking: branching happens only through explicit
            ``clone_conversation``/``import_conversation``.
-        3. Context write-back, same lock, same conversation: every ``task.context`` variable whose name is in the
-           destination's context and whose destination variable is not
-           ``readonly`` is written with one ``remember_many``. Scratch keys
+        3. Context write-back, same lock, same conversation: every
+           ``task.context`` variable whose name is in the destination's
+           context and whose destination variable is not ``readonly`` is
+           written with one ``remember_many``. Scratch keys
            and keys ``forget``-ed mid-call are dropped; readonly ones are
            skipped silently. Every eligible key is written, changed or not.
 
@@ -1148,27 +1087,6 @@ class Agent(AtomicInvokable, ABC):
                 context=conv.context,
             )
 
-    def _find_in_conversation(
-        self, conversation_id: str, run_id: str
-    ) -> AgentRecord | None:
-        """Pure query for a record within a given conversation; never raises.
-
-        Resolves ``run_id`` to the matching record, or ``None`` if no
-        record in that conversation has it. Takes ``conversation_id``
-        explicitly rather than reading ``self._active_conversation``
-        internally, matching every other conversation-keyed helper on this
-        class. Its only remaining caller is ``get_record``'s ``run_id``
-        mode, which scans every conversation via this method -- always
-        with a real, caller-supplied ``run_id`` (never ``None``; there is
-        no "most recent record" shorthand anymore, since nothing else
-        needs one now that ``create_task`` no longer resolves an
-        arbitrary target).
-        """
-        history = self._conversations[conversation_id].records
-        return next(
-            (r for r in history if r.run_id == run_id), None
-        )
-
     def create_conversation(self, name: str) -> Conversation:
         """Create a new, empty conversation.
 
@@ -1228,8 +1146,8 @@ class Agent(AtomicInvokable, ABC):
             )
 
         if run_id_mode:
-            for key in self._conversations:
-                found = self._find_in_conversation(key, run_id)
+            for conv in self._conversations.values():
+                found = next((r for r in conv.records if r.run_id == run_id), None)
                 if found is not None:
                     return found
             raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
@@ -1546,7 +1464,11 @@ class Agent(AtomicInvokable, ABC):
             },
             "pre_invoke": self.pre_invoke.to_dict(),
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
-            "bind_response_to": self.bind_response_to,
+            "bind_response_to": (
+                dict(self._bind_response_to)
+                if isinstance(self._bind_response_to, dict)
+                else self._bind_response_to
+            ),
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,

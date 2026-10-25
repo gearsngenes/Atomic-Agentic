@@ -522,7 +522,7 @@ class TestAgentPostInvokeRouting:
 
         result = agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        assert agent.bind_response_to == "raw"
+        assert agent._bind_response_to == "raw"
         assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
     def test_bind_response_to_args_parameter_is_allowed(self) -> None:
@@ -531,7 +531,7 @@ class TestAgentPostInvokeRouting:
             bind_response_to="items",
         )
 
-        assert agent.bind_response_to == "items"
+        assert agent._bind_response_to == "items"
 
     def test_bind_response_to_matching_pre_invoke_name_is_allowed(self) -> None:
         # A destination that pre_invoke also declares stays in the public
@@ -540,7 +540,7 @@ class TestAgentPostInvokeRouting:
             return topic
 
         agent = make_agent(post_invoke=post_with_topic_key, bind_response_to="topic")
-        assert agent.bind_response_to == "topic"
+        assert agent._bind_response_to == "topic"
 
 
 class TestAgentContext:
@@ -1200,7 +1200,7 @@ class TestAgentSerialization:
         assert "system_prompts" in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
-        assert data["bind_response_to"] == agent.bind_response_to == "result"
+        assert data["bind_response_to"] == agent._bind_response_to == "result"
         assert "post_result_key" not in data
         assert data["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data)
@@ -1614,20 +1614,30 @@ class TestBindResponseToSharedNames:
     """A destination that another source (pre_invoke / extra_parameters) also
     declares, and a destination that is a reserved name."""
 
+    def test_bound_name_declared_by_pre_must_be_type_compatible(self) -> None:
+        def pre(prompt: str, x: int = 7) -> str:
+            return prompt
+
+        def post(x: str = "d") -> str:
+            return x
+
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
+            make_agent(pre_invoke=pre, post_invoke=post, bind_response_to="x")
+
     def test_explicit_binding_to_non_first_parameter_accepted(self) -> None:
         agent = make_agent(post_invoke=post_with_custom_key, bind_response_to="suffix")
-        assert agent.bind_response_to == "suffix"
+        assert agent._bind_response_to == "suffix"
 
     def test_binding_to_a_name_no_post_parameter_declares_is_accepted(self) -> None:
         agent = make_agent(post_invoke=post_with_custom_key, bind_response_to="nope")
-        assert agent.bind_response_to == "nope"
+        assert agent._bind_response_to == "nope"
 
     def test_collision_with_pre_invoke_name_is_allowed(self) -> None:
         agent = make_agent(
             post_invoke=lambda topic: topic,
             bind_response_to="topic",
         )
-        assert agent.bind_response_to == "topic"
+        assert agent._bind_response_to == "topic"
 
     def test_collision_with_extra_parameters_name_is_allowed(self) -> None:
         def post_with_flag(result: str, flag: str = "x") -> str:
@@ -1642,7 +1652,7 @@ class TestBindResponseToSharedNames:
             bind_response_to="flag",
             extra_parameters=["flag"],
         )
-        assert agent.bind_response_to == "flag"
+        assert agent._bind_response_to == "flag"
 
     def test_binding_to_a_reserved_parameter_raises(self) -> None:
         # Built on _MinimalAgent (not make_agent()'s _EchoAgent, which has no
@@ -2557,7 +2567,7 @@ class TestBindResponseToConstruction:
     def test_forms_normalize(self, value: Any, expected: Any) -> None:
         agent = make_agent(bind_response_to=value)
 
-        assert agent.bind_response_to == expected
+        assert agent._bind_response_to == expected
 
     @pytest.mark.parametrize(
         "value, expected",
@@ -2568,23 +2578,42 @@ class TestBindResponseToConstruction:
         ],
     )
     def test_surrounding_whitespace_is_stripped(self, value: Any, expected: Any) -> None:
-        assert make_agent(bind_response_to=value).bind_response_to == expected
+        assert make_agent(bind_response_to=value)._bind_response_to == expected
 
     def test_duplicates_are_detected_after_stripping(self) -> None:
         with pytest.raises(AgentError, match="duplicate"):
             make_agent(bind_response_to=["a", " a "])
 
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda: iter(["b", "a"]),
+            lambda: (n for n in ["a", "b"]),
+            lambda: {"b": 1, "a": 2}.keys(),
+        ],
+        ids=["iterator", "generator", "dict_keys_view"],
+    )
+    def test_any_non_bytes_iterable_of_names_is_a_collection(self, make: Any) -> None:
+        agent = make_agent(bind_response_to=make())
+
+        assert sorted(agent._bind_response_to) == ["a", "b"]
+        assert agent._bind_response_to == {n: n for n in agent._bind_response_to}
+
+    def test_bytes_is_rejected(self) -> None:
+        with pytest.raises(AgentError, match="bind_response_to"):
+            make_agent(bind_response_to=b"abc")
+
     def test_set_form_is_stored_in_sorted_order(self) -> None:
         agent = make_agent(bind_response_to={"c", "a", "b"})
 
-        assert list(agent.bind_response_to) == ["a", "b", "c"]
+        assert list(agent._bind_response_to) == ["a", "b", "c"]
 
     def test_none_is_none(self) -> None:
-        assert make_agent(bind_response_to=None).bind_response_to is None
+        assert make_agent(bind_response_to=None)._bind_response_to is None
 
     @pytest.mark.parametrize("value", [[], (), set(), {}])
     def test_empty_collection_or_dict_is_none(self, value: Any) -> None:
-        assert make_agent(bind_response_to=value).bind_response_to is None
+        assert make_agent(bind_response_to=value)._bind_response_to is None
 
     @pytest.mark.parametrize("value", [5, b"ab", [["a"]], 1.5, object()])
     def test_bad_type_raises(self, value: Any) -> None:
@@ -2621,7 +2650,7 @@ class TestBindResponseToConstruction:
     def test_python_keyword_destination_is_accepted(self) -> None:
         agent = make_agent(bind_response_to="class")
 
-        assert agent.bind_response_to == "class"
+        assert agent._bind_response_to == "class"
 
     def test_kwargs_in_pre_invoke_raises(self) -> None:
         def pre_kwargs(prompt: str, **rest: Any) -> str:
@@ -2642,7 +2671,7 @@ class TestBindResponseToConstruction:
             pre_invoke=pre_args, post_invoke=post_with_args, bind_response_to="items"
         )
 
-        assert agent.bind_response_to == "items"
+        assert agent._bind_response_to == "items"
 
     def test_post_result_key_is_removed(self) -> None:
         assert not hasattr(make_agent(), "post_result_key")
@@ -2840,7 +2869,7 @@ class TestPostStageBinding:
         )
 
         assert agent.post_invoke is None
-        assert agent.bind_response_to is None
+        assert agent._bind_response_to is None
         assert _names(agent) == ["prompt"]
 
     def test_args_parameter_bound_with_list_response_expands_positionally(self) -> None:
