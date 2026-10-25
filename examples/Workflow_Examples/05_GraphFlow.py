@@ -77,6 +77,7 @@ drafter = BasicAgent(
     ),
     pre_invoke=drafter_pre,
     post_invoke=drafter_post,
+    bind_response_to="result",
     record_enabled=True,
 )
 
@@ -111,6 +112,7 @@ fact_checker = BasicAgent(
     ),
     pre_invoke=fact_pre,
     post_invoke=fact_post,
+    bind_response_to="result",
     record_enabled=False,
 )
 
@@ -140,6 +142,7 @@ style_editor = BasicAgent(
     ),
     pre_invoke=style_pre,
     post_invoke=style_post,
+    bind_response_to="result",
     record_enabled=False,
 )
 

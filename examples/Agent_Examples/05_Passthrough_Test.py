@@ -54,7 +54,8 @@ def package_response(
 ) -> dict[str, Any]:
     """post_invoke: structure the raw LLM result.
 
-    ``raw_answer`` receives the agent's raw generated text (the result key).
+    ``raw_answer`` receives the agent's raw generated text (via
+    ``bind_response_to="raw_answer"``).
     ``output_label`` and ``include_metadata`` are auto-grafted into the agent
     schema — callers supply them as regular inputs, no extra configuration needed.
     """
@@ -84,7 +85,7 @@ def main() -> None:
         record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,
-        post_result_key="raw_answer",
+        bind_response_to="raw_answer",
         # No passthrough_inputs needed — output_label and include_metadata
         # are auto-grafted from package_response into the agent schema.
     )

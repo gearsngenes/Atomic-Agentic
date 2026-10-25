@@ -58,6 +58,7 @@ def make_agent(
         records_window=records_window,
         pre_invoke=build_prompt,
         post_invoke=package_response,
+        bind_response_to="result",
     )
 
 

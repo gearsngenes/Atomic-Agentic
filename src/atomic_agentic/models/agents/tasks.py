@@ -98,7 +98,10 @@ class AgentTask:
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
         agent-specific). A name consumed by more than one goes into every
-        bucket that declares it.
+        bucket that declares it. ``post_process`` then overlays the response
+        pieces bound by ``bind_response_to`` onto ``post_inputs`` (only names
+        the post stage declares), so afterwards it is exactly what
+        ``post_invoke`` received.
 
     run_id, started_at, ended_at : str | None, datetime | None, datetime | None
         Identity and timing shared by the result and the record built from

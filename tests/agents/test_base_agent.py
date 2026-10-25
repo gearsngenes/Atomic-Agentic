@@ -10,7 +10,7 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
-from atomic_agentic.exceptions import AgentError, AgentInvocationError, SchemaError
+from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
@@ -300,11 +300,14 @@ def make_agent(
     records_window: int | None = None,
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
-    post_result_key: str | None = None,
+    bind_response_to: Any = "result",
     system_prompt: str = ROLE_PROMPT,
     response_preview_limit: int | None = None,
     agent_cls: type[_EchoAgent] = _EchoAgent,
 ) -> _EchoAgent:
+    # Default binding "result" matches the first parameter of the default
+    # post (package_response) and most helper posts below; tests whose post
+    # names its response parameter differently pass bind_response_to.
     return agent_cls(
         name="writer_agent",
         namespace="tests",
@@ -315,7 +318,7 @@ def make_agent(
         records_window=records_window,
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
-        post_result_key=post_result_key,
+        bind_response_to=bind_response_to,
         response_preview_limit=response_preview_limit,
     )
 
@@ -472,6 +475,7 @@ class TestAgentSchemaComposition:
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=build_prompt,
             post_invoke=post_with_post_only_args,
+            bind_response_to="result",
         )
 
         names = [p.name for p in agent.parameters]
@@ -510,67 +514,33 @@ class TestAgentPostInvokeRouting:
         with pytest.raises(TypeError, match="missing required"):
             agent.invoke({"topic": "pytest", "tone": "strict"})
 
-    def test_custom_post_result_key_routes_raw_result(self) -> None:
+    def test_custom_bind_response_to_routes_raw_result(self) -> None:
         agent = make_agent(
             post_invoke=post_with_custom_key,
-            post_result_key="raw",
+            bind_response_to="raw",
         )
 
         result = agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        assert agent.post_result_key == "raw"
+        assert agent.bind_response_to == "raw"
         assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
-    def test_post_result_key_defaults_to_first_post_parameter(self) -> None:
-        agent = make_agent(post_invoke=post_with_custom_key)
-
-        assert agent.post_result_key == "raw"
-
-    def test_empty_post_result_key_raises(self) -> None:
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_invoke=post_with_custom_key, post_result_key="  ")
-
-    def test_unknown_post_result_key_raises(self) -> None:
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_invoke=post_with_custom_key, post_result_key="missing")
-
-    def test_variadic_post_result_key_is_allowed_for_args(self) -> None:
+    def test_bind_response_to_args_parameter_is_allowed(self) -> None:
         agent = make_agent(
             post_invoke=post_with_args,
-            post_result_key="items",
+            bind_response_to="items",
         )
 
-        assert agent.post_result_key == "items"
+        assert agent.bind_response_to == "items"
 
-    def test_variadic_post_result_key_is_allowed_for_kwargs(self) -> None:
-        agent = make_agent(
-            post_invoke=post_with_kwargs,
-            post_result_key="items",
-        )
-
-        assert agent.post_result_key == "items"
-
-    def test_post_result_key_naming_an_undeclared_name_raises(self) -> None:
-        # "not_a_param" is never a legal post_result_key here: it's simply
-        # not among post_invoke's own declared parameter names at all
-        # (resolved against post_tool.parameters directly, unstripped).
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_result_key="not_a_param")
-
-    def test_post_result_key_matching_pre_invoke_name_no_longer_raises(self) -> None:
-        # Spec-mandated behavior change: the old pairwise "post_result_key
-        # collides with a pre_invoke/extra_parameters name" check is dropped
-        # in the __init__ rebuild -- post_only_raw excludes the result key
-        # BEFORE peer reconciliation ever runs, so there is no longer a
-        # schema-level name for it to collide with. pre_invoke's "topic" and
-        # the internal result-routing slot stay independently sliced at
-        # invoke time (pre_inputs/post_inputs), so no runtime ambiguity
-        # results either.
+    def test_bind_response_to_matching_pre_invoke_name_is_allowed(self) -> None:
+        # A destination that pre_invoke also declares stays in the public
+        # signature (pre wins); the response still overlays the caller value.
         def post_with_topic_key(topic: str) -> str:
             return topic
 
-        agent = make_agent(post_invoke=post_with_topic_key, post_result_key="topic")
-        assert agent.post_result_key == "topic"
+        agent = make_agent(post_invoke=post_with_topic_key, bind_response_to="topic")
+        assert agent.bind_response_to == "topic"
 
 
 class TestAgentContext:
@@ -1230,7 +1200,8 @@ class TestAgentSerialization:
         assert "system_prompts" in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
-        assert data["post_result_key"] == agent.post_result_key
+        assert data["bind_response_to"] == agent.bind_response_to == "result"
+        assert "post_result_key" not in data
         assert data["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data)
 
@@ -1567,6 +1538,7 @@ class TestReservedNameReconciliation:
                     llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                     pre_invoke=build_prompt,
                     post_invoke=post_with_bad_dummy_reserved,
+                    bind_response_to="result",
                 )
 
     def test_extra_parameters_incompatible_dummy_reserved_raises(self) -> None:
@@ -1580,23 +1552,15 @@ class TestReservedNameReconciliation:
                 extra_parameters=[bad],
             )
 
-    def test_variadic_param_named_like_reserved_is_exempt_from_the_reserved_check(self) -> None:
-        # A VAR_KEYWORD catch-all happens to be named "dummy_reserved" --
-        # exempt from the reserved-overlap check entirely: never checked,
-        # never stripped, regardless of the name collision (a catch-all's
-        # bucket name is a naming coincidence, not the same declared slot).
-        # The final signature still can't legally contain two params both
-        # literally named "dummy_reserved" (this VAR_KEYWORD bucket and the
-        # framework's own KEYWORD_ONLY graft), so construction still fails
-        # overall -- but via the pre-existing structural duplicate-name
-        # invariant every AtomicInvokable already enforces (SchemaError from
-        # insert_by_category's final _validate_parameter_order call), never
-        # via the reserved-overlap policy's own AgentError. That distinction
-        # is the point of the exemption.
+    def test_variadic_param_named_like_reserved_is_rejected_by_the_kwargs_ban(self) -> None:
+        # A VAR_KEYWORD catch-all happens to be named "dummy_reserved". The
+        # reserved-overlap check exempts variadics, but the **kwargs ban on
+        # pre_invoke now rejects it at construction (AgentError) before any
+        # reserved handling or schema grafting runs.
         def pre_with_dummy_reserved_kwargs(prompt: str, **dummy_reserved: Any) -> str:
             return prompt
 
-        with pytest.raises(SchemaError, match="Duplicate"):
+        with pytest.raises(AgentError, match=r"\*\*kwargs"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1626,21 +1590,15 @@ class TestReservedNameReconciliation:
 
     def test_same_named_variadic_with_conflicting_kind_across_sources_raises(self) -> None:
         # A same-named variadic declared under different kinds by two peer
-        # sources (pre_invoke's *extra vs post_invoke's **extra) is caught by
-        # n_way_kind_compatible inside the peer report -- not by the old,
-        # now-removed variadic_compatible primitive. variadic_compatible's
-        # only remaining real job -- differently-NAMED independent variadics
-        # -- is now caught structurally by insert_by_category's own
-        # duplicate/order validation instead (see the spec's "Removed"
-        # section); this is the same-name case, which the peer report
-        # itself must catch.
+        # sources (pre_invoke's *extra vs post_invoke's **extra) now fails
+        # earlier, at the **kwargs ban on post_invoke.
         def pre_with_var_positional(*extra: Any) -> str:
             return str(extra)
 
         def post_with_var_keyword(result: str, **extra: Any) -> str:
             return result
 
-        with pytest.raises(AgentError, match="no compatible reconciliation"):
+        with pytest.raises(AgentError, match=r"\*\*kwargs"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1648,34 +1606,30 @@ class TestReservedNameReconciliation:
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_var_positional,
                 post_invoke=post_with_var_keyword,
+                bind_response_to="result",
             )
 
 
-class TestPostResultKeyResolution:
-    def test_default_resolves_to_first_reserved_popped_post_name(self) -> None:
-        agent = make_agent(post_invoke=post_with_custom_key)
-        assert agent.post_result_key == "raw"
+class TestBindResponseToSharedNames:
+    """A destination that another source (pre_invoke / extra_parameters) also
+    declares, and a destination that is a reserved name."""
 
-    def test_explicit_override_accepted(self) -> None:
-        agent = make_agent(post_invoke=post_with_custom_key, post_result_key="suffix")
-        assert agent.post_result_key == "suffix"
+    def test_explicit_binding_to_non_first_parameter_accepted(self) -> None:
+        agent = make_agent(post_invoke=post_with_custom_key, bind_response_to="suffix")
+        assert agent.bind_response_to == "suffix"
 
-    def test_unknown_name_raises(self) -> None:
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_invoke=post_with_custom_key, post_result_key="nope")
+    def test_binding_to_a_name_no_post_parameter_declares_is_accepted(self) -> None:
+        agent = make_agent(post_invoke=post_with_custom_key, bind_response_to="nope")
+        assert agent.bind_response_to == "nope"
 
-    def test_collision_with_pre_invoke_name_no_longer_raises(self) -> None:
-        # See TestAgentPostInvokeRouting.
-        # test_post_result_key_matching_pre_invoke_name_no_longer_raises for
-        # the full rationale -- this pairwise collision check was dropped in
-        # the __init__ rebuild.
+    def test_collision_with_pre_invoke_name_is_allowed(self) -> None:
         agent = make_agent(
             post_invoke=lambda topic: topic,
-            post_result_key="topic",
+            bind_response_to="topic",
         )
-        assert agent.post_result_key == "topic"
+        assert agent.bind_response_to == "topic"
 
-    def test_collision_with_extra_parameters_name_no_longer_raises(self) -> None:
+    def test_collision_with_extra_parameters_name_is_allowed(self) -> None:
         def post_with_flag(result: str, flag: str = "x") -> str:
             return result
 
@@ -1685,21 +1639,13 @@ class TestPostResultKeyResolution:
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             post_invoke=post_with_flag,
-            post_result_key="flag",
+            bind_response_to="flag",
             extra_parameters=["flag"],
         )
-        assert agent.post_result_key == "flag"
+        assert agent.bind_response_to == "flag"
 
-    def test_explicit_post_result_key_naming_a_reserved_parameter_raises(self) -> None:
-        # post_result_key is resolved against post_tool.parameters directly,
-        # unstripped of reserved-name overlaps (step 5) -- so an explicit
-        # post_result_key naming a real post_invoke parameter that also
-        # happens to be a reserved name is caught by the dedicated new guard
-        # (step 6), with a message identifying the actual problem (not the
-        # old generic "not a declared parameter" message this would
-        # otherwise surface as, since "dummy_reserved" IS a real declared
-        # parameter of post_with_dummy_reserved_param below). Built on
-        # _MinimalAgent (not make_agent()'s _EchoAgent, which has no
+    def test_binding_to_a_reserved_parameter_raises(self) -> None:
+        # Built on _MinimalAgent (not make_agent()'s _EchoAgent, which has no
         # reserved params) so there's a real reserved name to collide with.
         def post_with_dummy_reserved_param(result: str, dummy_reserved: str = "x") -> str:
             return result
@@ -1711,7 +1657,7 @@ class TestPostResultKeyResolution:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 post_invoke=post_with_dummy_reserved_param,
-                post_result_key="dummy_reserved",
+                bind_response_to="dummy_reserved",
             )
 
 
@@ -1890,6 +1836,7 @@ class TestNWayWitnessOrderIndependence:
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_dict_shared,
                 post_invoke=post_with_bare_dict_shared,
+                bind_response_to="result",
                 extra_parameters=[
                     ParamSpec(
                         name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
@@ -1931,6 +1878,7 @@ class TestNWayWitnessOrderIndependence:
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_int_shared,
                 post_invoke=post_int_or_str_shared,
+                bind_response_to="result",
                 extra_parameters=[
                     ParamSpec(name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
                 ],
@@ -2246,7 +2194,7 @@ class TestCreateTask:
         agent = _MinimalAgent(
             name="a", namespace="tests", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            pre_invoke=pre, post_invoke=post,
+            pre_invoke=pre, post_invoke=post, bind_response_to="result",
             extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
         )
         inputs = agent.filter_inputs(
@@ -2325,7 +2273,7 @@ class TestPostProcessAndRecord:
         assert result.ended_at == task.ended_at and task.ended_at is not None
         assert result.result["final"] == "ECHO: Write about pytest in a strict tone."
 
-    def test_post_process_does_not_mutate_post_inputs(self) -> None:
+    def test_post_process_overlays_the_response_onto_post_inputs(self) -> None:
         agent = make_agent(post_invoke=post_with_suffix)
         task = agent.pre_process(agent.create_task(agent.filter_inputs({**_INPUTS, "suffix": "!"})))
         while not task.complete:
@@ -2334,7 +2282,7 @@ class TestPostProcessAndRecord:
 
         agent.post_process(task)
 
-        assert task.post_inputs == before
+        assert task.post_inputs == {**before, "result": task.generated_response}
 
     def test_async_post_process_matches_sync(self) -> None:
         agent = make_agent()
@@ -2527,3 +2475,468 @@ class TestContextLifecycle:
         agent.record(task)
 
         assert agent.get_conversation().context["k"].readonly is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bind_response_to (Pass 10a): construction + post-stage behavior
+# ─────────────────────────────────────────────────────────────────────────────
+class _ValueAgent(Agent):
+    """Agent whose generated response is a fixed arbitrary Python value
+    (mapping / list / int / bytes ...), so binding tests are not limited to
+    the str responses ``_EchoAgent`` requires. It still makes one real
+    engine call so ``build_result_from_task`` has an LLM record to read."""
+
+    def __init__(self, *, response_value: Any, **kwargs: Any) -> None:
+        self._response_value = response_value
+        super().__init__(**kwargs)
+
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        return task.task_messages
+
+    def _finish(self, task: AgentTask, engine_result: Any) -> AgentTask:
+        task.llm_records.append(LLMRecord(
+            messages=({"role": "user", "content": task.user_prompt},),
+            llm_result=engine_result,
+        ))
+        task.generated_response = self._response_value
+        task.complete = True
+        return task
+
+    def act(self, task: AgentTask) -> AgentTask:
+        engine_result = self._llm_engine.invoke(
+            {"messages": [{"role": "user", "content": task.user_prompt}]}
+        )
+        return self._finish(task, engine_result)
+
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        engine_result = await self._llm_engine.async_invoke(
+            {"messages": [{"role": "user", "content": task.user_prompt}]}
+        )
+        return self._finish(task, engine_result)
+
+
+class _ReservedEchoAgent(_EchoAgent):
+    """_EchoAgent that also reserves ``dummy_reserved`` (for reserved-name
+    destination tests through ``make_agent``)."""
+
+    @classmethod
+    def get_reserved_parameters(cls) -> list[ParamSpec]:
+        return [_DUMMY_RESERVED_PARAM]
+
+
+def make_value_agent(response_value: Any, **kwargs: Any) -> _ValueAgent:
+    kwargs.setdefault("record_enabled", False)
+    return _ValueAgent(
+        name="value_agent",
+        namespace="tests",
+        description="Fixed-response test agent.",
+        llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+        response_value=response_value,
+        **kwargs,
+    )
+
+
+def _names(agent: Agent) -> list[str]:
+    return [p.name for p in agent.parameters]
+
+
+class TestBindResponseToConstruction:
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ("a", "a"),
+            (["a", "b"], {"a": "a", "b": "b"}),
+            (("a", "b"), {"a": "a", "b": "b"}),
+            ({"b", "a"}, {"a": "a", "b": "b"}),
+            (frozenset({"b", "a"}), {"a": "a", "b": "b"}),
+            ({0: "first", "k": "second"}, {0: "first", "k": "second"}),
+        ],
+    )
+    def test_forms_normalize(self, value: Any, expected: Any) -> None:
+        agent = make_agent(bind_response_to=value)
+
+        assert agent.bind_response_to == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ("  a  ", "a"),
+            ([" a ", "b	"], {"a": "a", "b": "b"}),
+            ({0: " x "}, {0: "x"}),
+        ],
+    )
+    def test_surrounding_whitespace_is_stripped(self, value: Any, expected: Any) -> None:
+        assert make_agent(bind_response_to=value).bind_response_to == expected
+
+    def test_duplicates_are_detected_after_stripping(self) -> None:
+        with pytest.raises(AgentError, match="duplicate"):
+            make_agent(bind_response_to=["a", " a "])
+
+    def test_set_form_is_stored_in_sorted_order(self) -> None:
+        agent = make_agent(bind_response_to={"c", "a", "b"})
+
+        assert list(agent.bind_response_to) == ["a", "b", "c"]
+
+    def test_none_is_none(self) -> None:
+        assert make_agent(bind_response_to=None).bind_response_to is None
+
+    @pytest.mark.parametrize("value", [[], (), set(), {}])
+    def test_empty_collection_or_dict_is_none(self, value: Any) -> None:
+        assert make_agent(bind_response_to=value).bind_response_to is None
+
+    @pytest.mark.parametrize("value", [5, b"ab", [["a"]], 1.5, object()])
+    def test_bad_type_raises(self, value: Any) -> None:
+        with pytest.raises(AgentError, match="bind_response_to"):
+            make_agent(bind_response_to=value)
+
+    @pytest.mark.parametrize(
+        "value",
+        ["my key", "", "   ", "1x", "café", [1], ["ok", 2], {"k": 1}, {"k": "not valid"}, {"k": ""}],
+    )
+    def test_non_identifier_or_non_str_destination_raises(self, value: Any) -> None:
+        with pytest.raises(AgentError, match="bind_response_to"):
+            make_agent(bind_response_to=value)
+
+    @pytest.mark.parametrize(
+        "value", ["task_result_x", ["ok", "task_result_y"], {"k": "task_result_z"}]
+    )
+    def test_task_result_prefix_raises(self, value: Any) -> None:
+        with pytest.raises(AgentError, match="task_result_"):
+            make_agent(bind_response_to=value)
+
+    @pytest.mark.parametrize("value", [["a", "a"], ("a", "a"), {0: "a", 1: "a"}])
+    def test_duplicate_destinations_raise(self, value: Any) -> None:
+        with pytest.raises(AgentError, match="duplicate"):
+            make_agent(bind_response_to=value)
+
+    @pytest.mark.parametrize(
+        "value", ["dummy_reserved", ["dummy_reserved"], {"k": "dummy_reserved"}]
+    )
+    def test_reserved_name_destination_raises(self, value: Any) -> None:
+        with pytest.raises(AgentError, match="framework-reserved"):
+            make_agent(agent_cls=_ReservedEchoAgent, bind_response_to=value)
+
+    def test_python_keyword_destination_is_accepted(self) -> None:
+        agent = make_agent(bind_response_to="class")
+
+        assert agent.bind_response_to == "class"
+
+    def test_kwargs_in_pre_invoke_raises(self) -> None:
+        def pre_kwargs(prompt: str, **rest: Any) -> str:
+            return prompt
+
+        with pytest.raises(AgentError, match=r"pre_invoke.*\*\*kwargs"):
+            make_agent(pre_invoke=pre_kwargs)
+
+    def test_kwargs_in_post_invoke_raises(self) -> None:
+        with pytest.raises(AgentError, match=r"post_invoke.*\*\*kwargs"):
+            make_agent(post_invoke=post_with_kwargs, bind_response_to="items")
+
+    def test_args_in_pre_and_post_invoke_accepted(self) -> None:
+        def pre_args(*parts: Any) -> str:
+            return "".join(str(p) for p in parts)
+
+        agent = make_agent(
+            pre_invoke=pre_args, post_invoke=post_with_args, bind_response_to="items"
+        )
+
+        assert agent.bind_response_to == "items"
+
+    def test_post_result_key_is_removed(self) -> None:
+        assert not hasattr(make_agent(), "post_result_key")
+        with pytest.raises(TypeError):
+            _EchoAgent(
+                name="a", namespace="tests", description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                post_result_key="result",  # removed argument
+            )
+
+
+class TestPostStageBinding:
+    def test_str_binds_whole_response_and_leaves_public_signature(self) -> None:
+        def post(resp: Any, suffix: str = "!") -> str:
+            return f"{resp}{suffix}"
+
+        agent = make_value_agent("hi", post_invoke=post, bind_response_to="resp")
+
+        assert set(_names(agent)) == {"prompt", "suffix"}
+        assert agent.invoke({"prompt": "x"}).result == "hi!"
+
+    def test_list_binds_keys_of_a_mapping_response(self) -> None:
+        def post(a: Any, b: Any) -> dict[str, Any]:
+            return {"a": a, "b": b}
+
+        agent = make_value_agent(
+            {"a": 1, "b": 2, "c": 3}, post_invoke=post, bind_response_to=["a", "b"]
+        )
+
+        assert set(_names(agent)) == {"prompt"}
+        assert agent.invoke({"prompt": "x"}).result == {"a": 1, "b": 2}
+
+    def test_dict_selectors_index_keys_and_list_positions(self) -> None:
+        def post(first: Any, second: Any) -> list[Any]:
+            return [first, second]
+
+        mapping_agent = make_value_agent(
+            {"k": "v", 7: "seven"},
+            post_invoke=post,
+            bind_response_to={"k": "first", 7: "second"},
+        )
+        list_agent = make_value_agent(
+            ["x", "y", "z"], post_invoke=post, bind_response_to={0: "first", 2: "second"}
+        )
+
+        assert mapping_agent.invoke({"prompt": "p"}).result == ["v", "seven"]
+        assert list_agent.invoke({"prompt": "p"}).result == ["x", "z"]
+
+    def test_absent_key_is_skipped_and_required_parameter_fails_naturally(self) -> None:
+        def post(a: Any, b: Any) -> Any:
+            return (a, b)
+
+        agent = make_value_agent({"a": 1}, post_invoke=post, bind_response_to=["a", "b"])
+
+        with pytest.raises(TypeError, match="(?i)missing"):
+            agent.invoke({"prompt": "x"})
+
+    def test_absent_key_leaves_defaulted_parameter_at_its_default(self) -> None:
+        def post(a: Any, b: Any = "dflt") -> Any:
+            return (a, b)
+
+        agent = make_value_agent({"a": 1}, post_invoke=post, bind_response_to=["a", "b"])
+
+        assert agent.invoke({"prompt": "x"}).result == (1, "dflt")
+
+    def test_absent_index_is_skipped(self) -> None:
+        def post(a: Any, b: Any = "dflt") -> Any:
+            return (a, b)
+
+        agent = make_value_agent(["only"], post_invoke=post, bind_response_to={0: "a", 5: "b"})
+
+        assert agent.invoke({"prompt": "x"}).result == ("only", "dflt")
+
+    def test_present_none_value_is_bound(self) -> None:
+        def post(a: Any = "dflt") -> Any:
+            return a
+
+        agent = make_value_agent({"a": None}, post_invoke=post, bind_response_to=["a"])
+
+        assert agent.invoke({"prompt": "x"}).result is None
+
+    def test_shared_name_stays_in_signature_caller_value_stands_when_key_absent(self) -> None:
+        def post(topic: str) -> str:
+            return topic
+
+        agent = make_value_agent(
+            {"other": 1}, pre_invoke=build_prompt, post_invoke=post, bind_response_to=["topic"]
+        )
+
+        assert "topic" in _names(agent)
+        assert agent.invoke({"topic": "caller"}).result == "caller"
+
+    def test_shared_name_is_overwritten_by_response_when_key_present(self) -> None:
+        def post(topic: str) -> str:
+            return topic
+
+        agent = make_value_agent(
+            {"topic": "from-response"},
+            pre_invoke=build_prompt,
+            post_invoke=post,
+            bind_response_to=["topic"],
+        )
+
+        assert agent.invoke({"topic": "caller"}).result == "from-response"
+
+    def test_no_binding_required_post_parameter_is_caller_driven_and_fails_when_missing(self) -> None:
+        def post(resp: Any) -> Any:
+            return resp
+
+        agent = make_value_agent("response", post_invoke=post)
+
+        # Migration case: the response is no longer passed implicitly.
+        assert "resp" in _names(agent)
+        with pytest.raises(TypeError, match="(?i)missing"):
+            agent.invoke({"prompt": "x"})
+        assert agent.invoke({"prompt": "x", "resp": "from-caller"}).result == "from-caller"
+
+    def test_no_binding_defaulted_parameter_runs_without_the_response(self) -> None:
+        def post(resp: str = "dflt") -> str:
+            return resp
+
+        agent = make_value_agent("response", post_invoke=post)
+
+        assert agent.invoke({"prompt": "x"}).result == "dflt"
+
+    def test_bound_name_matching_no_post_parameter_is_inert(self) -> None:
+        def post(resp: str = "dflt") -> str:
+            return resp
+
+        agent = make_value_agent("response", post_invoke=post, bind_response_to="ghost")
+
+        assert agent.invoke({"prompt": "x"}).result == "dflt"
+        assert "ghost" not in _names(agent)
+
+    def test_post_process_overlays_bound_values_onto_post_inputs(self) -> None:
+        def post(resp: str, tag: str = "t") -> str:
+            return f"{resp}|{tag}"
+
+        agent = make_value_agent(
+            {"a": 1, "b": 2}, post_invoke=post, bind_response_to={"a": "resp", "b": "ghost"}
+        )
+
+        task = agent.create_task(agent.filter_inputs({"prompt": "x", "tag": "T"}))
+        assert task.post_inputs == {"tag": "T"}
+        task = agent.pre_process(task)
+        while not task.complete:
+            task = agent.act(agent.prepare(agent.think(task)))
+        agent.post_process(task)
+
+        # The sliced piece lands on the task's post inputs; a bound name that
+        # matches no post parameter is not added; caller inputs are kept.
+        assert task.post_inputs == {"tag": "T", "resp": 1}
+
+    def test_no_post_stage_leaves_post_inputs_untouched(self) -> None:
+        agent = make_value_agent("response", bind_response_to="resp")
+
+        task, _ = _run_until_post(agent, {"prompt": "x"})
+
+        assert task.post_inputs == {}
+
+    @pytest.mark.parametrize("binding", [None, "resp"])
+    def test_zero_parameter_post_runs_and_leaves_signature_alone(self, binding: Any) -> None:
+        agent = make_value_agent("response", post_invoke=post_zero_args, bind_response_to=binding)
+
+        assert _names(agent) == ["prompt"]
+        assert agent.invoke({"prompt": "x"}).result == "bad"
+
+    def test_post_invoke_none_returns_generated_response_as_is(self) -> None:
+        payload = {"a": 1, "b": [2, 3]}
+        agent = make_value_agent(payload, post_invoke=None)
+
+        result = agent.invoke({"prompt": "x"})
+
+        assert result.result == payload
+        assert agent.return_type == "any"
+        assert agent.post_invoke is None
+        assert agent.to_dict()["post_invoke"] is None
+
+    def test_post_invoke_none_async(self) -> None:
+        agent = make_value_agent({"a": 1}, post_invoke=None)
+
+        result = asyncio.run(agent.async_invoke({"prompt": "x"}))
+
+        assert result.result == {"a": 1}
+
+    def test_post_invoke_none_with_binding_still_returns_response(self) -> None:
+        agent = make_value_agent({"a": 1}, post_invoke=None, bind_response_to=["a"])
+
+        assert agent.invoke({"prompt": "x"}).result == {"a": 1}
+
+    def test_default_agent_has_no_post_stage(self) -> None:
+        agent = _EchoAgent(
+            name="a", namespace="tests", description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+        )
+
+        assert agent.post_invoke is None
+        assert agent.bind_response_to is None
+        assert _names(agent) == ["prompt"]
+
+    def test_args_parameter_bound_with_list_response_expands_positionally(self) -> None:
+        agent = make_value_agent(
+            ["a", "b"], post_invoke=post_with_args, bind_response_to="items"
+        )
+
+        assert agent.invoke({"prompt": "x"}).result == ("a", "b")
+
+    def test_args_parameter_with_non_list_response_raises_and_turn_is_not_recorded(self) -> None:
+        agent = make_value_agent(
+            5, post_invoke=post_with_args, bind_response_to="items", record_enabled=True
+        )
+
+        with pytest.raises(TypeError, match="list or tuple"):
+            agent.invoke({"prompt": "x"})
+
+        assert agent.get_conversation().records == []
+
+    @pytest.mark.parametrize("response", ["text", b"bytes"])
+    def test_str_or_bytes_response_with_selectors_raises(self, response: Any) -> None:
+        agent = make_value_agent(
+            response, post_invoke=post_zero_args, bind_response_to={0: "first"}
+        )
+
+        with pytest.raises(AgentInvocationError, match="str/bytes"):
+            agent.invoke({"prompt": "x"})
+
+    def test_str_response_with_str_binding_is_fine(self) -> None:
+        def post(resp: str) -> str:
+            return resp.upper()
+
+        agent = make_value_agent("text", post_invoke=post, bind_response_to="resp")
+
+        assert agent.invoke({"prompt": "x"}).result == "TEXT"
+
+    @pytest.mark.parametrize("binding", [{"k": "v"}, ["k"]])
+    def test_non_subscriptable_response_with_selectors_raises_type_error(
+        self, binding: Any
+    ) -> None:
+        agent = make_value_agent(5, post_invoke=post_zero_args, bind_response_to=binding)
+
+        with pytest.raises(TypeError):
+            agent.invoke({"prompt": "x"})
+
+    def test_bindings_resolve_before_the_post_runs(self) -> None:
+        calls: list[str] = []
+
+        def post(v: Any = None) -> Any:
+            calls.append("ran")
+            return v
+
+        agent = make_value_agent(5, post_invoke=post, bind_response_to={"k": "v"})
+
+        with pytest.raises(TypeError):
+            agent.invoke({"prompt": "x"})
+
+        assert calls == []
+
+    def test_failing_post_does_not_record_the_turn(self) -> None:
+        def post(resp: Any) -> Any:
+            raise RuntimeError("boom")
+
+        agent = make_value_agent(
+            "r", post_invoke=post, bind_response_to="resp", record_enabled=True
+        )
+
+        with pytest.raises(ToolInvocationError, match="boom"):
+            agent.invoke({"prompt": "x"})
+
+        assert agent.get_conversation().records == []
+
+    def test_to_dict_reports_bind_response_to_not_post_result_key(self) -> None:
+        agent = make_value_agent(
+            {"a": 1}, post_invoke=post_zero_args, bind_response_to={"a": "x"}
+        )
+
+        data = agent.to_dict()
+
+        assert data["bind_response_to"] == {"a": "x"}
+        assert "post_result_key" not in data
+
+    def test_sync_and_async_bind_identically(self) -> None:
+        def post(a: Any, b: Any = "dflt") -> Any:
+            return (a, b)
+
+        sync_agent = make_value_agent({"a": 1}, post_invoke=post, bind_response_to=["a", "b"])
+        async_agent = make_value_agent({"a": 1}, post_invoke=post, bind_response_to=["a", "b"])
+
+        sync_result = sync_agent.invoke({"prompt": "x"}).result
+        async_result = asyncio.run(async_agent.async_invoke({"prompt": "x"})).result
+
+        assert sync_result == async_result == (1, "dflt")
+
+    def test_async_selector_error_matches_sync(self) -> None:
+        agent = make_value_agent("text", post_invoke=post_zero_args, bind_response_to={0: "f"})
+
+        with pytest.raises(AgentInvocationError, match="str/bytes"):
+            asyncio.run(agent.async_invoke({"prompt": "x"}))

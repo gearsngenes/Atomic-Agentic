@@ -32,11 +32,13 @@ from ..models.agents.context import ContextVariable
 
 logger = logging.getLogger(__name__)
 
-from .tools import identity_pre_tool, identity_post_tool
+from .tools import identity_pre_tool
+from ..constants.core import IDENTIFIER_PATTERN
 from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TRAILING_FORK_INDEX_PATTERN,
+    TASK_RESULT_PREFIX,
 )
 from ..utils.parameters import (
     semantically_identical,
@@ -77,8 +79,9 @@ class Agent(AtomicInvokable, ABC):
     4. ``pre_process`` converts ``task.pre_inputs`` to the prompt string.
     5. Every round, unconditionally: ``task = think(task); task =
        prepare(task); task = act(task)`` — until ``task.complete``.
-    6. ``post_process`` transforms the raw response through ``post_invoke``
-       and builds the final ``AgentResult`` from the task.
+    6. ``post_process`` resolves ``bind_response_to``, transforms the raw
+       response through ``post_invoke`` (or returns it as-is when there is no
+       post stage), and builds the final ``AgentResult`` from the task.
     7. ``record`` builds the ``AgentRecord`` from the task and appends it to
        the conversation the task is bound to, under the lock, unless
        ``record_enabled`` is false, in which case nothing is stored at all.
@@ -90,8 +93,10 @@ class Agent(AtomicInvokable, ABC):
     flat sources:
 
     - All ``pre_invoke`` parameters.
-    - Post-only non-result parameters, preserving their original declared
-      kind (no forced ``KEYWORD_ONLY`` coercion).
+    - Post-only parameters not filled by a ``bind_response_to`` destination
+      (those leave the public signature unless pre_invoke/extra_parameters
+      also declares them), preserving their original declared kind (no
+      forced ``KEYWORD_ONLY`` coercion).
     - ``extra_parameters`` — a flat, subclass-computed source (e.g.
       ``BasicAgent`` passes its role-prompt placeholders as this agent's
       sole ``extra_parameters`` source).
@@ -122,6 +127,15 @@ class Agent(AtomicInvokable, ABC):
     identical overlap is silent. Grafting uses ``insert_by_category`` so every
     new parameter lands at the position that preserves a valid Python-style
     signature ordering, regardless of its declared kind.
+
+    ``bind_response_to``
+    --------------------
+    Says which pieces of the generated response get which names: a ``str``
+    (whole response), a collection of ``str`` (those keys of a mapping
+    response), or a ``{selector: name}`` dict. A bound name equal to a
+    ``post_invoke`` parameter fills it; nothing is passed to the post stage
+    by default. ``post_invoke=None`` means no post stage. ``**kwargs`` is
+    rejected in ``pre_invoke``/``post_invoke`` (``AgentError``).
 
     ``record_enabled`` / ``records_window``
     ----------------------------------------
@@ -191,7 +205,7 @@ class Agent(AtomicInvokable, ABC):
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
-        post_result_key: Optional[str] = None,
+        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
@@ -216,7 +230,7 @@ class Agent(AtomicInvokable, ABC):
 
         # ── Post-invoke ──────────────────────────────────────────────────────
         if post_invoke is None:
-            post_tool = identity_post_tool
+            post_tool = None  # no post stage: the response is returned as-is
         elif isinstance(post_invoke, AtomicInvokable):
             post_tool = post_invoke
         else:
@@ -226,8 +240,10 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
-        if len(post_tool.parameters) == 0:
-            raise AgentError("Agent.post_invoke must expect at least 1 argument")
+
+        self._reject_var_keyword(pre_tool, "pre_invoke")
+        if post_tool is not None:
+            self._reject_var_keyword(post_tool, "post_invoke")
 
         # 3. Reserved parameters for this (sub)class, computed once.
         reserved = self.get_reserved_parameters()
@@ -243,32 +259,25 @@ class Agent(AtomicInvokable, ABC):
                     f"got kind {p.kind!r}."
                 )
 
-        # 5. Resolve post_result_key against post_tool.parameters directly
-        # (unstripped of any reserved-name overlaps).
-        if post_result_key is None:
-            resolved_post_result_key = post_tool.parameters[0].name
-        else:
-            if not isinstance(post_result_key, str) or not post_result_key.strip():
-                raise AgentError("post_result_key must be None or a non-empty string.")
-            resolved_post_result_key = post_result_key.strip()
-            if resolved_post_result_key not in {p.name for p in post_tool.parameters}:
-                raise AgentError(
-                    "post_result_key must name one of post_invoke's declared parameters; "
-                    f"got {resolved_post_result_key!r}."
-                )
+        # 5. Normalize + validate the binding knob (needs reserved_names).
+        bindings = self._normalize_bind_response_to(bind_response_to, reserved_names)
 
-        # 6. The result-routing slot can never itself be a reserved name.
-        if resolved_post_result_key in reserved_names:
-            raise AgentError(
-                f"post_result_key {resolved_post_result_key!r} is a framework-reserved "
-                "parameter name; it cannot also serve as the internal "
-                "result-routing slot."
-            )
+        # 6. Response-filled set: destinations that name a post parameter.
+        post_param_names = (
+            {p.name for p in post_tool.parameters} if post_tool is not None else set()
+        )
+        bound_names = (
+            set() if bindings is None
+            else {bindings} if isinstance(bindings, str)
+            else set(bindings.values())
+        )
+        response_filled = bound_names & post_param_names
 
-        # 7. Post-only parameters: post_tool's declared params minus the result key.
-        post_only_raw = [
-            p for p in post_tool.parameters if p.name != resolved_post_result_key
-        ]
+        # 7. Post-only parameters: the post's parameters not filled by a binding.
+        post_only_raw = (
+            [p for p in post_tool.parameters if p.name not in response_filled]
+            if post_tool is not None else []
+        )
 
         # 8. Reserved-overlap pass, fully independent per source (never
         # compared against each other for a reserved name).
@@ -296,8 +305,8 @@ class Agent(AtomicInvokable, ABC):
 
         # Store lifecycle components.
         self._pre_invoke = pre_tool
-        self._post_invoke = post_tool
-        self._post_result_key = resolved_post_result_key
+        self._post_invoke: Optional[AtomicInvokable] = post_tool
+        self._bind_response_to = bindings  # None | str | dict[Any, str]
 
         # System prompt registry — subclasses populate after super().__init__.
         self._system_prompts: dict[str, PromptConfig] = {}
@@ -330,7 +339,9 @@ class Agent(AtomicInvokable, ABC):
             namespace=namespace,
             description=description,
             parameters=agent_parameters,
-            return_type=self._post_invoke.return_type,
+            return_type=(
+                self._post_invoke.return_type if self._post_invoke is not None else "any"
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -383,13 +394,90 @@ class Agent(AtomicInvokable, ABC):
 
         return [p for p in params if p.name not in stripped_names]
 
+    @staticmethod
+    def _reject_var_keyword(tool: AtomicInvokable, label: str) -> None:
+        """Raise ``AgentError`` if ``tool`` declares a ``**kwargs`` parameter.
+
+        Every name a reconciled hook consumes must be enumerable at
+        construction. ``*args`` is allowed and not inspected here.
+        """
+        for p in tool.parameters:
+            if p.kind == ParamSpec.VAR_KEYWORD:
+                raise AgentError(
+                    f"Agent.{label} must not declare a **kwargs parameter "
+                    f"({p.name!r}); every name it consumes must be enumerable at "
+                    "construction. Wrap the callable to drop it."
+                )
+
+    @staticmethod
+    def _normalize_bind_response_to(
+        value: Any, reserved_names: set[str]
+    ) -> Optional[str | dict[Any, str]]:
+        """Validate ``bind_response_to`` and return its normalized form.
+
+        1. ``None`` -> ``None``; ``str`` -> the str itself (whole response);
+           ``Mapping`` -> ``dict(value)``; list/tuple -> ``{d: d}``;
+           set/frozenset -> same, in sorted order; anything else raises.
+        2. An empty collection/mapping normalizes to ``None``.
+        3. Destinations are stripped of surrounding whitespace (as
+           ``ContextVariable``/``ParamSpec`` names are), then each must be an
+           identifier string, must not start with
+           ``TASK_RESULT_PREFIX``, and must not be a reserved parameter name.
+        4. Duplicate destinations raise (checked before collapsing to a dict).
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            destinations = [value]
+        elif isinstance(value, Mapping):
+            destinations = list(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            destinations = list(value)
+            if isinstance(value, (set, frozenset)) and all(isinstance(i, str) for i in destinations):
+                destinations.sort()
+        else:
+            raise AgentError(
+                "bind_response_to must be None, a str, a collection of str, "
+                f"or a mapping of selector -> str; got {type(value).__name__}."
+            )
+
+        if not destinations:
+            return None
+
+        destinations = [d.strip() if isinstance(d, str) else d for d in destinations]
+        for d in destinations:
+            if not (isinstance(d, str) and IDENTIFIER_PATTERN.fullmatch(d)):
+                raise AgentError(
+                    f"bind_response_to destination {d!r} must be a valid identifier string."
+                )
+            if d.startswith(TASK_RESULT_PREFIX):
+                raise AgentError(
+                    f"bind_response_to destination {d!r} must not start with "
+                    f"{TASK_RESULT_PREFIX!r}."
+                )
+            if d in reserved_names:
+                raise AgentError(
+                    f"bind_response_to destination {d!r} is a framework-reserved "
+                    "parameter name."
+                )
+        if len(set(destinations)) != len(destinations):
+            raise AgentError("bind_response_to has duplicate destinations.")
+
+        if isinstance(value, str):
+            return destinations[0]
+        if isinstance(value, Mapping):
+            return dict(zip(value, destinations))
+        return {d: d for d in destinations}
+
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
     @property
-    def post_result_key(self) -> str:
-        """Post-invoke parameter name that receives the task's raw generated response."""
-        return self._post_result_key
+    def bind_response_to(self) -> Optional[str | dict[Any, str]]:
+        """Normalized response bindings: None, one destination name (the whole
+        response), or {selector: destination}."""
+        return self._bind_response_to
 
     @property
     def llm_engine(self) -> LLMEngine:
@@ -452,8 +540,9 @@ class Agent(AtomicInvokable, ABC):
         return self._pre_invoke
 
     @property
-    def post_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the task's raw generated response into the final agent output."""
+    def post_invoke(self) -> Optional[AtomicInvokable]:
+        """Invokable that converts the response into the final output, or ``None``
+        when there is no post stage (the response is returned as-is)."""
         return self._post_invoke
 
     @property
@@ -545,8 +634,9 @@ class Agent(AtomicInvokable, ABC):
 
         The three views are slices of ``inputs`` by name -- views, not a
         partition: a name consumed by several buckets goes into each. Reserved
-        names are excluded from pre/post; ``post_result_key`` is excluded from
-        post (``post_process`` supplies it). ``agentic_inputs`` holds the
+        names are excluded from pre/post. Post receives the caller inputs for
+        its declared parameters, with bound values overlaid by ``post_process``.
+        ``agentic_inputs`` holds the
         reserved parameters plus the ``extra_parameters``-sourced names
         (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
@@ -569,9 +659,8 @@ class Agent(AtomicInvokable, ABC):
         reserved_names = {p.name for p in self.get_reserved_parameters()}
         pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
         post_names = (
-            {p.name for p in self._post_invoke.parameters}
-            - {self._post_result_key}
-            - reserved_names
+            {p.name for p in self._post_invoke.parameters} - reserved_names
+            if self._post_invoke is not None else set()
         )
         agentic_names = reserved_names | self._extra_names
 
@@ -764,29 +853,79 @@ class Agent(AtomicInvokable, ABC):
         """
         ...
 
-    def post_process(self, task: AgentTask) -> AgentResult:
-        """Run ``post_invoke`` over the raw response and build the result.
+    def _resolve_bindings(self, response: Any) -> dict[str, Any]:
+        """Resolve ``bind_response_to`` against ``response`` (pure, no I/O).
 
-        Reads ``task.post_inputs`` and ``task.generated_response``; writes
-        ``task.ended_at``; returns the final ``AgentResult``, built directly
-        from the task (the record is built independently by ``record``).
-        ``task.post_inputs`` itself is not mutated -- a copy gains the
-        ``post_result_key`` entry. Errors raised by ``post_invoke`` propagate
-        unchanged.
+        1. ``None`` -> ``{}``; ``str`` -> ``{name: response}``.
+        2. ``dict`` -> each selector is indexed out of the response and stored
+           under its destination; a missing key/index is skipped, a present
+           ``None`` is bound, other errors propagate. A ``str``/``bytes``
+           response raises ``AgentInvocationError`` (it would index characters).
+        Covers every destination; it does not look at post parameters.
+        """
+        spec = self._bind_response_to
+        if spec is None:
+            return {}
+        if isinstance(spec, str):
+            return {spec: response}
+        if isinstance(response, (str, bytes)):
+            raise AgentInvocationError(
+                "bind_response_to selectors cannot index a str/bytes response; "
+                "use the str form to bind the whole response."
+            )
+        bound: dict[str, Any] = {}
+        for selector, destination in spec.items():
+            try:
+                bound[destination] = response[selector]
+            except (KeyError, IndexError):
+                continue
+        return bound
+
+    def _bind_response(self, task: AgentTask) -> dict[str, Any]:
+        """Slice the generated response onto the task's post inputs.
+
+        Resolves ``bind_response_to`` against ``task.generated_response``; with
+        a post stage, the bound values named after post parameters overwrite
+        those entries of ``task.post_inputs`` (bound names matching no post
+        parameter are not added). Returns every bound value for the caller.
+        """
+        bound = self._resolve_bindings(task.generated_response)
+        if self._post_invoke is not None:
+            post_names = {p.name for p in self._post_invoke.parameters}
+            task.post_inputs.update({k: v for k, v in bound.items() if k in post_names})
+        return bound
+
+    def post_process(self, task: AgentTask) -> AgentResult:
+        """Resolve response bindings, run ``post_invoke``, and build the result.
+
+        1. Slice ``task.generated_response`` per ``bind_response_to`` and, with a
+           post stage, overlay the pieces named after post parameters onto
+           ``task.post_inputs`` (can raise before anything runs).
+        2. With no post stage the response is the result; otherwise ``post_invoke``
+           runs over ``task.post_inputs``.
+        3. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
+        Errors from steps 1-2 propagate unchanged, before ``record``, so the
+        turn is not recorded.
         """
         logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-        post_inputs = {**task.post_inputs, self._post_result_key: task.generated_response}
-        post_result = self._post_invoke.invoke(post_inputs)
+        self._bind_response(task)
+        if self._post_invoke is None:
+            result = task.generated_response
+        else:
+            result = self._post_invoke.invoke(task.post_inputs).result
         task.ended_at = datetime.now(timezone.utc)
-        return self.build_result_from_task(task, post_result.result)
+        return self.build_result_from_task(task, result)
 
     async def async_post_process(self, task: AgentTask) -> AgentResult:
         """Async mirror of ``post_process``."""
         logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-        post_inputs = {**task.post_inputs, self._post_result_key: task.generated_response}
-        post_result = await self._post_invoke.async_invoke(post_inputs)
+        self._bind_response(task)
+        if self._post_invoke is None:
+            result = task.generated_response
+        else:
+            result = (await self._post_invoke.async_invoke(task.post_inputs)).result
         task.ended_at = datetime.now(timezone.utc)
-        return self.build_result_from_task(task, post_result.result)
+        return self.build_result_from_task(task, result)
 
     def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
@@ -1406,8 +1545,8 @@ class Agent(AtomicInvokable, ABC):
                 for key, cfg in self._system_prompts.items()
             },
             "pre_invoke": self.pre_invoke.to_dict(),
-            "post_invoke": self.post_invoke.to_dict(),
-            "post_result_key": self.post_result_key,
+            "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
+            "bind_response_to": self.bind_response_to,
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,

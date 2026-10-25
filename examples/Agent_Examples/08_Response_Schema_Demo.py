@@ -54,6 +54,7 @@ def main() -> None:
             "additionalProperties": False,
         },
         post_invoke=record_verdict,
+        bind_response_to="result",
     )
     result = agent.invoke(
         {"prompt": "Summarize in one sentence: Python is a dynamically typed language."}

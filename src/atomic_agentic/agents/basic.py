@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 import logging
@@ -49,7 +50,7 @@ class BasicAgent(Agent):
         *,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
-        post_result_key: Optional[str] = None,
+        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
@@ -74,7 +75,7 @@ class BasicAgent(Agent):
             record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            bind_response_to=bind_response_to,
             extra_parameters=role_params,
             records_window=records_window,
             response_preview_limit=response_preview_limit,

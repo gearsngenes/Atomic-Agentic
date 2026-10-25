@@ -4,15 +4,11 @@ Example: Custom pre-invoke Tool with its own schema (Lesson Plan Composer)
 This script shows how to define a custom pre-invoke Tool that expects a specific
 input schema and converts that mapping into a single prompt string for the Agent.
 
-It includes:
-  1) A REQUIRED-SCHEMA Tool (explicit keyword-only params, no **kwargs sink;
-     missing required keys raise, unrecognized keys are silently dropped).
-  2) A PERMISSIVE Tool (accepts any keys via **kwargs; known ones are read
-     with defaults, unrecognized ones are simply unused).
-
-Usage:
-  - Run as-is to use the required-schema tool.
-  - Set use_permissive=True in main() to try the permissive variant.
+The Tool declares explicit keyword-only params (no **kwargs sink): missing
+required keys raise, and unrecognized keys are silently dropped. A pre_invoke
+(or post_invoke) that declares **kwargs is rejected when the Agent is built --
+every name it consumes must be known up front. For a lenient schema, give the
+optional parameters defaults instead.
 """
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.tools import Tool
@@ -22,7 +18,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --------------------------- Required-schema Tool -------------------------- #
+# ------------------------------ Schema Tool ------------------------------ #
 def lesson_prompt_strict(
     *,
     grade_level: str,
@@ -73,53 +69,7 @@ strict_tool = Tool(
 )
 
 
-# ------------------------- PERMISSIVE schema Tool ------------------------ #
-def lesson_prompt_permissive(**kwargs) -> str:
-    """
-    PERMISSIVE variant:
-      - Accepts any keys; uses known ones with defaults and ignores unknowns.
-      - Useful while iterating on your schema.
-    Known (optional) keys: grade_level, subject, topic, duration_min, objectives(list[str]), constraints(list[str]), tone(str)
-    """
-    grade_level = kwargs.get("grade_level", "unspecified")
-    subject = kwargs.get("subject", "general studies")
-    topic = kwargs.get("topic", "general topic")
-    duration_min = int(kwargs.get("duration_min", 45))
-    objectives = list(kwargs.get("objectives", []))
-    constraints = list(kwargs.get("constraints", []))
-    tone = kwargs.get("tone", "practical")
-
-    def _fmt_block(title: str, items: List[str]) -> str:
-        if not items:
-            return f"{title}: (none)"
-        return f"{title}:\n" + "\n".join(f"- {x}" for x in items)
-
-    lines = [
-        f"Compose a {tone} lesson plan.",
-        f"Grade level: {grade_level}",
-        f"Subject: {subject}",
-        f"Topic: {topic}",
-        f"Duration: {duration_min} minutes",
-        _fmt_block("Learning objectives", objectives),
-        _fmt_block("Constraints", constraints),
-        "Deliverables:",
-        "- A brief lesson overview",
-        "- A step-by-step outline",
-        "- A quick formative assessment item",
-        "- One extension activity",
-        "Style: concise, actionable, teacher-friendly.",
-    ]
-    return "\n".join(lines)
-
-
-permissive_tool = Tool(
-    function=lesson_prompt_permissive,
-    name="lesson_prompt_permissive",
-    description="Permissive: accepts extra keys; uses defaults; builds a lesson-planning prompt.",
-)
-
-
-def main(use_permissive: bool = False) -> None:
+def main() -> None:
     # 1) Choose an engine (OpenAI here; replace if needed)
     engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -132,7 +82,7 @@ def main(use_permissive: bool = False) -> None:
         role_prompt="You are an expert teacher who writes concise, practical lesson plans.",
         record_enabled=True,
         records_window=8,
-        pre_invoke=(permissive_tool if use_permissive else strict_tool),
+        pre_invoke=strict_tool,
     )
 
     # 3) Prepare inputs (MAPPING ONLY!). Match the Tool’s schema.
@@ -151,12 +101,9 @@ def main(use_permissive: bool = False) -> None:
             "No live electricity experiments",
         ],
         "tone": "hands-on",
-        # Required-schema tool note:
-        #   An unknown top-level key here would be silently dropped (no
-        #   **kwargs sink to collect it).
-        # Permissive tool note:
-        #   Unknown keys are accepted and simply unused.
-        # "extra_note": "This key would be dropped/unused either way.",
+        # An unknown top-level key here would be silently dropped (no
+        # **kwargs sink to collect it).
+        # "extra_note": "This key would be dropped.",
     }
 
     # 4) Invoke (the Tool converts the mapping into a prompt string)
@@ -168,5 +115,4 @@ def main(use_permissive: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    # Toggle to True to see the permissive behavior
-    main(use_permissive=False)
+    main()

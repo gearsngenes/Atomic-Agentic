@@ -36,8 +36,10 @@ from typing import (
     Callable,
     ClassVar,
     Literal,
+    Mapping,
     Optional,
 )
+from collections.abc import Iterable
 
 from .base import Agent
 from ..models.agents.records import AgentRecord
@@ -134,7 +136,7 @@ class ToolAgent(Agent, ABC):
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         constants: Optional[list[Any]] = None,
@@ -157,7 +159,7 @@ class ToolAgent(Agent, ABC):
         tool_concurrency_limit : int | None
             Max dispatched calls allowed in a single concurrently-executed
             batch. ``None`` means unlimited (default).
-        response_preview_limit, pre_invoke, post_invoke, post_result_key,
+        response_preview_limit, pre_invoke, post_invoke, bind_response_to,
         records_window
             Forwarded to ``Agent.__init__`` unchanged.
         tools : list | None
@@ -222,7 +224,7 @@ class ToolAgent(Agent, ABC):
             record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            bind_response_to=bind_response_to,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
             extra_parameters=tool_instructions_params,

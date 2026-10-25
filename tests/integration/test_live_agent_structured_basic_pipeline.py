@@ -85,6 +85,7 @@ def make_live_openai_agent() -> BasicAgent:
         record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,
+        bind_response_to="result",
     )
 
 

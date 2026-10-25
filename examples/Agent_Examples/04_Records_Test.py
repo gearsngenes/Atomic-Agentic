@@ -37,6 +37,7 @@ def main() -> None:
         record_enabled=True,
         records_window=None,
         post_invoke=summarize_result,
+        bind_response_to="result",
         response_preview_limit=300,
     )
 

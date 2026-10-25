@@ -12,6 +12,7 @@ not a construction-time knob -- before replying. There is no early exit.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 from .base import Agent
@@ -98,7 +99,7 @@ class ThinkingAgent(BasicAgent):
         thinking_llm_engine: LLMEngine | None = None,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
-        post_result_key: Optional[str] = None,
+        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
@@ -200,7 +201,7 @@ class ThinkingAgent(BasicAgent):
             record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            bind_response_to=bind_response_to,
             extra_parameters=combined_extra_params,
             records_window=records_window,
             response_preview_limit=response_preview_limit,

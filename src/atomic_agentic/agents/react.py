@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, ClassVar, Optional
+from collections.abc import Iterable
+from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
 from .prompts import REACT_PROMPT
@@ -123,7 +124,7 @@ class ReActAgent(ToolAgent):
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         constants: Optional[list[Any]] = None,
@@ -158,7 +159,7 @@ class ReActAgent(ToolAgent):
             response_preview_limit=response_preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            bind_response_to=bind_response_to,
             records_window=records_window,
             tools=tools,
             constants=constants,

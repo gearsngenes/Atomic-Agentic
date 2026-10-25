@@ -156,7 +156,7 @@ def main() -> None:
         records_window=None,
         pre_invoke=build_message,
         post_invoke=package_reply,
-        post_result_key="result",
+        bind_response_to="result",
         # 'style' is auto-grafted from package_reply into the agent schema.
         # No passthrough_inputs declaration needed.
     )
