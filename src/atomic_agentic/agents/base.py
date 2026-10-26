@@ -10,6 +10,7 @@ from typing import (
     Mapping,
     Optional,
 )
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 import asyncio
@@ -30,13 +31,13 @@ from ..models.agents.tasks import AgentTask
 from ..models.agents.conversations import Conversation
 from ..models.agents.context import ContextVariable
 
-from .tools import identity_pre_tool
 from ..constants.core import IDENTIFIER_PATTERN
 from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TRAILING_FORK_INDEX_PATTERN,
     TASK_RESULT_PREFIX,
+    PROMPT_PARAM,
 )
 from ..utils.parameters import (
     semantically_identical,
@@ -198,7 +199,7 @@ class Agent(AtomicInvokable, ABC):
 
         # ── Pre-invoke ───────────────────────────────────────────────────────
         if pre_invoke is None:
-            pre_tool = identity_pre_tool
+            pre_tool = None  # no pre stage: the caller's prompt passes straight through
         elif isinstance(pre_invoke, AtomicInvokable):
             pre_tool = pre_invoke
         else:
@@ -208,7 +209,7 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
-        if pre_tool.return_type.lower() not in {"any", "str"}:
+        if pre_tool is not None and pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError(
                 "Agent.pre_invoke must return a type 'str'|'any'"
             )
@@ -259,7 +260,8 @@ class Agent(AtomicInvokable, ABC):
             else {bindings} if isinstance(bindings, str)
             else set(bindings.values())
         )
-        declared_elsewhere = {p.name for p in pre_tool.parameters} | {
+        pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
+        declared_elsewhere = {p.name for p in pre_declared} | {
             p.name for p in extra_raw
         }
         response_filled = bound_names - declared_elsewhere
@@ -271,7 +273,7 @@ class Agent(AtomicInvokable, ABC):
         # once for compatible-but-not-identical names.
         post_params = list(post_tool.parameters) if post_tool is not None else []
         pre_params = self._strip_reserved_overlaps(
-            list(pre_tool.parameters), reserved, "pre_invoke"
+            pre_declared, reserved, "pre_invoke"
         )
         post_only = self._strip_reserved_overlaps(
             [p for p in post_params if p.name not in response_filled],
@@ -286,10 +288,10 @@ class Agent(AtomicInvokable, ABC):
         agent_parameters = insert_by_category(insert_by_category([], constructed), reserved)
 
         # Lifecycle components and the per-consumer name sets create_task slices by.
-        self._pre_invoke = pre_tool
+        self._pre_invoke: Optional[AtomicInvokable] = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
         self._bind_response_to = bindings  # None | str | dict[Any, str]
-        self._pre_names = frozenset(p.name for p in pre_tool.parameters) - reserved_names
+        self._pre_names = frozenset(p.name for p in pre_declared) - reserved_names
         self._post_names = frozenset(p.name for p in post_params) - reserved_names
         self._agentic_names = frozenset(reserved_names | {p.name for p in extra_params})
 
@@ -493,8 +495,9 @@ class Agent(AtomicInvokable, ABC):
         return list(self._conversations.keys())
 
     @property
-    def pre_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the input mapping into a prompt string."""
+    def pre_invoke(self) -> Optional[AtomicInvokable]:
+        """Invokable that converts the input mapping into a prompt string, or
+        ``None`` when there is no pre stage (the caller's ``prompt`` is used as-is)."""
         return self._pre_invoke
 
     @property
@@ -511,24 +514,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def build_messages(
-        self,
-        system_prompt: str,
-        turns: List[AgentRecord],
-        prompt: str,
-    ) -> List[Dict[str, str]]:
-        """Render provider-facing message dicts from canonical turn inputs.
-
-        Each supplied turn is rendered through ``render_turn``. The current
-        prompt is appended as the final user message.
-        """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-        if turns:
-            for i, turn in enumerate(turns):
-                messages.extend(self.render_turn(turn, index=i))
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
     def render_turn(self, turn: AgentRecord, **kwargs: Any) -> List[Dict[str, str]]:
         """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
@@ -585,8 +570,9 @@ class Agent(AtomicInvokable, ABC):
         conversation's context taken here -- the seed point; a later
         ``remember()`` is not visible to the task), the ``pre_inputs``/
         ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
-        ``started_at``. The base loop never writes ``task.context``; a
-        subclass writer must check a variable's ``readonly`` flag itself.
+        ``started_at``. ``post_process`` writes bound response values into
+        ``task.context`` (replace-only); any other writer must check a
+        variable's ``readonly`` flag itself.
 
         The three views are slices of ``inputs`` by name -- views, not a
         partition: a name consumed by several buckets goes into each. Reserved
@@ -661,28 +647,36 @@ class Agent(AtomicInvokable, ABC):
         """Run ``pre_invoke`` over ``task.pre_inputs`` to produce the prompt.
 
         Reads ``task.pre_inputs``; always overwrites ``task.user_prompt``;
-        returns ``task``. Errors raised by ``pre_invoke`` propagate
-        unchanged. A non-``str`` result raises ``AgentInvocationError`` --
-        a prompt string is required.
+        returns ``task``. With no ``pre_invoke`` the prompt is
+        ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
+        propagate unchanged. A non-``str`` prompt raises
+        ``AgentInvocationError`` -- a prompt string is required.
         """
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-        raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
-        task.user_prompt = self._require_prompt_str(raw_prompt)
+        if self._pre_invoke is None:
+            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
+        else:
+            raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
+            subject = "pre_invoke returned a non-string result"
+        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
         return task
 
     async def async_pre_process(self, task: AgentTask) -> AgentTask:
         """Async mirror of ``pre_process``."""
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-        raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
-        task.user_prompt = self._require_prompt_str(raw_prompt)
+        if self._pre_invoke is None:
+            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
+        else:
+            raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
+            subject = "pre_invoke returned a non-string result"
+        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
         return task
 
     @staticmethod
-    def _require_prompt_str(raw_prompt: Any) -> str:
+    def _require_prompt_str(raw_prompt: Any, subject: str) -> str:
         if not isinstance(raw_prompt, str):
             raise AgentInvocationError(
-                f"pre_invoke returned a non-string result "
-                f"(type={type(raw_prompt)!r}); a prompt string is required"
+                f"{subject} (type={type(raw_prompt)!r}); a prompt string is required"
             )
         return raw_prompt
 
@@ -801,21 +795,24 @@ class Agent(AtomicInvokable, ABC):
         """
         ...
 
-    def _bind_response(self, task: AgentTask) -> None:
-        """Slice the generated response onto ``task.post_inputs``.
+    def _bind_response(self, task: AgentTask) -> dict[str, Any]:
+        """Slice the generated response per ``bind_response_to``.
 
-        1. ``None`` binding -> nothing. A ``str`` binds the whole response; a
+        1. ``None`` binding -> ``{}``. A ``str`` binds the whole response; a
            mapping indexes each selector out of it (a missing key/index is
            skipped, a present ``None`` is bound, other errors propagate; a
            ``str``/``bytes`` response raises ``AgentInvocationError`` since it
            would index characters).
         2. Bound values named after post parameters overwrite those entries of
-           ``task.post_inputs``; other bound names are not added (10b gives
-           them the context sink). With no post stage nothing matches.
+           ``task.post_inputs``; other bound names are not added. With no post
+           stage nothing matches.
+
+        Returns the resolved values (a skipped selector has no entry), which
+        ``post_process`` hands to the context sink.
         """
         spec = self._bind_response_to
         if spec is None:
-            return
+            return {}
         response = task.generated_response
         if isinstance(spec, str):
             bound = {spec: response}
@@ -832,36 +829,56 @@ class Agent(AtomicInvokable, ABC):
                 except (KeyError, IndexError):
                     continue
         task.post_inputs.update({k: v for k, v in bound.items() if k in self._post_names})
+        return bound
+
+    @staticmethod
+    def _write_context(task: AgentTask, bound: Mapping[str, Any]) -> None:
+        """Context sink: replace the value of each bound name that already
+        exists, writable, in ``task.context``.
+
+        A readonly variable is skipped and an absent name is ignored (nothing
+        is created); description and flags are kept. Persisting beyond the call
+        is ``record``'s existing write-back. Per-call state, so no lock.
+        """
+        for name, value in bound.items():
+            variable = task.context.get(name)
+            if variable is not None and not variable.readonly:
+                task.context[name] = replace(variable, value=value)
 
     def post_process(self, task: AgentTask) -> AgentResult:
-        """Resolve response bindings, run ``post_invoke``, and build the result.
+        """Resolve response bindings, run ``post_invoke``, write the context
+        sink, and build the result.
 
         1. Slice ``task.generated_response`` per ``bind_response_to`` and, with a
            post stage, overlay the pieces named after post parameters onto
            ``task.post_inputs`` (can raise before anything runs).
         2. With no post stage the response is the result; otherwise ``post_invoke``
            runs over ``task.post_inputs``.
-        3. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
-        Errors from steps 1-2 propagate unchanged, before ``record``, so the
-        turn is not recorded.
+        3. Context sink: bound values replace existing writable ``task.context``
+           variables (``_write_context``).
+        4. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
+        Errors from steps 1-2 propagate unchanged, before the sink and before
+        ``record``, so nothing is written and the turn is not recorded.
         """
         logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-        self._bind_response(task)
+        bound = self._bind_response(task)
         if self._post_invoke is None:
             result = task.generated_response
         else:
             result = self._post_invoke.invoke(task.post_inputs).result
+        self._write_context(task, bound)
         task.ended_at = datetime.now(timezone.utc)
         return self.build_result_from_task(task, result)
 
     async def async_post_process(self, task: AgentTask) -> AgentResult:
         """Async mirror of ``post_process``."""
         logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-        self._bind_response(task)
+        bound = self._bind_response(task)
         if self._post_invoke is None:
             result = task.generated_response
         else:
             result = (await self._post_invoke.async_invoke(task.post_inputs)).result
+        self._write_context(task, bound)
         task.ended_at = datetime.now(timezone.utc)
         return self.build_result_from_task(task, result)
 
@@ -1462,7 +1479,7 @@ class Agent(AtomicInvokable, ABC):
                 key: {"template": cfg.template, "description": cfg.description}
                 for key, cfg in self._system_prompts.items()
             },
-            "pre_invoke": self.pre_invoke.to_dict(),
+            "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
             "bind_response_to": (
                 dict(self._bind_response_to)

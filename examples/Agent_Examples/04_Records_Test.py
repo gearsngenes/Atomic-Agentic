@@ -64,12 +64,10 @@ def main() -> None:
     pprint.pp(agent.render_turn(agent.get_conversation().records[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
-    next_messages = agent.build_messages(
-        system_prompt = agent.role_prompt,
-        turns = agent.get_conversation().records,
-        prompt = "Now explain why turn-native memory is useful."
-    )
-    pprint.pp(next_messages)
+    task = agent.create_task({"prompt": "Now explain why turn-native memory is useful."})
+    agent.summarize(task)
+    agent.pre_process(task)
+    pprint.pp(agent.render_task(task))
 
 
 if __name__ == "__main__":

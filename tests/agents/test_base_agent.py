@@ -99,7 +99,7 @@ class _EchoAgent(Agent):
     single-LLM-call ``act`` path. Used in place of ``BasicAgent`` for
     invoke-lifecycle tests in this file for fixture independence.
 
-    ``act``/``async_act`` call ``build_messages`` directly with
+    ``act``/``async_act`` build the message list directly from
     ``self._echo_system_prompt`` -- a deliberate bypass of the
     ``render_task``/``_render_system_message`` pipeline (unchanged from the
     pre-1a design), so ``_render_task_messages`` below is never actually
@@ -120,7 +120,11 @@ class _EchoAgent(Agent):
         return task.task_messages
 
     def act(self, task: AgentTask) -> AgentTask:
-        messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
+        messages = [
+            {"role": "system", "content": self._echo_system_prompt},
+            *task.historic_messages,
+            {"role": "user", "content": task.user_prompt},
+        ]
         engine_result = self._llm_engine.invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -134,7 +138,11 @@ class _EchoAgent(Agent):
         return task
 
     async def async_act(self, task: AgentTask) -> AgentTask:
-        messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
+        messages = [
+            {"role": "system", "content": self._echo_system_prompt},
+            *task.historic_messages,
+            {"role": "user", "content": task.user_prompt},
+        ]
         engine_result = await self._llm_engine.async_invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -389,7 +397,7 @@ class TestAgentPipeline:
             {"role": "user", "content": "Write about agents in a concise tone."},
         ]
 
-    def test_default_identity_pre_and_post_invoke_path(self) -> None:
+    def test_default_no_pre_and_no_post_path(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
             name="identity_agent",
@@ -1397,7 +1405,7 @@ class TestExtraParametersNormalization:
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
-        # "prompt" comes from the default identity_pre_tool; no extra_parameters
+        # "prompt" comes from the built-in PROMPT_PARAM; no extra_parameters
         # means nothing else is grafted beyond the reserved dummy_reserved.
         assert [p.name for p in agent.parameters] == ["prompt", "dummy_reserved"]
 
@@ -1927,8 +1935,8 @@ class TestFinalReservedGraftOrdering:
             ],
         )
         names = [p.name for p in agent.parameters]
-        # "prompt" (default identity_pre_tool, KEYWORD_ONLY) and "lang" (extra,
-        # KEYWORD_ONLY) both sort at the same category tier; combined-vs-extra
+        # "prompt" (built-in PROMPT_PARAM, POSITIONAL_OR_KEYWORD) sorts ahead of
+        # "lang" (extra, KEYWORD_ONLY); combined-vs-extra
         # reconciliation appends extra's remainder after pre's, and the final
         # reserved graft appends dummy_reserved last.
         assert names == ["prompt", "lang", "dummy_reserved"]
@@ -2969,3 +2977,187 @@ class TestPostStageBinding:
 
         with pytest.raises(AgentInvocationError, match="str/bytes"):
             asyncio.run(agent.async_invoke({"prompt": "x"}))
+
+
+class TestBuildMessagesRemoved:
+    def test_agent_has_no_build_messages(self) -> None:
+        assert not hasattr(Agent, "build_messages")
+
+
+class TestOptionalPreInvoke:
+    def test_default_agent_has_no_pre_stage(self) -> None:
+        agent = make_value_agent("r")
+
+        assert agent.pre_invoke is None
+        assert agent.to_dict()["pre_invoke"] is None
+
+    def test_default_signature_is_the_built_in_prompt_parameter(self) -> None:
+        agent = make_value_agent("r")
+        prompt = agent.parameters[0]
+
+        assert _names(agent) == ["prompt"]
+        assert prompt.kind == ParamSpec.POSITIONAL_OR_KEYWORD
+        assert prompt.type == ("str",)
+        assert prompt.default is NO_VAL
+
+    def test_prompt_passes_through_verbatim_sync_and_async(self) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = _EchoAgent(
+            name="a", namespace="tests", description="d",
+            llm_engine=engine, system_prompt=ROLE_PROMPT,
+        )
+
+        agent.invoke({"prompt": "hello"})
+        asyncio.run(agent.async_invoke({"prompt": "hello"}))
+        agent("hello")
+
+        assert [c[-1] for c in engine.calls] == [{"role": "user", "content": "hello"}] * 3
+
+    def test_non_str_prompt_raises_agent_invocation_error(self) -> None:
+        agent = make_value_agent("r")
+
+        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
+            agent.invoke({"prompt": 5})
+        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
+            asyncio.run(agent.async_invoke({"prompt": 5}))
+
+    def test_post_parameter_named_prompt_shares_the_built_in_parameter(self) -> None:
+        def post(prompt: str, resp: Any) -> str:
+            return f"{prompt}->{resp}"
+
+        agent = make_value_agent("r", post_invoke=post, bind_response_to="resp")
+
+        assert _names(agent).count("prompt") == 1
+        assert agent.invoke({"prompt": "q"}).result == "q->r"
+
+    def test_incompatible_post_prompt_type_raises_at_construction(self) -> None:
+        def post(prompt: int, resp: Any) -> Any:
+            return resp
+
+        with pytest.raises(AgentError, match="(?i)compatible"):
+            make_value_agent("r", post_invoke=post, bind_response_to="resp")
+
+    def test_custom_pre_invoke_with_its_own_prompt_parameter_still_works(self) -> None:
+        def pre(prompt: str, tone: str = "calm") -> str:
+            return f"{prompt} ({tone})"
+
+        agent = make_value_agent("r", pre_invoke=pre)
+
+        assert agent.pre_invoke is not None
+        assert set(_names(agent)) == {"prompt", "tone"}
+        assert agent.invoke({"prompt": "go"}).result == "r"
+
+
+class TestContextSink:
+    @staticmethod
+    def _post(resp: Any) -> Any:
+        return resp
+
+    def _run(self, agent: Agent) -> tuple[AgentTask, Any]:
+        return _run_until_post(agent, {"prompt": "p"})
+
+    def test_writable_variable_value_is_replaced_keeping_description(self) -> None:
+        agent = make_value_agent("new", bind_response_to="notes")
+        agent.remember("notes", "old", "my notes")
+
+        task, _ = self._run(agent)
+
+        assert task.context["notes"].value == "new"
+        assert task.context["notes"].description == "my notes"
+        assert task.context["notes"].readonly is False
+
+    def test_readonly_variable_is_skipped_but_post_still_receives_piece(self) -> None:
+        agent = make_value_agent("new", post_invoke=self._post, bind_response_to="resp")
+        agent.remember("resp", "old", readonly=True)
+
+        task, result = self._run(agent)
+
+        assert task.context["resp"].value == "old"
+        assert result.result == "new"
+
+    def test_absent_name_is_ignored_and_nothing_is_created(self) -> None:
+        agent = make_value_agent("new", bind_response_to="notes", record_enabled=True)
+
+        task, _ = self._run(agent)
+        agent.record(task)
+
+        assert "notes" not in task.context
+        assert "notes" not in agent.get_conversation().context
+
+    def test_no_binding_writes_nothing(self) -> None:
+        agent = make_value_agent("new", bind_response_to=None)
+        agent.remember("notes", "old")
+
+        task, _ = self._run(agent)
+
+        assert task.context["notes"].value == "old"
+
+    def test_collection_and_dict_bindings_and_skipped_selector(self) -> None:
+        agent = make_value_agent(
+            {"a": 1, "z": None}, bind_response_to={"a": "x", "z": "y", "missing": "w"}
+        )
+        for name in ("x", "y", "w"):
+            agent.remember(name, "old")
+
+        task, _ = self._run(agent)
+
+        assert task.context["x"].value == 1
+        assert task.context["y"].value is None
+        assert task.context["w"].value == "old"
+
+    def test_no_post_stage_still_writes(self) -> None:
+        agent = make_value_agent("new", post_invoke=None, bind_response_to="notes")
+        agent.remember("notes", "old")
+
+        task, result = self._run(agent)
+
+        assert result.result == "new"
+        assert task.context["notes"].value == "new"
+
+    def test_failing_post_writes_nothing_and_records_nothing(self) -> None:
+        def post(resp: Any) -> Any:
+            raise RuntimeError("boom")
+
+        agent = make_value_agent(
+            "new", post_invoke=post, bind_response_to="resp", record_enabled=True
+        )
+        agent.remember("resp", "old")
+
+        with pytest.raises(Exception):
+            agent.invoke({"prompt": "p"})
+
+        assert agent.get_conversation().context["resp"].value == "old"
+        assert agent.get_conversation().records == []
+
+    def test_remembered_variable_persists_through_record(self) -> None:
+        agent = make_value_agent("new", bind_response_to="notes", record_enabled=True)
+        agent.remember("notes", "old", "d")
+
+        agent.invoke({"prompt": "p"})
+
+        stored = agent.get_conversation().context["notes"]
+        assert (stored.value, stored.description) == ("new", "d")
+
+    def test_record_disabled_persists_nothing(self) -> None:
+        agent = make_value_agent("new", bind_response_to="notes", record_enabled=False)
+        agent.remember("notes", "old")
+
+        agent.invoke({"prompt": "p"})
+
+        assert agent.get_conversation().context["notes"].value == "old"
+
+    def test_bind_response_returns_resolved_values_only(self) -> None:
+        agent = make_value_agent({"a": 1}, bind_response_to=["a", "b"])
+        task = agent.create_task(agent.filter_inputs({"prompt": "p"}))
+        task.generated_response = {"a": 1}
+
+        assert agent._bind_response(task) == {"a": 1}
+        assert make_value_agent("r")._bind_response(task) == {}
+
+    def test_async_parity(self) -> None:
+        agent = make_value_agent("new", bind_response_to="notes", record_enabled=True)
+        agent.remember("notes", "old")
+
+        asyncio.run(agent.async_invoke({"prompt": "p"}))
+
+        assert agent.get_conversation().context["notes"].value == "new"

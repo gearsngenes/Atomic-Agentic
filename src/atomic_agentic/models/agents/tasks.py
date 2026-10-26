@@ -92,8 +92,9 @@ class AgentTask:
         Per-call working copy of the bound conversation's context, seeded by
         ``create_task`` (a shallow copy; the variables are shared frozen
         objects) and written back by ``record`` -- see its docstring for the
-        rules. Written only by subclass loop steps, which must skip or raise
-        on a ``readonly`` variable themselves; this dict is not guarded.
+        rules. ``post_process`` replaces the value of existing writable variables
+        from ``bind_response_to``; any other writer (subclass loop steps) must skip
+        or raise on a ``readonly`` variable itself. This dict is not guarded.
 
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,

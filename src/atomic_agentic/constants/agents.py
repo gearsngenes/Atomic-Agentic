@@ -42,6 +42,16 @@ before a fresh one is appended (prevents suffix accumulation like
 # in Agent.__init__ can compare caller-declared params against the
 # authoritative definition without re-constructing it inline.
 
+# The built-in pre source: with no ``pre_invoke`` the caller's prompt is read
+# straight from this parameter. Not reserved -- it takes the pre_invoke slot in
+# schema composition and reconciles with post/extra declarations like any
+# pre_invoke parameter.
+PROMPT_PARAM: ParamSpec = ParamSpec(
+    name="prompt", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+    type=("str",),
+    description="The prompt to send to the agent.",
+)
+
 THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
     name="thinking_rounds", index=0, kind=ParamSpec.KEYWORD_ONLY,
     type=("int",), default=1,
@@ -330,6 +340,7 @@ __all__ = [
     "CONVERSATION_NAME_PATTERN",
     "TRAILING_FORK_INDEX_PATTERN",
     # Framework-reserved parameters
+    "PROMPT_PARAM",
     "THINKING_ROUNDS_PARAM",
     # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
