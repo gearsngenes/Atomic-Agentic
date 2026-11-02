@@ -5,13 +5,14 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
+from ...constants.agents import DEFAULT_RENDER_MODE, PREVIEW_LIMIT_FIELDS
 from .context import ContextVariable
 from .records import AgentRecord
 
 __all__ = ["Conversation"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Conversation:
     """
     One named conversation's forward-ordered record history and durable
@@ -19,10 +20,12 @@ class Conversation:
 
     Plain data container, no Agent-registry awareness -- mirrors
     AgentRecord's own stance (a dataclass with no owning-Agent awareness).
-    ``records`` is a mutable list despite the frozen dataclass -- same
-    treatment as ``AgentRecord.children``/``.inputs``: the field bindings are
-    frozen; the list's own contents are appended to in place by
-    ``Agent.record`` and read via direct indexing/slicing elsewhere.
+    ``records`` is a mutable list whose contents are appended to in place by
+    ``Agent.record`` and read via direct indexing/slicing elsewhere. The
+    dataclass is not frozen so the preview limits can be assigned directly
+    (``conv.response_preview_limit = 500``); ``name``, ``agent_type``,
+    ``records`` and ``context`` are not meant to be reassigned, and
+    ``context`` changes only through its mutators.
 
     Equality is by value over every field (context values are compared with
     ``==``, so a value with an unusual ``__eq__`` surfaces naturally).
@@ -56,12 +59,31 @@ class Conversation:
         ``_invoke_lock``. Constructor input is copied, never aliased; the
         frozen ``ContextVariable`` objects are shared and stored values are
         shared by reference, like reference-copied records.
+    response_preview_limit, prompt_preview_limit, context_preview_limit:
+        Character budgets applied when history responses, history prompts and
+        context-variable values are rendered into a prompt. ``None`` is
+        unlimited, ``0`` hides the text, a positive ``int`` truncates. Owned
+        by the conversation (not the agent), copied by import/clone, and
+        validated on every assignment, including construction (``None`` or an
+        ``int >= 0``; ``bool`` is rejected).
     """
 
     name: str
     agent_type: type
     records: list[AgentRecord] = field(default_factory=list)
     context: Mapping[str, ContextVariable] = field(default_factory=dict)
+    response_preview_limit: int | None = None
+    prompt_preview_limit: int | None = None
+    context_preview_limit: int | None = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in PREVIEW_LIMIT_FIELDS and value is not None and (
+            type(value) is not int or value < 0
+        ):
+            raise ValueError(
+                f"Conversation.{name} must be None or an int >= 0, got {value!r}."
+            )
+        object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
         # Shape-only validation -- element-type checking of each record is
@@ -112,13 +134,19 @@ class Conversation:
         description: str | None = None,
         *,
         readonly: bool = False,
+        render_mode: str = DEFAULT_RENDER_MODE,
     ) -> None:
         """
-        Upsert ``key``. A full replace: ``description=None`` clears any old
-        description. Raises if the existing variable is readonly.
+        Upsert ``key``. A full replace: omitting ``description`` or
+        ``render_mode`` resets them to ``None`` / the default mode. Raises if
+        the existing variable is readonly.
         """
         variable = ContextVariable(
-            name=key, value=value, description=description, readonly=readonly
+            name=key,
+            value=value,
+            description=description,
+            readonly=readonly,
+            render_mode=render_mode,
         )
         self._check_writable(variable.name)
         self._swap({**self.context, variable.name: variable})

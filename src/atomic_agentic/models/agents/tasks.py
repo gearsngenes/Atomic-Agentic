@@ -74,8 +74,8 @@ class AgentTask:
         Rendered ``turns``, built lazily once per invoke by
         ``Agent.summarize`` and reused for the rest of it.
         Never rebuilt mid-invoke — turn-rendering is phase-invariant,
-        governed only by ``response_preview_limit``, itself static
-        per-agent config.
+        governed only by the bound conversation's preview limits, read from
+        the conversation (``task.conversation``) when it is built.
 
     task_messages : list[dict[str, str]]
         Phase-scoped LLM-facing content, lazily built by each subclass's

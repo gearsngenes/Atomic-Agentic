@@ -213,3 +213,95 @@ class TestBulk:
             conv.forget_many(["x", "nope"])
 
         assert conv.context is before
+
+
+class TestPreviewLimits:
+    LIMITS = ("response_preview_limit", "prompt_preview_limit", "context_preview_limit")
+
+    def test_default_to_none(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+
+        assert all(getattr(conv, name) is None for name in self.LIMITS)
+
+    @pytest.mark.parametrize("value", [None, 0, 1, 10_000])
+    def test_valid_values_accepted_at_construction_and_assignment(
+        self, value: int | None
+    ) -> None:
+        for name in self.LIMITS:
+            conv = Conversation(name="c", agent_type=_A, **{name: value})
+            assert getattr(conv, name) == value
+
+            other = Conversation(name="c", agent_type=_A)
+            setattr(other, name, value)
+            assert getattr(other, name) == value
+
+    @pytest.mark.parametrize("value", [-1, True, False, 1.5, "5"])
+    def test_invalid_values_rejected_at_construction_and_assignment(
+        self, value: object
+    ) -> None:
+        for name in self.LIMITS:
+            with pytest.raises(ValueError, match=name):
+                Conversation(name="c", agent_type=_A, **{name: value})  # type: ignore[arg-type]
+
+            conv = Conversation(name="c", agent_type=_A, **{name: 7})  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match=name):
+                setattr(conv, name, value)
+            assert getattr(conv, name) == 7
+
+    def test_limits_take_part_in_equality(self) -> None:
+        a = Conversation(name="c", agent_type=_A, response_preview_limit=5)
+        b = Conversation(name="c", agent_type=_A, response_preview_limit=5)
+        c = Conversation(name="c", agent_type=_A, response_preview_limit=6)
+
+        assert a == b
+        assert a != c
+
+    def test_context_mutators_still_work_after_limit_assignment(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.context_preview_limit = 3
+        conv.remember("k", 1)
+
+        assert conv.context["k"].value == 1
+        assert isinstance(conv.context, MappingProxyType)
+
+
+class TestRememberRenderMode:
+    def test_remember_stores_render_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.remember("k", {"a": 1}, render_mode="j")
+
+        assert conv.context["k"].render_mode == "j"
+
+    def test_remember_defaults_to_str_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.remember("k", 1)
+
+        assert conv.context["k"].render_mode == "s"
+
+    def test_remember_is_full_replace_for_render_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.remember("k", 1, render_mode="r")
+        conv.remember("k", 2)
+
+        assert conv.context["k"].render_mode == "s"
+
+    def test_remember_rejects_none_render_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+
+        with pytest.raises(ValueError, match="render_mode"):
+            conv.remember("k", 1, render_mode=None)  # type: ignore[arg-type]
+
+    def test_remember_rejects_invalid_render_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+
+        with pytest.raises(ValueError, match="render_mode"):
+            conv.remember("k", 1, render_mode="bogus")
+        assert "k" not in conv.context
+
+    def test_describe_keeps_render_mode(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.remember("k", 1, "old", render_mode="a")
+        conv.describe("k", "new")
+
+        assert conv.context["k"].render_mode == "a"
+        assert conv.context["k"].description == "new"

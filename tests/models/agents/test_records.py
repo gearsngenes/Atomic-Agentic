@@ -92,8 +92,27 @@ class TestContextVariable:
             "value": 0.75,
             "description": "Decision threshold.",
             "readonly": False,
+            "render_mode": "s",
             "type": "float",
         }
+
+    def test_render_mode_defaults_to_str(self) -> None:
+        assert ContextVariable(name="V", value=1).render_mode == "s"
+
+    @pytest.mark.parametrize("mode", ["s", "r", "a", "j", "p"])
+    def test_render_mode_accepts_valid_values_and_survives_replace(
+        self, mode: str
+    ) -> None:
+        spec = ContextVariable(name="V", value=1, render_mode=mode)
+
+        assert spec.render_mode == mode
+        assert replace(spec, value=2).render_mode == mode
+        assert spec.to_dict()["render_mode"] == mode
+
+    @pytest.mark.parametrize("mode", ["x", "S", "", 1, ["s"], None])
+    def test_render_mode_rejects_invalid_values(self, mode: Any) -> None:
+        with pytest.raises(ValueError, match="render_mode"):
+            ContextVariable(name="V", value=1, render_mode=mode)
 
     @pytest.mark.parametrize(
         "name",

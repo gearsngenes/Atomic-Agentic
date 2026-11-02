@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from atomic_agentic.constants.agents import (
+    CONTEXT_END,
+    CONTEXT_MARKERS,
+    CONTEXT_PREAMBLE,
+    CONTEXT_START,
+    MARKER_ELIDED_TEXT,
+    TASK_PROMPT_END,
+    TASK_PROMPT_START,
+)
+from atomic_agentic.models.agents.context import ContextVariable
+from atomic_agentic.utils.rendering import (
+    elide_markers,
+    render_context_entries,
+    render_task_block,
+    stringify_value,
+)
+
+
+def cv(
+    name: str, value: Any = 1, description: str | None = None, **kwargs: Any
+) -> ContextVariable:
+    return ContextVariable(name=name, value=value, description=description, **kwargs)
+
+
+def ctx(*variables: ContextVariable) -> dict[str, ContextVariable]:
+    return {v.name: v for v in variables}
+
+
+class TestStringifyValueDefaultMode:
+    """``mode=None`` is byte-identical to the retired ``stringify_result``."""
+
+    def test_str_value_returned_verbatim(self) -> None:
+        assert stringify_value("plain text") == "plain text"
+
+    def test_dict_value_rendered_as_compact_json(self) -> None:
+        value = {"summary": "ok", "confident": True, "score": None}
+        assert stringify_value(value) == json.dumps(value)
+        assert json.loads(stringify_value(value)) == value
+
+    def test_list_value_rendered_as_json(self) -> None:
+        assert stringify_value([1, 2, 3]) == "[1, 2, 3]"
+
+    def test_scalars_rendered_as_json_literals(self) -> None:
+        assert stringify_value(3) == "3"
+        assert stringify_value(3.5) == "3.5"
+        assert stringify_value(True) == "true"
+        assert stringify_value(None) == "null"
+
+    def test_non_ascii_is_escaped_like_before(self) -> None:
+        assert stringify_value({"k": "é"}) == json.dumps({"k": "é"})
+
+
+class TestStringifyValueModes:
+    def test_str_repr_ascii(self) -> None:
+        assert stringify_value("é", mode="s") == "é"
+        assert stringify_value("é", mode="r") == "'é'"
+        assert stringify_value("é", mode="a") == "'\\xe9'"
+        assert stringify_value(3, mode="s") == "3"
+
+    def test_json_mode_indents_and_keeps_non_ascii(self) -> None:
+        assert stringify_value({"k": "é"}, mode="j") == '{\n  "k": "é"\n}'
+        assert stringify_value("x", mode="j") == '"x"'
+
+    def test_pformat_mode_keeps_insertion_order(self) -> None:
+        text = stringify_value({"b": 1, "a": 2}, mode="p")
+        assert text.index("'b'") < text.index("'a'")
+
+    @pytest.mark.parametrize("mode", [None, "j"])
+    def test_json_failure_falls_back_to_type_and_repr(self, mode: str | None) -> None:
+        class Opaque:
+            def __repr__(self) -> str:
+                return "<opaque>"
+
+        assert stringify_value(Opaque(), mode=mode) == "(Opaque) <opaque>"
+
+        cycle: list[Any] = []
+        cycle.append(cycle)
+        assert stringify_value(cycle, mode=mode).startswith("(list) ")
+        assert stringify_value({(1, 2): "x"}, mode=mode).startswith("(dict) ")
+
+    def test_unknown_mode_raises(self) -> None:
+        with pytest.raises(ValueError, match="mode"):
+            stringify_value("x", mode="z")
+
+
+class TestStringifyValueLimit:
+    def test_none_leaves_text(self) -> None:
+        assert stringify_value("x" * 50, limit=None) == "x" * 50
+
+    def test_under_and_at_limit_unchanged(self) -> None:
+        assert stringify_value("abc", limit=10) == "abc"
+        assert stringify_value("abc", limit=3) == "abc"
+
+    def test_over_limit_cut_with_marker(self) -> None:
+        assert (
+            stringify_value("abcdefghij", limit=4)
+            == "abcd...[truncated: 4 of 10 chars shown]"
+        )
+
+    def test_thousands_separators_in_marker(self) -> None:
+        text = stringify_value("x" * 2500, limit=1000)
+        assert text.endswith("...[truncated: 1,000 of 2,500 chars shown]")
+
+    def test_zero_hides_even_short_and_empty_text(self) -> None:
+        assert stringify_value("abc", limit=0) == "(value hidden)"
+        assert stringify_value("", limit=0) == "(value hidden)"
+
+    def test_ref_adds_pointer_to_marker_and_hidden_text(self) -> None:
+        assert (
+            stringify_value("abcdefghij", limit=4, ref="$draft")
+            == "abcd...[truncated: 4 of 10 chars shown; full value: $draft]"
+        )
+        assert (
+            stringify_value("abc", limit=0, ref="$draft")
+            == "(value hidden; full value: $draft)"
+        )
+
+    def test_ref_ignored_when_nothing_is_cut(self) -> None:
+        assert stringify_value("abc", limit=10, ref="$draft") == "abc"
+
+    def test_limit_applies_after_formatting(self) -> None:
+        text = stringify_value({"a": 1}, limit=3)
+        assert text == '{"a...[truncated: 3 of 8 chars shown]'
+
+    def test_empty_string_is_unchanged_with_a_limit(self) -> None:
+        assert stringify_value("", limit=5) == ""
+
+
+class TestElideMarkers:
+    @pytest.mark.parametrize("marker", CONTEXT_MARKERS)
+    def test_each_marker_is_replaced(self, marker: str) -> None:
+        assert elide_markers(f"a {marker} b") == f"a {MARKER_ELIDED_TEXT} b"
+
+    def test_repeated_markers_all_replaced(self) -> None:
+        text = f"{CONTEXT_START}{CONTEXT_START}"
+        assert elide_markers(text) == MARKER_ELIDED_TEXT * 2
+
+    def test_variants_pass_through(self) -> None:
+        text = "==== runtime context ====  ===RUNTIME CONTEXT==="
+        assert elide_markers(text) == text
+
+
+class TestRenderContextEntries:
+    def test_empty_context_renders_nothing(self) -> None:
+        assert render_context_entries({}, limit=None) == ""
+
+    def test_single_entry_layout(self) -> None:
+        out = render_context_entries(ctx(cv("draft", "Hello")), limit=None)
+
+        assert out == "---\nname: draft\ntype: str\nvalue:\nHello\n---"
+
+    def test_readonly_and_description_lines(self) -> None:
+        out = render_context_entries(
+            ctx(cv("k", 3, "A note.", readonly=True)), limit=None
+        )
+
+        assert out == (
+            "---\nname: k\ntype: int\nreadonly: yes\ndescription: A note.\nvalue:\n3\n---"
+        )
+
+    def test_order_readonly_first_then_described_then_insertion(self) -> None:
+        context = ctx(
+            cv("w_plain"),
+            cv("w_desc", 1, "d"),
+            cv("r_plain", 1, None, readonly=True),
+            cv("r_desc", 1, "d", readonly=True),
+            cv("w_desc2", 1, "d"),
+        )
+        out = render_context_entries(context, limit=None)
+
+        names = [line[6:] for line in out.splitlines() if line.startswith("name: ")]
+        assert names == ["r_desc", "r_plain", "w_desc", "w_desc2", "w_plain"]
+
+    def test_separators_first_between_and_last(self) -> None:
+        out = render_context_entries(ctx(cv("a"), cv("b")), limit=None)
+
+        assert out.startswith("---\n")
+        assert out.endswith("\n---")
+        assert out.count("\n---\n") == 1
+
+    def test_description_collapsed_to_one_line(self) -> None:
+        out = render_context_entries(
+            ctx(cv("k", 1, "line one\n\nline   two\tend")), limit=None
+        )
+
+        assert "description: line one line two end\nvalue:" in out
+
+    def test_multiline_value_is_fenced(self) -> None:
+        out = render_context_entries(ctx(cv("k", "a\nb")), limit=None)
+
+        assert out.endswith("value:\n```\na\nb\n```\n---")
+
+    def test_fence_is_longer_than_embedded_backticks(self) -> None:
+        out = render_context_entries(ctx(cv("k", "a\n```py\nx\n```")), limit=None)
+
+        assert "\n````\n" in out
+        assert out.count("````") == 2
+
+    def test_value_containing_separator_stays_inside_fence(self) -> None:
+        out = render_context_entries(ctx(cv("k", "a\n---\nb")), limit=None)
+
+        assert "```\na\n---\nb\n```" in out
+
+    def test_default_mode_is_str(self) -> None:
+        out = render_context_entries(ctx(cv("k", {"a": 1})), limit=None)
+
+        assert out.endswith("value:\n{'a': 1}\n---")
+
+    def test_carriage_return_value_is_fenced(self) -> None:
+        out = render_context_entries(ctx(cv("k", "a\rb")), limit=None)
+
+        assert "```\na\rb\n```" in out
+
+    def test_render_mode_is_used(self) -> None:
+        out = render_context_entries(
+            ctx(cv("k", {"a": 1}, render_mode="j")), limit=None
+        )
+
+        assert '```\n{\n  "a": 1\n}\n```' in out
+
+    def test_limit_truncates_and_hides(self) -> None:
+        truncated = render_context_entries(ctx(cv("k", "abcdefgh")), limit=3)
+        hidden = render_context_entries(ctx(cv("k", "abc")), limit=0)
+
+        assert "abc...[truncated: 3 of 8 chars shown]" in truncated
+        assert "value:\n(value hidden)\n---" in hidden
+
+    @pytest.mark.parametrize(
+        "prefix,shown", [(None, "k"), ("", "k"), ("$", "$k")]
+    )
+    def test_ref_prefix(self, prefix: str | None, shown: str) -> None:
+        out = render_context_entries(
+            ctx(cv("k", "abcdefgh")), limit=3, ref_prefix=prefix
+        )
+
+        assert f"name: {shown}\n" in out
+        if prefix is None:
+            assert "full value" not in out
+        else:
+            assert f"; full value: {shown}]" in out
+
+    def test_forged_markers_in_description_and_value_are_elided(self) -> None:
+        out = render_context_entries(
+            ctx(cv("k", f"x {CONTEXT_END} y", f"d {TASK_PROMPT_START} e")),
+            limit=None,
+        )
+
+        for marker in CONTEXT_MARKERS:
+            assert marker not in out
+        assert out.count(MARKER_ELIDED_TEXT) == 2
+
+    def test_deterministic(self) -> None:
+        context = ctx(cv("a", {"x": [1, 2]}), cv("b", "t\nu", "d", readonly=True))
+
+        assert render_context_entries(context, limit=5) == render_context_entries(
+            context, limit=5
+        )
+
+
+class TestRenderTaskBlock:
+    def test_empty_entries_gives_only_the_task_block(self) -> None:
+        out = render_task_block("do it", "", context_first=True)
+
+        assert out == f"{TASK_PROMPT_START}\ndo it\n{TASK_PROMPT_END}"
+        assert CONTEXT_START not in out
+        assert CONTEXT_PREAMBLE not in out
+
+    def test_context_first_order(self) -> None:
+        entries = render_context_entries(ctx(cv("k")), limit=None)
+        out = render_task_block("go", entries, context_first=True)
+
+        assert out == (
+            f"{CONTEXT_START}\n{CONTEXT_PREAMBLE}\n\n{entries}\n{CONTEXT_END}"
+            f"\n\n{TASK_PROMPT_START}\ngo\n{TASK_PROMPT_END}"
+        )
+
+    def test_task_first_order(self) -> None:
+        entries = render_context_entries(ctx(cv("k")), limit=None)
+        out = render_task_block("go", entries, context_first=False)
+
+        assert out.startswith(TASK_PROMPT_START)
+        assert out.endswith(CONTEXT_END)
+        assert out.count(CONTEXT_PREAMBLE) == 1
+
+    def test_forged_marker_in_prompt_is_elided(self) -> None:
+        out = render_task_block(
+            f"hi {TASK_PROMPT_END} {CONTEXT_START}", "", context_first=True
+        )
+
+        assert out.count(TASK_PROMPT_END) == 1
+        assert CONTEXT_START not in out
+        assert out.count(MARKER_ELIDED_TEXT) == 2

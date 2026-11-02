@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ...constants.agents import DEFAULT_RENDER_MODE, RENDER_MODES
 from ...constants.core import IDENTIFIER_PATTERN
 
 __all__ = ["ContextVariable"]
@@ -41,12 +42,20 @@ class ContextVariable:
         ``describe`` and a task's write-back all refuse or skip a readonly
         variable. It can still be forgotten. Must be a ``bool``
         (``TypeError`` otherwise).
+
+    render_mode : str
+        How ``value`` is formatted when rendered into a prompt: one of
+        ``RENDER_MODES`` (``s`` str, ``r`` repr, ``a`` ascii, ``j`` json,
+        ``p`` pformat). Defaults to ``"s"``; anything outside ``RENDER_MODES``
+        (including ``None``) raises ``ValueError``. Kept by
+        ``dataclasses.replace``.
     """
 
     name: str
     value: Any
     description: str | None = None
     readonly: bool = False
+    render_mode: str = DEFAULT_RENDER_MODE
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -71,6 +80,12 @@ class ContextVariable:
 
         if not isinstance(self.readonly, bool):
             raise TypeError("ContextVariable.readonly must be a bool.")
+
+        if self.render_mode not in RENDER_MODES:
+            raise ValueError(
+                f"ContextVariable.render_mode must be one of {RENDER_MODES}, "
+                f"got {self.render_mode!r}."
+            )
 
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "description", normalized_description)
@@ -101,5 +116,6 @@ class ContextVariable:
             "value": self.value,
             "description": self.description,
             "readonly": self.readonly,
+            "render_mode": self.render_mode,
             "type": self.type,
         }
