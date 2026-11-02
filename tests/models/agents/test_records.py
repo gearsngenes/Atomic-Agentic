@@ -93,6 +93,7 @@ class TestContextVariable:
             "description": "Decision threshold.",
             "readonly": False,
             "render_mode": "s",
+            "preview_limit": None,
             "type": "float",
         }
 
@@ -113,6 +114,24 @@ class TestContextVariable:
     def test_render_mode_rejects_invalid_values(self, mode: Any) -> None:
         with pytest.raises(ValueError, match="render_mode"):
             ContextVariable(name="V", value=1, render_mode=mode)
+
+    def test_preview_limit_defaults_to_none(self) -> None:
+        assert ContextVariable(name="V", value=1).preview_limit is None
+
+    @pytest.mark.parametrize("limit", [None, 0, 5])
+    def test_preview_limit_accepts_valid_values_and_survives_replace(
+        self, limit: int | None
+    ) -> None:
+        spec = ContextVariable(name="V", value=1, preview_limit=limit)
+
+        assert spec.preview_limit == limit
+        assert replace(spec, value=2).preview_limit == limit
+        assert spec.to_dict()["preview_limit"] == limit
+
+    @pytest.mark.parametrize("limit", [-1, True, False, 1.5, "5"])
+    def test_preview_limit_rejects_invalid_values(self, limit: Any) -> None:
+        with pytest.raises(ValueError, match="preview_limit"):
+            ContextVariable(name="V", value=1, preview_limit=limit)
 
     @pytest.mark.parametrize(
         "name",

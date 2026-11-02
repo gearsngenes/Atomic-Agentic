@@ -38,8 +38,9 @@ def main() -> None:
         records_window=None,
         post_invoke=summarize_result,
         bind_response_to="result",
-        response_preview_limit=300,
     )
+    # Preview limits live on the conversation, not the agent.
+    agent.get_conversation().response_preview_limit = 300
 
     result = agent.invoke(
         {

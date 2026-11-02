@@ -735,10 +735,18 @@ class TestRenderCacheSnapshot:
 
         rendered = render_cache_snapshot([slot], {"a": "x" * 20}, 5)
 
-        # preview() truncates repr(value), and repr() of a string includes
-        # its wrapping quote -- the first 5 characters are the quote plus 4
-        # x's, not 5 x's.
-        assert "'xxxx..." in rendered
+        # preview() limits repr(value), and repr() of a string includes its
+        # wrapping quote -- the first 5 characters are the quote plus 4 x's,
+        # and the 20-char string's repr is 22 chars long.
+        assert "a: str = 'xxxx...[truncated: 5 of 22 chars shown]" in rendered
+
+    def test_zero_preview_limit_hides_the_value(self) -> None:
+        slot = ToolStatement(identifier="a", tool="tool_a")
+
+        rendered = render_cache_snapshot([slot], {"a": "secret"}, 0)
+
+        assert "a: str = value hidden" in rendered
+        assert "secret" not in rendered
 
     def test_no_preview_limit_means_no_truncation(self) -> None:
         slot = ToolStatement(identifier="a", tool="tool_a")

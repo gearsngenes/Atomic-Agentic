@@ -46,7 +46,7 @@ from ..utils.parameters import (
     build_parameter_reports,
     apply_parameter_reports,
 )
-from ..utils.agents import stringify_result
+from ..utils.rendering import stringify_value
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,6 @@ class Agent(AtomicInvokable, ABC):
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
     ) -> None:
 
         # ── Pre-invoke ───────────────────────────────────────────────────────
@@ -313,13 +312,6 @@ class Agent(AtomicInvokable, ABC):
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
         self._branch_counter: int = 0
-
-        if response_preview_limit is None:
-            self._response_preview_limit = None
-        elif type(response_preview_limit) is not int or response_preview_limit <= 0:
-            raise AgentError("response_preview_limit must be None or a positive integer > 0.")
-        else:
-            self._response_preview_limit = response_preview_limit
 
         super().__init__(
             name=name,
@@ -480,11 +472,6 @@ class Agent(AtomicInvokable, ABC):
         self._records_window = value
 
     @property
-    def response_preview_limit(self) -> Optional[int]:
-        """Character limit for rendered assistant responses. ``None`` means no truncation."""
-        return self._response_preview_limit
-
-    @property
     def active_conversation(self) -> str:
         """Key of the currently active conversation."""
         return self._active_conversation
@@ -514,38 +501,53 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def render_turn(self, turn: AgentRecord, **kwargs: Any) -> List[Dict[str, str]]:
+    def render_turn(
+        self,
+        turn: AgentRecord,
+        *,
+        response_preview_limit: Optional[int] = None,
+        prompt_preview_limit: Optional[int] = None,
+        render_mode: str = "s",
+        **kwargs: Any,
+    ) -> List[Dict[str, str]]:
         """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
         The assistant content is always ``turn.generated_response`` — the
         LLM's own raw output, never ``post_invoke``'s transformed result
-        (not retained on the record at all). ``response_preview_limit`` is
-        applied only to the rendered text. ``turn.user_prompt`` is used
-        verbatim as the user message content — it is already a
-        fully-resolved string, not a template.
+        (not retained on the record at all). ``turn.user_prompt`` is the user
+        message content — already a fully-resolved string, not a template.
+        Each is cut by its limit (``None`` truncates nothing, ``0`` hides the
+        text); ``summarize`` passes the bound conversation's limits and
+        ``render_mode`` (how the response is formatted; the prompt is always a
+        plain string), so called directly with no arguments nothing is
+        truncated and the response is rendered with ``str``.
 
         ``**kwargs`` is accepted and ignored at this level — base rendering
         has no family-specific use for it. A subclass override consumes
         whatever keys it needs (e.g. ``ToolAgent``'s required ``index``)
-        and forwards ``**kwargs`` through its own ``super().render_turn``
-        call if it still wants this base behavior too.
+        and forwards ``**kwargs`` (limits included) through its own
+        ``super().render_turn`` call if it still wants this base behavior too.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
                 f"render_turn expected AgentRecord, got {type(turn)!r}"
             )
 
-        response_text = stringify_result(turn.generated_response)
-
-        if (
-            self._response_preview_limit is not None
-            and len(response_text) > self._response_preview_limit
-        ):
-            response_text = response_text[: self._response_preview_limit] + "..."
-
         return [
-            {"role": "user", "content": turn.user_prompt},
-            {"role": "assistant", "content": response_text},
+            {
+                "role": "user",
+                "content": stringify_value(
+                    turn.user_prompt, mode="s", limit=prompt_preview_limit
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": stringify_value(
+                    turn.generated_response,
+                    mode=render_mode,
+                    limit=response_preview_limit,
+                ),
+            },
         ]
 
     # ------------------------------------------------------------------ #
@@ -631,11 +633,22 @@ class Agent(AtomicInvokable, ABC):
         turn's position in the full stored conversation. Base rendering
         ignores it; ``ToolAgent``'s ``render_turn`` requires it. Empty
         ``turns`` leaves ``historic_messages`` empty. Renders only -- there
-        is no compaction yet.
+        is no compaction yet. Each turn is limited by the bound conversation's
+        ``prompt_preview_limit`` / ``response_preview_limit`` / ``render_mode``,
+        read here when the messages are built.
         """
+        conv = self._conversations[task.conversation]
         rendered: list[dict[str, str]] = []
         for i, turn in enumerate(task.turns):
-            rendered.extend(self.render_turn(turn, index=i))
+            rendered.extend(
+                self.render_turn(
+                    turn,
+                    index=i,
+                    response_preview_limit=conv.response_preview_limit,
+                    prompt_preview_limit=conv.prompt_preview_limit,
+                    render_mode=conv.render_mode,
+                )
+            )
         task.historic_messages = rendered
         return task
 
@@ -1003,9 +1016,10 @@ class Agent(AtomicInvokable, ABC):
     # Public API
     # ------------------------------------------------------------------ #
     def clear_memory(self) -> None:
-        """Hard-reset all conversation storage to the just-constructed state.
+        """Factory-reset all conversation storage to the just-constructed state.
 
-        Every conversation is discarded; ``self._conversations`` becomes
+        Every conversation is discarded, including its context and preview
+        limits; ``self._conversations`` becomes
         ``{"default": []}`` and the active conversation resets to
         ``"default"``. ``self._branch_counter`` is deliberately NOT reset --
         an auto-generated conversation name must never be reissued, even
@@ -1037,13 +1051,22 @@ class Agent(AtomicInvokable, ABC):
         description: str | None = None,
         *,
         readonly: bool = False,
+        render_mode: str = "s",
+        preview_limit: int | None = None,
         conversation: str | None = None,
     ) -> None:
         """``Conversation.remember`` on a conversation (``None`` = the active one)."""
         with self._invoke_lock:
             self._conversations[
                 self._conversation_key(conversation, "remember")
-            ].remember(key, value, description, readonly=readonly)
+            ].remember(
+                key,
+                value,
+                description,
+                readonly=readonly,
+                render_mode=render_mode,
+                preview_limit=preview_limit,
+            )
 
     def describe(
         self, key: str, description: str | None, *, conversation: str | None = None
@@ -1079,51 +1102,68 @@ class Agent(AtomicInvokable, ABC):
                 self._conversation_key(conversation, "forget_many")
             ].forget_many(keys)
 
-    def get_conversation(self, conversation_id: str | None = None) -> Conversation:
-        """Return a snapshot of a conversation.
+    def _check_new_conversation_name(self, name: str, caller: str) -> None:
+        """Raise ``ValueError`` if ``name`` is badly shaped or already taken.
 
-        A distinct ``Conversation`` holding a copy of the record list and of
-        the context, tagged with the same ``agent_type``; mutating it (its
-        list, or calling its mutators) never affects the agent -- the
-        ``Agent`` wrappers are the only locked write path. ``conversation_id``
-        is a dict key, not a record identity: once cloning exists, a single
-        ``AgentRecord`` can legitimately belong to more than one
-        conversation's list.
+        The caller holds ``self._invoke_lock``.
+        """
+        if not CONVERSATION_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"{caller}: invalid conversation name {name!r} (must be "
+                "alphanumeric/underscore and must not end in _<digits>)."
+            )
+        if name in self._conversations:
+            raise ValueError(f"{caller}: conversation {name!r} already exists.")
+
+    def get_conversation(self, conversation_id: str | None = None) -> Conversation:
+        """Return the stored conversation itself (not a snapshot).
+
+        Mutating the returned object directly bypasses ``_invoke_lock`` -- the
+        ``Agent`` wrappers are the only locked write path -- but its preview
+        limits are meant to be assigned directly
+        (``agent.get_conversation().response_preview_limit = 500``).
+        ``conversation_id`` is a dict key, not a record identity: once cloning
+        exists, a single ``AgentRecord`` can legitimately belong to more than
+        one conversation's list.
 
         ``conversation_id=None`` resolves to the active conversation. An
         unknown key raises ``AgentInvocationError``.
         """
         with self._invoke_lock:
-            conv = self._conversations[
+            return self._conversations[
                 self._conversation_key(conversation_id, "get_conversation")
             ]
-            return Conversation(
-                name=conv.name,
-                agent_type=conv.agent_type,
-                records=list(conv.records),
-                context=conv.context,
-            )
 
-    def create_conversation(self, name: str) -> Conversation:
-        """Create a new, empty conversation.
+    def create_conversation(
+        self,
+        name: str,
+        *,
+        response_preview_limit: int | None = None,
+        prompt_preview_limit: int | None = None,
+        context_preview_limit: int | None = None,
+        render_mode: str = "s",
+    ) -> Conversation:
+        """Create a new, empty conversation and return the stored object.
 
         ``name`` must be alphanumeric-plus-underscore and must not end in
         ``_<digits>`` (that suffix shape is reserved for auto-generated clone
-        names) -- an invalid shape raises ``ValueError``. A name that already
-        exists raises ``AgentInvocationError`` -- matches ``register()``'s
-        collision behavior elsewhere in AA; never auto-activates either way.
+        names); a bad shape or a name that already exists raises
+        ``ValueError`` with a specific message. The three preview limits
+        (``None`` unlimited, ``0`` hidden, else ``int > 0``) are validated by
+        ``Conversation`` (``ValueError``), as is ``render_mode`` (how prior
+        responses are formatted in history). Never auto-activates.
         """
         with self._invoke_lock:
-            if not CONVERSATION_NAME_PATTERN.fullmatch(name):
-                raise ValueError(
-                    f"create_conversation: invalid name {name!r} (must be "
-                    "alphanumeric/underscore, must not end in _<digits>)."
-                )
-            if name in self._conversations:
-                raise AgentInvocationError(
-                    f"create_conversation: name {name!r} already exists."
-                )
-            conv = Conversation(name=name, agent_type=type(self), records=[])
+            self._check_new_conversation_name(name, "create_conversation")
+            conv = Conversation(
+                name=name,
+                agent_type=type(self),
+                records=[],
+                response_preview_limit=response_preview_limit,
+                prompt_preview_limit=prompt_preview_limit,
+                context_preview_limit=context_preview_limit,
+                render_mode=render_mode,
+            )
             self._conversations[name] = conv
             return conv
 
@@ -1247,11 +1287,12 @@ class Agent(AtomicInvokable, ABC):
         start_id: str | None = None,
         end_id: str | None = None,
         name: str | None = None,
-    ) -> Conversation:
+    ) -> str:
         """Import an ``[start, end]`` range of ``conversation`` as a new conversation.
 
-        ``conversation`` is typically a ``get_conversation`` snapshot, so
-        cross-agent use is ``b.import_conversation(a.get_conversation("x"))``.
+        Returns the new conversation's name. ``conversation`` is typically
+        another agent's ``get_conversation`` result, so cross-agent use is
+        ``b.import_conversation(a.get_conversation("x"))``.
         Its ``agent_type`` must be exactly ``type(self)`` (``TypeError``
         otherwise, before anything is created). Always creates a new
         conversation, never merges.
@@ -1269,9 +1310,10 @@ class Agent(AtomicInvokable, ABC):
         ``ValueError``); if omitted, a name is auto-derived from
         ``conversation.name``.
 
-        Records are reference-copied. Context is copied into a distinct
-        container (``ContextVariable``s shared by identity, values by
-        reference). Context is conversation-level, not per-record: a range
+        The new conversation is independent of the source. Records are
+        reference-copied. Context is copied into a distinct container
+        (``ContextVariable``s shared by identity, values by reference). The
+        three preview limits and ``render_mode`` are copied. Context is conversation-level, not per-record: a range
         import gets the conversation's **latest** context, not its state at
         that record. Reference-copied records share ``record.children`` lists
         across agents with different locks.
@@ -1293,12 +1335,7 @@ class Agent(AtomicInvokable, ABC):
             )
 
             if name is not None:
-                if not CONVERSATION_NAME_PATTERN.fullmatch(name):
-                    raise ValueError(f"import_conversation: invalid name {name!r}.")
-                if name in self._conversations:
-                    raise ValueError(
-                        f"import_conversation: name {name!r} already exists."
-                    )
+                self._check_new_conversation_name(name, "import_conversation")
                 resolved_name = name
             else:
                 base = TRAILING_FORK_INDEX_PATTERN.sub("", conversation.name)
@@ -1314,9 +1351,13 @@ class Agent(AtomicInvokable, ABC):
                 agent_type=type(self),
                 records=new_records,
                 context=conversation.context,
+                response_preview_limit=conversation.response_preview_limit,
+                prompt_preview_limit=conversation.prompt_preview_limit,
+                context_preview_limit=conversation.context_preview_limit,
+                render_mode=conversation.render_mode,
             )
             self._conversations[resolved_name] = new_conv
-            return new_conv
+            return resolved_name
 
     def clone_conversation(
         self,
@@ -1327,20 +1368,21 @@ class Agent(AtomicInvokable, ABC):
         start_id: str | None = None,
         end_id: str | None = None,
         name: str | None = None,
-    ) -> Conversation:
+    ) -> str:
         """Clone an arbitrary ``[start, end]`` range of an existing conversation.
 
         A thin wrapper over ``import_conversation`` with this agent's own
         ``source`` conversation: same range addressing, naming and errors, and
-        the clone carries the source's context. An unknown ``source`` raises
+        the clone carries the source's context, preview limits and render mode. Returns the
+        new conversation's name. An unknown ``source`` raises
         ``AgentInvocationError``.
         """
         with self._invoke_lock:
-            snapshot = self.get_conversation(
+            stored = self._conversations[
                 self._conversation_key(source, "clone_conversation")
-            )
+            ]
             return self.import_conversation(
-                snapshot,
+                stored,
                 start=start,
                 end=end,
                 start_id=start_id,
@@ -1362,8 +1404,8 @@ class Agent(AtomicInvokable, ABC):
 
         ``"default"`` is never actually removed -- regardless of whether
         it is currently active, deleting it resets it to an empty
-        ``Conversation`` (empty records and context) in place and returns the
-        prior one; the key itself always stays present. Any other conversation is refused while it is
+        ``Conversation`` (empty records, context and preview limits) in place
+        and returns the prior one; the key itself always stays present. Any other conversation is refused while it is
         the active conversation (switch active first); otherwise it is
         popped and returned.
         """
@@ -1489,7 +1531,6 @@ class Agent(AtomicInvokable, ABC):
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,
-            "response_preview_limit": self.response_preview_limit,
             "conversations": {
                 key: [r.to_dict() for r in conv.records]
                 for key, conv in self._conversations.items()},

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
-import json
 
 import pytest
 
@@ -533,9 +532,20 @@ class TestRenderPipeline:
         assert _THINKING_FRAMING in rendered[0]["content"]
         assert rendered[1] == {"role": "assistant", "content": "first thought"}
         assert rendered[2] == {"role": "user", "content": _THINKING_CONTINUATION_NUDGE}
-        assert rendered[3] == {"role": "assistant", "content": json.dumps({"a": 1})}
+        assert rendered[3] == {"role": "assistant", "content": "{'a': 1}"}
         assert rendered[4] == {"role": "user", "content": _THINKING_CONTINUATION_NUDGE}
         assert len(rendered) == 5
+
+    def test_thoughts_follow_the_conversations_render_mode(self) -> None:
+        agent = make_agent(engine=FakeLLMEngine([]))
+        agent.get_conversation().render_mode = "j"
+        task = agent.create_task({"thinking_rounds": 3})
+        task.user_prompt = "hello"
+        task.thoughts.append({"a": 1})
+
+        rendered = agent._render_task_messages(task)
+
+        assert rendered[1] == {"role": "assistant", "content": '{\n  "a": 1\n}'}
 
     def test_thinking_phase_messages_never_contain_round_headers(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
@@ -573,21 +583,24 @@ class TestRenderPipeline:
         assert len(rendered) == 1
         assert _THINKING_FRAMING not in rendered[0]["content"]
 
-    def test_format_thoughts_renders_non_str_values_via_json_dumps(self) -> None:
-        rendered = ThinkingAgent._format_thoughts(["plain", {"a": 1}])
+    def test_format_thoughts_renders_values_with_the_given_mode(self) -> None:
+        rendered = ThinkingAgent._format_thoughts(["plain", {"a": 1}], "s")
 
         assert "## Round 0" in rendered
         assert "plain" in rendered
         assert "## Round 1" in rendered
-        assert json.dumps({"a": 1}) in rendered
+        assert "{'a': 1}" in rendered
+        assert '{\n  "a": 1\n}' in ThinkingAgent._format_thoughts([{"a": 1}], "j")
 
     def test_stringify_thought_matches_format_thoughts_rendering(self) -> None:
         # Guards the two call sites (per-thought thinking-phase rendering,
         # reply-phase combined block) against drifting on how a non-str
         # thought gets stringified.
         value = {"a": 1}
-        assert ThinkingAgent._stringify_thought(value) == json.dumps(value)
-        assert ThinkingAgent._stringify_thought(value) in ThinkingAgent._format_thoughts([value])
+        for mode in ("s", "j"):
+            assert ThinkingAgent._stringify_thought(value, mode) in (
+                ThinkingAgent._format_thoughts([value], mode)
+            )
 
 
 class TestRecordAndResultConstruction:

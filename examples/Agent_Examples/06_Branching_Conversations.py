@@ -31,7 +31,7 @@ Key concepts shown
   from T0 in the cloned branch adds a second child (T_B1). That is
   provenance only -- the clone is a real conversation of its own, and the
   new turn is appended to it in place (there is no implicit forking).
-- ``Agent.get_conversation(conversation_id)``   (a Conversation snapshot) each conversation is its own
+- ``Agent.get_conversation(conversation_id)``   (the stored Conversation) each conversation is its own
   stored list under ``Agent.conversation_names``; reading one back is a
   plain dict lookup, not a reconstruction walk.
 
@@ -227,8 +227,7 @@ def main() -> None:
 
     # Explicitly clone "default" up through T0, switch into the clone, and
     # continue there -- the new turn is appended to the clone in place.
-    branch_b = agent.clone_conversation("default", end_id=run_0)
-    branch_b_name = branch_b.name
+    branch_b_name = agent.clone_conversation("default", end_id=run_0)
     agent.switch_conversation(branch_b_name)
 
     r_b1 = agent(

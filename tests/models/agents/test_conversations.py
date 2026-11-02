@@ -265,6 +265,35 @@ class TestPreviewLimits:
         assert isinstance(conv.context, MappingProxyType)
 
 
+class TestHistoryRenderMode:
+    def test_defaults_to_str(self) -> None:
+        assert Conversation(name="c", agent_type=_A).render_mode == "s"
+
+    @pytest.mark.parametrize("mode", ["s", "r", "a", "j", "p"])
+    def test_valid_modes_accepted_at_construction_and_assignment(self, mode: str) -> None:
+        assert Conversation(name="c", agent_type=_A, render_mode=mode).render_mode == mode
+
+        conv = Conversation(name="c", agent_type=_A)
+        conv.render_mode = mode
+        assert conv.render_mode == mode
+
+    @pytest.mark.parametrize("mode", ["x", "S", "", None, 1])
+    def test_invalid_modes_rejected_and_old_value_kept(self, mode: object) -> None:
+        with pytest.raises(ValueError, match="render_mode"):
+            Conversation(name="c", agent_type=_A, render_mode=mode)  # type: ignore[arg-type]
+
+        conv = Conversation(name="c", agent_type=_A, render_mode="j")
+        with pytest.raises(ValueError, match="render_mode"):
+            conv.render_mode = mode  # type: ignore[assignment]
+        assert conv.render_mode == "j"
+
+    def test_takes_part_in_equality(self) -> None:
+        a = Conversation(name="c", agent_type=_A, render_mode="j")
+
+        assert a == Conversation(name="c", agent_type=_A, render_mode="j")
+        assert a != Conversation(name="c", agent_type=_A)
+
+
 class TestRememberRenderMode:
     def test_remember_stores_render_mode(self) -> None:
         conv = Conversation(name="c", agent_type=_A)
@@ -296,6 +325,21 @@ class TestRememberRenderMode:
 
         with pytest.raises(ValueError, match="render_mode"):
             conv.remember("k", 1, render_mode="bogus")
+        assert "k" not in conv.context
+
+    def test_remember_stores_and_resets_preview_limit(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+        conv.remember("k", 1, preview_limit=4)
+        assert conv.context["k"].preview_limit == 4
+
+        conv.remember("k", 2)
+        assert conv.context["k"].preview_limit is None
+
+    def test_remember_rejects_invalid_preview_limit(self) -> None:
+        conv = Conversation(name="c", agent_type=_A)
+
+        with pytest.raises(ValueError, match="preview_limit"):
+            conv.remember("k", 1, preview_limit=-1)
         assert "k" not in conv.context
 
     def test_describe_keeps_render_mode(self) -> None:

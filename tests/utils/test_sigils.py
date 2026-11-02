@@ -31,3 +31,26 @@ class TestRenderCacheSnapshotSigil:
 
         assert "$a: int = 1" in rendered
         assert "$b: str = \"two\"" in rendered
+
+
+class TestRenderCacheSnapshotLimit:
+    def test_preview_limit_cuts_with_the_marker(self) -> None:
+        stmt = ToolStatement(identifier="a", tool="tool_a")
+
+        rendered = render_cache_snapshot([stmt], {"a": "x" * 20}, 5)
+
+        # json.dumps wraps the string in quotes: 22 chars, first 5 shown.
+        assert '$a: str = "xxxx...[truncated: 5 of 22 chars shown]' in rendered
+
+    def test_zero_preview_limit_hides_the_value(self) -> None:
+        stmt = ToolStatement(identifier="a", tool="tool_a")
+
+        rendered = render_cache_snapshot([stmt], {"a": "secret"}, 0)
+
+        assert "$a: str = value hidden" in rendered
+        assert "secret" not in rendered
+
+    def test_no_preview_limit_means_no_truncation(self) -> None:
+        stmt = ToolStatement(identifier="a", tool="tool_a")
+
+        assert "x" * 20 in render_cache_snapshot([stmt], {"a": "x" * 20}, None)

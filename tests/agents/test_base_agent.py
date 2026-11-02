@@ -310,7 +310,6 @@ def make_agent(
     post_invoke: Any = package_response,
     bind_response_to: Any = "result",
     system_prompt: str = ROLE_PROMPT,
-    response_preview_limit: int | None = None,
     agent_cls: type[_EchoAgent] = _EchoAgent,
 ) -> _EchoAgent:
     # Default binding "result" matches the first parameter of the default
@@ -327,7 +326,6 @@ def make_agent(
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
         bind_response_to=bind_response_to,
-        response_preview_limit=response_preview_limit,
     )
 
 
@@ -589,19 +587,18 @@ class TestAgentContext:
 
     def test_render_turn_stringifies_non_str_generated_response_as_json(self) -> None:
         # Regression guard: a structured (response_schema-produced)
-        # generated_response must round-trip back into history as valid
-        # JSON, not Python repr syntax (single-quoted keys, True/None) --
-        # see utils.agents.stringify_result.
+        # generated_response can round-trip back into history as valid JSON
+        # when the conversation's render_mode is "j" (the default "s" gives
+        # Python str syntax) -- see utils.rendering.stringify_value.
         agent = make_agent(engine=FakeLLMEngine([]), record_enabled=True)
-        record = AgentRecord(
-            user_prompt="hello",
-            generated_response={"summary": "ok", "confident": True, "score": None},
-        )
+        value = {"summary": "ok", "confident": True, "score": None}
+        record = AgentRecord(user_prompt="hello", generated_response=value)
 
-        rendered = agent.render_turn(record)
+        as_json = agent.render_turn(record, render_mode="j")
+        as_str = agent.render_turn(record)
 
-        assert rendered[1]["content"] == '{"summary": "ok", "confident": true, "score": null}'
-        assert json.loads(rendered[1]["content"]) == {"summary": "ok", "confident": True, "score": None}
+        assert json.loads(as_json[1]["content"]) == value
+        assert as_str[1]["content"] == str(value)
 
     def test_record_enabled_resends_prior_history_on_second_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -755,7 +752,7 @@ class TestConversationManagement:
         agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        with pytest.raises(AgentInvocationError):
+        with pytest.raises(ValueError, match="conversation 'scratch' already exists"):
             agent.create_conversation("scratch")
         # The existing conversation's history survives the rejected collision.
         assert len(agent.get_conversation("scratch").records) == 1
@@ -799,17 +796,76 @@ class TestConversationManagement:
         assert snap.agent_type is type(agent)
         assert [r.inputs["topic"] for r in snap.records[-1:]] == ["second"]
 
-    def test_get_conversation_snapshot_is_independent_of_storage(self) -> None:
+    def test_get_conversation_returns_the_stored_object(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        snap = agent.get_conversation()
-        snap.records.append("not a real record")  # type: ignore[arg-type]
-        snap.remember("x", 1)
+        stored = agent.get_conversation()
+        stored.remember("x", 1)
 
-        fresh = agent.get_conversation()
-        assert len(fresh.records) == 1
-        assert "x" not in fresh.context
+        assert agent.get_conversation() is stored
+        assert agent.get_conversation("default") is stored
+        assert len(stored.records) == 1
+        assert "x" in agent.get_conversation().context
+
+    def test_create_conversation_returns_the_stored_object_with_limits(self) -> None:
+        agent = make_agent()
+
+        conv = agent.create_conversation(
+            "scratch",
+            response_preview_limit=5,
+            prompt_preview_limit=0,
+            context_preview_limit=9,
+        )
+
+        assert agent.get_conversation("scratch") is conv
+        assert conv.agent_type is _EchoAgent
+        assert (
+            conv.response_preview_limit,
+            conv.prompt_preview_limit,
+            conv.context_preview_limit,
+        ) == (5, 0, 9)
+        assert agent.active_conversation == "default"
+
+    def test_create_conversation_defaults_limits_to_none(self) -> None:
+        conv = make_agent().create_conversation("scratch")
+
+        assert conv.response_preview_limit is None
+        assert conv.prompt_preview_limit is None
+        assert conv.context_preview_limit is None
+
+    @pytest.mark.parametrize("bad", [-1, True, 1.5, "5"])
+    def test_create_conversation_rejects_bad_limits_and_stores_nothing(
+        self, bad: object
+    ) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ValueError, match="response_preview_limit"):
+            agent.create_conversation("scratch", response_preview_limit=bad)  # type: ignore[arg-type]
+        assert agent.conversation_names == ["default"]
+
+    @pytest.mark.parametrize(
+        "bad_name, message", [("bad name", "invalid conversation name"), ("name_5", "invalid")]
+    )
+    def test_create_conversation_bad_shape_message(
+        self, bad_name: str, message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            make_agent().create_conversation(bad_name)
+
+    def test_limits_are_edited_directly_on_the_conversation(self) -> None:
+        agent = make_agent()
+        conv = agent.get_conversation()
+
+        conv.response_preview_limit = 500
+        conv.prompt_preview_limit = 0
+        assert agent.get_conversation().response_preview_limit == 500
+        assert agent.get_conversation().prompt_preview_limit == 0
+        assert agent.get_conversation().context_preview_limit is None
+
+        with pytest.raises(ValueError, match="response_preview_limit"):
+            conv.response_preview_limit = -1
+        assert conv.response_preview_limit == 500
 
     def test_delete_conversation_unknown_key_raises(self) -> None:
         agent = make_agent()
@@ -883,12 +939,31 @@ class TestConversationManagement:
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
 
         cloned = agent.clone_conversation("default", end_id=first.run_id)
-        agent.switch_conversation(cloned.name)
+        assert isinstance(cloned, str)
+        assert agent.get_conversation(cloned) is not agent.get_conversation("default")
+        agent.switch_conversation(cloned)
         agent.invoke({"topic": "forked-only", "tone": "strict"})
 
         # The clone's own new turn must never appear back in "default".
         assert len(agent.get_conversation("default").records) == 1
-        assert len(agent.get_conversation(cloned.name).records) == 2
+        assert len(agent.get_conversation(cloned).records) == 2
+
+    def test_clone_conversation_copies_preview_limits(self) -> None:
+        agent = make_agent(record_enabled=True)
+        conv = agent.get_conversation()
+        conv.response_preview_limit = 7
+        conv.prompt_preview_limit = 0
+        conv.context_preview_limit = 3
+
+        cloned = agent.get_conversation(agent.clone_conversation("default"))
+
+        assert (
+            cloned.response_preview_limit,
+            cloned.prompt_preview_limit,
+            cloned.context_preview_limit,
+        ) == (7, 0, 3)
+        cloned.response_preview_limit = 99
+        assert conv.response_preview_limit == 7
 
     def test_clone_conversation_auto_name_survives_clear_memory(self) -> None:
         # self._branch_counter is deliberately not reset by clear_memory(),
@@ -896,12 +971,12 @@ class TestConversationManagement:
         # even though the old name becomes technically free again.
         agent = make_agent(record_enabled=True)
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
-        first_clone_name = agent.clone_conversation("default", end_id=first.run_id).name
+        first_clone_name = agent.clone_conversation("default", end_id=first.run_id)
 
         agent.clear_memory()
 
         second = agent.invoke({"topic": "pytest", "tone": "strict"})
-        second_clone_name = agent.clone_conversation("default", end_id=second.run_id).name
+        second_clone_name = agent.clone_conversation("default", end_id=second.run_id)
 
         assert second_clone_name != first_clone_name
 
@@ -981,7 +1056,7 @@ class TestConversationContextWrappers:
         agent.create_conversation("scratch")
         cloned = agent.clone_conversation("default", end_id=first.run_id)
 
-        for name in ("default", "scratch", cloned.name):
+        for name in ("default", "scratch", cloned):
             assert agent.get_conversation(name).agent_type is _EchoAgent
 
 
@@ -999,20 +1074,44 @@ class TestImportConversation:
         source, _ = self._source()
         target = make_agent()
 
-        imported = target.import_conversation(source.get_conversation(), name="imp")
+        imported_name = target.import_conversation(source.get_conversation(), name="imp")
+        imported = target.get_conversation(imported_name)
 
-        assert target.get_conversation("imp").agent_type is _EchoAgent
+        assert imported_name == "imp"
+        assert imported is not source.get_conversation()
+        assert imported.records is not source.get_conversation().records
+        assert imported.agent_type is _EchoAgent
         assert imported.records == source.get_conversation().records
         assert all(a is b for a, b in zip(imported.records, source.get_conversation().records))
         assert target.active_conversation == "default"
+
+    def test_import_copies_preview_limits(self) -> None:
+        source, _ = self._source()
+        conv = source.get_conversation()
+        conv.response_preview_limit = 4
+        conv.prompt_preview_limit = 0
+        conv.context_preview_limit = 8
+        target = make_agent()
+
+        imported = target.get_conversation(target.import_conversation(conv))
+
+        assert (
+            imported.response_preview_limit,
+            imported.prompt_preview_limit,
+            imported.context_preview_limit,
+        ) == (4, 0, 8)
 
     def test_index_and_run_id_ranges(self) -> None:
         source, ids = self._source()
         snap = source.get_conversation()
         target = make_agent()
 
-        by_index = target.import_conversation(snap, start=1, end=-1, name="i")
-        by_id = target.import_conversation(snap, start_id=ids[1], name="j")
+        by_index = target.get_conversation(
+            target.import_conversation(snap, start=1, end=-1, name="i")
+        )
+        by_id = target.get_conversation(
+            target.import_conversation(snap, start_id=ids[1], name="j")
+        )
 
         assert [r.run_id for r in by_index.records] == ids[1:]
         assert [r.run_id for r in by_id.records] == ids[1:]
@@ -1035,7 +1134,9 @@ class TestImportConversation:
     def test_context_is_copied_into_independent_container(self) -> None:
         source, _ = self._source()
         target = make_agent()
-        imported = target.import_conversation(source.get_conversation(), name="imp")
+        imported = target.get_conversation(
+            target.import_conversation(source.get_conversation(), name="imp")
+        )
 
         assert imported.context["k"] is source.get_conversation().context["k"]
         target.remember("only_target", 1, conversation="imp")
@@ -1050,12 +1151,13 @@ class TestImportConversation:
         target = make_agent()
         target.create_conversation("taken")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="invalid conversation name 'bad name'"):
             target.import_conversation(snap, name="bad name")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="conversation 'taken' already exists"):
             target.import_conversation(snap, name="taken")
         auto = target.import_conversation(snap)
-        assert auto.name == "default_0"
+        assert auto == "default_0"
+        assert target.get_conversation(auto).name == "default_0"
 
     def test_wrong_agent_type_raises_and_creates_nothing(self) -> None:
         source, _ = self._source()
@@ -1072,7 +1174,9 @@ class TestImportConversation:
     def test_clone_carries_context(self) -> None:
         source, ids = self._source()
 
-        cloned = source.clone_conversation("default", end_id=ids[0], name="cl")
+        cloned = source.get_conversation(
+            source.clone_conversation("default", end_id=ids[0], name="cl")
+        )
 
         assert cloned.context["k"].value == [1]
         assert len(cloned.records) == 1
@@ -1315,23 +1419,20 @@ class TestAgentAsyncInvoke:
 
 
 class TestAgentFrozenRenderingProperties:
-    def test_response_preview_limit_is_frozen(self) -> None:
-        agent = make_agent(response_preview_limit=50)
+    def test_response_preview_limit_is_not_an_agent_surface(self) -> None:
+        agent = make_agent()
 
-        with pytest.raises(AttributeError):
-            agent.response_preview_limit = 100  # type: ignore[misc]
-
-    def test_response_preview_limit_construction_rejects_zero(self) -> None:
-        with pytest.raises(AgentError, match="response_preview_limit"):
-            make_agent(response_preview_limit=0)
-
-    def test_response_preview_limit_construction_rejects_negative(self) -> None:
-        with pytest.raises(AgentError, match="response_preview_limit"):
-            make_agent(response_preview_limit=-1)
-
-    def test_response_preview_limit_construction_rejects_non_int(self) -> None:
-        with pytest.raises(AgentError, match="response_preview_limit"):
-            make_agent(response_preview_limit="100")  # type: ignore[arg-type]
+        assert not hasattr(agent, "response_preview_limit")
+        assert "response_preview_limit" not in agent.to_dict()
+        with pytest.raises(TypeError, match="response_preview_limit"):
+            _EchoAgent(
+                name="writer_agent",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                system_prompt=ROLE_PROMPT,
+                response_preview_limit=5,  # type: ignore[call-arg]
+            )
 
     def test_attach_api_removed(self) -> None:
         agent = make_agent()
@@ -2228,6 +2329,202 @@ class TestCreateTask:
         assert task.agentic_inputs == {"lang": "fr", "dummy_reserved": None}
         assert "dummy_reserved" not in task.pre_inputs
         assert "dummy_reserved" not in task.post_inputs
+
+
+class TestPreviewLimitRendering:
+    """History is limited by the bound conversation's limits, read at build time."""
+
+    def _agent(self, **limits: int | None) -> _EchoAgent:
+        agent = make_agent(record_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+        conv = agent.get_conversation()
+        for name, value in limits.items():
+            setattr(conv, name, value)
+        return agent
+
+    def _history(self, agent: _EchoAgent) -> list[dict[str, str]]:
+        task = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS)))
+        return task.historic_messages
+
+    def test_no_limits_truncates_nothing(self) -> None:
+        history = self._history(self._agent())
+
+        assert history[0]["content"] == "Write about pytest in a strict tone."
+        assert history[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_response_and_prompt_limits_use_the_marker(self) -> None:
+        history = self._history(
+            self._agent(response_preview_limit=4, prompt_preview_limit=5)
+        )
+
+        assert history[0]["content"] == "Write...[truncated: 5 of 36 chars shown]"
+        assert history[1]["content"] == "ECHO...[truncated: 4 of 42 chars shown]"
+
+    def test_zero_hides_each_side_independently(self) -> None:
+        history = self._history(self._agent(response_preview_limit=0))
+
+        assert history[0]["content"] == "Write about pytest in a strict tone."
+        assert history[1]["content"] == "value hidden"
+
+    def test_limit_edit_between_summaries_is_picked_up(self) -> None:
+        agent = self._agent()
+        assert self._history(agent)[1]["content"].startswith("ECHO: Write")
+
+        agent.get_conversation().response_preview_limit = 2
+
+        assert self._history(agent)[1]["content"].startswith("EC...[truncated")
+
+    def test_limits_come_from_the_task_conversation_not_the_active_one(self) -> None:
+        agent = self._agent(response_preview_limit=3)
+        agent.create_conversation("other")
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        agent.switch_conversation("other")
+        agent.get_conversation("other").response_preview_limit = 0
+
+        task = agent.summarize(task)
+
+        assert task.historic_messages[1]["content"].startswith("ECH...[truncated")
+
+    def test_direct_render_turn_with_no_kwargs_truncates_nothing(self) -> None:
+        agent = self._agent(response_preview_limit=1, prompt_preview_limit=1)
+
+        rendered = agent.render_turn(agent.get_conversation().records[0])
+
+        assert rendered[0]["content"] == "Write about pytest in a strict tone."
+        assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_render_turn_accepts_explicit_limits(self) -> None:
+        agent = self._agent()
+
+        rendered = agent.render_turn(
+            agent.get_conversation().records[0],
+            response_preview_limit=4,
+            prompt_preview_limit=0,
+        )
+
+        assert rendered[0]["content"] == "value hidden"
+        assert rendered[1]["content"] == "ECHO...[truncated: 4 of 42 chars shown]"
+
+
+class TestHistoryRenderMode:
+    def test_default_is_str_and_str_responses_stay_plain(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        assert agent.get_conversation().render_mode == "s"
+        task = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS)))
+        assert task.historic_messages[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_conversation_mode_drives_history_not_the_prompt(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+        agent.get_conversation().render_mode = "j"
+
+        task = agent.summarize(agent.create_task(agent.filter_inputs(_INPUTS)))
+
+        assert task.historic_messages[0]["content"] == "Write about pytest in a strict tone."
+        assert task.historic_messages[1]["content"] == '"ECHO: Write about pytest in a strict tone."'
+
+    def test_create_import_and_clone_carry_the_mode(self) -> None:
+        agent = make_agent(record_enabled=True)
+        created = agent.create_conversation("scratch", render_mode="p")
+        assert created.render_mode == "p"
+
+        cloned = agent.get_conversation(agent.clone_conversation("scratch"))
+        assert cloned.render_mode == "p"
+        target = make_agent()
+        imported = target.get_conversation(target.import_conversation(created))
+        assert imported.render_mode == "p"
+
+    def test_factory_reset_restores_the_default(self) -> None:
+        agent = make_agent()
+        agent.get_conversation().render_mode = "j"
+
+        agent.clear_memory()
+
+        assert agent.get_conversation().render_mode == "s"
+
+    def test_invalid_mode_rejected(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ValueError, match="render_mode"):
+            agent.create_conversation("scratch", render_mode="nope")
+        with pytest.raises(ValueError, match="render_mode"):
+            agent.get_conversation().render_mode = None  # type: ignore[assignment]
+        assert agent.get_conversation().render_mode == "s"
+
+
+class TestFactoryReset:
+    def _with_limits(self) -> _EchoAgent:
+        agent = make_agent(record_enabled=True)
+        conv = agent.get_conversation()
+        conv.response_preview_limit = 5
+        conv.prompt_preview_limit = 6
+        conv.context_preview_limit = 7
+        return agent
+
+    def test_clear_memory_resets_default_limits_to_none(self) -> None:
+        agent = self._with_limits()
+        agent.create_conversation("scratch", response_preview_limit=1)
+
+        agent.clear_memory()
+
+        conv = agent.get_conversation()
+        assert conv.response_preview_limit is None
+        assert conv.prompt_preview_limit is None
+        assert conv.context_preview_limit is None
+        assert agent.conversation_names == ["default"]
+
+    def test_delete_default_resets_limits_and_returns_the_old_one(self) -> None:
+        agent = self._with_limits()
+
+        old = agent.delete_conversation("default")
+
+        assert old.response_preview_limit == 5
+        fresh = agent.get_conversation("default")
+        assert fresh is not old
+        assert fresh.response_preview_limit is None
+        assert fresh.prompt_preview_limit is None
+        assert fresh.context_preview_limit is None
+
+
+class TestRememberRenderOptions:
+    def test_remember_passes_render_mode_and_preview_limit_through(self) -> None:
+        agent = make_agent()
+
+        agent.remember("k", {"a": 1}, render_mode="j", preview_limit=4)
+
+        stored = agent.get_conversation().context["k"]
+        assert stored.render_mode == "j"
+        assert stored.preview_limit == 4
+
+    def test_remember_defaults_and_full_replace(self) -> None:
+        agent = make_agent()
+        agent.remember("k", 1, render_mode="r", preview_limit=2)
+
+        agent.remember("k", 2)
+
+        stored = agent.get_conversation().context["k"]
+        assert stored.render_mode == "s"
+        assert stored.preview_limit is None
+
+    def test_remember_targets_a_named_conversation(self) -> None:
+        agent = make_agent()
+        agent.create_conversation("scratch")
+
+        agent.remember("k", 1, render_mode="a", conversation="scratch")
+
+        assert agent.get_conversation("scratch").context["k"].render_mode == "a"
+        assert "k" not in agent.get_conversation().context
+
+    def test_remember_rejects_bad_options(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ValueError, match="render_mode"):
+            agent.remember("k", 1, render_mode="nope")
+        with pytest.raises(ValueError, match="preview_limit"):
+            agent.remember("k", 1, preview_limit=-1)
+        assert "k" not in agent.get_conversation().context
 
 
 class TestSummarizeAndPreProcess:

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from ...constants.agents import DEFAULT_RENDER_MODE, PREVIEW_LIMIT_FIELDS
+from ...constants.agents import RENDER_MODES
 from .context import ContextVariable
 from .records import AgentRecord
 
@@ -66,6 +66,13 @@ class Conversation:
         by the conversation (not the agent), copied by import/clone, and
         validated on every assignment, including construction (``None`` or an
         ``int >= 0``; ``bool`` is rejected).
+    render_mode:
+        How prior responses are formatted when this conversation's history is
+        replayed into a prompt: one of ``RENDER_MODES``, default ``"s"``
+        (``"j"`` suits structured-output agents). Prompts are always plain
+        strings. Unrelated to a ``ContextVariable``'s own ``render_mode``.
+        Validated on every assignment (``ValueError``) and copied by
+        import/clone.
     """
 
     name: str
@@ -75,13 +82,18 @@ class Conversation:
     response_preview_limit: int | None = None
     prompt_preview_limit: int | None = None
     context_preview_limit: int | None = None
+    render_mode: str = "s"
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in PREVIEW_LIMIT_FIELDS and value is not None and (
+        if name.endswith("_preview_limit") and value is not None and (
             type(value) is not int or value < 0
         ):
             raise ValueError(
                 f"Conversation.{name} must be None or an int >= 0, got {value!r}."
+            )
+        if name == "render_mode" and value not in RENDER_MODES:
+            raise ValueError(
+                f"Conversation.render_mode must be one of {RENDER_MODES}, got {value!r}."
             )
         object.__setattr__(self, name, value)
 
@@ -134,12 +146,13 @@ class Conversation:
         description: str | None = None,
         *,
         readonly: bool = False,
-        render_mode: str = DEFAULT_RENDER_MODE,
+        render_mode: str = "s",
+        preview_limit: int | None = None,
     ) -> None:
         """
         Upsert ``key``. A full replace: omitting ``description`` or
-        ``render_mode`` resets them to ``None`` / the default mode. Raises if
-        the existing variable is readonly.
+        ``render_mode`` / ``preview_limit`` resets them to the default mode /
+        ``None``. Raises if the existing variable is readonly.
         """
         variable = ContextVariable(
             name=key,
@@ -147,6 +160,7 @@ class Conversation:
             description=description,
             readonly=readonly,
             render_mode=render_mode,
+            preview_limit=preview_limit,
         )
         self._check_writable(variable.name)
         self._swap({**self.context, variable.name: variable})

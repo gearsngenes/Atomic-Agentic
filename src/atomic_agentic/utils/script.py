@@ -24,6 +24,7 @@ from .agents import (
     reject_unsupported_forms,
     strip_code_fence,
 )
+from .rendering import stringify_value
 
 __all__ = [
     "parse_statement_to_slots",
@@ -740,9 +741,11 @@ def render_cache_snapshot(
     type), under a leading ``"Cached values:"`` label, wrapped in a
     triple-backtick fence -- visually distinct from the reconstructed-code
     block above it, and unambiguous to a model that this section is data,
-    not code to continue writing. ``preview_limit`` truncates each
-    rendered value the same way ``Agent.render_turn`` truncates a rendered
-    response (``None`` means no truncation) -- guards against dumping an
+    not code to continue writing. ``preview_limit`` limits each
+    rendered value the same way ``Agent.render_turn`` limits a rendered
+    response (``None`` means no truncation; a longer value is cut with a
+    ``...[truncated: N of M chars shown]`` marker; ``0`` shows
+    ``value hidden``) -- guards against dumping an
     excessively long value into every subsequent generation call. Returns
     ``""`` when ``completed`` binds no identifiers at all (nothing to
     show) -- the caller omits the block entirely rather than rendering an
@@ -757,10 +760,7 @@ def render_cache_snapshot(
         return ""
 
     def preview(value: Any) -> str:
-        text = repr(value)
-        if preview_limit is not None and len(text) > preview_limit:
-            text = text[:preview_limit] + "..."
-        return text
+        return stringify_value(value, mode="r", limit=preview_limit)
 
     lines = [
         f"{name}: {type(value).__name__} = {preview(value)}"

@@ -25,7 +25,8 @@ from ..models.agents.records import LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
-from ..utils.agents import normalize_prompt_config, stringify_result
+from ..utils.agents import normalize_prompt_config
+from ..utils.rendering import stringify_value
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
@@ -101,7 +102,6 @@ class ThinkingAgent(BasicAgent):
         post_invoke: Optional[Callable | Any] = None,
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
         thinking_schema: dict[str, Any] | None = None,
         thinking_rounds_limit: int | None = None,
@@ -204,7 +204,6 @@ class ThinkingAgent(BasicAgent):
             bind_response_to=bind_response_to,
             extra_parameters=combined_extra_params,
             records_window=records_window,
-            response_preview_limit=response_preview_limit,
         )
 
         self._system_prompts["role"] = role_config
@@ -451,18 +450,22 @@ class ThinkingAgent(BasicAgent):
             return task.task_messages
 
         banner = self._render_task_banner_text(task)
+        mode = self._conversations[task.conversation].render_mode
 
         if task.system_prompt_name == self.THINKING_PROMPT_NAME:
             banner = banner + "\n---\n" + _THINKING_FRAMING
             messages = [{"role": "user", "content": banner}]
             for thought in task.thoughts:
-                messages.append({"role": "assistant", "content": self._stringify_thought(thought)})
+                messages.append({"role": "assistant", "content": self._stringify_thought(thought, mode)})
                 messages.append({"role": "user", "content": _THINKING_CONTINUATION_NUDGE})
         else:
             messages = [{"role": "user", "content": banner}]
             if task.thoughts:
                 messages.append(
-                    {"role": "assistant", "content": self._format_thoughts(task.thoughts)}
+                    {
+                        "role": "assistant",
+                        "content": self._format_thoughts(task.thoughts, mode),
+                    }
                 )
                 messages.append({"role": "user", "content": (
                     "Given the current task and the thoughts above, respond "
@@ -479,16 +482,19 @@ class ThinkingAgent(BasicAgent):
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod
-    def _stringify_thought(value: str | int | float | bool | list | dict | None) -> str:
-        """Render one raw thought value as display text -- delegates to the
-        shared ``utils.agents.stringify_result`` helper (also used by
-        ``Agent.render_turn``) so the two render paths can't drift on how a
-        non-str value gets stringified."""
-        return stringify_result(value)
+    def _stringify_thought(
+        value: str | int | float | bool | list | dict | None, mode: str
+    ) -> str:
+        """Render one raw thought value as display text with ``mode`` -- the
+        bound conversation's ``render_mode``, the same one ``Agent.render_turn``
+        uses, so the two render paths can't drift on how a non-str value gets
+        stringified."""
+        return stringify_value(value, mode=mode)
 
     @staticmethod
     def _format_thoughts(
         rounds: list[str | int | float | bool | list | dict | None],
+        mode: str,
         *,
         start_round: int = 0,
     ) -> str:
@@ -496,7 +502,7 @@ class ThinkingAgent(BasicAgent):
         reply-phase use only (see ``_render_task_messages``); the thinking
         phase never shows this labeled shape to the model."""
         blocks = [
-            f"## Round {i}\n{ThinkingAgent._stringify_thought(value)}"
+            f"## Round {i}\n{ThinkingAgent._stringify_thought(value, mode)}"
             for i, value in enumerate(rounds, start=start_round)
         ]
         return "\n\n".join(blocks)

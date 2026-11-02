@@ -6,8 +6,8 @@ deciding one tool call per round rather than a fixed upfront sequence, so
 it can stop as soon as the reviewer's grade clears the bar instead of
 always running a fixed number of cycles.
 
-`AgenticOrchestrator` sets `response_preview_limit` below so draft code and
-review dicts truncate in "Cached values" each round -- without it, the
+`AgenticOrchestrator`'s conversation sets `response_preview_limit` below so
+draft code and review dicts truncate in "Cached values" each round -- without it, the
 full values are always visible, leaving the model no real incentive to
 reference an earlier result by "$name" instead of retyping it.
 
@@ -148,8 +148,8 @@ orchestrator = ReActAgent(
     tool_calls_limit=10,
     record_enabled=True,
     tool_instructions=ORCHESTRATION_INSTRUCTIONS,
-    response_preview_limit=10,
 )
+orchestrator.get_conversation().response_preview_limit = 10
 
 # Register both agents as tools -- each reachable by its own bare name
 # (builder.name / reviewer.name) since no alias is given.

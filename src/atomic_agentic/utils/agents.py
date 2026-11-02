@@ -31,7 +31,6 @@ __all__ = [
     "extract_json_object",
     "normalize_prompt_config",
     "reject_unsupported_forms",
-    "stringify_result",
     "strip_code_fence",
     "is_dispatched",
     "tool_identity",
@@ -81,16 +80,6 @@ def normalize_prompt_config(
     raise TypeError(
         f"{error_label} must be str, PromptConfig, or None; got {type(value).__name__}."
     )
-
-
-def stringify_result(value: str | int | float | bool | list | dict | None) -> str:
-    """Render an agent-produced result value as LLM-facing display text --
-    a ``str`` value used as-is, any other JSON-decodable value
-    ``json.dumps``-rendered. Shared by every render path that replays a
-    structured (``response_schema``/``thinking_schema``) result back into
-    text (``Agent.render_turn``, ``ThinkingAgent._stringify_thought``), so
-    they can't drift on how a non-str value gets stringified."""
-    return value if isinstance(value, str) else json.dumps(value)
 
 
 def extract_json_object(raw_text: str, *, source_label: str) -> Any:

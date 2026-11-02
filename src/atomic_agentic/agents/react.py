@@ -121,7 +121,6 @@ class ReActAgent(ToolAgent):
         regeneration_limit: int = 5,
         tool_concurrency_limit: Optional[int] = None,
         fail_fast: bool = False,
-        response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
@@ -156,7 +155,6 @@ class ReActAgent(ToolAgent):
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
-            response_preview_limit=response_preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             bind_response_to=bind_response_to,
@@ -250,7 +248,9 @@ class ReActAgent(ToolAgent):
         completed_section = render_completed_as_json(task.completed) or "(nothing completed yet)"
 
         cache_snapshot = render_cache_snapshot(
-            task.completed, task.cache, self._response_preview_limit
+            task.completed,
+            task.cache,
+            self._conversations[task.conversation].response_preview_limit,
         )
         cache_section = f"\n\n{cache_snapshot}" if cache_snapshot else ""
 

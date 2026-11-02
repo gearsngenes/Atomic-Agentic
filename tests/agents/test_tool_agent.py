@@ -12,6 +12,7 @@ from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.constants.agents import RETURN_TOOL_NAME, RETURN_VALUE_FIELD
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.context import ContextVariable
+from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
@@ -970,6 +971,53 @@ class TestRenderTurn:
 
         assert messages[-1]["content"].startswith("task_result_0: ")
         assert not messages[-1]["content"].startswith("$task_result_0: ")
+
+
+class TestRenderTurnMode:
+    def test_render_turn_forwards_the_response_render_mode(self) -> None:
+        agent = make_planact_agent([_scripted_plan(plan=[], return_value=1)])
+        turn = AgentRecord(user_prompt="p", generated_response={"a": 1})
+
+        as_str = agent.render_turn(turn, index=0)
+        as_json = agent.render_turn(turn, index=0, render_mode="j")
+
+        assert as_str[-1]["content"] == "$task_result_0: dict = {'a': 1}"
+        assert as_json[-1]["content"] == '$task_result_0: dict = {\n  "a": 1\n}'
+        assert as_json[0]["content"] == "p"
+
+
+class TestRenderTurnLimits:
+    def test_render_turn_forwards_limits_and_keeps_the_label(self) -> None:
+        agent = make_planact_agent(
+            [_scripted_plan(plan=[], return_value="abcdefghij")],
+            record_enabled=True,
+        )
+        agent.invoke({"prompt": "first"})
+        turn = agent.get_conversation().records[0]
+
+        messages = agent.render_turn(
+            turn, index=0, response_preview_limit=3, prompt_preview_limit=0
+        )
+
+        assert messages[0]["content"] == "value hidden"
+        assert messages[-1]["content"] == (
+            "$task_result_0: str = abc...[truncated: 3 of 10 chars shown]"
+        )
+
+    def test_summarize_applies_the_conversation_limit(self) -> None:
+        agent = make_planact_agent(
+            [
+                _scripted_plan(plan=[], return_value="abcdefghij"),
+                _scripted_plan(plan=[], return_value="next"),
+            ],
+            record_enabled=True,
+        )
+        agent.invoke({"prompt": "first"})
+        agent.get_conversation().response_preview_limit = 0
+
+        task = agent.summarize(agent.create_task(agent.filter_inputs({"prompt": "again"})))
+
+        assert task.historic_messages[-1]["content"].endswith("= value hidden")
 
 
 class TestCopyForTaskNamespace:

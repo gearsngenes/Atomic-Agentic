@@ -132,8 +132,7 @@ class ToolAgent(Agent, ABC):
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
-        tool_concurrency_limit: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
+        tool_concurrency_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
@@ -159,8 +158,7 @@ class ToolAgent(Agent, ABC):
         tool_concurrency_limit : int | None
             Max dispatched calls allowed in a single concurrently-executed
             batch. ``None`` means unlimited (default).
-        response_preview_limit, pre_invoke, post_invoke, bind_response_to,
-        records_window
+        pre_invoke, post_invoke, bind_response_to, records_window
             Forwarded to ``Agent.__init__`` unchanged.
         tools : list | None
             Construction-time convenience: registered via ``register_tools()``
@@ -225,8 +223,7 @@ class ToolAgent(Agent, ABC):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             bind_response_to=bind_response_to,
-            records_window=records_window,
-            response_preview_limit=response_preview_limit,
+            records_window=records_window,
             extra_parameters=tool_instructions_params,
         )
 

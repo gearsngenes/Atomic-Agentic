@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...constants.agents import DEFAULT_RENDER_MODE, RENDER_MODES
+from ...constants.agents import RENDER_MODES
 from ...constants.core import IDENTIFIER_PATTERN
 
 __all__ = ["ContextVariable"]
@@ -49,13 +49,21 @@ class ContextVariable:
         ``p`` pformat). Defaults to ``"s"``; anything outside ``RENDER_MODES``
         (including ``None``) raises ``ValueError``. Kept by
         ``dataclasses.replace``.
+
+    preview_limit : int | None
+        Optional character ceiling for this variable's rendered value. ``None``
+        defers to the conversation's context limit; otherwise the smaller of
+        the two applies (a variable can only tighten the conversation's budget,
+        never loosen it). ``0`` hides the value. Must be ``None`` or an
+        ``int >= 0`` (``bool`` rejected), else ``ValueError``.
     """
 
     name: str
     value: Any
     description: str | None = None
     readonly: bool = False
-    render_mode: str = DEFAULT_RENDER_MODE
+    render_mode: str = "s"
+    preview_limit: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -85,6 +93,14 @@ class ContextVariable:
             raise ValueError(
                 f"ContextVariable.render_mode must be one of {RENDER_MODES}, "
                 f"got {self.render_mode!r}."
+            )
+
+        if self.preview_limit is not None and (
+            type(self.preview_limit) is not int or self.preview_limit < 0
+        ):
+            raise ValueError(
+                "ContextVariable.preview_limit must be None or an int >= 0, "
+                f"got {self.preview_limit!r}."
             )
 
         object.__setattr__(self, "name", normalized_name)
@@ -117,5 +133,6 @@ class ContextVariable:
             "description": self.description,
             "readonly": self.readonly,
             "render_mode": self.render_mode,
+            "preview_limit": self.preview_limit,
             "type": self.type,
         }

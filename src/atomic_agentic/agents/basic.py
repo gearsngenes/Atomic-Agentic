@@ -51,8 +51,7 @@ class BasicAgent(Agent):
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        records_window: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
+        records_window: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
@@ -77,8 +76,7 @@ class BasicAgent(Agent):
             post_invoke=post_invoke,
             bind_response_to=bind_response_to,
             extra_parameters=role_params,
-            records_window=records_window,
-            response_preview_limit=response_preview_limit,
+            records_window=records_window,
         )
 
         # 3. Register the role prompt.
