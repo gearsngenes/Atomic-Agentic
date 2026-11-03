@@ -38,9 +38,9 @@ class ContextVariable:
         raises ``TypeError``.
 
     readonly : bool
-        Never overwritten: ``Conversation.remember``/``remember_many``/
-        ``describe`` and a task's write-back all refuse or skip a readonly
-        variable. It can still be forgotten. Must be a ``bool``
+        Never overwritten: ``Conversation.update``/``describe`` and a task's
+        write-back skip a readonly variable (``remember`` can only add new
+        names). It can still be forgotten. Must be a ``bool``
         (``TypeError`` otherwise).
 
     render_mode : str

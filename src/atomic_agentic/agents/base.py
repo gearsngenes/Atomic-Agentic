@@ -29,13 +29,11 @@ from ..models.agents.records import AgentRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
 from ..models.agents.conversations import Conversation
-from ..models.agents.context import ContextVariable
 
 from ..constants.core import IDENTIFIER_PATTERN
 from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
-    TRAILING_FORK_INDEX_PATTERN,
     TASK_RESULT_PREFIX,
     PROMPT_PARAM,
 )
@@ -145,12 +143,20 @@ class Agent(AtomicInvokable, ABC):
     from and (when they commit) write to whichever conversation is active at
     call time -- always its own current tail, never an arbitrary earlier
     record. Retargeting to an earlier point requires an explicit
-    ``clone_conversation``/``switch_conversation`` call before invoking
-    (``create_conversation``/``get_record``/``delete_conversation`` round
-    out the rest of the explicit conversation-management API). There is no
-    implicit forking: two invocations racing to extend the same tail both
-    append to their bound conversation in commit order (``_invoke_lock``
-    serializes the commits), each with ``prev`` set to the record it read.
+    ``import_conversation`` (of a ``Conversation.slice``) or
+    ``switch_conversation`` call before invoking (``create_conversation``/
+    ``get_record``/``remove_conversation`` round out the rest of the explicit
+    conversation-management API). Context mutation goes through the
+    conversation itself (``agent.get_conversation(name).remember(...)``).
+    There is no implicit forking: two invocations racing to extend the same
+    tail both append to their bound conversation in commit order
+    (``Conversation.commit`` serializes the commits), each with ``prev`` set
+    to the record it read.
+
+    A conversation may be shared: ``import_conversation`` registers the same
+    object under a key, so several agents of the exact same type can read
+    and extend one history and context. The registry itself (which keys
+    exist, which is active) stays per-agent under ``_invoke_lock``.
     """
 
     # ------------------------------------------------------------------ #
@@ -306,12 +312,9 @@ class Agent(AtomicInvokable, ABC):
         self._records_window: Optional[int] = records_window
 
         self._conversations: dict[str, Conversation] = {
-            DEFAULT_CONVERSATION_NAME: Conversation(
-                name=DEFAULT_CONVERSATION_NAME, agent_type=type(self), records=[]
-            )
+            DEFAULT_CONVERSATION_NAME: Conversation(agent_type=type(self))
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
-        self._branch_counter: int = 0
 
         super().__init__(
             name=name,
@@ -589,8 +592,9 @@ class Agent(AtomicInvokable, ABC):
         ``_INITIAL_PROMPT_NAME``; ``_seed_task`` then does any family-specific
         seeding. Not overridden by subclasses. Pure computation, no I/O.
         """
-        active_key = self._active_conversation
-        conversation = self._conversations[active_key]
+        with self._invoke_lock:
+            active_key = self._active_conversation
+            conversation = self._conversations[active_key]
         history = conversation.records
         window = self._records_window
         if window == 0:
@@ -895,28 +899,35 @@ class Agent(AtomicInvokable, ABC):
         task.ended_at = datetime.now(timezone.utc)
         return self.build_result_from_task(task, result)
 
+    def _record_base_fields(self, task: AgentTask) -> dict[str, Any]:
+        """Common ``AgentRecord`` kwargs for a finished task.
+
+        Identity and timing come from the task; ``prev`` is the last turn this
+        call read (``task.turns[-1]``), ``None`` when it read none;
+        ``agent_id`` names this agent as the writer. Family overrides of
+        ``_build_record_from_task`` splat this and add their own fields.
+        """
+        return {
+            "user_prompt": task.user_prompt,
+            "generated_response": task.generated_response,
+            "run_id": task.run_id,
+            "started_at": task.started_at,
+            "ended_at": task.ended_at,
+            "inputs": task.inputs,
+            "llm_records": tuple(task.llm_records),
+            "prev": task.turns[-1] if task.turns else None,
+            "agent_id": f"{self.full_name};{self.instance_id}",
+        }
+
     def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
         ``BasicAgent`` uses this base implementation as-is; ``PlanActAgent``/
-        ``ReActAgent``/``ScriptActAgent`` each override it directly (not via
-        a shared ``ToolAgent`` implementation) to return their own richer
-        ``ToolAgentRecord``-family (or, for ``ScriptActAgent``,
-        ``ScriptActAgentRecord``) subclass. Identity and timing come from the
-        task; ``prev`` is the last turn this call read (``task.turns[-1]``),
-        ``None`` when it read none.
+        ``ReActAgent``/``ScriptActAgent``/``ThinkingAgent`` each override it
+        to return their own richer record subclass, built from
+        ``_record_base_fields`` plus their own fields.
         """
-        prev = task.turns[-1] if task.turns else None
-        return AgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            run_id=task.run_id,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
-        )
+        return AgentRecord(**self._record_base_fields(task))
 
     # ------------------------------------------------------------------ #
     # Result construction
@@ -950,67 +961,32 @@ class Agent(AtomicInvokable, ABC):
     def record(self, task: AgentTask) -> None:
         """Build this invocation's ``AgentRecord`` from the task and commit it.
 
-        Reads the task's record fields, ``turns``, ``conversation``,
-        ``run_id`` and timing; returns nothing. Shared by ``invoke`` and
-        ``async_invoke`` -- pure computation plus a brief lock, no I/O.
+        Reads the task's record fields and bound conversation name; returns
+        nothing. Shared by ``invoke`` and ``async_invoke``.
 
-        1. The record is built from the task (independent of the result) and
-           validated as an ``AgentRecord``.
-        2. Under ``self._invoke_lock``: if ``record_enabled`` is False,
-           nothing is stored. Otherwise the record is appended to
-           ``task.conversation``'s ``.records`` (the conversation bound at
-           ``create_task``, even if the active one has since changed), and
-           appended to ``record.prev.children`` when ``prev`` is set. There
-           is no implicit forking: branching happens only through explicit
-           ``clone_conversation``/``import_conversation``.
-        3. Context write-back, same lock, same conversation: every
-           ``task.context`` variable whose name is in the destination's
-           context and whose destination variable is not ``readonly`` is
-           written with one ``remember_many``. Scratch keys
-           and keys ``forget``-ed mid-call are dropped; readonly ones are
-           skipped silently. Every eligible key is written, changed or not.
-
-        Context limitations: last-writer-wins for keys this call started
-        with (a mid-call ``remember()`` or another call's commit to such a
-        key is overwritten); stored values are shared by reference. A
-        variable a writer marked ``readonly=True`` persists as readonly when
-        the destination's was not.
+        The record is built first (independent of the result). With
+        ``record_enabled`` False nothing is stored. Otherwise the conversation
+        bound at ``create_task`` is looked up under ``self._invoke_lock``
+        (even if the active one has since changed) and ``Conversation.commit``
+        runs outside it, so the agent and conversation locks are never held
+        together; see ``commit`` for the append, ``children`` link and context
+        write-back rules. There is no implicit forking: branching happens only
+        through explicit ``import_conversation``.
 
         ``prev`` is "the last turn this call read" (``task.turns[-1]``) and is
-        provenance only: turn selection slices the conversation's record list
-        and never uses ``prev``. ``children`` is likewise provenance, shared
-        by every conversation that contains a record, so a record continued
-        in two conversations (or by two racing calls) simply has two
-        children. Records land in commit order; with ``records_window == 0``
-        (nothing read) the record is a chain root (``prev=None``).
+        provenance only: turn selection never uses it. ``children`` is
+        likewise provenance, shared by every conversation that contains a
+        record, so a record continued by two racing calls or two agents simply
+        has two children. With ``records_window == 0`` the record is a chain
+        root (``prev=None``).
         """
+        if not self._record_enabled:
+            return
         record = self._build_record_from_task(task)
-        if not isinstance(record, AgentRecord):
-            raise AgentInvocationError(
-                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-            )
 
         with self._invoke_lock:
-            if not self._record_enabled:
-                return
-
-            dest_conv = self._conversations[task.conversation]
-            dest_conv.records.append(record)
-            if record.prev is not None:
-                record.prev.children.append(record)
-
-            # Context write-back. The destination's flags are read fresh under
-            # the lock, so they are authoritative even if a writer ignored
-            # `readonly`. A task key absent from the destination (call-local
-            # scratch, or forgotten mid-call) is dropped; a readonly
-            # destination variable is skipped silently.
-            dest_context = dest_conv.context
-            dest_conv.remember_many(
-                variable
-                for variable in task.context.values()
-                if variable.name in dest_context
-                and not dest_context[variable.name].readonly
-            )
+            conv = self._conversations[task.conversation]
+        conv.commit(record, task.context)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -1018,89 +994,20 @@ class Agent(AtomicInvokable, ABC):
     def clear_memory(self) -> None:
         """Factory-reset all conversation storage to the just-constructed state.
 
-        Every conversation is discarded, including its context and preview
-        limits; ``self._conversations`` becomes
-        ``{"default": []}`` and the active conversation resets to
-        ``"default"``. ``self._branch_counter`` is deliberately NOT reset --
-        an auto-generated conversation name must never be reissued, even
-        across a full clear. Takes ``self._invoke_lock`` like every other
-        conversation-mutating method -- without it, an in-flight
-        ``invoke``/``async_invoke`` whose ``create_task`` snapshot
-        predates this call could have its later ``record`` reference a
-        conversation key this reset just removed. Every conversation's
-        context is discarded with it.
+        Every conversation is unregistered from this agent, including its
+        context and preview limits (a conversation shared with another agent
+        stays intact there); ``self._conversations`` becomes a single fresh
+        ``"default"`` and the active conversation resets to ``"default"``.
+        Takes ``self._invoke_lock`` like every other registry-mutating method
+        -- without it, an in-flight ``invoke``/``async_invoke`` whose
+        ``create_task`` snapshot predates this call could have its later
+        ``record`` reference a conversation key this reset just removed.
         """
         with self._invoke_lock:
             self._conversations = {
-                DEFAULT_CONVERSATION_NAME: Conversation(
-                    name=DEFAULT_CONVERSATION_NAME, agent_type=type(self), records=[]
-                )
+                DEFAULT_CONVERSATION_NAME: Conversation(agent_type=type(self))
             }
             self._active_conversation = DEFAULT_CONVERSATION_NAME
-
-    def _conversation_key(self, conversation: str | None, caller: str) -> str:
-        key = self._active_conversation if conversation is None else conversation
-        if key not in self._conversations:
-            raise AgentInvocationError(f"{caller}: unknown conversation {key!r}.")
-        return key
-
-    def remember(
-        self,
-        key: str,
-        value: Any,
-        description: str | None = None,
-        *,
-        readonly: bool = False,
-        render_mode: str = "s",
-        preview_limit: int | None = None,
-        conversation: str | None = None,
-    ) -> None:
-        """``Conversation.remember`` on a conversation (``None`` = the active one)."""
-        with self._invoke_lock:
-            self._conversations[
-                self._conversation_key(conversation, "remember")
-            ].remember(
-                key,
-                value,
-                description,
-                readonly=readonly,
-                render_mode=render_mode,
-                preview_limit=preview_limit,
-            )
-
-    def describe(
-        self, key: str, description: str | None, *, conversation: str | None = None
-    ) -> None:
-        """``Conversation.describe`` on a conversation (``None`` = the active one)."""
-        with self._invoke_lock:
-            self._conversations[
-                self._conversation_key(conversation, "describe")
-            ].describe(key, description)
-
-    def forget(self, key: str, *, conversation: str | None = None) -> None:
-        """``Conversation.forget`` on a conversation (``None`` = the active one)."""
-        with self._invoke_lock:
-            self._conversations[
-                self._conversation_key(conversation, "forget")
-            ].forget(key)
-
-    def remember_many(
-        self, variables: Iterable[ContextVariable], *, conversation: str | None = None
-    ) -> None:
-        """``Conversation.remember_many`` on a conversation (``None`` = the active one)."""
-        with self._invoke_lock:
-            self._conversations[
-                self._conversation_key(conversation, "remember_many")
-            ].remember_many(variables)
-
-    def forget_many(
-        self, keys: Iterable[str], *, conversation: str | None = None
-    ) -> None:
-        """``Conversation.forget_many`` on a conversation (``None`` = the active one)."""
-        with self._invoke_lock:
-            self._conversations[
-                self._conversation_key(conversation, "forget_many")
-            ].forget_many(keys)
 
     def _check_new_conversation_name(self, name: str, caller: str) -> None:
         """Raise ``ValueError`` if ``name`` is badly shaped or already taken.
@@ -1110,7 +1017,7 @@ class Agent(AtomicInvokable, ABC):
         if not CONVERSATION_NAME_PATTERN.fullmatch(name):
             raise ValueError(
                 f"{caller}: invalid conversation name {name!r} (must be "
-                "alphanumeric/underscore and must not end in _<digits>)."
+                "alphanumeric/underscore)."
             )
         if name in self._conversations:
             raise ValueError(f"{caller}: conversation {name!r} already exists.")
@@ -1118,21 +1025,23 @@ class Agent(AtomicInvokable, ABC):
     def get_conversation(self, conversation_id: str | None = None) -> Conversation:
         """Return the stored conversation itself (not a snapshot).
 
-        Mutating the returned object directly bypasses ``_invoke_lock`` -- the
-        ``Agent`` wrappers are the only locked write path -- but its preview
-        limits are meant to be assigned directly
+        Context is changed through the returned object
+        (``agent.get_conversation().remember(...)``), whose mutators are
+        atomic under the conversation's own lock; its preview limits are
+        assigned directly
         (``agent.get_conversation().response_preview_limit = 500``).
-        ``conversation_id`` is a dict key, not a record identity: once cloning
-        exists, a single ``AgentRecord`` can legitimately belong to more than
-        one conversation's list.
+        ``conversation_id`` is a registry key, not a record identity: a
+        single ``AgentRecord`` can belong to more than one conversation's
+        list, and one conversation object can be registered in several agents.
 
         ``conversation_id=None`` resolves to the active conversation. An
         unknown key raises ``AgentInvocationError``.
         """
         with self._invoke_lock:
-            return self._conversations[
-                self._conversation_key(conversation_id, "get_conversation")
-            ]
+            key = self._active_conversation if conversation_id is None else conversation_id
+            if key not in self._conversations:
+                raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
+            return self._conversations[key]
 
     def create_conversation(
         self,
@@ -1145,20 +1054,17 @@ class Agent(AtomicInvokable, ABC):
     ) -> Conversation:
         """Create a new, empty conversation and return the stored object.
 
-        ``name`` must be alphanumeric-plus-underscore and must not end in
-        ``_<digits>`` (that suffix shape is reserved for auto-generated clone
-        names); a bad shape or a name that already exists raises
-        ``ValueError`` with a specific message. The three preview limits
-        (``None`` unlimited, ``0`` hidden, else ``int > 0``) are validated by
-        ``Conversation`` (``ValueError``), as is ``render_mode`` (how prior
-        responses are formatted in history). Never auto-activates.
+        ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
+        that already exists raises ``ValueError`` with a specific message. The
+        three preview limits (``None`` unlimited, ``0`` hidden, else
+        ``int > 0``) are validated by ``Conversation`` (``ValueError``), as is
+        ``render_mode`` (how prior responses are formatted in history). Never
+        auto-activates.
         """
         with self._invoke_lock:
             self._check_new_conversation_name(name, "create_conversation")
             conv = Conversation(
-                name=name,
                 agent_type=type(self),
-                records=[],
                 response_preview_limit=response_preview_limit,
                 prompt_preview_limit=prompt_preview_limit,
                 context_preview_limit=context_preview_limit,
@@ -1174,149 +1080,53 @@ class Agent(AtomicInvokable, ABC):
         conversation: str | None = None,
         index: int | None = None,
     ) -> AgentRecord:
-        """Single-record lookup by exactly one of two addressing modes.
+        """Single-record lookup. Valid combinations:
 
-        Direct addressing only, not a search/query-by-criteria API: either
-        ``run_id`` alone, or ``conversation`` + ``index`` together. Any other
-        combination (one of the pair alone, both modes together, all
-        ``None``) raises ``ValueError``.
+        - ``run_id`` alone: first match scanning every conversation.
+        - ``run_id`` + ``conversation``: first match in that conversation.
+        - ``conversation`` + ``index``: ``records[index]``.
+        - ``index`` alone: index into the active conversation.
 
-        ``run_id`` mode scans every conversation (no global index backs
-        this -- see the conversation-model-rebuild proposal's rationale for
-        why); an unresolvable ``run_id`` raises ``ValueError``, matching the
-        existing run_id-not-found convention used elsewhere (distinct from
-        the ``AgentInvocationError`` convention for unknown *conversation
-        keys*). ``conversation`` + ``index`` mode resolves via direct list
-        indexing; an unknown ``conversation`` raises ``AgentInvocationError``,
-        an out-of-range ``index`` raises the natural ``IndexError``.
+        Anything else (``run_id`` + ``index``, ``conversation`` alone,
+        nothing) raises ``ValueError``. An unknown ``conversation`` raises
+        ``AgentInvocationError``; no record with the ``run_id`` raises
+        ``ValueError``; an out-of-range ``index`` raises the natural
+        ``IndexError``.
         """
-        run_id_mode = run_id is not None
-        pair_mode = conversation is not None and index is not None
-        if run_id_mode and (conversation is not None or index is not None):
-            raise ValueError(
-                "get_record: run_id may not be combined with conversation/index."
-            )
-        if not run_id_mode and not pair_mode:
-            raise ValueError(
-                "get_record: must supply either run_id alone, or both "
-                "conversation and index."
-            )
-
-        if run_id_mode:
-            for conv in self._conversations.values():
+        if run_id is not None:
+            if index is not None:
+                raise ValueError("get_record: run_id may not be combined with index.")
+            if conversation is None:
+                with self._invoke_lock:
+                    convs = list(self._conversations.values())
+            else:
+                convs = [self.get_conversation(conversation)]
+            for conv in convs:
                 found = next((r for r in conv.records if r.run_id == run_id), None)
                 if found is not None:
                     return found
             raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
 
-        if conversation not in self._conversations:
-            raise AgentInvocationError(
-                f"get_record: unknown conversation {conversation!r}."
-            )
-        return self._conversations[conversation].records[index]
-
-    @staticmethod
-    def _resolve_range(
-        records: list[AgentRecord],
-        name: str,
-        start: int | None,
-        end: int | None,
-        start_id: str | None,
-        end_id: str | None,
-    ) -> list[AgentRecord]:
-        """Resolve an ``[start, end]`` range of ``records`` to a new list.
-
-        Shared by ``import_conversation``. Index pair (``start``/``end``) xor
-        run_id pair (``start_id``/``end_id``); mixing raises ``ValueError``.
-        All four ``None`` returns every record (including none). Out-of-range
-        bounds raise ``IndexError``; a resolved start after end, or a run_id
-        not found in ``records``, raises ``ValueError``.
-        """
-        if start is None and end is None and start_id is None and end_id is None:
-            return list(records)
-
-        index_pair_given = start is not None or end is not None
-        id_pair_given = start_id is not None or end_id is not None
-        if index_pair_given and id_pair_given:
+        if index is None:
             raise ValueError(
-                "import_conversation: start/end and start_id/end_id may not be mixed."
+                "get_record: must supply run_id, conversation + index, or index."
             )
+        return self.get_conversation(conversation).records[index]
 
-        def index_of(run_id: str) -> int:
-            found = next(
-                (i for i, r in enumerate(records) if r.run_id == run_id), None
-            )
-            if found is None:
-                raise ValueError(
-                    f"import_conversation: no record with run_id {run_id!r} "
-                    f"found in conversation {name!r}."
-                )
-            return found
+    def import_conversation(self, conversation: Conversation, *, name: str) -> None:
+        """Register ``conversation`` (the SAME object, shared) under ``name``.
 
-        if id_pair_given:
-            start_idx = 0 if start_id is None else index_of(start_id)
-            end_idx = len(records) - 1 if end_id is None else index_of(end_id)
-        else:
-            start_idx = 0 if start is None else (
-                start if start >= 0 else len(records) + start
-            )
-            end_idx = len(records) - 1 if end is None else (
-                end if end >= 0 else len(records) + end
-            )
+        ``conversation`` is typically another agent's ``get_conversation``
+        result, so two agents of the exact same type can share one history
+        and context. Never copies; to copy a range:
+        ``b.import_conversation(a.get_conversation("x").slice(2, 5), name="y")``.
+        Never activates; returns ``None``.
 
-        if not (0 <= start_idx <= len(records) - 1) or not (
-            0 <= end_idx <= len(records) - 1
-        ):
-            raise IndexError(
-                f"import_conversation: resolved range [{start_idx}, {end_idx}] "
-                f"out of bounds for conversation {name!r} of length {len(records)}."
-            )
-        if start_idx > end_idx:
-            raise ValueError(
-                f"import_conversation: resolved start {start_idx} is after "
-                f"resolved end {end_idx}."
-            )
-        return list(records[start_idx : end_idx + 1])
-
-    def import_conversation(
-        self,
-        conversation: Conversation,
-        *,
-        start: int | None = None,
-        end: int | None = None,
-        start_id: str | None = None,
-        end_id: str | None = None,
-        name: str | None = None,
-    ) -> str:
-        """Import an ``[start, end]`` range of ``conversation`` as a new conversation.
-
-        Returns the new conversation's name. ``conversation`` is typically
-        another agent's ``get_conversation`` result, so cross-agent use is
-        ``b.import_conversation(a.get_conversation("x"))``.
-        Its ``agent_type`` must be exactly ``type(self)`` (``TypeError``
-        otherwise, before anything is created). Always creates a new
-        conversation, never merges.
-
-        The range is addressed either by plain list index (``start``/``end``,
-        negative indices resolved the normal Python way) or by run_id
-        (``start_id``/``end_id``). Exactly one pair may have any non-None
-        member -- mixing raises ``ValueError``. All four ``None`` imports the
-        whole conversation (including an empty one). Out-of-range bounds
-        raise ``IndexError``; a resolved ``start`` after ``end`` raises
-        ``ValueError`` -- neither is silently clamped/emptied.
-
-        ``name``, if given, is validated/collision-checked exactly like
-        ``create_conversation``'s ``name`` (either failure raises
-        ``ValueError``); if omitted, a name is auto-derived from
-        ``conversation.name``.
-
-        The new conversation is independent of the source. Records are
-        reference-copied. Context is copied into a distinct container
-        (``ContextVariable``s shared by identity, values by reference). The
-        three preview limits and ``render_mode`` are copied. Context is conversation-level, not per-record: a range
-        import gets the conversation's **latest** context, not its state at
-        that record. Reference-copied records share ``record.children`` lists
-        across agents with different locks.
+        Not a ``Conversation`` raises ``TypeError``, as does an ``agent_type``
+        that is not exactly ``type(self)`` (before anything is registered).
+        ``name`` is validated/collision-checked exactly like
+        ``create_conversation``'s (``ValueError``); the same object already
+        registered under another key of this agent also raises ``ValueError``.
         """
         if not isinstance(conversation, Conversation):
             raise TypeError(
@@ -1330,65 +1140,12 @@ class Agent(AtomicInvokable, ABC):
             )
 
         with self._invoke_lock:
-            new_records = self._resolve_range(
-                conversation.records, conversation.name, start, end, start_id, end_id
-            )
-
-            if name is not None:
-                self._check_new_conversation_name(name, "import_conversation")
-                resolved_name = name
-            else:
-                base = TRAILING_FORK_INDEX_PATTERN.sub("", conversation.name)
-                candidate = f"{base}_{self._branch_counter}"
-                self._branch_counter += 1
-                while candidate in self._conversations:
-                    candidate = f"{base}_{self._branch_counter}"
-                    self._branch_counter += 1
-                resolved_name = candidate
-
-            new_conv = Conversation(
-                name=resolved_name,
-                agent_type=type(self),
-                records=new_records,
-                context=conversation.context,
-                response_preview_limit=conversation.response_preview_limit,
-                prompt_preview_limit=conversation.prompt_preview_limit,
-                context_preview_limit=conversation.context_preview_limit,
-                render_mode=conversation.render_mode,
-            )
-            self._conversations[resolved_name] = new_conv
-            return resolved_name
-
-    def clone_conversation(
-        self,
-        source: str,
-        *,
-        start: int | None = None,
-        end: int | None = None,
-        start_id: str | None = None,
-        end_id: str | None = None,
-        name: str | None = None,
-    ) -> str:
-        """Clone an arbitrary ``[start, end]`` range of an existing conversation.
-
-        A thin wrapper over ``import_conversation`` with this agent's own
-        ``source`` conversation: same range addressing, naming and errors, and
-        the clone carries the source's context, preview limits and render mode. Returns the
-        new conversation's name. An unknown ``source`` raises
-        ``AgentInvocationError``.
-        """
-        with self._invoke_lock:
-            stored = self._conversations[
-                self._conversation_key(source, "clone_conversation")
-            ]
-            return self.import_conversation(
-                stored,
-                start=start,
-                end=end,
-                start_id=start_id,
-                end_id=end_id,
-                name=name,
-            )
+            self._check_new_conversation_name(name, "import_conversation")
+            if any(c is conversation for c in self._conversations.values()):
+                raise ValueError(
+                    "import_conversation: conversation is already registered here."
+                )
+            self._conversations[name] = conversation
 
     def switch_conversation(self, key: str) -> None:
         """Switch the active conversation. Unknown key raises ``AgentInvocationError``."""
@@ -1399,31 +1156,30 @@ class Agent(AtomicInvokable, ABC):
                 )
             self._active_conversation = key
 
-    def delete_conversation(self, key: str) -> Conversation:
-        """Remove and return a conversation.
+    def remove_conversation(self, key: str) -> Conversation:
+        """Unregister ``key`` and return the popped conversation.
 
-        ``"default"`` is never actually removed -- regardless of whether
-        it is currently active, deleting it resets it to an empty
-        ``Conversation`` (empty records, context and preview limits) in place
-        and returns the prior one; the key itself always stays present. Any other conversation is refused while it is
-        the active conversation (switch active first); otherwise it is
-        popped and returned.
+        Other agents that share the conversation keep it. ``"default"`` is
+        never actually removed -- regardless of whether it is currently
+        active, removing it stores a fresh empty ``Conversation`` (default
+        settings) under that key, leaves the active key unchanged and returns
+        the prior one. Any other key is refused while it is the active
+        conversation (switch first); otherwise it is popped and returned. An
+        unknown key raises ``AgentInvocationError``.
         """
         with self._invoke_lock:
             if key not in self._conversations:
                 raise AgentInvocationError(
-                    f"delete_conversation: unknown conversation {key!r}."
+                    f"remove_conversation: unknown conversation {key!r}."
                 )
             if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
-                self._conversations[key] = Conversation(
-                    name=DEFAULT_CONVERSATION_NAME, agent_type=type(self), records=[]
-                )
+                self._conversations[key] = Conversation(agent_type=type(self))
                 return old
             if key == self._active_conversation:
                 raise AgentInvocationError(
-                    f"delete_conversation: cannot delete the active "
-                    f"conversation {key!r}; switch active first."
+                    f"remove_conversation: cannot remove the active "
+                    f"conversation {key!r}; switch first."
                 )
             return self._conversations.pop(key)
 
@@ -1434,10 +1190,11 @@ class Agent(AtomicInvokable, ABC):
         ``post_process`` and the ``async_think``/``async_prepare``/
         ``async_act`` hooks. ``create_task`` and ``record`` are sync (pure
         computation, no I/O) and serve both paths. Same lock scope as
-        ``invoke``: only ``record`` runs under ``self._invoke_lock`` (a
-        ``threading.RLock`` -- safe to hold briefly here since ``record``
-        never awaits), letting concurrent ``async_invoke`` calls against the
-        same instance genuinely overlap everywhere else. See ``invoke``'s own
+        ``invoke``: only ``record`` takes locks (``self._invoke_lock`` for the
+        registry lookup, then the conversation's own lock for the commit --
+        both are ``threading.RLock``s, safe to hold briefly here since
+        ``record`` never awaits), letting concurrent ``async_invoke`` calls
+        against the same instance genuinely overlap everywhere else. See ``invoke``'s own
         docstring for the full reasoning.
         """
         logger.info(f"[Async {self.full_name} started]")
@@ -1462,10 +1219,12 @@ class Agent(AtomicInvokable, ABC):
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the agent with a single input mapping.
 
-        Only ``record`` runs under ``self._invoke_lock`` -- everything before
-        it (turn selection, pre_invoke, the full task lifecycle, post_invoke)
-        is unlocked. The only shared, mutable state any of that touches
-        (``self._conversations``) is only ever *mutated* inside ``record``;
+        Only ``record`` takes locks (``self._invoke_lock`` for the registry
+        lookup, the conversation's own lock for the commit) -- everything
+        before it (turn selection, pre_invoke, the full task lifecycle,
+        post_invoke) is unlocked. The only shared, mutable state any of that
+        touches (a conversation's records) is only ever *appended to* inside
+        ``record``;
         reads elsewhere are stale-safe by construction (append-only,
         immutable-once-persisted, aside from the active-key snapshot and the
         pinned turn copy ``create_task`` takes up front). Narrowing the lock
@@ -1515,6 +1274,8 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
         """Return a minimal diagnostic snapshot of this agent."""
+        with self._invoke_lock:
+            conversations = dict(self._conversations)
         d = super().to_dict()
         d.update({
             "system_prompts": {
@@ -1533,6 +1294,6 @@ class Agent(AtomicInvokable, ABC):
             "records_window": self.records_window,
             "conversations": {
                 key: [r.to_dict() for r in conv.records]
-                for key, conv in self._conversations.items()},
+                for key, conv in conversations.items()},
         })
         return d

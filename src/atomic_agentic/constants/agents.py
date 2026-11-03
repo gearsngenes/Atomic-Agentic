@@ -10,29 +10,21 @@ from ..constants.core import IDENTIFIER_PATTERN_TEXT
 # =============================================================================
 # Used by:
 # - agents/base.py: Agent's per-conversation storage (_conversations dict,
-#   create_conversation, clone_conversation) and its name-shape validation.
+#   create_conversation, import_conversation) and its name-shape validation.
 #
-# "default" is the always-present conversation key -- Agent seeds
-# {"default": []} at construction and delete_conversation refuses to ever
-# truly remove it, resetting its list to empty instead.
+# "default" is the always-present conversation key -- Agent seeds a fresh
+# empty Conversation under it at construction and remove_conversation
+# refuses to ever truly remove it, rebuilding a fresh one instead.
 
 DEFAULT_CONVERSATION_NAME = "default"
-"""The always-present conversation key. Never truly removable -- deleting
-it resets its list to empty instead."""
+"""The always-present conversation key. Never truly removable -- removing
+it rebuilds a fresh default instead."""
 
 CONVERSATION_NAME_PATTERN: re.Pattern[str] = re.compile(
-    rf"^(?!.*_\d+$){IDENTIFIER_PATTERN_TEXT}$"
+    rf"^{IDENTIFIER_PATTERN_TEXT}$"
 )
-"""Valid shape for an explicitly-given conversation name (create_conversation's
-`name`, or an explicit `clone_conversation(name=...)`): alphanumeric +
-underscore (same as IDENTIFIER_PATTERN), and must NOT end in `_<digits>` --
-that suffix shape is reserved for auto-generated clone names, which
-guarantees "ends in _<digits> iff auto-generated" holds everywhere."""
-
-TRAILING_FORK_INDEX_PATTERN: re.Pattern[str] = re.compile(r"_(\d+)$")
-"""Matches an existing auto-generated numeric suffix so it can be stripped
-before a fresh one is appended (prevents suffix accumulation like
-`branch_5_7_2`)."""
+"""Valid shape for a conversation name (the key under which an Agent registers
+a conversation): alphanumeric + underscore, same as IDENTIFIER_PATTERN."""
 
 # =============================================================================
 # Context rendering
@@ -358,7 +350,6 @@ __all__ = [
     # Conversation storage
     "DEFAULT_CONVERSATION_NAME",
     "CONVERSATION_NAME_PATTERN",
-    "TRAILING_FORK_INDEX_PATTERN",
     # Context rendering
     "RENDER_MODES",
     "CONTEXT_START",

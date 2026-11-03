@@ -513,16 +513,8 @@ class ThinkingAgent(BasicAgent):
     def _build_record_from_task(self, task: ThinkingTask) -> ThinkingAgentRecord:
         """Persist ``task.thoughts`` directly onto the completed record --
         no agent-level accumulator, no span bookkeeping."""
-        prev = task.turns[-1] if task.turns else None
         return ThinkingAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            run_id=task.run_id,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
+            **self._record_base_fields(task),
             thoughts=tuple(task.thoughts),
         )
 

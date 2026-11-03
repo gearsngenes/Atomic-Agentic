@@ -140,7 +140,7 @@ class AgentRecord:
     the processed result must capture it from ``invoke()``'s live return
     value at call time.
 
-    Records form a doubly-linked tree via ``prev``/``children``: each
+    Records are linked in both directions via ``prev``/``children``: each
     committed record points backward to the most recent record that was used
     as context when it was created (``prev``), and that target record points
     forward to every record that was ever committed on top of it
@@ -148,8 +148,10 @@ class AgentRecord:
     fresh start). Walking ``prev`` backward from any record reconstructs the
     exact conversation branch that produced it; a target with more than one
     child marks a branch point where more than one conversation (or racing
-    call) continued from the same record. Provenance only: turn selection
-    never reads it.
+    call) continued from the same record. Under a shared conversation a
+    record may gain sibling ``children`` from different agents, while the
+    conversation's list order stays commit order. Provenance only: turn
+    selection never reads it.
 
     Fields
     ------
@@ -185,6 +187,11 @@ class AgentRecord:
         is omitted. No type/shape validation beyond the fill logic itself --
         framework-internal plumbing, not a validated external boundary.
 
+    agent_id:
+        The writing agent, ``f"{full_name};{instance_id}"``; ``None`` for
+        bare construction. Provenance only -- history replay does not
+        distinguish writers.
+
     llm_records:
         Complete record of every LLM generation that contributed to this
         invocation, populated by ``_build_record_from_task`` from the
@@ -201,9 +208,10 @@ class AgentRecord:
         than a singly-linked chain. Mutable-in-place despite this being a
         frozen dataclass — ``hash=False, compare=False`` mirrors ``inputs``'s
         existing treatment, so appending to it post-construction doesn't
-        disturb hashing/equality. Never reassigned after construction, only
-        ever mutated via ``.append(...)``; expected to always start empty at
-        construction time (a record cannot have children before it exists).
+        disturb hashing/equality. Deliberately a list, not a tuple: later
+        commits append to it in place. Never reassigned after construction;
+        expected to always start empty (a record cannot have children before
+        it exists).
     """
 
     user_prompt: str
@@ -211,6 +219,7 @@ class AgentRecord:
     run_id: str | None = field(default=None, kw_only=True)
     started_at: datetime | None = field(default=None, kw_only=True)
     ended_at: datetime | None = field(default=None, kw_only=True)
+    agent_id: str | None = field(default=None, kw_only=True)
     inputs: dict = field(default_factory=dict, hash=False, compare=False)
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
@@ -238,37 +247,7 @@ class AgentRecord:
                 "AgentRecord.llm_records must be a sequence of LLMRecord instances, "
                 f"got {type(self.llm_records).__name__}."
             )
-        normalized = tuple(self.llm_records)
-        for index, record in enumerate(normalized):
-            if not isinstance(record, LLMRecord):
-                raise TypeError(
-                    "AgentRecord.llm_records must contain only LLMRecord instances; "
-                    f"item {index} is {type(record).__name__}."
-                )
-        object.__setattr__(self, "llm_records", normalized)
-
-        if self.prev is not None:
-            if not isinstance(self.prev, AgentRecord):
-                raise TypeError(
-                    f"AgentRecord.prev must be an AgentRecord or None, "
-                    f"got {type(self.prev).__name__}."
-                )
-
-        if not isinstance(self.children, (list, tuple)) or isinstance(self.children, (str, bytes)):
-            raise TypeError(
-                "AgentRecord.children must be a list of AgentRecord instances, "
-                f"got {type(self.children).__name__}."
-            )
-        for index, child in enumerate(self.children):
-            if not isinstance(child, AgentRecord):
-                raise TypeError(
-                    "AgentRecord.children must contain only AgentRecord instances; "
-                    f"item {index} is {type(child).__name__}."
-                )
-        # Deliberately NOT normalized to tuple -- children is the one field
-        # exempt from this class's "normalize sequences to tuple" convention,
-        # exactly like the existing inputs dict exemption. It must stay a
-        # mutable list so later commits can append to it in place.
+        object.__setattr__(self, "llm_records", tuple(self.llm_records))
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -277,6 +256,7 @@ class AgentRecord:
             "inputs": self.inputs,
             "generated_response": self.generated_response,
             "run_id": self.run_id,
+            "agent_id": self.agent_id,
             "started_at": self.started_at.isoformat(),
             "ended_at": self.ended_at.isoformat(),
             "llm_records": [r.to_dict() for r in self.llm_records],

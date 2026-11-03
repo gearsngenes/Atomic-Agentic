@@ -588,16 +588,8 @@ class ReActAgent(ToolAgent):
         ``ReActTask``. Mirrors ``PlanActAgent._build_record_from_task``
         exactly -- no agent-level global blackboard to persist into.
         """
-        prev = task.turns[-1] if task.turns else None
         return ToolAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            run_id=task.run_id,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
+            **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
             regenerations_used=task.regenerations_used,

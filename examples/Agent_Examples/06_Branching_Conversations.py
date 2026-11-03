@@ -15,21 +15,24 @@ Conversation tree
     T_A1  reveal dog name                │
         │                                │
     T_A2  "what do you know             T_B1  "what's my dog's
-          about my dog?"                        name?" (cloned from T0)
+          about my dog?"                        name?" (sliced at T0)
           → agent recalls Biscuit               → agent: "you haven't
                                                   told me"
 
 Key concepts shown
 ------------------
-- ``Agent.clone_conversation(source, *, end_id=...)``   explicitly clone a
-  conversation up through any prior turn, not just the tail.
+- ``Conversation.slice(start, end)`` + ``Agent.import_conversation(conv, *, name)``
+  copy a conversation up through any prior turn, not just the tail, and
+  register the copy under a name. ``import_conversation`` registers the
+  object it is given as-is (shared, never copied), so the slice is what makes
+  the branch independent.
 - ``Agent.switch_conversation(name)``   switch which conversation
-  subsequent calls read from and write to. Cloning never changes the active
+  subsequent calls read from and write to. Importing never changes the active
   conversation by itself -- the caller switches explicitly.
 - A record's ``children`` list is shared across every conversation it
   belongs to: T0 already has a child (T_A1) in "default", and continuing
-  from T0 in the cloned branch adds a second child (T_B1). That is
-  provenance only -- the clone is a real conversation of its own, and the
+  from T0 in the sliced branch adds a second child (T_B1). That is
+  provenance only -- the slice is a real conversation of its own, and the
   new turn is appended to it in place (there is no implicit forking).
 - ``Agent.get_conversation(conversation_id)``   (the stored Conversation) each conversation is its own
   stored list under ``Agent.conversation_names``; reading one back is a
@@ -41,7 +44,7 @@ Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
 a ``dict[str, Conversation]`` -- the agent's active conversation
 ("default" here) keeps growing in place for T0/T_A1/T_A2. There is no
 implicit, invoke-time forking mechanism -- every branch starts from an
-explicit ``clone_conversation`` call and is continued in place.
+explicit ``slice`` + ``import_conversation`` and is continued in place.
 
 Post-invoke parameters are no longer declared via ``passthrough_inputs``.
 Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
@@ -215,19 +218,20 @@ def main() -> None:
     print(f"  reply: {r_a2.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Branch B — T_B1: clone from T0, ask the same recall question
+    # Branch B — T_B1: slice from T0, ask the same recall question
     #
     # This branch's context is T0 only. T_A1 and T_A2 never happened here.
     # The agent cannot know Biscuit's name.
     # ------------------------------------------------------------------ #
     print(f"\n{'═' * _W}")
-    print("  T_B1  ·  Branch B  —  cloned from T0  (clone_conversation(end_id=run_0))")
+    print("  T_B1  ·  Branch B  —  sliced from T0  (slice(0, 1))")
     print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
     print(f"{'═' * _W}")
 
-    # Explicitly clone "default" up through T0, switch into the clone, and
-    # continue there -- the new turn is appended to the clone in place.
-    branch_b_name = agent.clone_conversation("default", end_id=run_0)
+    # Slice "default" up through T0, register the slice, switch into it, and
+    # continue there -- the new turn is appended to the slice in place.
+    branch_b_name = "branch_b"
+    agent.import_conversation(agent.get_conversation("default").slice(0, 1), name=branch_b_name)
     agent.switch_conversation(branch_b_name)
 
     r_b1 = agent(
@@ -256,7 +260,7 @@ def main() -> None:
     )
     print_chain(
         agent.get_conversation(branch_b_name).records,
-        "Branch B  ·  root → same question, no prior fact  (cloned at T0)",
+        "Branch B  ·  root → same question, no prior fact  (sliced at T0)",
         results_by_run_id,
     )
 
@@ -270,7 +274,7 @@ def main() -> None:
         run_0:  "T0     root",
         run_a1: "T_A1   branch A — fact revealed",
         run_a2: "T_A2   branch A — fact recalled",
-        run_b1: "T_B1   branch B — parallel clone from T0",
+        run_b1: "T_B1   branch B — parallel slice from T0",
     }
     for name in agent.conversation_names:
         history = agent.get_conversation(name).records

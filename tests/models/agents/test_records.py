@@ -306,6 +306,19 @@ class TestAgentRecord:
         assert record.started_at == ts
         assert record.ended_at == ts
 
+    def test_agent_id_defaults_to_none(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert record.agent_id is None
+
+    def test_agent_id_is_keyword_only_and_serialized(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y", agent_id="ns.a;123")
+        assert record.agent_id == "ns.a;123"
+        assert record.to_dict()["agent_id"] == "ns.a;123"
+
+    def test_llm_records_rejects_str(self) -> None:
+        with pytest.raises(TypeError, match="llm_records"):
+            AgentRecord(user_prompt="x", generated_response="y", llm_records="abc")  # type: ignore[arg-type]
+
     def test_to_dict_has_no_final_result_key(self) -> None:
         record = AgentRecord(
             user_prompt="run",
@@ -318,6 +331,7 @@ class TestAgentRecord:
             "inputs": {},
             "generated_response": "raw",
             "run_id": record.run_id,
+            "agent_id": None,
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
@@ -374,14 +388,6 @@ class TestAgentRecord:
         )
         assert isinstance(record.llm_records, tuple)
 
-    def test_rejects_non_llm_record_item_in_llm_records(self) -> None:
-        with pytest.raises(TypeError, match="LLMRecord"):
-            AgentRecord(
-                user_prompt="hi",
-                generated_response="there",
-                llm_records=("not a record",),
-            )
-
     def test_to_dict_includes_llm_records(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
@@ -406,15 +412,6 @@ class TestAgentRecord:
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
         assert record.prev is completed
 
-    def test_prev_rejects_non_agent_record(self) -> None:
-        with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt="x", generated_response="y", prev="bad")  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("bad_prev", [0, "string", object(), []])
-    def test_prev_rejects_non_agent_record_parametrize(self, bad_prev: Any) -> None:
-        with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt="x", generated_response="y", prev=bad_prev)  # type: ignore[arg-type]
-
     def test_to_dict_prev_run_id_is_none_when_no_prev(self) -> None:
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.to_dict()["prev_run_id"] is None
@@ -435,14 +432,6 @@ class TestAgentRecord:
         child = AgentRecord(user_prompt="child", generated_response="r")
         record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
         assert record.children == [child]
-
-    def test_children_rejects_non_list_tuple(self) -> None:
-        with pytest.raises(TypeError, match="children"):
-            AgentRecord(user_prompt="x", generated_response="y", children="not a list")  # type: ignore[arg-type]
-
-    def test_children_rejects_non_agent_record_element(self) -> None:
-        with pytest.raises(TypeError, match="children"):
-            AgentRecord(user_prompt="x", generated_response="y", children=["not a record"])  # type: ignore[list-item]
 
     def test_children_not_normalized_to_tuple(self) -> None:
         # Deliberately mutable -- unlike llm_records, children is appended to
@@ -618,6 +607,7 @@ class TestThinkingAgentRecord:
             "inputs": {},
             "generated_response": "a poem",
             "run_id": record.run_id,
+            "agent_id": None,
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
