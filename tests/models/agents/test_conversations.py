@@ -10,16 +10,8 @@ from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.records import AgentRecord
 
 
-class _A:
-    pass
-
-
-class _B:
-    pass
-
-
 def make_conv(**variables: ContextVariable) -> Conversation:
-    return Conversation(agent_type=_A, context=dict(variables))
+    return Conversation(context=dict(variables))
 
 
 def cv(name: str, value: object = 1, **kwargs: object) -> ContextVariable:
@@ -28,7 +20,7 @@ def cv(name: str, value: object = 1, **kwargs: object) -> ContextVariable:
 
 class TestConversationContextConstruction:
     def test_defaults_to_empty_read_only_view(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         assert isinstance(conv.context, MappingProxyType)
         assert len(conv.context) == 0
@@ -39,7 +31,7 @@ class TestConversationContextConstruction:
         var = cv("x", [1])
         source = {"x": var}
 
-        conv = Conversation(agent_type=_A, context=source)
+        conv = Conversation(context=source)
         source["y"] = cv("y")
 
         assert "y" not in conv.context
@@ -48,33 +40,28 @@ class TestConversationContextConstruction:
 
     def test_rejects_bad_context(self) -> None:
         with pytest.raises(ValueError, match="Mapping"):
-            Conversation(agent_type=_A, context=[])  # type: ignore[arg-type]
+            Conversation(context=[])  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="ContextVariable"):
-            Conversation(agent_type=_A, context={"x": 1})  # type: ignore[dict-item]
+            Conversation(context={"x": 1})  # type: ignore[dict-item]
         with pytest.raises(ValueError, match="must equal"):
-            Conversation(agent_type=_A, context={"y": cv("x")})
-
-    def test_agent_type_must_be_a_class(self) -> None:
-        with pytest.raises(TypeError, match="agent_type"):
-            Conversation(agent_type="_A")  # type: ignore[arg-type]
+            Conversation(context={"y": cv("x")})
 
     def test_equality_is_by_value_over_every_field(self) -> None:
-        a = Conversation(agent_type=_A, context={"x": cv("x")})
-        same = Conversation(agent_type=_A, context={"x": cv("x")})
+        a = Conversation(context={"x": cv("x")})
+        same = Conversation(context={"x": cv("x")})
 
         assert a == same
-        assert a != Conversation(agent_type=_B, context={"x": cv("x")})
-        assert a != Conversation(agent_type=_A)
-        assert a != Conversation(agent_type=_A, context={"x": cv("x", 2)})
+        assert a != Conversation()
+        assert a != Conversation(context={"x": cv("x", 2)})
 
     def test_unhashable(self) -> None:
         with pytest.raises(TypeError):
-            hash(Conversation(agent_type=_A))
+            hash(Conversation())
 
 
 class TestRemember:
     def test_new_key_defaults_not_readonly(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         conv.remember("x", 5, "five")
 
@@ -82,7 +69,7 @@ class TestRemember:
         assert conv.context["x"].readonly is False
 
     def test_readonly_creation_and_key_normalization(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         conv.remember(" x ", 1, readonly=True)
 
@@ -171,7 +158,7 @@ class TestUpdate:
 
     def test_unknown_key_raises(self) -> None:
         with pytest.raises(KeyError):
-            Conversation(agent_type=_A).update("nope", 1)
+            Conversation().update("nope", 1)
 
 
 class TestForget:
@@ -186,7 +173,7 @@ class TestForget:
 
     def test_unknown_key_raises(self) -> None:
         with pytest.raises(KeyError):
-            Conversation(agent_type=_A).forget("x")
+            Conversation().forget("x")
 
     def test_readonly_can_be_forgotten(self) -> None:
         conv = make_conv(x=cv("x", readonly=True))
@@ -244,7 +231,7 @@ class TestPreviewLimits:
     LIMITS = ("response_preview_limit", "prompt_preview_limit", "context_preview_limit")
 
     def test_default_to_none(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         assert all(getattr(conv, name) is None for name in self.LIMITS)
 
@@ -253,10 +240,10 @@ class TestPreviewLimits:
         self, value: int | None
     ) -> None:
         for name in self.LIMITS:
-            conv = Conversation(agent_type=_A, **{name: value})
+            conv = Conversation(**{name: value})
             assert getattr(conv, name) == value
 
-            other = Conversation(agent_type=_A)
+            other = Conversation()
             setattr(other, name, value)
             assert getattr(other, name) == value
 
@@ -266,23 +253,23 @@ class TestPreviewLimits:
     ) -> None:
         for name in self.LIMITS:
             with pytest.raises(ValueError, match=name):
-                Conversation(agent_type=_A, **{name: value})  # type: ignore[arg-type]
+                Conversation(**{name: value})  # type: ignore[arg-type]
 
-            conv = Conversation(agent_type=_A, **{name: 7})  # type: ignore[arg-type]
+            conv = Conversation(**{name: 7})  # type: ignore[arg-type]
             with pytest.raises(ValueError, match=name):
                 setattr(conv, name, value)
             assert getattr(conv, name) == 7
 
     def test_limits_take_part_in_equality(self) -> None:
-        a = Conversation(agent_type=_A, response_preview_limit=5)
-        b = Conversation(agent_type=_A, response_preview_limit=5)
-        c = Conversation(agent_type=_A, response_preview_limit=6)
+        a = Conversation(response_preview_limit=5)
+        b = Conversation(response_preview_limit=5)
+        c = Conversation(response_preview_limit=6)
 
         assert a == b
         assert a != c
 
     def test_context_mutators_still_work_after_limit_assignment(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.context_preview_limit = 3
         conv.remember("k", 1)
 
@@ -292,68 +279,68 @@ class TestPreviewLimits:
 
 class TestHistoryRenderMode:
     def test_defaults_to_str(self) -> None:
-        assert Conversation(agent_type=_A).render_mode == "s"
+        assert Conversation().render_mode == "s"
 
     @pytest.mark.parametrize("mode", ["s", "r", "a", "j", "p"])
     def test_valid_modes_accepted_at_construction_and_assignment(self, mode: str) -> None:
-        assert Conversation(agent_type=_A, render_mode=mode).render_mode == mode
+        assert Conversation(render_mode=mode).render_mode == mode
 
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.render_mode = mode
         assert conv.render_mode == mode
 
     @pytest.mark.parametrize("mode", ["x", "S", "", None, 1])
     def test_invalid_modes_rejected_and_old_value_kept(self, mode: object) -> None:
         with pytest.raises(ValueError, match="render_mode"):
-            Conversation(agent_type=_A, render_mode=mode)  # type: ignore[arg-type]
+            Conversation(render_mode=mode)  # type: ignore[arg-type]
 
-        conv = Conversation(agent_type=_A, render_mode="j")
+        conv = Conversation(render_mode="j")
         with pytest.raises(ValueError, match="render_mode"):
             conv.render_mode = mode  # type: ignore[assignment]
         assert conv.render_mode == "j"
 
     def test_takes_part_in_equality(self) -> None:
-        a = Conversation(agent_type=_A, render_mode="j")
+        a = Conversation(render_mode="j")
 
-        assert a == Conversation(agent_type=_A, render_mode="j")
-        assert a != Conversation(agent_type=_A)
+        assert a == Conversation(render_mode="j")
+        assert a != Conversation()
 
 
 class TestRememberRenderMode:
     def test_remember_stores_render_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.remember("k", {"a": 1}, render_mode="j")
 
         assert conv.context["k"].render_mode == "j"
 
     def test_remember_defaults_to_str_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.remember("k", 1)
 
         assert conv.context["k"].render_mode == "s"
 
     def test_update_keeps_render_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.remember("k", 1, render_mode="r")
         conv.update("k", 2)
 
         assert conv.context["k"].render_mode == "r"
 
     def test_remember_rejects_none_render_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         with pytest.raises(ValueError, match="render_mode"):
             conv.remember("k", 1, render_mode=None)  # type: ignore[arg-type]
 
     def test_remember_rejects_invalid_render_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         with pytest.raises(ValueError, match="render_mode"):
             conv.remember("k", 1, render_mode="bogus")
         assert "k" not in conv.context
 
     def test_remember_stores_and_update_keeps_preview_limit(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.remember("k", 1, preview_limit=4)
         assert conv.context["k"].preview_limit == 4
 
@@ -361,14 +348,14 @@ class TestRememberRenderMode:
         assert conv.context["k"].preview_limit == 4
 
     def test_remember_rejects_invalid_preview_limit(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         with pytest.raises(ValueError, match="preview_limit"):
             conv.remember("k", 1, preview_limit=-1)
         assert "k" not in conv.context
 
     def test_describe_keeps_render_mode(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         conv.remember("k", 1, "old", render_mode="a")
         conv.describe("k", "new")
 
@@ -383,22 +370,22 @@ def rec(prompt: str = "p", **kwargs: object) -> AgentRecord:
 class TestNoName:
     def test_name_is_not_a_field(self) -> None:
         with pytest.raises(TypeError):
-            Conversation(name="c", agent_type=_A)  # type: ignore[call-arg]
-        assert not hasattr(Conversation(agent_type=_A), "name")
+            Conversation(name="c")  # type: ignore[call-arg]
+        assert not hasattr(Conversation(), "name")
 
     def test_lock_is_not_an_init_arg_repr_or_equality_part(self) -> None:
         with pytest.raises(TypeError):
-            Conversation(agent_type=_A, _lock=threading.RLock())  # type: ignore[call-arg]
-        conv = Conversation(agent_type=_A)
+            Conversation(_lock=threading.RLock())  # type: ignore[call-arg]
+        conv = Conversation()
 
         assert "_lock" not in repr(conv)
-        assert conv == Conversation(agent_type=_A)
-        assert conv._lock is not Conversation(agent_type=_A)._lock
+        assert conv == Conversation()
+        assert conv._lock is not Conversation()._lock
 
 
 class TestSlice:
     def make(self, n: int = 5) -> Conversation:
-        return Conversation(agent_type=_A, records=[rec(str(i)) for i in range(n)])
+        return Conversation(records=[rec(str(i)) for i in range(n)])
 
     def prompts(self, conv: Conversation) -> list[str]:
         return [r.user_prompt for r in conv.records]
@@ -445,7 +432,7 @@ class TestSlice:
 
     def test_carries_latest_context_in_distinct_container(self) -> None:
         var = cv("x", [1])
-        conv = Conversation(agent_type=_A, records=[rec()], context={"x": var})
+        conv = Conversation(records=[rec()], context={"x": var})
         copy = conv.slice(0, 0)
 
         assert copy.context is not conv.context
@@ -453,7 +440,6 @@ class TestSlice:
 
     def test_copies_limits_and_render_mode_and_gets_fresh_lock(self) -> None:
         conv = Conversation(
-            agent_type=_A,
             response_preview_limit=1,
             prompt_preview_limit=2,
             context_preview_limit=3,
@@ -463,13 +449,12 @@ class TestSlice:
 
         assert (copy.response_preview_limit, copy.prompt_preview_limit, copy.context_preview_limit) == (1, 2, 3)
         assert copy.render_mode == "j"
-        assert copy.agent_type is _A
         assert copy._lock is not conv._lock
 
 
 class TestCommit:
     def test_appends_record(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         r = rec()
 
         conv.commit(r, {})
@@ -477,7 +462,7 @@ class TestCommit:
         assert conv.records == [r]
 
     def test_links_prev_children_only_when_prev_set(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         first = rec("1")
         second = rec("2", prev=first)
 
@@ -516,7 +501,7 @@ class TestCommit:
         assert "x" not in conv.context
 
     def test_concurrent_commits_keep_every_record_and_child(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
         root = rec("root")
         conv.commit(root, {})
         n_threads, per_thread = 8, 25
@@ -535,7 +520,7 @@ class TestCommit:
         assert len(root.children) == n_threads * per_thread
 
     def test_concurrent_context_writes_all_land(self) -> None:
-        conv = Conversation(agent_type=_A)
+        conv = Conversation()
 
         def work(t: int) -> None:
             for i in range(25):

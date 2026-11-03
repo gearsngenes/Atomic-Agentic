@@ -23,15 +23,15 @@ class Conversation:
     ``records`` is a mutable list whose contents are appended to in place by
     ``commit`` and read via direct indexing/slicing elsewhere. The
     dataclass is not frozen so the preview limits can be assigned directly
-    (``conv.response_preview_limit = 500``); ``agent_type``, ``records`` and
-    ``context`` are not meant to be reassigned, and ``context`` changes only
-    through its mutators.
+    (``conv.response_preview_limit = 500``); ``records`` and ``context`` are
+    not meant to be reassigned, and ``context`` changes only through its
+    mutators.
 
     A conversation has no name: the key under which an Agent registers it is
     the only name, and one object may sit under different keys in different
-    agents. The object may be shared by several agents of the exact same
-    ``agent_type`` (``Agent.import_conversation`` registers the same object,
-    never a copy); ``slice`` is how an independent copy is made. The context
+    agents. The object may be shared by several agents, of any type
+    (``Agent.import_conversation`` registers the same object, never a copy);
+    ``slice`` is how an independent copy is made. The context
     mutators, ``commit`` and ``slice`` each run under the conversation's own
     ``_lock`` (a re-entrant lock, never compared, copied or shown in the
     repr), so they are atomic with respect to one another.
@@ -42,11 +42,6 @@ class Conversation:
 
     Fields
     ------
-    agent_type:
-        The ``Agent`` class this conversation was created for; required, no
-        default. ``Agent.import_conversation`` accepts a conversation only on
-        an exact match. Trusted -- records are not re-validated against it.
-        (Typed ``type`` because the model layer never imports ``Agent``.)
     records:
         Forward-ordered (oldest-first) list of ``AgentRecord``. A single
         ``AgentRecord`` may legitimately appear in more than one
@@ -77,7 +72,6 @@ class Conversation:
         ``slice``.
     """
 
-    agent_type: type
     records: list[AgentRecord] = field(default_factory=list)
     context: Mapping[str, ContextVariable] = field(default_factory=dict)
     response_preview_limit: int | None = None
@@ -104,10 +98,6 @@ class Conversation:
     def __post_init__(self) -> None:
         # Shape-only validation -- element-type checking of each record is
         # AgentRecord's own construction's job, not this container's.
-        if not isinstance(self.agent_type, type):
-            raise TypeError(
-                f"Conversation.agent_type must be a class, got {self.agent_type!r}."
-            )
         if not isinstance(self.records, list):
             raise ValueError(
                 f"Conversation.records must be a list, got {type(self.records)!r}."
@@ -240,7 +230,6 @@ class Conversation:
         with self._lock:
             records = self.records[start:end]
             return Conversation(
-                agent_type=self.agent_type,
                 records=records,
                 context=self.context,
                 response_preview_limit=self.response_preview_limit,

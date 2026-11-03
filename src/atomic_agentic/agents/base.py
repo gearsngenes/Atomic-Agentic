@@ -13,7 +13,6 @@ from typing import (
 from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
-import asyncio
 import logging
 
 from ..exceptions import (
@@ -154,9 +153,18 @@ class Agent(AtomicInvokable, ABC):
     to the record it read.
 
     A conversation may be shared: ``import_conversation`` registers the same
-    object under a key, so several agents of the exact same type can read
-    and extend one history and context. The registry itself (which keys
-    exist, which is active) stays per-agent under ``_invoke_lock``.
+    object under a key, so several agents (of any type) can read and extend
+    one history and context. Each reader renders the records with its own
+    ``render_turn``. The registry itself (which keys exist, which is active)
+    stays per-agent under ``_invoke_lock``.
+
+    Context and recording
+    ---------------------
+    Context changes made during a call (``bind_response_to`` values) are
+    written back to the conversation by ``record`` -- the same ``commit`` that
+    appends the turn. So with ``record_enabled`` False neither happens: such an
+    agent (a judge or probe) never changes a conversation, and its
+    ``bind_response_to`` values reach only the result and the post stage.
     """
 
     # ------------------------------------------------------------------ #
@@ -312,7 +320,7 @@ class Agent(AtomicInvokable, ABC):
         self._records_window: Optional[int] = records_window
 
         self._conversations: dict[str, Conversation] = {
-            DEFAULT_CONVERSATION_NAME: Conversation(agent_type=type(self))
+            DEFAULT_CONVERSATION_NAME: Conversation()
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
 
@@ -453,7 +461,9 @@ class Agent(AtomicInvokable, ABC):
         axis). ``True``: the completed turn is appended to the conversation
         the call was bound to. ``False``: a normal ``AgentResult`` is still
         returned, but nothing is stored in any conversation for that
-        invocation -- regardless of ``records_window``.
+        invocation -- regardless of ``records_window``. Context write-back
+        (``bind_response_to`` values) is part of the same commit, so it is
+        skipped too.
         """
         return self._record_enabled
 
@@ -657,8 +667,8 @@ class Agent(AtomicInvokable, ABC):
         return task
 
     async def async_summarize(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``summarize``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self.summarize, task)
+        """Async mirror of ``summarize``; pure computation, so it runs inline."""
+        return self.summarize(task)
 
     def pre_process(self, task: AgentTask) -> AgentTask:
         """Run ``pre_invoke`` over ``task.pre_inputs`` to produce the prompt.
@@ -707,8 +717,9 @@ class Agent(AtomicInvokable, ABC):
         return task
 
     async def async_think(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``think``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self.think, task)
+        """Async mirror of ``think``; the default is a no-op, so it runs inline.
+        A family that overrides ``think`` must override this too."""
+        return task
 
     def prepare(self, task: AgentTask) -> AgentTask:
         """Advance ``task``'s preparation phase by one round.
@@ -718,8 +729,9 @@ class Agent(AtomicInvokable, ABC):
         return task
 
     async def async_prepare(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``prepare``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self.prepare, task)
+        """Async mirror of ``prepare``; the default is a no-op, so it runs inline.
+        A family that overrides ``prepare`` must override this too."""
+        return task
 
     @abstractmethod
     def act(self, task: AgentTask) -> AgentTask:
@@ -1005,7 +1017,7 @@ class Agent(AtomicInvokable, ABC):
         """
         with self._invoke_lock:
             self._conversations = {
-                DEFAULT_CONVERSATION_NAME: Conversation(agent_type=type(self))
+                DEFAULT_CONVERSATION_NAME: Conversation()
             }
             self._active_conversation = DEFAULT_CONVERSATION_NAME
 
@@ -1064,7 +1076,6 @@ class Agent(AtomicInvokable, ABC):
         with self._invoke_lock:
             self._check_new_conversation_name(name, "create_conversation")
             conv = Conversation(
-                agent_type=type(self),
                 response_preview_limit=response_preview_limit,
                 prompt_preview_limit=prompt_preview_limit,
                 context_preview_limit=context_preview_limit,
@@ -1117,14 +1128,13 @@ class Agent(AtomicInvokable, ABC):
         """Register ``conversation`` (the SAME object, shared) under ``name``.
 
         ``conversation`` is typically another agent's ``get_conversation``
-        result, so two agents of the exact same type can share one history
-        and context. Never copies; to copy a range:
+        result, so two agents (of any type) can share one history and
+        context. Never copies; to copy a range:
         ``b.import_conversation(a.get_conversation("x").slice(2, 5), name="y")``.
         Never activates; returns ``None``.
 
-        Not a ``Conversation`` raises ``TypeError``, as does an ``agent_type``
-        that is not exactly ``type(self)`` (before anything is registered).
-        ``name`` is validated/collision-checked exactly like
+        Not a ``Conversation`` raises ``TypeError`` (before anything is
+        registered). ``name`` is validated/collision-checked exactly like
         ``create_conversation``'s (``ValueError``); the same object already
         registered under another key of this agent also raises ``ValueError``.
         """
@@ -1132,11 +1142,6 @@ class Agent(AtomicInvokable, ABC):
             raise TypeError(
                 "import_conversation: expected a Conversation, "
                 f"got {type(conversation)!r}."
-            )
-        if conversation.agent_type is not type(self):
-            raise TypeError(
-                f"import_conversation: conversation was created for "
-                f"{conversation.agent_type.__name__}, not {type(self).__name__}."
             )
 
         with self._invoke_lock:
@@ -1174,7 +1179,7 @@ class Agent(AtomicInvokable, ABC):
                 )
             if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
-                self._conversations[key] = Conversation(agent_type=type(self))
+                self._conversations[key] = Conversation()
                 return old
             if key == self._active_conversation:
                 raise AgentInvocationError(
@@ -1186,16 +1191,10 @@ class Agent(AtomicInvokable, ABC):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``invoke``.
 
-        The same lifecycle with ``await`` at ``summarize``/``pre_process``/
-        ``post_process`` and the ``async_think``/``async_prepare``/
-        ``async_act`` hooks. ``create_task`` and ``record`` are sync (pure
-        computation, no I/O) and serve both paths. Same lock scope as
-        ``invoke``: only ``record`` takes locks (``self._invoke_lock`` for the
-        registry lookup, then the conversation's own lock for the commit --
-        both are ``threading.RLock``s, safe to hold briefly here since
-        ``record`` never awaits), letting concurrent ``async_invoke`` calls
-        against the same instance genuinely overlap everywhere else. See ``invoke``'s own
-        docstring for the full reasoning.
+        The same lifecycle with ``await`` at ``pre_process``/``post_process``
+        and the ``async_*`` hooks. ``create_task``, ``summarize`` and
+        ``record`` are sync (pure computation, no I/O) and serve both paths.
+        Same lock scope as ``invoke``; see its docstring.
         """
         logger.info(f"[Async {self.full_name} started]")
 
@@ -1220,20 +1219,12 @@ class Agent(AtomicInvokable, ABC):
         """Invoke the agent with a single input mapping.
 
         Only ``record`` takes locks (``self._invoke_lock`` for the registry
-        lookup, the conversation's own lock for the commit) -- everything
-        before it (turn selection, pre_invoke, the full task lifecycle,
-        post_invoke) is unlocked. The only shared, mutable state any of that
-        touches (a conversation's records) is only ever *appended to* inside
-        ``record``;
-        reads elsewhere are stale-safe by construction (append-only,
-        immutable-once-persisted, aside from the active-key snapshot and the
-        pinned turn copy ``create_task`` takes up front). Narrowing the lock
-        this way lets true concurrent execution of the actual work happen
-        for both sync and async callers sharing one instance. A deliberate,
-        accepted consequence: two concurrent calls reading the same tail may
-        race, since nothing serializes the read-tail-then-commit span as a
-        whole -- both simply append in commit order, each with ``prev`` set
-        to the record it read (so that record has two children).
+        lookup, the conversation's own lock for the commit); everything
+        before it is unlocked, so concurrent calls on one instance genuinely
+        overlap. Reads are stale-safe (records are append-only and
+        ``create_task`` pins its turn copy). Accepted consequence: two calls
+        reading the same tail both append in commit order, each with ``prev``
+        set to the record it read (so that record has two children).
 
         The lifecycle, spelled out -- each step is public, so this is also the
         recipe for assembling your own::

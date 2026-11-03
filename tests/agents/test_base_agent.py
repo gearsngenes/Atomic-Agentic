@@ -199,6 +199,12 @@ class _LifecycleOrderAgent(Agent):
         self.call_log.append("prepare")
         return task
 
+    async def async_think(self, task: AgentTask) -> AgentTask:
+        return self.think(task)
+
+    async def async_prepare(self, task: AgentTask) -> AgentTask:
+        return self.prepare(task)
+
     def act(self, task: AgentTask) -> AgentTask:
         self.call_log.append("act")
         self._rounds_remaining -= 1
@@ -791,7 +797,6 @@ class TestConversationManagement:
         snap = agent.get_conversation()
 
         assert isinstance(snap, Conversation)
-        assert snap.agent_type is type(agent)
         assert [r.inputs["topic"] for r in snap.records[-1:]] == ["second"]
 
     def test_get_conversation_returns_the_stored_object(self) -> None:
@@ -817,7 +822,6 @@ class TestConversationManagement:
         )
 
         assert agent.get_conversation("scratch") is conv
-        assert conv.agent_type is _EchoAgent
         assert (
             conv.response_preview_limit,
             conv.prompt_preview_limit,
@@ -917,7 +921,6 @@ class TestConversationManagement:
         assert fresh is not old
         assert fresh.records == []
         assert fresh.response_preview_limit is None
-        assert fresh.agent_type is _EchoAgent
         assert agent.active_conversation == "default"
 
     def test_remove_default_while_another_is_active_keeps_active_key(self) -> None:
@@ -967,21 +970,10 @@ class TestConversationContext:
 
         agent.remove_conversation("default")
         assert len(agent.get_conversation().context) == 0
-        assert agent.get_conversation().agent_type is _EchoAgent
 
         agent.get_conversation().remember("y", 1)
         agent.clear_memory()
         assert len(agent.get_conversation().context) == 0
-        assert agent.get_conversation().agent_type is _EchoAgent
-
-    def test_every_created_conversation_is_tagged(self) -> None:
-        agent = make_agent(record_enabled=True)
-        agent.invoke({"topic": "pytest", "tone": "strict"})
-        agent.create_conversation("scratch")
-        agent.import_conversation(agent.get_conversation().slice(0, 1), name="sliced")
-
-        for name in ("default", "scratch", "sliced"):
-            assert agent.get_conversation(name).agent_type is _EchoAgent
 
 
 class TestImportConversation:
@@ -1059,13 +1051,12 @@ class TestImportConversation:
             target.import_conversation(conv, name="taken")
         assert target.conversation_names == ["default", "taken"]
 
-    def test_wrong_agent_type_raises_and_registers_nothing(self) -> None:
+    def test_other_agent_type_can_share(self) -> None:
         source, _ = self._source()
         other = make_agent(agent_cls=_OtherEchoAgent)
 
-        with pytest.raises(TypeError, match="_EchoAgent"):
-            other.import_conversation(source.get_conversation(), name="imp")
-        assert other.conversation_names == ["default"]
+        other.import_conversation(source.get_conversation(), name="imp")
+        assert other.get_conversation("imp") is source.get_conversation()
 
     def test_non_conversation_raises(self) -> None:
         with pytest.raises(TypeError):

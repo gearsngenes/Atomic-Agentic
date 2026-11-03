@@ -85,8 +85,8 @@ class AgentTask:
         planning finishes; ``ReActAgent`` after each step commits).
 
     conversation : str | None
-        Name of the conversation this invocation is bound to. ``None`` until
-        the lifecycle populates it (Pass 8a).
+        Registry key of the conversation this invocation is bound to. ``None``
+        until ``create_task`` populates it.
 
     context : dict[str, ContextVariable]
         Per-call working copy of the bound conversation's context, seeded by
@@ -106,7 +106,7 @@ class AgentTask:
 
     run_id, started_at, ended_at : str | None, datetime | None, datetime | None
         Identity and timing shared by the result and the record built from
-        this task. ``None`` until the lifecycle mints them (Pass 8a).
+        this task. ``None`` until ``create_task`` mints them.
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]

@@ -54,6 +54,7 @@ as a regular input.
 from __future__ import annotations
 
 import os
+import sys
 import textwrap
 from dotenv import load_dotenv
 
@@ -61,6 +62,7 @@ from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
+sys.stdout.reconfigure(encoding="utf-8")  # the demo prints non-ASCII; Windows consoles default to cp1252
 
 _W = 66  # display column width
 
