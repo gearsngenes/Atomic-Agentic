@@ -458,3 +458,25 @@ class TestLLMEngineImmutability:
 
         with pytest.raises(AttributeError):
             engine.timeout_seconds = 99.0  # type: ignore[misc]
+
+
+class TestLLMEngineModelData:
+    def test_model_data_returns_engine_model_data(self) -> None:
+        data = FakeLLMEngine().model_data
+
+        assert isinstance(data, LLMModelData)
+        assert data == LLMModelData(provider="fake")
+
+    def test_model_data_needs_no_call(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.model_data
+
+        assert engine.requested_structured_calls == []
+
+    def test_model_data_reflects_get_model_data(self) -> None:
+        class _OtherEngine(FakeLLMEngine):
+            def _get_model_data(self) -> LLMModelData:
+                return LLMModelData(provider="other")
+
+        assert _OtherEngine().model_data.provider == "other"

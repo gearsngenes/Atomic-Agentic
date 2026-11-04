@@ -956,9 +956,12 @@ class Agent(AtomicInvokable, ABC):
         on the task, so it stays an explicit parameter -- distinct from
         ``task.generated_response``, the pre-``post_invoke`` raw value.
         ``run_id`` and ``started_at``/``ended_at`` come from the task.
+
+        ``llm_model_data`` comes from the engine's configuration, so a task
+        that finished without any LLM call still builds a result.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = task.llm_records[-1].llm_result.model_data
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,

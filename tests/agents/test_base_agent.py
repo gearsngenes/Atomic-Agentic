@@ -3511,3 +3511,60 @@ class TestContextSink:
         asyncio.run(agent.async_invoke({"prompt": "p"}))
 
         assert agent.get_conversation().context["notes"].value == "new"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Result model data (Pass 12a): read from the engine, not the last LLM record
+# ─────────────────────────────────────────────────────────────────────────────
+class _NoCallAgent(Agent):
+    """Agent that completes its task without ever calling the engine."""
+
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        return task.task_messages
+
+    def act(self, task: AgentTask) -> AgentTask:
+        task.generated_response = "x"
+        task.complete = True
+        return task
+
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        return self.act(task)
+
+
+def make_no_call_agent() -> _NoCallAgent:
+    return _NoCallAgent(
+        name="no_call_agent",
+        namespace="tests",
+        description="Agent that never calls its engine.",
+        llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+        record_enabled=False,
+    )
+
+
+class TestResultModelData:
+    def test_zero_llm_call_task_builds_result(self) -> None:
+        agent = make_no_call_agent()
+
+        result = agent.invoke({"prompt": "p"})
+
+        assert result.result == "x"
+        assert result.llm_token_usage == ()
+        assert result.llm_model_data == agent.llm_engine.model_data
+
+    def test_zero_llm_call_task_builds_result_async(self) -> None:
+        agent = make_no_call_agent()
+
+        result = asyncio.run(agent.async_invoke({"prompt": "p"}))
+
+        assert result.llm_token_usage == ()
+        assert result.llm_model_data == agent.llm_engine.model_data
+
+    def test_result_model_data_comes_from_engine(self) -> None:
+        agent = make_value_agent("v")
+
+        result = agent.invoke({"prompt": "p"})
+
+        assert len(result.llm_token_usage) == 1
+        assert result.llm_model_data == agent.llm_engine.model_data

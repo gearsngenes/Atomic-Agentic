@@ -663,3 +663,17 @@ class TestToDictThinkingLlm:
         agent = make_agent(engine=main_engine, thinking_llm_engine=thinking_engine)
 
         assert agent.to_dict()["thinking_llm"] == thinking_engine.to_dict()
+
+
+class TestResultModelData:
+    def test_zero_record_task_builds_result_with_engine_model_data(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs({"prompt": "hello"}))
+        task.ended_at = task.started_at
+
+        result = agent.build_result_from_task(task, "reply")
+
+        assert isinstance(result, ThinkingAgentResult)
+        assert result.llm_token_usage == ()
+        assert result.llm_model_data == agent.llm_engine.model_data
+        assert result.thinking_rounds_used == 0

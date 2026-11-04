@@ -134,8 +134,8 @@ class AgentResult(AtomicResult):
         report usage are omitted. Empty tuple is valid.
 
     llm_model_data:
-        Model identity associated with the LLM activity that produced this
-        Agent result. Sourced from the last LLMRecord's engine model_data.
+        Model identity of the engine that served this invocation, read from
+        the engine's configuration when the result is built.
     """
 
     llm_token_usage: tuple[TokenUsage, ...]

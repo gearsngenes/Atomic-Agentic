@@ -738,7 +738,7 @@ class PlanActAgent(ToolAgent):
         from ``len(task.failed_statements)``.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = task.llm_records[-1].llm_result.model_data
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,
