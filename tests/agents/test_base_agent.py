@@ -3568,3 +3568,70 @@ class TestResultModelData:
 
         assert len(result.llm_token_usage) == 1
         assert result.llm_model_data == agent.llm_engine.model_data
+
+
+class _HookAgent(_EchoAgent):
+    """Agent whose default conversations come from an overridden hook."""
+
+    hook_calls = 0
+
+    def _new_conversation(self) -> Conversation:
+        type(self).hook_calls += 1
+        return Conversation(render_mode="r")
+
+
+class TestNewConversationHook:
+    def test_initial_default_comes_from_the_hook(self) -> None:
+        agent = make_agent(agent_cls=_HookAgent)
+
+        assert agent.get_conversation().render_mode == "r"
+
+    def test_clear_memory_rebuilds_through_the_hook(self) -> None:
+        agent = make_agent(agent_cls=_HookAgent)
+        agent.get_conversation().render_mode = "s"
+
+        agent.clear_memory()
+
+        assert agent.get_conversation().render_mode == "r"
+
+    def test_remove_default_rebuilds_through_the_hook(self) -> None:
+        agent = make_agent(agent_cls=_HookAgent)
+        agent.get_conversation().render_mode = "s"
+
+        agent.remove_conversation("default")
+
+        assert agent.get_conversation().render_mode == "r"
+
+    def test_create_conversation_overlays_given_arguments(self) -> None:
+        agent = make_agent(agent_cls=_HookAgent)
+
+        given = agent.create_conversation(
+            "a", response_preview_limit=3, render_mode="a"
+        )
+        omitted = agent.create_conversation("b", prompt_preview_limit=4)
+
+        assert (given.response_preview_limit, given.render_mode) == (3, "a")
+        assert omitted.render_mode == "r"
+        assert omitted.prompt_preview_limit == 4
+        assert omitted.response_preview_limit is None
+
+    def test_base_hook_returns_a_new_default_conversation_each_call(self) -> None:
+        agent = make_agent()
+
+        first = agent._new_conversation()
+        second = agent._new_conversation()
+
+        assert first is not second
+        assert first == Conversation()
+        assert first.render_mode == "s"
+
+    def test_removing_a_non_default_conversation_does_not_use_the_hook(self) -> None:
+        agent = make_agent(agent_cls=_HookAgent)
+        agent.create_conversation("x")
+        before = _HookAgent.hook_calls
+
+        popped = agent.remove_conversation("x")
+
+        assert popped.render_mode == "r"
+        assert _HookAgent.hook_calls == before
+        assert "x" not in agent.conversation_names

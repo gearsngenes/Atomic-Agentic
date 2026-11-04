@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
+from atomic_agentic.constants.agents import TASK_PROMPT_END, TASK_PROMPT_START
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results.structured import StructuredResult
@@ -18,6 +19,10 @@ from ..fake_engines import FakeLLMEngine, echo_latest_user
 pytestmark = [pytest.mark.integration]
 
 ROLE_PROMPT = "You are a deterministic integration-test writer."
+
+
+def wrap(prompt: str) -> str:
+    return f"{TASK_PROMPT_START}\n{prompt}\n{TASK_PROMPT_END}"
 
 
 def build_prompt(topic: str, tone: str = "neutral") -> str:
@@ -125,7 +130,8 @@ class TestAgentStructuredBasicPipeline:
         result = flow.invoke({"topic": "pytest", "tone": "strict"})
 
         expected_prompt = "Write about pytest in a strict tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_message = wrap(expected_prompt)
+        expected_raw = f"ECHO: {expected_message}"
 
         assert isinstance(result, SequentialFlowResult)
         assert result.result == {
@@ -137,7 +143,7 @@ class TestAgentStructuredBasicPipeline:
         assert engine.calls == [
             [
                 {"role": "system", "content": ROLE_PROMPT},
-                {"role": "user", "content": expected_prompt},
+                {"role": "user", "content": expected_message},
             ]
         ]
 
@@ -166,7 +172,7 @@ class TestAgentStructuredBasicPipeline:
         result = flow.invoke({"topic": "composition", "tone": "direct"})
 
         expected_prompt = "Write about composition in a direct tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_raw = f"ECHO: {wrap(expected_prompt)}"
         expected_first = {
             "final": expected_raw,
             "length": len(expected_raw),
@@ -193,8 +199,10 @@ class TestAgentStructuredBasicPipeline:
         first = flow.invoke({"topic": "first topic", "tone": "plain"})
         second = flow.invoke({"topic": "second topic", "tone": "plain"})
 
-        assert first.result["final"] == "ECHO: Write about first topic in a plain tone."
-        assert second.result["final"] == "ECHO: Write about second topic in a plain tone."
+        first_prompt = "Write about first topic in a plain tone."
+        second_prompt = "Write about second topic in a plain tone."
+        assert first.result["final"] == f"ECHO: {wrap(first_prompt)}"
+        assert second.result["final"] == f"ECHO: {wrap(second_prompt)}"
         assert len(engine.calls) == 2
 
         second_call_messages = engine.calls[1]
@@ -204,9 +212,9 @@ class TestAgentStructuredBasicPipeline:
             "assistant",
             "user",
         ]
-        assert second_call_messages[1]["content"] == "Write about first topic in a plain tone."
-        assert second_call_messages[2]["content"] == "ECHO: Write about first topic in a plain tone."
-        assert second_call_messages[3]["content"] == "Write about second topic in a plain tone."
+        assert second_call_messages[1]["content"] == first_prompt
+        assert second_call_messages[2]["content"] == f"ECHO: {wrap(first_prompt)}"
+        assert second_call_messages[3]["content"] == wrap(second_prompt)
 
     def test_async_structured_agent_sequential_flow_pipeline(self) -> None:
         engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
@@ -216,7 +224,7 @@ class TestAgentStructuredBasicPipeline:
         )
 
         expected_prompt = "Write about async pytest in a strict tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_raw = f"ECHO: {wrap(expected_prompt)}"
 
         assert isinstance(result, SequentialFlowResult)
         assert result.result == {

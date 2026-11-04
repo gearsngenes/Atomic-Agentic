@@ -677,3 +677,14 @@ class TestResultModelData:
         assert result.llm_token_usage == ()
         assert result.llm_model_data == agent.llm_engine.model_data
         assert result.thinking_rounds_used == 0
+
+
+class TestDefaultRenderMode:
+    def test_response_schema_keeps_plain_default_render_mode(self) -> None:
+        agent = make_agent(response_schema={"type": "object"})
+
+        assert agent.get_conversation().render_mode == "s"
+
+        agent.clear_memory()
+
+        assert agent.get_conversation().render_mode == "s"

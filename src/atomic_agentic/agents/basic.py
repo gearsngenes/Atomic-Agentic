@@ -32,6 +32,13 @@ class BasicAgent(Agent):
     mutation API for it, matching the fixed-topology invariant every other
     ``AtomicInvokable`` in this codebase already follows (parameters are
     resolved once at construction and are immutable thereafter).
+
+    The single user message each call sends is a task block: the current
+    prompt wrapped in the task markers, preceded by a runtime-context block
+    when the call's context has any variable (see ``_render_task_block``).
+    History stays raw. When a ``response_schema`` is set, the agent's default
+    conversations use render mode ``"j"`` so structured replies replay in
+    history as JSON, not as a Python repr.
     """
 
     DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
@@ -51,7 +58,8 @@ class BasicAgent(Agent):
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        records_window: Optional[int] = None,
+        records_window: Optional[int] = None,
+
         response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
@@ -64,7 +72,19 @@ class BasicAgent(Agent):
         )
         role_params = list(config.parameters)
 
-        # 2. Delegate to Agent base; role placeholders are the sole
+        # 2. Validate and store response_schema -- no deeper validation
+        # (no JSON-Schema key checks), matching LLMEngine's own
+        # output_structure contract. Stored before the base init because
+        # Agent.__init__ builds the default conversation through
+        # _new_conversation(), which reads it.
+        if response_schema is not None and not isinstance(response_schema, Mapping):
+            raise AgentError(
+                f"{type(self).__name__}.response_schema must be a dict/Mapping "
+                f"or None, got {type(response_schema).__name__}."
+            )
+        self._response_schema = response_schema
+
+        # 3. Delegate to Agent base; role placeholders are the sole
         # extra_parameters source.
         super().__init__(
             name=name,
@@ -76,21 +96,12 @@ class BasicAgent(Agent):
             post_invoke=post_invoke,
             bind_response_to=bind_response_to,
             extra_parameters=role_params,
-            records_window=records_window,
+            records_window=records_window,
+
         )
 
-        # 3. Register the role prompt.
+        # 4. Register the role prompt.
         self._system_prompts["role"] = config
-
-        # 4. Validate and store response_schema -- no deeper validation
-        # (no JSON-Schema key checks), matching LLMEngine's own
-        # output_structure contract.
-        if response_schema is not None and not isinstance(response_schema, Mapping):
-            raise AgentError(
-                f"{type(self).__name__}.response_schema must be a dict/Mapping "
-                f"or None, got {type(response_schema).__name__}."
-            )
-        self._response_schema = response_schema
 
     # ------------------------------------------------------------------ #
     # Role prompt API
@@ -107,18 +118,45 @@ class BasicAgent(Agent):
         return self._response_schema
 
     # ------------------------------------------------------------------ #
+    # Conversation defaults
+    # ------------------------------------------------------------------ #
+    def _new_conversation(self):
+        """Build one fresh default conversation for this agent.
+
+        1. no ``response_schema``: the base default.
+        2. otherwise ``Conversation(render_mode="j")``, so structured
+           (dict/list) replies replay in history as JSON, not as a Python
+           repr.
+
+        Applies to every default conversation this agent builds, including
+        those after ``clear_memory()`` and ``remove_conversation("default")``,
+        and to ``create_conversation()`` calls that omit ``render_mode``.
+        Conversations imported from elsewhere keep their own settings.
+        """
+        new_convo = super()._new_conversation()
+        if self._response_schema is None:
+            new_convo.render_mode = "j"
+        return new_convo
+
+    # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.
 
-        ``task.task_messages`` is a single message the first time it's
-        built (the raw ``user_prompt``, unwrapped) and never grows further
-        — ``BasicAgent`` has no retry loop, so this branch never re-triggers
-        within one invocation once set.
+        1. if ``task.task_messages`` is non-empty, return it (build-once
+           contract; ``BasicAgent`` never retries, so this holds once set).
+        2. otherwise store one user message holding ``_render_task_block``.
+        3. return ``task.task_messages``.
+
+        The message is the wrapped prompt, preceded by the context block when
+        ``task.context`` is non-empty. ``task.user_prompt`` is not modified;
+        the sent message is what the ``LLMRecord`` stores.
         """
         if not task.task_messages:
-            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+            task.task_messages = [
+                {"role": "user", "content": self._render_task_block(task)}
+            ]
         return task.task_messages
 
     def act(self, task: AgentTask) -> AgentTask:

@@ -20,6 +20,7 @@ from .basic import BasicAgent
 from ..constants.agents import THINKING_ROUNDS_PARAM
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
+from ..models.agents.conversations import Conversation
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
@@ -241,6 +242,18 @@ class ThinkingAgent(BasicAgent):
                 f"concrete int >= 0, got {thinking_rounds_limit!r}."
             )
         self._thinking_rounds_limit = thinking_rounds_limit
+
+    def _new_conversation(self) -> Conversation:
+        """Keep the base default.
+
+        Context rendering is scoped to ``BasicAgent`` for now, so Thinking's
+        default conversation stays ``"s"`` (free-text thoughts would be
+        JSON-quoted under ``"j"``). Also required for correctness: this runs
+        inside ``Agent.__init__``, before ``ThinkingAgent`` stores
+        ``_response_schema``, so the inherited ``BasicAgent`` override would
+        read an unset attribute.
+        """
+        return Agent._new_conversation(self)
 
     # ------------------------------------------------------------------ #
     # Secondary thinking engine

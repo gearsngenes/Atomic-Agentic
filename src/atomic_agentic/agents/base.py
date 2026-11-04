@@ -43,7 +43,11 @@ from ..utils.parameters import (
     build_parameter_reports,
     apply_parameter_reports,
 )
-from ..utils.rendering import stringify_value
+from ..utils.rendering import (
+    render_context_entries,
+    render_task_block,
+    stringify_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +179,11 @@ class Agent(AtomicInvokable, ABC):
     # seeding goes through ``_seed_task``.
     _TASK_CLS: type[AgentTask] = AgentTask
     _INITIAL_PROMPT_NAME: str | None = None
+
+    # Context-block placement and naming, read by _render_task_block. A family
+    # overrides these as class attributes; nothing else about the block varies.
+    _CONTEXT_NAME_PREFIX: str = ""   # "$" for the sigil families (Pass 14b)
+    _CONTEXT_FIRST: bool = True      # context block above the task block
 
     @classmethod
     def get_reserved_parameters(cls) -> list[ParamSpec]:
@@ -320,7 +329,7 @@ class Agent(AtomicInvokable, ABC):
         self._records_window: Optional[int] = records_window
 
         self._conversations: dict[str, Conversation] = {
-            DEFAULT_CONVERSATION_NAME: Conversation()
+            DEFAULT_CONVERSATION_NAME: self._new_conversation()
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
 
@@ -820,9 +829,41 @@ class Agent(AtomicInvokable, ABC):
            on the task, not a copy.
 
         Hard-abstract, no shared content — base ``Agent`` has no phase of
-        its own to render generically.
+        its own to render generically. A family whose task message carries
+        the prompt and context builds its text with ``_render_task_block``.
         """
         ...
+
+    def _render_task_block(self, task: AgentTask) -> str:
+        """Build the single user-message text for a context-aware task.
+
+        The wrapped current prompt, preceded (by default) by a context block.
+        Private and overridable; ``BasicAgent`` calls it from
+        ``_render_task_messages``, and later passes reuse it for the other
+        families.
+
+        1. ``limit`` is the bound conversation's ``context_preview_limit``,
+           read now (not cached), so an edit made before this render is seen.
+           A removed conversation raises ``KeyError``, as in ``summarize``
+           (known hazard).
+        2. ``render_context_entries`` over ``task.context`` (the call's working
+           copy, never a first-round snapshot) with this family's name prefix.
+        3. ``render_task_block`` wraps ``task.user_prompt`` and places the
+           context block per ``_CONTEXT_FIRST``.
+
+        Never modifies ``task.user_prompt`` or ``task.context``. The prompt is
+        always wrapped; the context block appears only when ``task.context`` is
+        non-empty (a variable with a hidden value still counts); the prompt is
+        never truncated. A pure function of the task and the conversation's
+        limit.
+        """
+        limit = self._conversations[task.conversation].context_preview_limit
+        entries = render_context_entries(
+            task.context, limit=limit, name_prefix=self._CONTEXT_NAME_PREFIX
+        )
+        return render_task_block(
+            task.user_prompt, entries, context_first=self._CONTEXT_FIRST
+        )
 
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
         """Slice the generated response per ``bind_response_to``.
@@ -1012,7 +1053,8 @@ class Agent(AtomicInvokable, ABC):
         Every conversation is unregistered from this agent, including its
         context and preview limits (a conversation shared with another agent
         stays intact there); ``self._conversations`` becomes a single fresh
-        ``"default"`` and the active conversation resets to ``"default"``.
+        ``"default"`` built by ``_new_conversation()`` and the active
+        conversation resets to ``"default"``.
         Takes ``self._invoke_lock`` like every other registry-mutating method
         -- without it, an in-flight ``invoke``/``async_invoke`` whose
         ``create_task`` snapshot predates this call could have its later
@@ -1020,9 +1062,28 @@ class Agent(AtomicInvokable, ABC):
         """
         with self._invoke_lock:
             self._conversations = {
-                DEFAULT_CONVERSATION_NAME: Conversation()
+                DEFAULT_CONVERSATION_NAME: self._new_conversation()
             }
             self._active_conversation = DEFAULT_CONVERSATION_NAME
+
+    def _new_conversation(self) -> Conversation:
+        """Build one fresh, empty default conversation for this agent.
+
+        1. return ``Conversation()`` -- all default limits and render_mode
+           ``"s"``.
+        2. pure: no I/O, no lock, and it must not read ``AtomicInvokable``
+           state or anything a subclass sets after ``Agent.__init__`` (it runs
+           inside ``Agent.__init__`` before the invokable parts are
+           initialized).
+
+        The single source of every default conversation this agent builds: the
+        initial ``"default"``, the one rebuilt by ``clear_memory()``, the one
+        rebuilt by ``remove_conversation("default")``, and the starting point
+        ``create_conversation`` overlays its arguments onto. A subclass
+        overrides it to give its conversations different defaults
+        (``BasicAgent``: render_mode ``"j"`` when it has a response_schema).
+        """
+        return Conversation()
 
     def _check_new_conversation_name(self, name: str, caller: str) -> None:
         """Raise ``ValueError`` if ``name`` is badly shaped or already taken.
@@ -1065,25 +1126,38 @@ class Agent(AtomicInvokable, ABC):
         response_preview_limit: int | None = None,
         prompt_preview_limit: int | None = None,
         context_preview_limit: int | None = None,
-        render_mode: str = "s",
+        render_mode: str | None = None,
     ) -> Conversation:
         """Create a new, empty conversation and return the stored object.
 
         ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
-        that already exists raises ``ValueError`` with a specific message. The
-        three preview limits (``None`` unlimited, ``0`` hidden, else
-        ``int > 0``) are validated by ``Conversation`` (``ValueError``), as is
-        ``render_mode`` (how prior responses are formatted in history). Never
-        auto-activates.
+        that already exists raises ``ValueError`` with a specific message.
+
+        1. under ``self._invoke_lock``: check the name.
+        2. start from ``self._new_conversation()``.
+        3. assign each argument that is not ``None`` onto it. The three
+           preview limits (``None`` unlimited, ``0`` hidden, else
+           ``int > 0``) and ``render_mode`` (how prior responses are formatted
+           in history; omitted -> the agent's default) are validated by
+           ``Conversation`` (``ValueError``); a failure leaves nothing
+           registered.
+        4. register and return it. Never auto-activates.
+
+        ``None`` means "not given" for every argument, so a limit cannot be
+        set back to ``None`` over a default the agent's hook already set.
         """
         with self._invoke_lock:
             self._check_new_conversation_name(name, "create_conversation")
-            conv = Conversation(
-                response_preview_limit=response_preview_limit,
-                prompt_preview_limit=prompt_preview_limit,
-                context_preview_limit=context_preview_limit,
-                render_mode=render_mode,
-            )
+            conv = self._new_conversation()
+            given = {
+                "response_preview_limit": response_preview_limit,
+                "prompt_preview_limit": prompt_preview_limit,
+                "context_preview_limit": context_preview_limit,
+                "render_mode": render_mode,
+            }
+            for field, value in given.items():
+                if value is not None:
+                    setattr(conv, field, value)
             self._conversations[name] = conv
             return conv
 
@@ -1169,9 +1243,9 @@ class Agent(AtomicInvokable, ABC):
 
         Other agents that share the conversation keep it. ``"default"`` is
         never actually removed -- regardless of whether it is currently
-        active, removing it stores a fresh empty ``Conversation`` (default
-        settings) under that key, leaves the active key unchanged and returns
-        the prior one. Any other key is refused while it is the active
+        active, removing it stores a fresh empty conversation built by
+        ``_new_conversation()`` under that key, leaves the active key
+        unchanged and returns the prior one. Any other key is refused while it is the active
         conversation (switch first); otherwise it is popped and returned. An
         unknown key raises ``AgentInvocationError``.
         """
@@ -1182,7 +1256,7 @@ class Agent(AtomicInvokable, ABC):
                 )
             if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
-                self._conversations[key] = Conversation()
+                self._conversations[key] = self._new_conversation()
                 return old
             if key == self._active_conversation:
                 raise AgentInvocationError(

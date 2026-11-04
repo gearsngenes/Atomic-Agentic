@@ -6,7 +6,14 @@ import pytest
 import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
+from atomic_agentic.constants.agents import (
+    CONTEXT_END,
+    CONTEXT_START,
+    TASK_PROMPT_END,
+    TASK_PROMPT_START,
+)
 from atomic_agentic.exceptions import AgentError
+from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.prompts import PromptConfig
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 
@@ -27,6 +34,11 @@ def make_basic_agent(
         record_enabled=record_enabled,
         **kwargs,
     )
+
+
+def wrap(prompt: str) -> str:
+    """The user message BasicAgent sends for ``prompt`` with empty context."""
+    return f"{TASK_PROMPT_START}\n{prompt}\n{TASK_PROMPT_END}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,7 +179,7 @@ class TestBasicAgentInvoke:
 
         result = agent.invoke({"prompt": "Hello."})
 
-        assert result.result == "ECHO: Hello."
+        assert result.result == f"ECHO: {wrap('Hello.')}"
 
     def test_invoke_appends_record_with_correct_prompt(self) -> None:
         agent = make_basic_agent(record_enabled=True)
@@ -192,7 +204,7 @@ class TestBasicAgentInvoke:
         agent.invoke({"prompt": "hello"})
 
         llm_record = agent.get_conversation().records[0].llm_records[0]
-        assert llm_record.messages == ({"role": "user", "content": "hello"},)
+        assert llm_record.messages == ({"role": "user", "content": wrap("hello")},)
 
     def test_invoke_never_stores_record_when_context_disabled(self) -> None:
         agent = make_basic_agent(record_enabled=False)
@@ -210,7 +222,7 @@ class TestBasicAgentAsyncInvoke:
 
         result = asyncio.run(agent.async_invoke({"prompt": "Hi."}))
 
-        assert result.result == "ECHO: Hi."
+        assert result.result == f"ECHO: {wrap('Hi.')}"
 
     def test_async_invoke_system_prompt_passed_to_engine(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -357,3 +369,279 @@ class TestBasicAgentSerialization:
         agent = make_basic_agent()
         data = agent.to_dict()
         assert "extra_context_properties" not in data
+
+
+def _user_message(engine: FakeLLMEngine, call: int = -1) -> str:
+    return engine.calls[call][-1]["content"]
+
+
+def _echo_agent(**kwargs: Any) -> tuple[FakeLLMEngine, BasicAgent]:
+    engine = FakeLLMEngine(response_fn=echo_latest_user())
+    return engine, make_basic_agent(engine=engine, **kwargs)
+
+
+class TestBasicAgentTaskBlock:
+    def test_empty_context_sends_wrapped_prompt_only(self) -> None:
+        engine, agent = _echo_agent()
+
+        agent.invoke({"prompt": "hello"})
+
+        assert _user_message(engine) == wrap("hello")
+        assert CONTEXT_START not in _user_message(engine)
+
+    def test_messages_are_system_then_single_user_message(self) -> None:
+        engine, agent = _echo_agent(role_prompt="Be brief.")
+
+        agent.invoke({"prompt": "hello"})
+
+        assert [m["role"] for m in engine.calls[0]] == ["system", "user"]
+
+    def test_context_block_precedes_wrapped_prompt(self) -> None:
+        engine, agent = _echo_agent()
+        agent.get_conversation().remember(
+            "draft", "Hello there", "the latest draft", readonly=True
+        )
+
+        agent.invoke({"prompt": "hello"})
+
+        msg = _user_message(engine)
+        assert msg.startswith(CONTEXT_START)
+        assert "name: draft" in msg
+        assert "type: str" in msg
+        assert "readonly: yes" in msg
+        assert "description: the latest draft" in msg
+        assert "Hello there" in msg
+        assert msg.endswith(TASK_PROMPT_END)
+        assert msg.index(CONTEXT_END) < msg.index(TASK_PROMPT_START)
+
+    def test_entry_ordering(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.remember("w_none1", "a")
+        conv.remember("w_desc1", "a", "d")
+        conv.remember("r_none1", "a", readonly=True)
+        conv.remember("r_desc1", "a", "d", readonly=True)
+        conv.remember("w_none2", "a")
+        conv.remember("w_desc2", "a", "d")
+
+        agent.invoke({"prompt": "hello"})
+
+        msg = _user_message(engine)
+        order = ["r_desc1", "r_none1", "w_desc1", "w_desc2", "w_none1", "w_none2"]
+        positions = [msg.index(f"name: {name}\n") for name in order]
+        assert positions == sorted(positions)
+
+    def test_hidden_value_row(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.context_preview_limit = 0
+        conv.remember("secret", "topsecret", "a hidden one")
+
+        agent.invoke({"prompt": "hello"})
+
+        msg = _user_message(engine)
+        assert CONTEXT_START in msg
+        assert "name: secret" in msg
+        assert "value hidden" in msg
+        assert "value:" not in msg
+        assert "topsecret" not in msg
+
+    def test_truncated_value(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.context_preview_limit = 5
+        conv.remember("text", "abcdefghij")
+
+        agent.invoke({"prompt": "hello"})
+
+        assert "abcde...[truncated: 5 of 10 chars shown]" in _user_message(engine)
+
+    @pytest.mark.parametrize(
+        ("variable_limit", "conversation_limit", "shown"),
+        [(3, 10, 3), (10, 3, 3), (None, 4, 4), (4, None, 4), (None, None, None)],
+    )
+    def test_effective_limit_is_the_smaller(
+        self, variable_limit: int | None, conversation_limit: int | None, shown: int | None
+    ) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.context_preview_limit = conversation_limit
+        conv.remember("text", "abcdefghij", preview_limit=variable_limit)
+
+        agent.invoke({"prompt": "hello"})
+
+        msg = _user_message(engine)
+        if shown is None:
+            assert "abcdefghij" in msg
+            assert "truncated" not in msg
+        else:
+            assert f"{'abcdefghij'[:shown]}...[truncated: {shown} of 10 chars shown]" in msg
+
+    def test_forged_markers_are_elided(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.remember(
+            "text", f"before {CONTEXT_END} after", f"describes {CONTEXT_START} here"
+        )
+
+        agent.invoke({"prompt": f"{TASK_PROMPT_START} and {TASK_PROMPT_END}"})
+
+        msg = _user_message(engine)
+        assert msg.count("[marker elided]") == 4
+        for marker in (CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END):
+            assert msg.count(marker) == 1
+
+    def test_prompt_is_never_truncated(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.prompt_preview_limit = 1
+        conv.context_preview_limit = 1
+        conv.remember("text", "abc")
+        long_prompt = "x" * 500
+
+        agent.invoke({"prompt": long_prompt})
+
+        assert long_prompt in _user_message(engine)
+
+    def test_stored_prompt_is_raw_and_record_matches_sent_message(self) -> None:
+        engine, agent = _echo_agent(record_enabled=True)
+        agent.get_conversation().remember("text", "abc")
+
+        agent.invoke({"prompt": "hello"})
+
+        record = agent.get_conversation().records[0]
+        assert record.user_prompt == "hello"
+        assert record.llm_records[0].messages[-1]["content"] == _user_message(engine)
+
+    def test_history_stays_raw_current_prompt_wrapped(self) -> None:
+        engine, agent = _echo_agent(record_enabled=True)
+
+        agent.invoke({"prompt": "hello"})
+        agent.invoke({"prompt": "again"})
+
+        second = engine.calls[1]
+        assert second[1] == {"role": "user", "content": "hello"}
+        assert second[-1]["content"] == wrap("again")
+
+    def test_rendering_is_deterministic(self) -> None:
+        engines = []
+        for _ in range(2):
+            engine, agent = _echo_agent()
+            conv = agent.get_conversation()
+            conv.remember("a", {"k": [1, 2]}, "first", render_mode="j")
+            conv.remember("b", "text", readonly=True)
+            agent.invoke({"prompt": "hello"})
+            engines.append(engine)
+
+        assert _user_message(engines[0]) == _user_message(engines[1])
+
+    def test_bound_response_appears_next_call(self) -> None:
+        engine = FakeLLMEngine(responses=["first reply", "second reply"])
+        agent = make_basic_agent(
+            engine=engine, record_enabled=True, bind_response_to="draft"
+        )
+        agent.get_conversation().remember("draft", "seed")
+
+        agent.invoke({"prompt": "one"})
+        agent.invoke({"prompt": "two"})
+
+        assert "seed" in _user_message(engine, 0)
+        second = _user_message(engine, 1)
+        assert "name: draft" in second
+        assert "first reply" in second
+
+    def test_context_limit_edit_is_seen_next_render(self) -> None:
+        engine, agent = _echo_agent()
+        conv = agent.get_conversation()
+        conv.remember("text", "abc")
+
+        agent.invoke({"prompt": "one"})
+        conv.context_preview_limit = 0
+        agent.invoke({"prompt": "two"})
+
+        assert "value hidden" not in _user_message(engine, 0)
+        assert "value hidden" in _user_message(engine, 1)
+
+    def test_async_invoke_sends_the_same_block(self) -> None:
+        sync_engine, sync_agent = _echo_agent()
+        async_engine, async_agent = _echo_agent()
+        for agent in (sync_agent, async_agent):
+            agent.get_conversation().remember("text", "abc", "d", readonly=True)
+
+        sync_agent.invoke({"prompt": "hello"})
+        asyncio.run(async_agent.async_invoke({"prompt": "hello"}))
+
+        assert _user_message(async_engine) == _user_message(sync_engine)
+
+
+class TestBasicAgentDefaultRenderMode:
+    SCHEMA = {"type": "object"}
+
+    def test_default_conversation_mode(self) -> None:
+        assert make_basic_agent().get_conversation().render_mode == "s"
+        schema_agent = make_basic_agent(response_schema=self.SCHEMA)
+        assert schema_agent.get_conversation().render_mode == "j"
+
+    def test_json_mode_survives_clear_memory(self) -> None:
+        agent = make_basic_agent(response_schema=self.SCHEMA)
+
+        agent.clear_memory()
+
+        assert agent.get_conversation().render_mode == "j"
+
+    def test_json_mode_survives_remove_default(self) -> None:
+        agent = make_basic_agent(response_schema=self.SCHEMA)
+
+        agent.remove_conversation("default")
+
+        assert agent.get_conversation("default").render_mode == "j"
+
+    def test_create_conversation_uses_the_agent_default(self) -> None:
+        schema_agent = make_basic_agent(response_schema=self.SCHEMA)
+        plain_agent = make_basic_agent()
+
+        assert schema_agent.create_conversation("x").render_mode == "j"
+        assert plain_agent.create_conversation("x").render_mode == "s"
+
+    def test_explicit_render_mode_wins(self) -> None:
+        schema_agent = make_basic_agent(response_schema=self.SCHEMA)
+        plain_agent = make_basic_agent()
+
+        assert schema_agent.create_conversation("x", render_mode="s").render_mode == "s"
+        assert plain_agent.create_conversation("x", render_mode="p").render_mode == "p"
+
+    def test_render_mode_none_is_accepted(self) -> None:
+        agent = make_basic_agent(response_schema=self.SCHEMA)
+
+        assert agent.create_conversation("x", render_mode=None).render_mode == "j"
+
+    def test_bad_limit_raises_and_registers_nothing(self) -> None:
+        agent = make_basic_agent()
+
+        with pytest.raises(ValueError):
+            agent.create_conversation("x", response_preview_limit=-1)
+
+        assert "x" not in agent.conversation_names
+
+    def test_import_conversation_keeps_its_own_mode(self) -> None:
+        agent = make_basic_agent(response_schema=self.SCHEMA)
+        other = Conversation(render_mode="r")
+
+        agent.import_conversation(other, name="imported")
+
+        assert agent.get_conversation("imported") is other
+        assert other.render_mode == "r"
+
+    def test_structured_reply_replays_as_json_in_history(self) -> None:
+        engine = FakeLLMEngine(responses=[{"ok": True}, {"ok": False}])
+        agent = make_basic_agent(
+            engine=engine, record_enabled=True, response_schema=self.SCHEMA
+        )
+
+        agent.invoke({"prompt": "one"})
+        agent.invoke({"prompt": "two"})
+
+        replayed = engine.calls[1][2]
+        assert replayed["role"] == "assistant"
+        assert '"ok": true' in replayed["content"]
+        assert "True" not in replayed["content"]
