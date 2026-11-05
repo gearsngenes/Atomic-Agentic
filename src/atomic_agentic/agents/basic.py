@@ -134,7 +134,7 @@ class BasicAgent(Agent):
         Conversations imported from elsewhere keep their own settings.
         """
         new_convo = super()._new_conversation()
-        if self._response_schema is None:
+        if self._response_schema is not None:
             new_convo.render_mode = "j"
         return new_convo
 
