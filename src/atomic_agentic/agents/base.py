@@ -642,8 +642,9 @@ class Agent(AtomicInvokable, ABC):
         """Family-specific seeding of a freshly built task, in place.
 
         Called once by ``create_task`` after construction. Default: nothing
-        to seed. ``ToolAgent`` seeds its cache and constants; ``ThinkingAgent``
-        validates and sets its round budget.
+        to seed. ``ToolAgent`` seeds its cache and constants; a ``ThinkingAgent``
+        subclass seeds its strategy state and the base then switches to the
+        reply prompt when thinking is already done.
         """
 
     def summarize(self, task: AgentTask) -> AgentTask:
@@ -818,7 +819,11 @@ class Agent(AtomicInvokable, ABC):
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this round's phase-specific task messages.
 
-        Every implementation must follow this contract:
+        A family that retries within a phase must follow this contract (its
+        ``additional_messages`` live on ``task.task_messages``); a family that
+        never retries (``ThinkingAgent``) may instead rebuild on every call,
+        still storing the result on ``task.task_messages`` and returning that
+        same list:
 
         1. If ``task.task_messages`` is already non-empty, this phase's
            messages are already built for this round — return it as-is

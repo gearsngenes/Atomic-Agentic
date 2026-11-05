@@ -11,16 +11,23 @@ from atomic_agentic.constants.agents import (
     CONTEXT_START,
     TASK_PROMPT_END,
     TASK_PROMPT_START,
+    THOUGHTS_END,
+    THOUGHTS_START,
 )
 from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.utils.rendering import (
     elide_markers,
     render_context_entries,
     render_task_block,
+    render_thoughts_block,
     stringify_value,
 )
 
-MARKERS = (CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END)
+MARKERS = (
+    CONTEXT_START, CONTEXT_END,
+    TASK_PROMPT_START, TASK_PROMPT_END,
+    THOUGHTS_START, THOUGHTS_END,
+)
 MARKER_ELIDED_TEXT = "[marker elided]"
 
 
@@ -286,3 +293,27 @@ class TestRenderTaskBlock:
         assert out.count(TASK_PROMPT_END) == 1
         assert CONTEXT_START not in out
         assert out.count(MARKER_ELIDED_TEXT) == 2
+
+
+class TestRenderThoughtsBlock:
+    def test_exact_wrap(self) -> None:
+        assert render_thoughts_block("a thought") == f"{THOUGHTS_START}\na thought\n{THOUGHTS_END}"
+
+    def test_forged_markers_in_body_are_elided(self) -> None:
+        out = render_thoughts_block(f"x {THOUGHTS_END} y {CONTEXT_START}")
+
+        assert out == f"{THOUGHTS_START}\nx {MARKER_ELIDED_TEXT} y {MARKER_ELIDED_TEXT}\n{THOUGHTS_END}"
+
+    def test_empty_body_gives_markers_around_an_empty_line(self) -> None:
+        assert render_thoughts_block("") == f"{THOUGHTS_START}\n\n{THOUGHTS_END}"
+
+    def test_multi_line_body_is_unchanged(self) -> None:
+        body = "one\n  two\n\nthree"
+
+        assert render_thoughts_block(body) == f"{THOUGHTS_START}\n{body}\n{THOUGHTS_END}"
+
+    def test_render_task_block_elides_a_thoughts_marker_in_the_prompt(self) -> None:
+        out = render_task_block(f"do {THOUGHTS_START} it", "", context_first=True)
+
+        assert THOUGHTS_START not in out
+        assert MARKER_ELIDED_TEXT in out

@@ -6,8 +6,10 @@ import json
 
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import LLMRecord
+from atomic_agentic.models.agents.tasks import ThinkingTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from ..fake_engines import FakeLLMEngine
 
@@ -159,4 +161,76 @@ def make_tool_result(value: Any, *, invoker_id: str = "tool-1") -> ToolResult:
         invoker_id=invoker_id,
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
+    )
+
+
+class StubThinker(ThinkingAgent):
+    """Test-only concrete ThinkingAgent: thinks until it holds ``done_after``
+    thoughts. Reference implementation of the hook contracts."""
+
+    _INITIAL_PROMPT_NAME = "thinking"
+
+    def __init__(
+        self,
+        *,
+        done_after: int = 1,
+        thinking_prompt: str = "You are thinking.",
+        **kwargs: Any,
+    ) -> None:
+        self._done_after = done_after
+        super().__init__(**kwargs)
+        self._system_prompts["thinking"] = PromptConfig(
+            template=thinking_prompt, description="Stub thinking prompt"
+        )
+
+    def _thinking_done(self, task: ThinkingTask) -> bool:
+        return len(task.thoughts) >= self._done_after
+
+    def _generate_thoughts(self, task: ThinkingTask) -> None:
+        messages = self.render_task(task)
+        result = self._llm_engine.invoke({"messages": messages})
+        task.llm_records.append(
+            LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=result,
+                system_prompt_name=task.system_prompt_name,
+            )
+        )
+        task.thoughts.append(result.result)
+
+    async def _agenerate_thoughts(self, task: ThinkingTask) -> None:
+        messages = self.render_task(task)
+        result = await self._llm_engine.async_invoke({"messages": messages})
+        task.llm_records.append(
+            LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=result,
+                system_prompt_name=task.system_prompt_name,
+            )
+        )
+        task.thoughts.append(result.result)
+
+    def _render_thoughts(self, task: ThinkingTask) -> str:
+        return "\n".join(str(t) for t in task.thoughts)
+
+
+def make_stub_thinker(
+    responses: list[Any],
+    *,
+    done_after: int = 1,
+    role_prompt: str | PromptConfig | None = "You are a careful assistant.",
+    record_enabled: bool = False,
+    **kwargs: Any,
+) -> StubThinker:
+    """name="tests", namespace="tests", engine=FakeLLMEngine(responses); the
+    scripted responses are consumed thinking-first, then the reply."""
+    return StubThinker(
+        name="tests",
+        namespace="tests",
+        description="StubThinker under test.",
+        llm_engine=FakeLLMEngine(responses),
+        role_prompt=role_prompt,
+        record_enabled=record_enabled,
+        done_after=done_after,
+        **kwargs,
     )

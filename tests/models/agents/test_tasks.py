@@ -201,14 +201,17 @@ class TestThinkingTask:
         assert task.thoughts == []
 
     def test_no_retries_or_rounds_used_fields(self) -> None:
-        # No retry-budget field: the free-flowing category-marker parser
-        # degrades unmarked text to a single OTHER thought rather than
-        # failing, so there is no malformed-output case to retry. No
-        # separate round counter either -- len(thoughts) is the round count.
+        # No retry-budget field and no separate round counter: the base
+        # keeps no budget or count (those, if any, belong to the strategy).
         task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
 
         assert not hasattr(task, "retries_used")
         assert not hasattr(task, "rounds_used")
+
+    def test_no_thinking_rounds_field(self) -> None:
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert not hasattr(task, "thinking_rounds")
 
     def test_no_phase_field(self) -> None:
         # ThinkingTask deliberately has no phase field -- system_prompt_name
@@ -221,10 +224,10 @@ class TestThinkingTask:
     def test_thoughts_holds_raw_values_directly(self) -> None:
         task = ThinkingTask(
             turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking",
-            thoughts=["a raw thought", {"focus": "x"}],
+            thoughts=["a raw thought", {"focus": "x"}, None, 3, [1, {"k": ["v"]}]],
         )
 
-        assert task.thoughts == ["a raw thought", {"focus": "x"}]
+        assert task.thoughts == ["a raw thought", {"focus": "x"}, None, 3, [1, {"k": ["v"]}]]
 
     def test_default_factories_are_independent_per_instance(self) -> None:
         first = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")

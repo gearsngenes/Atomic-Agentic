@@ -182,7 +182,7 @@ class ToolAgent(Agent, ABC):
             ``{TOOLS}``/``{CONSTANTS}`` becomes a real declared parameter of
             this agent -- validated/defaulted by the normal
             ``invoke(inputs)`` pipeline, the same mechanism
-            ``BasicAgent.role_prompt``/``ThinkingAgent.thinking_instructions``
+            ``BasicAgent.role_prompt``/``ScratchpadAgent.thinking_instructions``
             already use -- and is rendered against ``task.inputs`` merged
             with ``{TOOLS}``/``{CONSTANTS}``/``_extra_system_context()``
             (``task.inputs`` first, so it can never shadow those framework
@@ -200,7 +200,7 @@ class ToolAgent(Agent, ABC):
         # Normalized before super().__init__() (unlike every other
         # ToolAgent construction-time field) so a {name} field discovered
         # inside the template can be declared as a real extra_parameters
-        # entry -- the same precedent ThinkingAgent's role_prompt/
+        # entry -- the same precedent ScratchpadAgent's role_prompt/
         # thinking_instructions already establishes.
         normalized_tool_instructions = normalize_prompt_config(
             tool_instructions,

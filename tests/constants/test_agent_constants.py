@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import ast
 
+import atomic_agentic.constants.agents as agent_constants
+
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
+    CONTEXT_END,
+    CONTEXT_START,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     KWARGS_UNPACK_KEY,
@@ -13,7 +17,11 @@ from atomic_agentic.constants.agents import (
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     SUB_NAME_PREFIX,
+    TASK_PROMPT_END,
+    TASK_PROMPT_START,
     TASK_RESULT_PREFIX,
+    THOUGHTS_END,
+    THOUGHTS_START,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
@@ -79,3 +87,23 @@ class TestUnsupportedExprLabels:
     def test_labels_are_non_empty_strings(self) -> None:
         for label in UNSUPPORTED_EXPR_LABELS.values():
             assert isinstance(label, str) and label.strip()
+
+
+class TestThoughtsMarkers:
+    def test_values(self) -> None:
+        assert THOUGHTS_START == "==== THOUGHTS START ===="
+        assert THOUGHTS_END == "==== THOUGHTS END ===="
+
+    def test_framed_with_equals_runs(self) -> None:
+        for marker in (THOUGHTS_START, THOUGHTS_END):
+            assert marker.startswith("====")
+            assert marker.endswith("====")
+
+    def test_distinct_from_other_framing_markers(self) -> None:
+        markers = (CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END, THOUGHTS_START, THOUGHTS_END)
+
+        assert len(set(markers)) == len(markers)
+
+    def test_exported(self) -> None:
+        assert "THOUGHTS_START" in agent_constants.__all__
+        assert "THOUGHTS_END" in agent_constants.__all__

@@ -12,6 +12,8 @@ from ..constants.agents import (
     CONTEXT_START,
     TASK_PROMPT_END,
     TASK_PROMPT_START,
+    THOUGHTS_END,
+    THOUGHTS_START,
 )
 from ..models.agents.context import ContextVariable
 
@@ -20,6 +22,7 @@ __all__ = [
     "elide_markers",
     "render_context_entries",
     "render_task_block",
+    "render_thoughts_block",
 ]
 
 
@@ -74,10 +77,19 @@ def stringify_value(
 def elide_markers(text: str) -> str:
     """Replace every exact occurrence of a framing marker with a placeholder.
 
+    1. For each framing marker in (CONTEXT_START, CONTEXT_END,
+       TASK_PROMPT_START, TASK_PROMPT_END, THOUGHTS_START, THOUGHTS_END),
+       replace every exact occurrence with ``[marker elided]``.
+    2. Return the text.
+
     Structural protection only: a variant with different spacing or case
     passes through untouched.
     """
-    for marker in (CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END):
+    for marker in (
+        CONTEXT_START, CONTEXT_END,
+        TASK_PROMPT_START, TASK_PROMPT_END,
+        THOUGHTS_START, THOUGHTS_END,
+    ):
         text = text.replace(marker, "[marker elided]")
     return text
 
@@ -161,3 +173,18 @@ def render_task_block(
         return task
     context = f"{CONTEXT_START}\n{CONTEXT_PREAMBLE}\n\n{entries_text}\n{CONTEXT_END}"
     return f"{context}\n\n{task}" if context_first else f"{task}\n\n{context}"
+
+
+def render_thoughts_block(body: str) -> str:
+    """Wrap ``body`` in the thoughts markers.
+
+    1. Elide forged framing markers in ``body`` (``elide_markers``).
+    2. Return ``THOUGHTS_START``, the body and ``THOUGHTS_END``, each on its own
+       line.
+
+    Pure wrap: no truncation, no formatting of the body. The caller decides
+    whether to call it at all (the agent omits the block when there are no
+    thoughts). An empty body yields the two markers with an empty line between
+    them.
+    """
+    return f"{THOUGHTS_START}\n{elide_markers(body)}\n{THOUGHTS_END}"

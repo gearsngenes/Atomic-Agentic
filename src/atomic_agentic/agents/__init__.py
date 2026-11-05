@@ -4,6 +4,7 @@ from .toolagent import ToolAgent
 from .planact import PlanActAgent
 from .react import ReActAgent
 from .thinking import ThinkingAgent
+from .scratchpad import ScratchpadAgent
 from .scriptact import ScriptActAgent
 
 __all__ = ["Agent",
@@ -12,5 +13,6 @@ __all__ = ["Agent",
            "ReActAgent",
            "PlanActAgent",
            "ThinkingAgent",
+           "ScratchpadAgent",
            "ScriptActAgent",
            ]
