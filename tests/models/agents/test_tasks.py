@@ -8,6 +8,7 @@ from atomic_agentic.models.agents.tasks import (
     ToolAgentTask,
     PlanActTask,
     ReActTask,
+    ScratchpadTask,
     ScriptActAgentTask,
     ThinkingTask,
 )
@@ -236,6 +237,35 @@ class TestThinkingTask:
         first.thoughts.append("x")
 
         assert second.thoughts == []
+
+
+class TestScratchpadTask:
+    def _make(self, **kwargs) -> ScratchpadTask:
+        return ScratchpadTask(
+            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", **kwargs
+        )
+
+    def test_is_a_thinking_task(self) -> None:
+        assert isinstance(self._make(), ThinkingTask)
+
+    def test_added_field_defaults_to_keep_thinking(self) -> None:
+        task = self._make()
+
+        assert task.more_thinking_required is True
+        assert task.thoughts == []
+
+    def test_flag_is_settable_and_independent_per_instance(self) -> None:
+        first = self._make()
+        second = self._make()
+
+        first.more_thinking_required = False
+
+        assert second.more_thinking_required is True
+
+    def test_base_thinking_task_has_no_flag(self) -> None:
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert not hasattr(task, "more_thinking_required")
 
 
 class TestScriptActAgentTask:

@@ -2,7 +2,7 @@ import sys
 import os
 import json
 from dotenv import load_dotenv
-from atomic_agentic.agents import ThinkingAgent
+from atomic_agentic.agents import ScratchpadAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.llm import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 
@@ -67,11 +67,11 @@ PUZZLE_THINKING_SCHEMA = {
 }
 
 # --- thinking_instructions is the parameterized side of this example
-#     (Examples 1/2 parameterized role_prompt/thinking engine instead -- this
-#     one shows a plain string role_prompt paired with a thinking_instructions
-#     PromptConfig contributing its OWN {verification_style} placeholder,
-#     reconciled against role_prompt's own params the same way at
-#     construction time).
+#     (Examples 1/2 used a plain thinking prompt and a parameterized
+#     role_prompt -- this one shows a plain string role_prompt paired with a
+#     thinking_instructions PromptConfig contributing its OWN
+#     {verification_style} placeholder, reconciled against role_prompt's own
+#     params the same way at construction time).
 #
 #     The schema alone only constrains SHAPE, not content -- nothing stops a
 #     model from writing the puzzle's actual solution into working_hypothesis
@@ -108,10 +108,11 @@ Verification style: {verification_style}
     },
 )
 
-puzzle_agent = ThinkingAgent(
+puzzle_agent = ScratchpadAgent(
     name="Branching_Puzzle_Solver",
     namespace="examples",
     llm_engine=llm,
+    thinking_rounds=3,
     role_prompt="You are a meticulous puzzle solver who shows its work clearly.",
     thinking_instructions=PUZZLE_THINKING_INSTRUCTIONS,
     thinking_schema=PUZZLE_THINKING_SCHEMA,
@@ -121,9 +122,7 @@ puzzle_agent = ThinkingAgent(
 # --- the task itself is a three-stage chain, each stage unsolvable without
 #     the previous stage's answer -- there is no way to "skip ahead" to the
 #     final answer, which is what makes multiple thinking rounds a
-#     near-certainty rather than a matter of model preference. thinking_rounds
-#     is a per-invocation runtime parameter, passed alongside the task's own
-#     inputs ---
+#     near-certainty rather than a matter of model preference ---
 task = (
     "Solve this three-stage lock puzzle. Solve the stages strictly in order "
     "-- each stage's clue depends on the previous stage's answer and cannot "
@@ -141,7 +140,6 @@ task = (
 )
 result = puzzle_agent.invoke({
     "prompt": task,
-    "thinking_rounds": 3,
     "verification_style": (
         "Briefly sanity-check each stage's answer against the clue before "
         "moving on to the next stage."
@@ -156,5 +154,5 @@ for round_index, thought in enumerate(record.thoughts):
     print(f"  Round {round_index}:")
     print(json.dumps(thought, indent=4))
 
-print(f"\nTHINKING ROUNDS USED: {result.thinking_rounds_used}")
+print(f"\nTHOUGHTS PRODUCED: {result.thoughts_produced}")
 print(f"\nFINAL ANSWER:\n{result.result}")

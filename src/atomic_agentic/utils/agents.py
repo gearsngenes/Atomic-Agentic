@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
 
@@ -16,6 +17,7 @@ from ..constants.agents import (
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
+    STOP_EARLY_SCHEMA_TEMPLATE,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
@@ -30,6 +32,7 @@ __all__ = [
     "extract_identifiers",
     "extract_json_object",
     "normalize_prompt_config",
+    "build_thinking_step_schema",
     "reject_unsupported_forms",
     "strip_code_fence",
     "is_dispatched",
@@ -80,6 +83,28 @@ def normalize_prompt_config(
     raise TypeError(
         f"{error_label} must be str, PromptConfig, or None; got {type(value).__name__}."
     )
+
+
+def build_thinking_step_schema(
+    thought_schema: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the ``stop_early`` per-round output schema.
+
+    1. deep-copy ``STOP_EARLY_SCHEMA_TEMPLATE``
+    2. merge ``thought_schema`` (``{"type": "string"}`` when ``None``) into the
+       template's ``thought`` entry; the author's keys win, a description
+       included
+    3. return the schema
+
+    Pure and non-validating: the caller rejects ``$defs``/``definitions``/``$ref``
+    before calling, since nesting would break their pointers. Never aliases the
+    template or ``thought_schema``.
+    """
+    schema = copy.deepcopy(STOP_EARLY_SCHEMA_TEMPLATE)
+    inner = {"type": "string"} if thought_schema is None else copy.deepcopy(dict(thought_schema))
+    entry = schema["properties"]["thought"]
+    schema["properties"]["thought"] = {**entry, **inner}
+    return schema
 
 
 def extract_json_object(raw_text: str, *, source_label: str) -> Any:

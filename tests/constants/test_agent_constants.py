@@ -16,10 +16,15 @@ from atomic_agentic.constants.agents import (
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
+    STOP_EARLY_PROMPT_SECTION,
+    STOP_EARLY_SCHEMA_TEMPLATE,
+    STOP_EARLY_UNSAFE_SCHEMA_KEYS,
     SUB_NAME_PREFIX,
     TASK_PROMPT_END,
     TASK_PROMPT_START,
     TASK_RESULT_PREFIX,
+    THINKING_INSTRUCTIONS_END,
+    THINKING_INSTRUCTIONS_START,
     THOUGHTS_END,
     THOUGHTS_START,
     TRAILING_CODE_FENCE_PATTERN,
@@ -107,3 +112,62 @@ class TestThoughtsMarkers:
     def test_exported(self) -> None:
         assert "THOUGHTS_START" in agent_constants.__all__
         assert "THOUGHTS_END" in agent_constants.__all__
+
+
+class TestThinkingInstructionsMarkers:
+    def test_values(self) -> None:
+        assert THINKING_INSTRUCTIONS_START == "==== USER-DEFINED THINKING INSTRUCTIONS [START] ===="
+        assert THINKING_INSTRUCTIONS_END == "==== USER-DEFINED THINKING INSTRUCTIONS [END] ===="
+
+    def test_distinct_from_other_framing_markers(self) -> None:
+        markers = (
+            CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END,
+            THOUGHTS_START, THOUGHTS_END,
+            THINKING_INSTRUCTIONS_START, THINKING_INSTRUCTIONS_END,
+        )
+
+        assert len(set(markers)) == len(markers)
+
+    def test_exported(self) -> None:
+        for name in (
+            "THINKING_INSTRUCTIONS_START",
+            "THINKING_INSTRUCTIONS_END",
+            "STOP_EARLY_PROMPT_SECTION",
+            "STOP_EARLY_SCHEMA_TEMPLATE",
+        ):
+            assert name in agent_constants.__all__
+
+
+class TestStopEarlySchemaTemplate:
+    def test_properties_are_exactly_the_two_wrapper_keys(self) -> None:
+        # ScratchpadAgent reads these two keys as literals; pin them here.
+        assert set(STOP_EARLY_SCHEMA_TEMPLATE["properties"]) == {
+            "thought", "more_thinking_required",
+        }
+
+    def test_both_required_and_no_extra_properties(self) -> None:
+        assert STOP_EARLY_SCHEMA_TEMPLATE["required"] == ["thought", "more_thinking_required"]
+        assert STOP_EARLY_SCHEMA_TEMPLATE["additionalProperties"] is False
+
+    def test_flag_is_a_described_boolean(self) -> None:
+        flag = STOP_EARLY_SCHEMA_TEMPLATE["properties"]["more_thinking_required"]
+        assert flag["type"] == "boolean"
+        assert flag["description"].strip()
+
+    def test_thought_entry_carries_only_a_description(self) -> None:
+        # The thought schema is merged in by build_thinking_step_schema.
+        assert set(STOP_EARLY_SCHEMA_TEMPLATE["properties"]["thought"]) == {"description"}
+
+    def test_prompt_section_names_both_fields(self) -> None:
+        assert "thought" in STOP_EARLY_PROMPT_SECTION
+        assert "more_thinking_required" in STOP_EARLY_PROMPT_SECTION
+
+    def test_unsafe_schema_keys_are_the_root_reference_keys(self) -> None:
+        assert STOP_EARLY_UNSAFE_SCHEMA_KEYS == ("$defs", "definitions", "$ref")
+        assert "STOP_EARLY_UNSAFE_SCHEMA_KEYS" in agent_constants.__all__
+
+
+class TestThinkingRoundsParamRemoved:
+    def test_constant_is_gone(self) -> None:
+        assert not hasattr(agent_constants, "THINKING_ROUNDS_PARAM")
+        assert "THINKING_ROUNDS_PARAM" not in agent_constants.__all__

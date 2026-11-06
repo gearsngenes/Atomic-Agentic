@@ -273,32 +273,31 @@ class ScriptActAgentResult(ToolAgentResult):
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentResult(AgentResult):
     """
-    Successful thinking-capable agent invocation result (currently only
-    ``ThinkingAgent``).
+    Successful thinking-agent invocation result (every ``ThinkingAgent``
+    subclass), built by ``ThinkingAgent.build_result_from_task``.
 
-    Extends ``AgentResult`` with a derived count of completed thinking
-    rounds -- mirrors how ``llm_token_usage`` is already a derived
-    reduction of ``record.llm_records``, not a duplicate of it. A caller
-    needing the actual thought content reads it off the record instead
-    (``agent.get_conversation().records[-1].thoughts`` for the invocation
-    just made; scan ``get_conversation(conversation_id).records`` and
-    match ``r.run_id`` for an older one).
+    Extends ``AgentResult`` with the count of thoughts the invocation
+    produced -- a derived reduction like ``llm_token_usage``, not a duplicate
+    of the record. A caller needing the thought content reads it off the
+    record (``agent.get_conversation().records[-1].thoughts`` for the
+    invocation just made); with ``record_enabled=False`` this count is the
+    only trace of the thinking.
 
     No ``__post_init__`` override needed -- plain ``int`` field, no
     cross-field validation, matching this class's existing precedent (the
-    value is always internally computed as ``len(record.thoughts)``, never
+    value is always internally computed as ``len(task.thoughts)``, never
     caller-supplied at a real boundary).
 
     Fields
     ------
-    thinking_rounds_used:
-        Count of thinking rounds completed during this invocation.
+    thoughts_produced:
+        ``len(task.thoughts)`` at the end of the invocation.
     """
 
-    thinking_rounds_used: int = 0
+    thoughts_produced: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
-        data["thinking_rounds_used"] = self.thinking_rounds_used
+        data["thoughts_produced"] = self.thoughts_produced
         return data

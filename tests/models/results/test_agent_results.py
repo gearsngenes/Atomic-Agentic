@@ -271,7 +271,7 @@ class TestToolAgentResult:
 # ── TestThinkingAgentResult ───────────────────────────────────────────────────
 
 class TestThinkingAgentResult:
-    def _make_result(self, *, thinking_rounds_used=0) -> ThinkingAgentResult:
+    def _make_result(self, *, thoughts_produced=0) -> ThinkingAgentResult:
         started_at = datetime.now(timezone.utc)
         return ThinkingAgentResult(
             result="done",
@@ -280,25 +280,30 @@ class TestThinkingAgentResult:
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(make_token_usage(),),
             llm_model_data=make_model_data(),
-            thinking_rounds_used=thinking_rounds_used,
+            thoughts_produced=thoughts_produced,
         )
 
     def test_is_agent_result(self) -> None:
         result = self._make_result()
         assert isinstance(result, AgentResult)
 
-    def test_thinking_rounds_used_defaults_to_zero(self) -> None:
+    def test_thoughts_produced_defaults_to_zero(self) -> None:
         result = self._make_result()
-        assert result.thinking_rounds_used == 0
+        assert result.thoughts_produced == 0
 
-    def test_thinking_rounds_used_stores_value(self) -> None:
-        result = self._make_result(thinking_rounds_used=5)
-        assert result.thinking_rounds_used == 5
+    def test_thoughts_produced_stores_value(self) -> None:
+        result = self._make_result(thoughts_produced=5)
+        assert result.thoughts_produced == 5
 
-    def test_to_dict_includes_thinking_rounds_used(self) -> None:
-        result = self._make_result(thinking_rounds_used=5)
+    def test_old_field_name_is_gone(self) -> None:
+        result = self._make_result()
+        assert not hasattr(result, "thinking_rounds_used")
+
+    def test_to_dict_includes_thoughts_produced(self) -> None:
+        result = self._make_result(thoughts_produced=5)
         d = result.to_dict()
-        assert d["thinking_rounds_used"] == 5
+        assert d["thoughts_produced"] == 5
+        assert "thinking_rounds_used" not in d
         assert "llm_token_usage" in d
         assert "thoughts_start" not in d
         assert "thoughts_end" not in d
@@ -307,4 +312,4 @@ class TestThinkingAgentResult:
     def test_is_frozen(self) -> None:
         result = self._make_result()
         with pytest.raises(FrozenInstanceError):
-            result.thinking_rounds_used = 1  # type: ignore[misc]
+            result.thoughts_produced = 1  # type: ignore[misc]

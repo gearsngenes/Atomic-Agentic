@@ -10,10 +10,12 @@ ceiling; those are strategy decisions made inside the hooks.
 from __future__ import annotations
 
 from abc import abstractmethod
+from typing import Any
 
 from .basic import BasicAgent
 from ..models.agents.records import ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
+from ..models.results.agents import ThinkingAgentResult
 from ..utils.rendering import render_thoughts_block
 
 
@@ -55,6 +57,9 @@ class ThinkingAgent(BasicAgent):
         shape (only the directive differs).
     Absent ``additional_messages``, the list never holds two consecutive user
     messages and ends on a user message.
+
+    The result is ``ThinkingAgentResult`` (``thoughts_produced``), built by
+    ``build_result_from_task``.
 
     Hook contracts (the strategy author's side):
       * ``_thinking_done`` -- deterministic, side-effect free, safe on an empty
@@ -272,4 +277,26 @@ class ThinkingAgent(BasicAgent):
         return ThinkingAgentRecord(
             **self._record_base_fields(task),
             thoughts=tuple(task.thoughts),
+        )
+
+    def build_result_from_task(self, task: ThinkingTask, result: Any) -> ThinkingAgentResult:
+        """
+        ``Agent.build_result_from_task`` with the family result class.
+
+        1. ``llm_token_usage`` from ``task.llm_records``; ``llm_model_data`` from
+           the engine's configuration
+        2. return ``ThinkingAgentResult`` with ``thoughts_produced=len(task.thoughts)``
+        """
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = self._llm_engine.model_data
+
+        return self._make_result(
+            result=result,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
+            result_cls=ThinkingAgentResult,
+            run_id=task.run_id,
+            llm_token_usage=llm_token_usage,
+            llm_model_data=llm_model_data,
+            thoughts_produced=len(task.thoughts),
         )

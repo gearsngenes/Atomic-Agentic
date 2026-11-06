@@ -17,6 +17,7 @@ from .tasks import (
     PlanActTask,
     ReActTask,
     ThinkingTask,
+    ScratchpadTask,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
+    "ScratchpadTask",
 ]

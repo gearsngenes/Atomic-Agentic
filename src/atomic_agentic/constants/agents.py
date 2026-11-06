@@ -34,6 +34,8 @@ a conversation): alphanumeric + underscore, same as IDENTIFIER_PATTERN."""
 # - utils/rendering.py: value formatting/limiting and the context/task blocks;
 #   render_thoughts_block.
 # - agents/thinking.py: the thoughts message framing (via render_thoughts_block).
+# - agents/scratchpad.py: the stop_early system-message frame and format section.
+# - utils/agents.py: build_thinking_step_schema (the stop_early schema template).
 
 RENDER_MODES: tuple[str, ...] = ("s", "r", "a", "j", "p")
 """Valid ``ContextVariable.render_mode`` values: s = str, r = repr, a = ascii,
@@ -50,13 +52,57 @@ CONTEXT_PREAMBLE = (
     "The ==== lines are framing; do not repeat them in your reply."
 )
 
+THINKING_INSTRUCTIONS_START = "==== USER-DEFINED THINKING INSTRUCTIONS [START] ===="
+THINKING_INSTRUCTIONS_END = "==== USER-DEFINED THINKING INSTRUCTIONS [END] ===="
+
+STOP_EARLY_PROMPT_SECTION = (
+    "While thinking, each of your replies is one structured object with two "
+    "fields:\n"
+    "- thought: your thinking for this step, written in the form the "
+    "instructions above describe (and matching the thought field's schema, "
+    "when it has one).\n"
+    "- more_thinking_required: the decision flag. Set it to true if you need "
+    "more time to think preparatorily about the task before completing it, "
+    "false if you are ready to complete it now.\n"
+    "The instructions above describe how to think; this object format is fixed."
+)
+
+STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        # The thought schema is merged into this entry by
+        # utils.agents.build_thinking_step_schema; only the description lives here.
+        "thought": {
+            "description": (
+                "Your thinking for this step, in the form the thinking "
+                "instructions describe."
+            ),
+        },
+        "more_thinking_required": {
+            "type": "boolean",
+            "description": (
+                "The decision flag: whether you need more time to think "
+                "preparatorily about the task before completing it. true = keep "
+                "thinking, false = ready to complete the task."
+            ),
+        },
+    },
+    "required": ["thought", "more_thinking_required"],
+    "additionalProperties": False,
+}
+
+STOP_EARLY_UNSAFE_SCHEMA_KEYS: tuple[str, ...] = ("$defs", "definitions", "$ref")
+"""Root keys of a thinking schema that cannot survive being nested under the
+``stop_early`` wrapper's ``thought`` property (their ``#/...`` pointers resolve
+from the document root); ``ScratchpadAgent`` rejects them at construction."""
+
 # =============================================================================
 # Agent framework-reserved parameters
 # =============================================================================
-# A subclass's own reserved ParamSpec constants (e.g. THINKING_ROUNDS_PARAM
-# below) are defined here so that the reserved-name reconciliation machinery
-# in Agent.__init__ can compare caller-declared params against the
-# authoritative definition without re-constructing it inline.
+# A subclass's own reserved ParamSpec constants (none currently) are defined
+# here so that the reserved-name reconciliation machinery in Agent.__init__ can
+# compare caller-declared params against the authoritative definition without
+# re-constructing it inline.
 
 # The built-in pre source: with no ``pre_invoke`` the caller's prompt is read
 # straight from this parameter. Not reserved -- it takes the pre_invoke slot in
@@ -66,12 +112,6 @@ PROMPT_PARAM: ParamSpec = ParamSpec(
     name="prompt", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
     type=("str",),
     description="The prompt to send to the agent.",
-)
-
-THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
-    name="thinking_rounds", index=0, kind=ParamSpec.KEYWORD_ONLY,
-    type=("int",), default=1,
-    description="Number of thinking rounds ThinkingAgent runs before replying. Must be a concrete int >= 0; 0 skips thinking entirely and replies immediately."
 )
 
 # RETURN_VALUE_FIELD is the kwargs key PlanActAgent uses for its
@@ -363,9 +403,13 @@ __all__ = [
     "THOUGHTS_START",
     "THOUGHTS_END",
     "CONTEXT_PREAMBLE",
+    "THINKING_INSTRUCTIONS_START",
+    "THINKING_INSTRUCTIONS_END",
+    "STOP_EARLY_PROMPT_SECTION",
+    "STOP_EARLY_SCHEMA_TEMPLATE",
+    "STOP_EARLY_UNSAFE_SCHEMA_KEYS",
     # Framework-reserved parameters
     "PROMPT_PARAM",
-    "THINKING_ROUNDS_PARAM",
     # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",

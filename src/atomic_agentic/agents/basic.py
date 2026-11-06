@@ -10,6 +10,7 @@ from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
+from ..models.parameters import ParamSpec
 from ..utils.agents import normalize_prompt_config
 from .base import Agent
 
@@ -70,7 +71,7 @@ class BasicAgent(Agent):
             default_description="Default assistant role prompt",
             error_label="role_prompt",
         )
-        role_params = list(config.parameters)
+        role_params = self._merge_prompt_parameters(list(config.parameters))
 
         # 2. Validate and store response_schema -- no deeper validation
         # (no JSON-Schema key checks), matching LLMEngine's own
@@ -116,6 +117,19 @@ class BasicAgent(Agent):
         """Structured-output schema applied to this agent's replies;
         ``None`` requests plain text. Frozen at construction -- no setter."""
         return self._response_schema
+
+    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
+        """Seam for a subclass that registers more prompt templates than the
+        role prompt and wants their placeholders in the agent's signature.
+
+        1. return ``role_params`` unchanged (``BasicAgent``: identity)
+
+        An override returns the full list of prompt-derived parameters, the
+        role prompt's included and first so it keeps priority. It runs inside
+        ``__init__`` before ``Agent.__init__``, so it may read only attributes
+        the subclass set before calling ``super().__init__``.
+        """
+        return role_params
 
     # ------------------------------------------------------------------ #
     # Conversation defaults

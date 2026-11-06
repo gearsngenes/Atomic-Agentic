@@ -528,17 +528,18 @@ class ScriptActAgentRecord(ToolAgentRecord):
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed thinking-capable agent
-    invocation (currently only ``ThinkingAgent``).
+    Canonical memory record for one completed thinking-agent invocation
+    (any ``ThinkingAgent`` subclass).
 
     In addition to the base AgentRecord lifecycle artifacts, a
     ThinkingAgentRecord stores the full thought content produced by the
-    invocation directly -- one raw value per completed round, in order.
-    Mirrors ``AgentRecord.llm_records``'s own pattern (the full artifact
-    lives on the record, not a span into some agent-level accumulator).
+    invocation directly -- one value per thought, in order. Mirrors
+    ``AgentRecord.llm_records``'s own pattern (the full artifact lives on the
+    record, not a span into some agent-level accumulator). The tuple is
+    shallow: the thought values are shared with the task, not copied.
     """
 
-    thoughts: tuple[str | int | float | bool | list | dict | None, ...] = ()
+    thoughts: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds

@@ -483,14 +483,46 @@ class TestRecordAndResult:
         assert record.thoughts == ("A", "B")
         assert isinstance(record.thoughts, tuple)
 
-    def test_result_is_plain_agent_result(self) -> None:
+    def test_result_is_thinking_agent_result(self) -> None:
         agent = make_stub_thinker(["A", "R"], done_after=1)
 
         result = agent.invoke({"prompt": "hi"})
 
-        assert type(result) is AgentResult
-        assert not isinstance(result, ThinkingAgentResult)
+        assert type(result) is ThinkingAgentResult
+        assert isinstance(result, AgentResult)
         assert result.result == "R"
+
+    def test_result_counts_thoughts_produced(self) -> None:
+        agent = make_stub_thinker(["A", "B", "C", "R"], done_after=3)
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.thoughts_produced == 3
+        assert len(result.llm_token_usage) == 4
+
+    def test_result_counts_zero_thoughts_when_thinking_is_skipped(self) -> None:
+        agent = make_stub_thinker(["R"], done_after=0)
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.thoughts_produced == 0
+        assert result.result == "R"
+
+    def test_async_result_counts_thoughts_produced(self) -> None:
+        agent = make_stub_thinker(["A", "B", "R"], done_after=2)
+
+        result = asyncio.run(agent.async_invoke({"prompt": "hi"}))
+
+        assert type(result) is ThinkingAgentResult
+        assert result.thoughts_produced == 2
+
+    def test_result_count_survives_record_enabled_false(self) -> None:
+        agent = make_stub_thinker(["A", "R"], done_after=1, record_enabled=False)
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.thoughts_produced == 1
+        assert agent.get_conversation().records == []
 
     def test_llm_records_count_and_prompt_names(self) -> None:
         agent = make_stub_thinker(["A", "B", "R"], done_after=2, record_enabled=True)

@@ -16,6 +16,7 @@ __all__ = [
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
+    "ScratchpadTask",
 ]
 
 
@@ -411,3 +412,20 @@ class ThinkingTask(AgentTask):
         those, if any, belong to the strategy.
     """
     thoughts: list[Any] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ScratchpadTask(ThinkingTask):
+    """
+    ScratchpadAgent task.
+
+    Fields
+    ------
+    more_thinking_required : bool
+        The model's latest "keep thinking" decision under ``stop_early``.
+        ``True`` (the default) means the model has not ended thinking;
+        ``ScratchpadAgent._generate_thoughts`` overwrites it after every
+        thinking call when ``stop_early`` is on and never touches it
+        otherwise.
+    """
+    more_thinking_required: bool = True

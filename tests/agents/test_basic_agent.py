@@ -15,6 +15,7 @@ from atomic_agentic.constants.agents import (
 from atomic_agentic.exceptions import AgentError
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.models.parameters import ParamSpec
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
@@ -130,6 +131,47 @@ class TestBasicAgentSchemaComposition:
         )
         with pytest.raises(AgentError):
             make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
+
+
+class _MergingAgent(BasicAgent):
+    """Test-only subclass whose override adds one prompt-derived parameter."""
+
+    def __init__(self, *, extra: list[ParamSpec], **kwargs: Any) -> None:
+        self._extra = extra  # read by the hook, so set before super().__init__
+        super().__init__(**kwargs)
+
+    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
+        return role_params + self._extra
+
+
+class TestBasicAgentMergePromptParameters:
+    def test_default_is_identity(self) -> None:
+        agent = make_basic_agent()
+        params = [ParamSpec(name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("str",))]
+
+        assert agent._merge_prompt_parameters(params) is params
+
+    def test_default_leaves_the_signature_to_the_role_prompt(self) -> None:
+        config = PromptConfig(template="You are {persona}.", description="d")
+
+        agent = make_basic_agent(role_prompt=config)
+
+        assert [p.name for p in agent.parameters] == ["prompt", "persona"]
+
+    def test_override_adds_parameters_to_the_signature(self) -> None:
+        tone = ParamSpec(name="tone", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("str",))
+        config = PromptConfig(template="You are {persona}.", description="d")
+
+        agent = _MergingAgent(
+            extra=[tone],
+            name="merging",
+            namespace="tests",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            role_prompt=config,
+        )
+
+        assert [p.name for p in agent.parameters] == ["prompt", "persona", "tone"]
 
 
 class TestBasicAgentInvoke:
