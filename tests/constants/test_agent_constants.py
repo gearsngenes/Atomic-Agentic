@@ -91,8 +91,8 @@ class TestUnsupportedExprLabels:
 
 class TestThoughtsMarkers:
     def test_values(self) -> None:
-        assert THOUGHTS_START == "==== THOUGHTS START ===="
-        assert THOUGHTS_END == "==== THOUGHTS END ===="
+        assert THOUGHTS_START == "==== THOUGHTS [START] ===="
+        assert THOUGHTS_END == "==== THOUGHTS [END] ===="
 
     def test_framed_with_equals_runs(self) -> None:
         for marker in (THOUGHTS_START, THOUGHTS_END):

@@ -26,13 +26,15 @@ class ThinkingAgent(BasicAgent):
     ``_INITIAL_PROMPT_NAME`` to its (first) thinking prompt name, registers its
     thinking prompt(s) in ``self._system_prompts``, and implements the four
     abstract hooks. The reply phase always uses the role prompt, registered by
-    ``BasicAgent`` under ``"role"``.
+    ``BasicAgent`` under ``"role"``. A thinking prompt registered this way is
+    rendered against ``task.inputs`` only: a ``{placeholder}`` in it is not wired
+    into the agent's parameters (only role-prompt placeholders are), so a
+    subclass using placeholders must declare them itself or avoid them.
 
     Phase: ``task.system_prompt_name`` is the indicator. ``"role"`` means the
     reply phase; any other value means thinking. ``_thinking_done`` is
-    evaluated exactly twice per phase change: once at seed and once after each
-    ``_generate_thoughts`` call; its only effect is to switch the name to
-    ``"role"``.
+    evaluated at seed and after each ``_generate_thoughts`` call; its only
+    effect is to switch the name to ``"role"``.
 
     Lifecycle (one ``invoke``):
       ``create_task`` -> ``_seed_task`` (reply immediately if done) -> loop
@@ -40,12 +42,19 @@ class ThinkingAgent(BasicAgent):
       until the reply phase)} until the task completes. The pass that flips the
       phase runs ``think`` and then ``act``.
 
-    Rendering (every call, ``_render_task_messages``): after the system message
-    and history: the task block (context block when ``task.context`` is
-    non-empty, then the wrapped prompt), then, only when there are thoughts, one
-    assistant-role thoughts message framed by the thoughts markers, then one
-    user directive. With no thoughts the directive is appended to the task
-    block's user message, so the list never holds two consecutive user messages.
+    Rendering (every call, ``_render_task_messages``), after the system message
+    and history, is one of four shapes. The task block is the context block (when
+    ``task.context`` is non-empty) then the wrapped prompt.
+      * reply, no thoughts: the task block alone, as one user message,
+        identical to ``BasicAgent``'s (no directive).
+      * thinking, no thoughts: the task block and the directive in one user
+        message.
+      * reply, thoughts present: user task block, one assistant thoughts
+        message framed by the thoughts markers, user directive.
+      * thinking, thoughts present: the same three messages as the previous
+        shape (only the directive differs).
+    Absent ``additional_messages``, the list never holds two consecutive user
+    messages and ends on a user message.
 
     Hook contracts (the strategy author's side):
       * ``_thinking_done`` -- deterministic, side-effect free, safe on an empty
@@ -55,8 +64,11 @@ class ThinkingAgent(BasicAgent):
     """
 
     _TASK_CLS = ThinkingTask
-    # _INITIAL_PROMPT_NAME: inherited from BasicAgent ("role", the reply
-    # phase); every concrete subclass overrides it with its thinking prompt.
+    # Deliberately overrides BasicAgent's "role" with None. Unset until a
+    # concrete subclass sets its thinking prompt name; an unset subclass still
+    # thinks (the hooks run) but with no system message, instead of silently
+    # skipping thinking.
+    _INITIAL_PROMPT_NAME: str | None = None
 
     # ------------------------------------------------------------------ #
     # Strategy hooks (abstract)
@@ -67,7 +79,11 @@ class ThinkingAgent(BasicAgent):
 
         Called at seed (``task.thoughts`` empty) and after every
         ``_generate_thoughts`` call. Must be deterministic, free of side
-        effects and tolerate an empty task. Must eventually return True.
+        effects and tolerate an empty task. Must eventually return True: a
+        strategy whose ``_thinking_done`` never becomes true hangs ``invoke``,
+        since the base has no ceiling by design. The seed call runs before
+        ``summarize``/``pre_process``, so ``task.user_prompt`` is ``""`` and
+        ``task.historic_messages`` is ``[]`` then.
         """
         ...
 
@@ -79,8 +95,9 @@ class ThinkingAgent(BasicAgent):
            call, so it reflects ``task.thoughts`` so far); a strategy that
            needs a different system prompt for this step sets
            ``task.system_prompt_name`` to one of its registered thinking
-           names first (never to ``"role"``: the base switches to the reply
-           phase through ``_thinking_done``)
+           names first (never to ``"role"``: the base cannot tell such a write
+           from its own flip, so assigning it ends thinking at once; the base
+           switches to the reply phase through ``_thinking_done``)
         2. make the engine call(s) the strategy needs with ``self._llm_engine``
         3. for every call append
            ``LLMRecord(messages=list(task.task_messages), llm_result=...,
@@ -102,7 +119,8 @@ class ThinkingAgent(BasicAgent):
     def _render_thoughts(self, task: ThinkingTask) -> str:
         """Return the text between the thoughts markers.
 
-        Only called when ``task.thoughts`` is non-empty. The format is the
+        Only called when ``task.thoughts`` is non-empty. Must return ``str``
+        (a non-str fails later in ``elide_markers``). The format is the
         strategy's (chain, tree, transcript, ...); the base adds the markers
         and elides forged marker strings.
         """
@@ -169,25 +187,32 @@ class ThinkingAgent(BasicAgent):
     def _render_task_messages(self, task: ThinkingTask) -> list[dict[str, str]]:
         """
         Rebuilt on every call (no build-once guard; this family never retries).
+        The only call with no directive is a reply with no thoughts, which is
+        exactly ``BasicAgent``'s message. ``additional_messages`` passed to
+        ``render_task`` extend the returned list for that call only and do not
+        persist to later calls (the list is rebuilt each call), unlike the
+        build-once families.
 
         1. ``block = self._render_task_block(task)``
-        2. ``directive = self._render_directive(task)``
-        3. ``thoughts = self._render_thoughts_message(task)``
-        4. no thoughts: one user message, ``block`` then ``directive``
-        5. thoughts: user ``block``, the thoughts message, user ``directive``
+        2. ``thoughts = self._render_thoughts_message(task)``
+        3. thoughts present: user ``block``, the thoughts message, user directive
+        4. no thoughts, reply phase: user ``block`` alone
+        5. no thoughts, thinking phase: user ``block``, a blank line, directive
         6. ``task.task_messages = <the list>``; return that same list object
         """
         block = self._render_task_block(task)
-        directive = self._render_directive(task)
         thoughts = self._render_thoughts_message(task)
-        if not thoughts:
-            messages = [{"role": "user", "content": f"{block}\n\n{directive}"}]
-        else:
+        if thoughts:
             messages = [
                 {"role": "user", "content": block},
                 *thoughts,
-                {"role": "user", "content": directive},
+                {"role": "user", "content": self._render_directive(task)},
             ]
+        elif task.system_prompt_name == "role":
+            messages = [{"role": "user", "content": block}]
+        else:
+            directive = self._render_directive(task)
+            messages = [{"role": "user", "content": f"{block}\n\n{directive}"}]
         task.task_messages = messages
         return messages
 
@@ -203,22 +228,38 @@ class ThinkingAgent(BasicAgent):
         return [{"role": "assistant", "content": render_thoughts_block(body)}]
 
     def _render_directive(self, task: ThinkingTask) -> str:
-        """Generic, phase-driven; override to vary per step.
+        """Generic closing instruction; override to vary per step.
 
-        1. reply phase (``task.system_prompt_name == "role"``): the directive
-           to complete the user task prompt given the context and thoughts
-        2. otherwise: the directive to keep thinking as preparation for the
-           final reply
+        The text depends on the phase and on what the model can see: the
+        runtime context (``task.context``) and the thoughts so far. The default
+        rendering calls it for every shape except a reply with no thoughts, so
+        the two reply branches without thoughts only serve overrides.
+
+        1. ``seen`` names what precedes the directive: "RUNTIME CONTEXT" when
+           ``task.context`` is non-empty, "THOUGHTS" when ``task.thoughts`` is
+           non-empty (joined with "and")
+        2. reply phase (``task.system_prompt_name == "role"``): "Given the
+           above <seen>, complete the USER TASK PROMPT."; with nothing seen,
+           "Complete the USER TASK PROMPT."
+        3. thinking phase: "think about" the USER TASK PROMPT as preparation
+           for the final reply, not the reply itself ("continue thinking
+           about" once thoughts exist), led by "Given the above <seen>," when
+           anything is seen
         """
-        if task.system_prompt_name == "role":
-            return (
-                "Given the above RUNTIME CONTEXT (if present) and THOUGHTS (if "
-                "present), complete the USER TASK PROMPT."
-            )
-        return (
-            "Continue thinking as preparation for the final reply, not the "
-            "reply itself."
+        seen = " and ".join(
+            label
+            for label, present in (("RUNTIME CONTEXT", task.context), ("THOUGHTS", task.thoughts))
+            if present
         )
+        if task.system_prompt_name == "role":
+            if not seen:
+                return "Complete the USER TASK PROMPT."
+            return f"Given the above {seen}, complete the USER TASK PROMPT."
+        verb = "continue thinking about" if task.thoughts else "think about"
+        tail = "the USER TASK PROMPT as preparation for the final reply, not the reply itself."
+        if not seen:
+            return f"{verb.capitalize()} {tail}"
+        return f"Given the above {seen}, {verb} {tail}"
 
     # ------------------------------------------------------------------ #
     # Finalization (concrete)

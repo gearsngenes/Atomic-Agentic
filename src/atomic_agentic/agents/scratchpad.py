@@ -531,7 +531,7 @@ class ScratchpadAgent(ThinkingAgent):
         reply-phase use only (see ``_render_task_messages``); the thinking
         phase never shows this labeled shape to the model."""
         blocks = [
-            f"## Round {i}\n{ThinkingAgent._stringify_thought(value, mode)}"
+            f"## Round {i}\n{ScratchpadAgent._stringify_thought(value, mode)}"
             for i, value in enumerate(rounds, start=start_round)
         ]
         return "\n\n".join(blocks)
