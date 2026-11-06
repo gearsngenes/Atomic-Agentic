@@ -33,9 +33,10 @@ a conversation): alphanumeric + underscore, same as IDENTIFIER_PATTERN."""
 # - models/agents/context.py: ContextVariable.render_mode validation.
 # - utils/rendering.py: value formatting/limiting and the context/task blocks;
 #   render_thoughts_block.
-# - agents/thinking.py: the thoughts message framing (via render_thoughts_block).
-# - agents/scratchpad.py: the stop_early system-message frame and format section.
-# - utils/agents.py: build_thinking_step_schema (the stop_early schema template).
+# - agents/thinking.py: the thoughts message framing (via render_thoughts_block)
+#   and the two directives.
+# - agents/scratchpad.py: the stop_early system-message frame, format section and
+#   output schema.
 
 RENDER_MODES: tuple[str, ...] = ("s", "r", "a", "j", "p")
 """Valid ``ContextVariable.render_mode`` values: s = str, r = repr, a = ascii,
@@ -55,12 +56,17 @@ CONTEXT_PREAMBLE = (
 THINKING_INSTRUCTIONS_START = "==== USER-DEFINED THINKING INSTRUCTIONS [START] ===="
 THINKING_INSTRUCTIONS_END = "==== USER-DEFINED THINKING INSTRUCTIONS [END] ===="
 
+THINKING_DIRECTIVE = (
+    "Think about the USER TASK PROMPT as preparation for the final reply, not "
+    "the reply itself. Build on the THOUGHTS above, if there are any."
+)
+REPLY_DIRECTIVE = "Using the THOUGHTS above, complete the USER TASK PROMPT."
+
 STOP_EARLY_PROMPT_SECTION = (
     "While thinking, each of your replies is one structured object with two "
     "fields:\n"
     "- thought: your thinking for this step, written in the form the "
-    "instructions above describe (and matching the thought field's schema, "
-    "when it has one).\n"
+    "instructions above describe.\n"
     "- more_thinking_required: the decision flag. Set it to true if you need "
     "more time to think preparatorily about the task before completing it, "
     "false if you are ready to complete it now.\n"
@@ -70,9 +76,8 @@ STOP_EARLY_PROMPT_SECTION = (
 STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
     "type": "object",
     "properties": {
-        # The thought schema is merged into this entry by
-        # utils.agents.build_thinking_step_schema; only the description lives here.
         "thought": {
+            "type": "string",
             "description": (
                 "Your thinking for this step, in the form the thinking "
                 "instructions describe."
@@ -90,11 +95,6 @@ STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
     "required": ["thought", "more_thinking_required"],
     "additionalProperties": False,
 }
-
-STOP_EARLY_UNSAFE_SCHEMA_KEYS: tuple[str, ...] = ("$defs", "definitions", "$ref")
-"""Root keys of a thinking schema that cannot survive being nested under the
-``stop_early`` wrapper's ``thought`` property (their ``#/...`` pointers resolve
-from the document root); ``ScratchpadAgent`` rejects them at construction."""
 
 # =============================================================================
 # Agent framework-reserved parameters
@@ -405,9 +405,10 @@ __all__ = [
     "CONTEXT_PREAMBLE",
     "THINKING_INSTRUCTIONS_START",
     "THINKING_INSTRUCTIONS_END",
+    "THINKING_DIRECTIVE",
+    "REPLY_DIRECTIVE",
     "STOP_EARLY_PROMPT_SECTION",
     "STOP_EARLY_SCHEMA_TEMPLATE",
-    "STOP_EARLY_UNSAFE_SCHEMA_KEYS",
     # Framework-reserved parameters
     "PROMPT_PARAM",
     # ScriptActAgent code-statement reserved literals

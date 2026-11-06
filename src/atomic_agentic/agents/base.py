@@ -642,9 +642,7 @@ class Agent(AtomicInvokable, ABC):
         """Family-specific seeding of a freshly built task, in place.
 
         Called once by ``create_task`` after construction. Default: nothing
-        to seed. ``ToolAgent`` seeds its cache and constants; a ``ThinkingAgent``
-        subclass seeds its strategy state and the base then switches to the
-        reply prompt when thinking is already done.
+        to seed. ``ToolAgent`` seeds its cache and constants.
         """
 
     def summarize(self, task: AgentTask) -> AgentTask:
@@ -784,9 +782,7 @@ class Agent(AtomicInvokable, ABC):
         ``task.system_prompt_name`` itself.
 
         ``additional_messages`` (``None`` treated as ``[]``) is appended
-        directly onto whatever ``_render_task_messages`` returns — which is
-        ``task.task_messages`` itself, so the extension persists there too,
-        across generation retries within one phase.
+        directly onto whatever ``_render_task_messages`` returns.
 
         Pure computation, no I/O — the same method serves both the sync and
         async lifecycle paths; there is no ``_async_render_task``.
@@ -819,11 +815,8 @@ class Agent(AtomicInvokable, ABC):
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this round's phase-specific task messages.
 
-        A family that retries within a phase must follow this contract (its
-        ``additional_messages`` live on ``task.task_messages``); a family that
-        never retries (``ThinkingAgent``) may instead rebuild on every call,
-        still storing the result on ``task.task_messages`` and returning that
-        same list:
+        Build-once contract (``additional_messages`` passed to ``render_task``
+        extend the stored list, so they persist across retries within a phase):
 
         1. If ``task.task_messages`` is already non-empty, this phase's
            messages are already built for this round — return it as-is

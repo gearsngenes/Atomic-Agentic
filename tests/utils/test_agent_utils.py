@@ -5,59 +5,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.constants.agents import STOP_EARLY_SCHEMA_TEMPLATE
-from atomic_agentic.utils.agents import build_thinking_step_schema, extract_json_object
-
-
-class TestBuildThinkingStepSchema:
-    def test_none_types_the_thought_as_a_string(self) -> None:
-        schema = build_thinking_step_schema(None)
-
-        thought = schema["properties"]["thought"]
-        assert thought["type"] == "string"
-        assert thought["description"] == STOP_EARLY_SCHEMA_TEMPLATE["properties"]["thought"]["description"]
-
-    def test_keeps_the_template_structure(self) -> None:
-        schema = build_thinking_step_schema(None)
-
-        assert schema["type"] == "object"
-        assert schema["required"] == ["thought", "more_thinking_required"]
-        assert schema["additionalProperties"] is False
-        assert schema["properties"]["more_thinking_required"]["type"] == "boolean"
-
-    def test_thought_schema_is_merged_into_the_thought_entry(self) -> None:
-        user = {
-            "type": "object",
-            "properties": {"reasoning": {"type": "string"}, "next": {"type": "string"}},
-            "required": ["reasoning", "next"],
-        }
-
-        thought = build_thinking_step_schema(user)["properties"]["thought"]
-
-        assert thought["type"] == "object"
-        assert thought["properties"] == user["properties"]
-        assert thought["required"] == ["reasoning", "next"]
-        assert "description" in thought
-
-    def test_user_keys_win_including_the_description(self) -> None:
-        thought = build_thinking_step_schema(
-            {"type": "string", "description": "my own words"}
-        )["properties"]["thought"]
-
-        assert thought["description"] == "my own words"
-
-    def test_does_not_alias_the_template_or_the_argument(self) -> None:
-        user = {"type": "object", "properties": {"a": {"type": "string"}}}
-
-        first = build_thinking_step_schema(user)
-        first["properties"]["thought"]["properties"]["a"]["type"] = "integer"
-        first["properties"]["more_thinking_required"]["type"] = "string"
-        second = build_thinking_step_schema(user)
-
-        assert user["properties"]["a"]["type"] == "string"
-        assert second["properties"]["thought"]["properties"]["a"]["type"] == "string"
-        assert STOP_EARLY_SCHEMA_TEMPLATE["properties"]["more_thinking_required"]["type"] == "boolean"
-        assert "type" not in STOP_EARLY_SCHEMA_TEMPLATE["properties"]["thought"]
+from atomic_agentic.utils.agents import extract_json_object
 
 
 class TestExtractJsonObject:

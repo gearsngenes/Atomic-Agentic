@@ -12,27 +12,18 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.scratchpad import ScratchpadAgent
 from atomic_agentic.constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
+    STOP_EARLY_SCHEMA_TEMPLATE,
     THINKING_INSTRUCTIONS_END,
     THINKING_INSTRUCTIONS_START,
     THOUGHTS_END,
     THOUGHTS_START,
 )
-from atomic_agentic.exceptions import AgentError
+from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ScratchpadTask
 from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResult
-from atomic_agentic.utils.agents import build_thinking_step_schema
-from atomic_agentic.utils.rendering import stringify_value
 
-
-_LEAD_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "focus": {"type": "string"},
-        "leads": {"type": "array", "items": {"type": "object"}},
-    },
-}
 
 ROLE = "You are a careful assistant."
 THINK = "Think hard."
@@ -80,7 +71,7 @@ def last_record(agent: ScratchpadAgent) -> ThinkingAgentRecord:
 
 
 class _Spy(ScratchpadAgent):
-    """Keeps every task ``_thinking_done`` sees (it is evaluated at seed)."""
+    """Keeps every task ``_thinking_done`` sees."""
 
     def _thinking_done(self, task: ScratchpadTask) -> bool:
         self.tasks.append(task)
@@ -93,7 +84,6 @@ class TestConstruction:
 
         assert agent.thinking_rounds == 1
         assert agent.stop_early is False
-        assert agent.thinking_schema is None
         assert agent.response_schema is None
 
     def test_thinking_rounds_is_required(self) -> None:
@@ -111,20 +101,6 @@ class TestConstruction:
         with pytest.raises(AgentError, match="thinking_rounds"):
             make_agent(thinking_rounds=bad)
 
-    @pytest.mark.parametrize("bad", [1, 0, "yes", None])
-    def test_non_bool_stop_early_raises(self, bad: Any) -> None:
-        with pytest.raises(AgentError, match="stop_early"):
-            make_agent(stop_early=bad)
-
-    def test_thinking_schema_stored_unwrapped(self) -> None:
-        agent = make_agent(thinking_schema=_LEAD_SCHEMA, stop_early=True)
-
-        assert agent.thinking_schema == _LEAD_SCHEMA
-
-    def test_thinking_schema_rejects_non_mapping(self) -> None:
-        with pytest.raises(AgentError, match="thinking_schema"):
-            make_agent(thinking_schema="not a dict")  # type: ignore[arg-type]
-
     def test_response_schema_rejects_non_mapping(self) -> None:
         with pytest.raises(AgentError, match="response_schema"):
             make_agent(response_schema="not a dict")  # type: ignore[arg-type]
@@ -133,41 +109,12 @@ class TestConstruction:
         with pytest.raises(TypeError, match="thinking_instructions"):
             make_agent(thinking_instructions=123)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("key", ["$defs", "definitions", "$ref"])
-    def test_stop_early_rejects_root_level_reference_keys(self, key: str) -> None:
-        schema = {"type": "object", key: {} if key != "$ref" else "#/$defs/x"}
-
-        with pytest.raises(AgentError, match="stop_early"):
-            make_agent(thinking_schema=schema, stop_early=True)
-
-    @pytest.mark.parametrize("key", ["$defs", "definitions", "$ref"])
-    def test_reference_keys_are_fine_without_stop_early(self, key: str) -> None:
-        schema = {"type": "object", key: {} if key != "$ref" else "#/$defs/x"}
-
-        assert make_agent(thinking_schema=schema).thinking_schema == schema
-
-    def test_property_named_definitions_is_not_rejected(self) -> None:
-        schema = {"type": "object", "properties": {"definitions": {"type": "string"}}}
-
-        assert make_agent(thinking_schema=schema, stop_early=True).stop_early is True
-
-    @pytest.mark.parametrize("name", ["thinking_schema", "thinking_rounds", "stop_early"])
+    @pytest.mark.parametrize("name", ["thinking_rounds", "stop_early"])
     def test_properties_are_read_only(self, name: str) -> None:
         agent = make_agent()
 
         with pytest.raises(AttributeError):
             setattr(agent, name, 3)
-
-    def test_removed_surfaces_are_gone(self) -> None:
-        agent = make_agent()
-
-        assert not hasattr(agent, "thinking_llm_engine")
-        assert not hasattr(agent, "thinking_rounds_limit")
-        assert ScratchpadAgent.get_reserved_parameters() == []
-        with pytest.raises(TypeError):
-            make_agent(thinking_llm_engine=FakeLLMEngine([]))
-        with pytest.raises(TypeError):
-            make_agent(thinking_rounds_limit=3)
 
     def test_thinking_rounds_is_not_an_invoke_input(self) -> None:
         agent = make_agent()
@@ -187,17 +134,20 @@ class TestConstruction:
         assert make_agent().get_conversation().render_mode == "s"
 
     def test_to_dict_includes_the_thinking_knobs(self) -> None:
-        d = make_agent(
-            thinking_schema=_LEAD_SCHEMA, thinking_rounds=3, stop_early=True
-        ).to_dict()
+        d = make_agent(thinking_rounds=3, stop_early=True).to_dict()
 
         assert d["thinking_instructions"] == THINK
-        assert d["thinking_schema"] == _LEAD_SCHEMA
         assert d["thinking_rounds"] == 3
         assert d["stop_early"] is True
         assert d["role_prompt"] == ROLE
-        assert "thinking_llm" not in d
-        assert "thinking_rounds_limit" not in d
+        assert "thinking_schema" not in d
+
+    def test_the_stop_early_output_structure_is_built_once(self) -> None:
+        agent = make_agent(thinking_rounds=2, stop_early=True)
+
+        assert agent._thinking_output == STOP_EARLY_SCHEMA_TEMPLATE
+        assert agent._thinking_output is not STOP_EARLY_SCHEMA_TEMPLATE
+        assert make_agent()._thinking_output is None
 
 
 class TestFixedRounds:
@@ -246,19 +196,13 @@ class TestFixedRounds:
 
         assert structures(agent) == [None, None]
 
-    def test_thinking_and_reply_schemas_are_independent(self) -> None:
+    def test_response_schema_reaches_only_the_reply_call(self) -> None:
         reply_schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
-        agent = make_agent(
-            [{"focus": "x"}, {"answer": "y"}],
-            thinking_schema=_LEAD_SCHEMA,
-            response_schema=reply_schema,
-            record_enabled=True,
-        )
+        agent = make_agent(["t1", {"answer": "y"}], response_schema=reply_schema)
 
         result = agent.invoke({"prompt": "hi"})
 
-        assert structures(agent) == [_LEAD_SCHEMA, reply_schema]
-        assert last_record(agent).thoughts == ({"focus": "x"},)
+        assert structures(agent) == [None, reply_schema]
         assert result.result == {"answer": "y"}
 
     def test_stop_flag_is_untouched_without_stop_early(self) -> None:
@@ -292,21 +236,7 @@ class TestStopEarly:
 
         agent.invoke({"prompt": "hi"})
 
-        wrapper = build_thinking_step_schema(None)
-        assert structures(agent) == [wrapper, wrapper, None]
-        assert wrapper["properties"]["thought"]["type"] == "string"
-
-    def test_thinking_schema_is_nested_under_thought(self) -> None:
-        agent = make_agent(
-            [step({"focus": "f"}, False), "R"],
-            thinking_schema=_LEAD_SCHEMA, thinking_rounds=3, stop_early=True,
-        )
-
-        agent.invoke({"prompt": "hi"})
-
-        sent = structures(agent)[0]
-        assert sent == build_thinking_step_schema(_LEAD_SCHEMA)
-        assert sent["properties"]["thought"]["properties"] == _LEAD_SCHEMA["properties"]
+        assert structures(agent) == [STOP_EARLY_SCHEMA_TEMPLATE, STOP_EARLY_SCHEMA_TEMPLATE, None]
 
     def test_stop_after_round_one(self) -> None:
         agent = make_agent(
@@ -363,17 +293,35 @@ class TestStopEarly:
         assert result.thoughts_produced == 0
 
     def test_thoughts_are_unwrapped_and_the_llm_record_keeps_the_wrapper(self) -> None:
-        wrapped = step({"focus": "f"}, False)
+        wrapped = step("f", False)
         agent = make_agent(
-            [wrapped, "R"], thinking_schema=_LEAD_SCHEMA, thinking_rounds=2,
-            stop_early=True, record_enabled=True,
+            [wrapped, "R"], thinking_rounds=2, stop_early=True, record_enabled=True,
         )
 
         agent.invoke({"prompt": "hi"})
 
         record = last_record(agent)
-        assert record.thoughts == ({"focus": "f"},)
+        assert record.thoughts == ("f",)
         assert record.llm_records[0].llm_result.result == wrapped
+
+    @pytest.mark.parametrize("bad", [
+        "plain text",
+        {"more_thinking_required": False},
+        {"thought": "t"},
+        {"thought": 5, "more_thinking_required": False},
+        {"thought": "t", "more_thinking_required": "false"},
+    ])
+    def test_a_malformed_reply_raises_invocation_error(self, bad: Any) -> None:
+        agent = make_agent([bad], thinking_rounds=2, stop_early=True)
+
+        with pytest.raises(AgentInvocationError, match="more_thinking_required"):
+            agent.invoke({"prompt": "hi"})
+
+    def test_a_malformed_reply_raises_on_the_async_path_too(self) -> None:
+        agent = make_agent([{"thought": "t"}], thinking_rounds=2, stop_early=True)
+
+        with pytest.raises(AgentInvocationError, match="more_thinking_required"):
+            asyncio.run(agent.async_invoke({"prompt": "hi"}))
 
     def test_string_thoughts_are_stripped(self) -> None:
         agent = make_agent(
@@ -578,14 +526,10 @@ class TestRendering:
             thoughts=thoughts,
         )
 
-    def test_strings_are_shown_as_is_and_values_as_json(self) -> None:
-        agent = make_agent()
-        value = {"focus": "ünï", "leads": [1, 2]}
+    def test_thoughts_are_joined_by_rules(self) -> None:
+        text = make_agent()._render_thoughts(self._task(["one", "two"]))
 
-        text = agent._render_thoughts(self._task(["plain", value]))
-
-        assert text == f"plain\n\n---\n\n{stringify_value(value, mode='j')}"
-        assert "ünï" in text
+        assert text == "one\n\n---\n\ntwo"
 
     def test_one_thought_has_no_separator(self) -> None:
         assert make_agent()._render_thoughts(self._task(["only"])) == "only"
@@ -615,15 +559,6 @@ class TestRendering:
         reply = calls(agent)[2]
         assert [m["role"] for m in reply] == ["system", "user", "assistant", "user"]
         assert reply[2]["content"] == f"{THOUGHTS_START}\nt1\n\n---\n\nt2\n{THOUGHTS_END}"
-
-    def test_structured_thoughts_reach_the_model_as_json(self) -> None:
-        agent = make_agent(
-            [{"focus": "f"}, "R"], thinking_schema=_LEAD_SCHEMA, record_enabled=False,
-        )
-
-        agent.invoke({"prompt": "hi"})
-
-        assert stringify_value({"focus": "f"}, mode="j") in calls(agent)[1][2]["content"]
 
     def test_stop_early_thoughts_render_unwrapped(self) -> None:
         agent = make_agent(
@@ -709,13 +644,3 @@ class TestAsyncParity:
         assert calls(async_agent) == calls(sync_agent)
         assert structures(async_agent) == structures(sync_agent)
         assert last_record(async_agent).thoughts == ("t1", "t2")
-
-    def test_structured_thoughts_match_the_sync_flow(self) -> None:
-        async_agent = make_agent(
-            [step({"focus": "f"}, False), "R"], thinking_schema=_LEAD_SCHEMA,
-            thinking_rounds=2, stop_early=True, record_enabled=True,
-        )
-
-        asyncio.run(async_agent.async_invoke({"prompt": "hi"}))
-
-        assert last_record(async_agent).thoughts == ({"focus": "f"},)

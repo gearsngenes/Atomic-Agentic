@@ -9,8 +9,10 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.constants.agents import (
     CONTEXT_START,
+    REPLY_DIRECTIVE,
     TASK_PROMPT_END,
     TASK_PROMPT_START,
+    THINKING_DIRECTIVE,
     THOUGHTS_END,
     THOUGHTS_START,
 )
@@ -21,17 +23,7 @@ from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResul
 
 from .conftest import FakeLLMEngine, StubThinker, make_stub_thinker
 
-HOOKS = ("_thinking_done", "_generate_thoughts", "_agenerate_thoughts", "_render_thoughts")
-THINK_DIRECTIVE = (
-    "Think about the USER TASK PROMPT as preparation for the final reply, not the reply itself."
-)
-THINK_WITH_THOUGHTS = (
-    "Given the above THOUGHTS, continue thinking about the USER TASK PROMPT as "
-    "preparation for the final reply, not the reply itself."
-)
-REPLY_DIRECTIVE = "Given the above THOUGHTS, complete the USER TASK PROMPT."
-
-
+HOOKS = ("_thinking_done", "_generate_thoughts", "_agenerate_thoughts")
 def wrap(prompt: str) -> str:
     return f"{TASK_PROMPT_START}\n{prompt}\n{TASK_PROMPT_END}"
 
@@ -69,19 +61,17 @@ class TestAbstractness:
             "_thinking_done": lambda self, task: True,
             "_generate_thoughts": lambda self, task: None,
             "_agenerate_thoughts": lambda self, task: None,
-            "_render_thoughts": lambda self, task: "",
         }
         partial = type("Partial", (ThinkingAgent,), {k: v for k, v in impls.items() if k != missing})
 
         with pytest.raises(TypeError, match=missing):
             partial(**valid_kwargs())
 
-    def test_subclass_with_all_four_hooks_can_be_instantiated(self) -> None:
+    def test_subclass_with_all_three_hooks_can_be_instantiated(self) -> None:
         full = type("Full", (ThinkingAgent,), {
             "_thinking_done": lambda self, task: True,
             "_generate_thoughts": lambda self, task: None,
             "_agenerate_thoughts": lambda self, task: None,
-            "_render_thoughts": lambda self, task: "",
         })
 
         assert isinstance(full(**valid_kwargs()), ThinkingAgent)
@@ -89,7 +79,7 @@ class TestAbstractness:
     def test_stub_can_be_instantiated(self) -> None:
         assert isinstance(make_stub_thinker([]), ThinkingAgent)
 
-    def test_abstract_methods_are_exactly_the_four_hooks(self) -> None:
+    def test_abstract_methods_are_exactly_the_three_hooks(self) -> None:
         assert ThinkingAgent.__abstractmethods__ == frozenset(HOOKS)
 
     def test_task_class(self) -> None:
@@ -99,37 +89,16 @@ class TestAbstractness:
         assert ThinkingAgent.__init__ is BasicAgent.__init__
 
 
-class TestSeed:
-    def test_done_after_zero_starts_in_reply_phase(self) -> None:
-        agent = make_stub_thinker([], done_after=0)
-
-        assert agent.create_task(agent.filter_inputs({"prompt": "hi"})).system_prompt_name == "role"
-
-    @pytest.mark.parametrize("done_after", [1, 2])
-    def test_otherwise_starts_in_thinking_phase(self, done_after: int) -> None:
-        agent = make_stub_thinker([], done_after=done_after)
-
-        assert agent.create_task(agent.filter_inputs({"prompt": "hi"})).system_prompt_name == "thinking"
-
-    def test_subclass_seed_before_super_is_seen_by_the_flip_check(self) -> None:
-        class Seeded(StubThinker):
-            def _seed_task(self, task: ThinkingTask) -> None:
-                task.thoughts.append("seeded")
-                super()._seed_task(task)
-
-        agent = Seeded(
-            name="tests", namespace="tests", description="seeded",
-            llm_engine=FakeLLMEngine([]),
-            done_after=1,
-        )
-        task = agent.create_task(agent.filter_inputs({"prompt": "hi"}))
-
-        assert task.thoughts == ["seeded"]
-        assert task.system_prompt_name == "role"
-
-
 class TestPhaseGating:
-    def test_think_in_reply_phase_is_a_noop(self) -> None:
+    def test_every_task_starts_in_the_thinking_phase(self) -> None:
+        for done_after in (0, 1, 2):
+            agent = make_stub_thinker([], done_after=done_after)
+
+            task = agent.create_task(agent.filter_inputs({"prompt": "hi"}))
+
+            assert task.system_prompt_name == "thinking"
+
+    def test_think_flips_to_reply_when_done_without_a_call(self) -> None:
         agent = make_stub_thinker([], done_after=0)
         task = new_task(agent)
 
@@ -139,6 +108,31 @@ class TestPhaseGating:
         assert task.thoughts == []
         assert task.system_prompt_name == "role"
         assert not task.complete
+
+    def test_think_generates_while_not_done_and_does_not_flip_that_pass(self) -> None:
+        agent = make_stub_thinker(["T0"], done_after=1)
+        task = new_task(agent)
+
+        agent.think(task)
+
+        # the stub's hooks never assign the prompt name; the flip is the base's
+        assert task.thoughts == ["T0"]
+        assert task.system_prompt_name == "thinking"
+
+        agent.think(task)
+
+        assert task.system_prompt_name == "role"
+        assert agent._llm_engine.call_count == 1
+
+    def test_think_after_the_flip_never_generates_again(self) -> None:
+        agent = make_stub_thinker(["T0"], done_after=1)
+        task = new_task(agent)
+
+        for _ in range(4):
+            agent.think(task)
+
+        assert agent._llm_engine.call_count == 1
+        assert task.system_prompt_name == "role"
 
     def test_act_in_thinking_phase_is_a_noop(self) -> None:
         agent = make_stub_thinker([], done_after=1)
@@ -159,16 +153,17 @@ class TestPhaseGating:
         asyncio.run(reply_agent.async_think(reply_task))
         asyncio.run(think_agent.async_act(think_task))
 
+        assert reply_task.system_prompt_name == "role"
         assert reply_agent._llm_engine.call_count == 0
         assert think_agent._llm_engine.call_count == 0
         assert not think_task.complete
 
     @pytest.mark.parametrize("done_after", [1, 2])
-    def test_pass_that_makes_last_thought_also_replies(self, done_after: int) -> None:
+    def test_the_pass_after_the_last_thought_flips_and_replies(self, done_after: int) -> None:
         agent = make_stub_thinker([f"T{i}" for i in range(done_after)] + ["REPLY"], done_after=done_after)
         task = new_task(agent)
 
-        for _ in range(done_after - 1):
+        for _ in range(done_after):
             task = agent.act(agent.prepare(agent.think(task)))
             assert not task.complete
             assert task.system_prompt_name == "thinking"
@@ -188,16 +183,6 @@ class TestPhaseGating:
         assert result.result == "REPLY"
         assert agent._llm_engine.call_count == 1
 
-    def test_flip_is_set_by_the_base(self) -> None:
-        agent = make_stub_thinker(["T0"], done_after=1)
-        task = new_task(agent)
-
-        agent.think(task)
-
-        # the stub's hooks never assign the prompt name
-        assert task.thoughts == ["T0"]
-        assert task.system_prompt_name == "role"
-
 
 class TestRendering:
     def test_round_one_is_one_merged_user_message(self) -> None:
@@ -207,7 +192,7 @@ class TestRendering:
 
         first = agent._llm_engine.calls[0]
         assert [m["role"] for m in first] == ["system", "user"]
-        assert first[1]["content"] == f"{wrap('hi')}\n\n{THINK_DIRECTIVE}"
+        assert first[1]["content"] == f"{wrap('hi')}\n\n{THINKING_DIRECTIVE}"
 
     def test_round_two_is_block_thoughts_directive(self) -> None:
         agent = make_stub_thinker(["T1", "T2", "R"], done_after=2)
@@ -218,7 +203,7 @@ class TestRendering:
         assert [m["role"] for m in second] == ["system", "user", "assistant", "user"]
         assert second[1]["content"] == wrap("hi")
         assert second[2]["content"] == f"{THOUGHTS_START}\nT1\n{THOUGHTS_END}"
-        assert second[3]["content"] == THINK_WITH_THOUGHTS
+        assert second[3]["content"] == THINKING_DIRECTIVE
 
     def test_reply_with_thoughts_has_three_message_shape(self) -> None:
         agent = make_stub_thinker(["T1", "T2", "R"], done_after=2)
@@ -239,7 +224,7 @@ class TestRendering:
         assert [m["role"] for m in call] == ["system", "user"]
         assert call[1]["content"] == wrap("hi")
         assert REPLY_DIRECTIVE not in call[1]["content"]
-        assert THINK_DIRECTIVE not in call[1]["content"]
+        assert THINKING_DIRECTIVE not in call[1]["content"]
 
     @pytest.mark.parametrize("with_context", [False, True])
     def test_zero_thinking_call_equals_basic_agent_call(self, with_context: bool) -> None:
@@ -364,22 +349,6 @@ class TestRendering:
             assert joined.count(THOUGHTS_END) == (1 if len(call) == 4 else 0)
         assert "[marker elided]" in agent._llm_engine.calls[1][2]["content"]
 
-    def test_render_directive_override_is_honoured(self) -> None:
-        class Custom(StubThinker):
-            def _render_directive(self, task: ThinkingTask) -> str:
-                return f"step {len(task.thoughts)}"
-
-        agent = Custom(
-            name="tests", namespace="tests", description="custom",
-            llm_engine=FakeLLMEngine(["T1", "T2", "R"]), done_after=2,
-        )
-
-        agent.invoke({"prompt": "hi"})
-
-        directives = [call[-1]["content"] for call in agent._llm_engine.calls]
-        assert directives[0].endswith("step 0")
-        assert directives[1:] == ["step 1", "step 2"]
-
     def test_system_message_follows_prompt_name(self) -> None:
         agent = make_stub_thinker(["T", "R"], done_after=1, role_prompt="Reply role.")
 
@@ -390,86 +359,39 @@ class TestRendering:
         assert calls[1][0] == {"role": "system", "content": "Reply role."}
 
 
-class TestInitialPromptName:
-    def test_base_default_is_none(self) -> None:
-        assert ThinkingAgent._INITIAL_PROMPT_NAME is None
-
-    def test_unconfigured_subclass_still_thinks_without_a_system_message(self) -> None:
-        seen: list[list[dict[str, str]]] = []
-
-        class Minimal(ThinkingAgent):
-            def _thinking_done(self, task: ThinkingTask) -> bool:
-                return len(task.thoughts) >= 1
-
-            def _generate_thoughts(self, task: ThinkingTask) -> None:
-                seen.append(self.render_task(task))
-                task.thoughts.append("T")
-
-            async def _agenerate_thoughts(self, task: ThinkingTask) -> None:
-                self._generate_thoughts(task)
-
-            def _render_thoughts(self, task: ThinkingTask) -> str:
-                return "T"
-
-        agent = Minimal(
-            name="tests", namespace="tests", description="minimal",
-            llm_engine=FakeLLMEngine(["R"]),
-        )
-        task = agent.create_task(agent.filter_inputs({"prompt": "hi"}))
-
-        assert task.system_prompt_name is None
-
-        result = agent.invoke({"prompt": "hi"})
-
-        assert len(seen) == 1
-        assert [m["role"] for m in seen[0]] == ["user"]
-        assert result.result == "R"
-
-class TestRenderDirective:
-    """The closing instruction by phase x thoughts x context."""
-
-    TAIL = "the USER TASK PROMPT as preparation for the final reply, not the reply itself."
-
-    @pytest.mark.parametrize(
-        "phase, thoughts, context, expected",
-        [
-            ("role", True, True, "Given the above RUNTIME CONTEXT and THOUGHTS, complete the USER TASK PROMPT."),
-            ("role", True, False, "Given the above THOUGHTS, complete the USER TASK PROMPT."),
-            ("role", False, True, "Given the above RUNTIME CONTEXT, complete the USER TASK PROMPT."),
-            ("role", False, False, "Complete the USER TASK PROMPT."),
-            ("thinking", True, True, f"Given the above RUNTIME CONTEXT and THOUGHTS, continue thinking about {TAIL}"),
-            ("thinking", True, False, f"Given the above THOUGHTS, continue thinking about {TAIL}"),
-            ("thinking", False, True, f"Given the above RUNTIME CONTEXT, think about {TAIL}"),
-            ("thinking", False, False, f"Think about {TAIL}"),
-        ],
-    )
-    def test_matrix(self, phase: str, thoughts: bool, context: bool, expected: str) -> None:
-        agent = make_stub_thinker([], done_after=1)
-        agent.get_conversation().remember("draft", "Hello there", "the latest draft")
-        task = new_task(agent)
-        task.system_prompt_name = phase
-        task.thoughts = ["T"] if thoughts else []
-        if not context:
-            task.context = {}
-
-        assert agent._render_directive(task) == expected
-
-    def test_context_and_thoughts_reach_the_model_end_to_end(self) -> None:
+class TestDirectives:
+    def test_each_phase_closes_with_its_constant(self) -> None:
         agent = make_stub_thinker(["T1", "T2", "R"], done_after=2)
         agent.get_conversation().remember("draft", "Hello there", "the latest draft")
 
         agent.invoke({"prompt": "hi"})
 
         calls = agent._llm_engine.calls
-        assert calls[0][1]["content"].endswith(
-            f"{TASK_PROMPT_END}\n\nGiven the above RUNTIME CONTEXT, think about {self.TAIL}"
+        assert calls[0][1]["content"].endswith(f"{TASK_PROMPT_END}\n\n{THINKING_DIRECTIVE}")
+        assert calls[1][3]["content"] == THINKING_DIRECTIVE
+        assert calls[2][3]["content"] == REPLY_DIRECTIVE
+
+
+class TestRenderThoughtsDefault:
+    def test_joins_strings_and_renders_values_as_json(self) -> None:
+        class Plain(StubThinker):
+            _render_thoughts = ThinkingAgent._render_thoughts
+
+        agent = Plain(
+            name="tests", namespace="tests", description="plain",
+            llm_engine=FakeLLMEngine([]), done_after=1,
         )
-        assert calls[1][3]["content"] == (
-            f"Given the above RUNTIME CONTEXT and THOUGHTS, continue thinking about {self.TAIL}"
-        )
-        assert calls[2][3]["content"] == (
-            "Given the above RUNTIME CONTEXT and THOUGHTS, complete the USER TASK PROMPT."
-        )
+        task = new_task(agent)
+        task.thoughts = ["a", {"k": 1}]
+
+        text = agent._render_thoughts(task)
+
+        assert text == 'a\n\n---\n\n{\n  "k": 1\n}'
+
+
+class TestInitialPromptName:
+    def test_the_base_does_not_override_basic_agents_name(self) -> None:
+        assert ThinkingAgent._INITIAL_PROMPT_NAME == BasicAgent._INITIAL_PROMPT_NAME == "role"
 
 
 class TestRecordAndResult:
@@ -580,25 +502,6 @@ class TestTermination:
 
 
 class TestHookContracts:
-    def test_strategy_writing_role_ends_thinking_immediately(self) -> None:
-        # The base cannot tell a strategy's write of "role" from its own flip.
-        class Eager(StubThinker):
-            def _generate_thoughts(self, task: ThinkingTask) -> None:
-                super()._generate_thoughts(task)
-                task.system_prompt_name = "role"
-
-        agent = Eager(
-            name="tests", namespace="tests", description="eager",
-            llm_engine=FakeLLMEngine(["T", "R"]), done_after=3,
-        )
-
-        result = agent.invoke({"prompt": "hi"})
-
-        assert result.result == "R"
-        assert agent._llm_engine.call_count == 2
-        assert agent._llm_engine.calls[0][0]["content"] == "You are thinking."
-        assert agent._llm_engine.calls[1][0]["content"] != "You are thinking."
-
     def test_non_converging_strategy_never_leaves_thinking(self) -> None:
         # Non-convergence hangs invoke by design (no base ceiling), so the
         # loop is driven by hand here.
@@ -622,23 +525,28 @@ class TestHookContracts:
         assert not task.complete
         assert agent._llm_engine.call_count == 0
 
-    def test_thinking_done_called_at_seed_and_after_each_generate(self) -> None:
-        seen: list[tuple[list[Any], str, list[dict[str, str]]]] = []
+    def test_thinking_done_runs_on_a_complete_task_every_think_call(self) -> None:
+        seen: list[tuple[list[Any], str, bool]] = []
 
         class Counting(StubThinker):
             def _thinking_done(self, task: ThinkingTask) -> bool:
-                seen.append((list(task.thoughts), task.user_prompt, list(task.historic_messages)))
+                seen.append((list(task.thoughts), task.user_prompt, bool(task.historic_messages)))
                 return super()._thinking_done(task)
 
         agent = Counting(
             name="tests", namespace="tests", description="counting",
-            llm_engine=FakeLLMEngine(["A", "B", "R"]), done_after=2,
+            llm_engine=FakeLLMEngine(["x1", "x2", "xR", "A", "B", "R"]), done_after=2,
+            record_enabled=True,
         )
+        agent.invoke({"prompt": "first"})
+        seen.clear()
 
         agent.invoke({"prompt": "hi"})
 
-        assert len(seen) == 3
-        assert seen[0] == ([], "", [])
+        # one call before each thought, then the flip
+        assert [t for t, _, _ in seen] == [[], ["A"], ["A", "B"]]
+        assert all(prompt == "hi" for _, prompt, _ in seen)
+        assert all(has_history for _, _, has_history in seen)
 
 
 class TestAsyncFlowWithContext:
@@ -652,10 +560,9 @@ class TestAsyncFlowWithContext:
         assert result.result == "R"
         assert len(calls) == 3
         assert all(call[1]["content"].startswith(CONTEXT_START) for call in calls)
-        tail = "the USER TASK PROMPT as preparation for the final reply, not the reply itself."
-        assert calls[0][-1]["content"].endswith(f"Given the above RUNTIME CONTEXT, think about {tail}")
-        assert calls[1][-1]["content"] == f"Given the above RUNTIME CONTEXT and THOUGHTS, continue thinking about {tail}"
-        assert calls[2][-1]["content"] == "Given the above RUNTIME CONTEXT and THOUGHTS, complete the USER TASK PROMPT."
+        assert calls[0][-1]["content"].endswith(THINKING_DIRECTIVE)
+        assert calls[1][-1]["content"] == THINKING_DIRECTIVE
+        assert calls[2][-1]["content"] == REPLY_DIRECTIVE
         assert calls[2][0]["content"] == "You are a careful assistant."
 
 

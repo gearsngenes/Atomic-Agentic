@@ -2,37 +2,36 @@
 ScratchpadAgent: user-authored, fixed-count thinking strategy.
 
 ``ScratchpadAgent`` is the one concrete ``ThinkingAgent`` shipped in this
-release. Each thinking round is one LLM call producing one thought (free text,
-or a structured value when ``thinking_schema`` is set); after the rounds the
-agent replies as a ``BasicAgent`` would. With ``stop_early`` the model may end
+release. Each thinking round is one LLM call producing one free-text thought;
+after the rounds the agent replies as a ``BasicAgent`` would. With ``stop_early`` the model may end
 thinking before the cap by returning ``more_thinking_required: false``.
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 from .thinking import ThinkingAgent
 from ..constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
-    STOP_EARLY_UNSAFE_SCHEMA_KEYS,
+    STOP_EARLY_SCHEMA_TEMPLATE,
     THINKING_INSTRUCTIONS_END,
     THINKING_INSTRUCTIONS_START,
 )
-from ..exceptions import AgentError
+from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
 from ..models.parameters import ParamSpec
-from ..utils.agents import build_thinking_step_schema, normalize_prompt_config
+from ..utils.agents import normalize_prompt_config
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
     insert_by_category,
 )
-from ..utils.rendering import stringify_value
 
 
 class ScratchpadAgent(ThinkingAgent):
@@ -49,20 +48,13 @@ class ScratchpadAgent(ThinkingAgent):
 
     ``thinking_rounds`` is the exact number of thinking calls, or the cap when
     ``stop_early`` is on. ``stop_early`` makes every thinking call return
-    ``{thought, more_thinking_required}``; thinking ends at the first
+    ``{thought, more_thinking_required}`` (a string thought and a boolean); thinking ends at the first
     ``more_thinking_required: false`` or at the cap, and round 1 always runs
     when ``thinking_rounds >= 1``. Both are fixed at construction.
-
-    Limit with ``stop_early``: ``thinking_schema`` must not use ``$defs``,
-    ``definitions`` or ``$ref`` at its root (the schema is nested under
-    ``thought``, which would break their pointers). A nested ref that points
-    back into the schema is not detected; the provider reports it.
     """
 
-    THINKING_PROMPT_NAME = "thinking"
-
     _TASK_CLS = ScratchpadTask
-    _INITIAL_PROMPT_NAME = THINKING_PROMPT_NAME
+    _INITIAL_PROMPT_NAME = "thinking"
 
     DEFAULT_THINKING_PROMPT: str = (
         "You are a thinking assistant that produces various thoughts, "
@@ -85,7 +77,6 @@ class ScratchpadAgent(ThinkingAgent):
         bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
-        thinking_schema: dict[str, Any] | None = None,
         thinking_rounds: int,
         stop_early: bool = False,
     ) -> None:
@@ -97,44 +88,22 @@ class ScratchpadAgent(ThinkingAgent):
             followed by a format section when ``stop_early`` is on). Defaults
             to ``DEFAULT_THINKING_PROMPT`` when omitted or blank. Its
             ``{placeholder}``s become agent inputs.
-        thinking_schema : dict[str, Any] | None
-            Output structure of each thought; ``None`` keeps thinking free
-            text (or a string ``thought`` under ``stop_early``). Independent of
-            ``response_schema``, which applies to the reply only.
         thinking_rounds : int
             Required. Exact thinking-call count, or the cap under
             ``stop_early``; ``0`` skips thinking.
         stop_early : bool
             Let the model end thinking before the cap.
 
-        Everything before ``super().__init__`` runs first because
-        ``_merge_prompt_parameters`` (called inside it) reads
+        State is set before ``super().__init__`` because
+        ``_merge_prompt_parameters``, called inside it, reads
         ``self._thinking_config``.
         """
         # 1. Validate construction knobs.
-        if thinking_schema is not None and not isinstance(thinking_schema, Mapping):
-            raise AgentError(
-                f"{type(self).__name__}.thinking_schema must be a dict/Mapping "
-                f"or None, got {type(thinking_schema).__name__}."
-            )
         if type(thinking_rounds) is not int or thinking_rounds < 0:
             raise AgentError(
                 f"{type(self).__name__}.thinking_rounds must be a concrete int "
                 f">= 0, got {thinking_rounds!r}."
             )
-        if type(stop_early) is not bool:
-            raise AgentError(
-                f"{type(self).__name__}.stop_early must be a bool, got "
-                f"{type(stop_early).__name__}."
-            )
-        if stop_early and thinking_schema is not None:
-            unsafe = [key for key in STOP_EARLY_UNSAFE_SCHEMA_KEYS if key in thinking_schema]
-            if unsafe:
-                raise AgentError(
-                    f"{type(self).__name__}.thinking_schema must not use {unsafe} "
-                    "at its root when stop_early is on (it is nested under "
-                    "'thought', which would break those references)."
-                )
 
         # 2. Store the thinking state the merge hook and hooks read.
         self._thinking_config = normalize_prompt_config(
@@ -144,9 +113,12 @@ class ScratchpadAgent(ThinkingAgent):
             default_description="Default thinking instructions.",
             error_label="thinking_instructions",
         )
-        self._thinking_schema = thinking_schema
         self._thinking_rounds = thinking_rounds
         self._stop_early = stop_early
+        # Built once; the wrapper is the only structured thinking output.
+        self._thinking_output = (
+            copy.deepcopy(STOP_EARLY_SCHEMA_TEMPLATE) if stop_early else None
+        )
 
         # 3. Construct through BasicAgent, then register the thinking prompt.
         super().__init__(
@@ -162,17 +134,11 @@ class ScratchpadAgent(ThinkingAgent):
             records_window=records_window,
             response_schema=response_schema,
         )
-        self._system_prompts[self.THINKING_PROMPT_NAME] = self._thinking_config
+        self._system_prompts[self._INITIAL_PROMPT_NAME] = self._thinking_config
 
     # ------------------------------------------------------------------ #
     # Properties (read-only)
     # ------------------------------------------------------------------ #
-    @property
-    def thinking_schema(self) -> dict[str, Any] | None:
-        """The author's thinking schema, unwrapped (not the ``stop_early``
-        wrapper). Frozen at construction."""
-        return self._thinking_schema
-
     @property
     def thinking_rounds(self) -> int:
         """Exact thinking-call count, or the cap under ``stop_early``."""
@@ -194,6 +160,10 @@ class ScratchpadAgent(ThinkingAgent):
         2. raise on a true collision, warn on a compatible-but-not-identical
            overlap (role wins)
         3. return the reconciled parameters in signature order
+
+        Known limit: the overlap warning's ``stacklevel`` (and ``Agent``'s own
+        overlap warning) assume a direct ``ScratchpadAgent(...)`` call; through a
+        user subclass they point one frame short.
         """
         reports = build_parameter_reports(
             [role_params, list(self._thinking_config.parameters)]
@@ -220,18 +190,16 @@ class ScratchpadAgent(ThinkingAgent):
         One thinking round.
 
         1. render, call the engine, record the call; the output structure is
-           the author's ``thinking_schema``, or its ``stop_early`` wrapper
-        2. unwrap the result under ``stop_early`` (setting
-           ``task.more_thinking_required``)
-        3. append the thought (a ``str`` stripped, anything else as-is)
+           ``None`` (free text), or the ``stop_early`` wrapper
+        2. under ``stop_early``, check the reply is ``{thought: str,
+           more_thinking_required: bool}`` (``AgentInvocationError`` if not),
+           unwrap it and set ``task.more_thinking_required``
+        3. append the stripped thought
         """
         messages = self.render_task(task)
         engine_result = self._llm_engine.invoke({
             "messages": messages,
-            "output_structure": (
-                build_thinking_step_schema(self._thinking_schema)
-                if self._stop_early else self._thinking_schema
-            ),
+            "output_structure": self._thinking_output,
         })
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
@@ -239,23 +207,28 @@ class ScratchpadAgent(ThinkingAgent):
             system_prompt_name=task.system_prompt_name,
         ))
 
-        raw = engine_result.result
+        thought = engine_result.result
         if self._stop_early:
-            thought = raw["thought"]
-            task.more_thinking_required = raw["more_thinking_required"]
-        else:
-            thought = raw
-        task.thoughts.append(thought.strip() if isinstance(thought, str) else thought)
+            if not (
+                isinstance(thought, Mapping)
+                and isinstance(thought.get("thought"), str)
+                and isinstance(thought.get("more_thinking_required"), bool)
+            ):
+                raise AgentInvocationError(
+                    f"{self.full_name}: a stop_early thinking reply must be an object "
+                    "with a string 'thought' and a boolean 'more_thinking_required', "
+                    f"got {thought!r}."
+                )
+            task.more_thinking_required = thought["more_thinking_required"]
+            thought = thought["thought"]
+        task.thoughts.append(thought.strip())
 
     async def _agenerate_thoughts(self, task: ScratchpadTask) -> None:
         """Async twin of ``_generate_thoughts`` (awaits ``async_invoke``)."""
         messages = self.render_task(task)
         engine_result = await self._llm_engine.async_invoke({
             "messages": messages,
-            "output_structure": (
-                build_thinking_step_schema(self._thinking_schema)
-                if self._stop_early else self._thinking_schema
-            ),
+            "output_structure": self._thinking_output,
         })
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
@@ -263,21 +236,21 @@ class ScratchpadAgent(ThinkingAgent):
             system_prompt_name=task.system_prompt_name,
         ))
 
-        raw = engine_result.result
+        thought = engine_result.result
         if self._stop_early:
-            thought = raw["thought"]
-            task.more_thinking_required = raw["more_thinking_required"]
-        else:
-            thought = raw
-        task.thoughts.append(thought.strip() if isinstance(thought, str) else thought)
-
-    def _render_thoughts(self, task: ScratchpadTask) -> str:
-        """Each thought as its string (a ``str`` as-is, anything else as JSON),
-        unnumbered, separated by ``---``."""
-        return "\n\n---\n\n".join(
-            t if isinstance(t, str) else stringify_value(t, mode="j")
-            for t in task.thoughts
-        )
+            if not (
+                isinstance(thought, Mapping)
+                and isinstance(thought.get("thought"), str)
+                and isinstance(thought.get("more_thinking_required"), bool)
+            ):
+                raise AgentInvocationError(
+                    f"{self.full_name}: a stop_early thinking reply must be an object "
+                    "with a string 'thought' and a boolean 'more_thinking_required', "
+                    f"got {thought!r}."
+                )
+            task.more_thinking_required = thought["more_thinking_required"]
+            thought = thought["thought"]
+        task.thoughts.append(thought.strip())
 
     # ------------------------------------------------------------------ #
     # Rendering
@@ -308,7 +281,6 @@ class ScratchpadAgent(ThinkingAgent):
         """Diagnostic snapshot including this agent's thinking knobs."""
         d = super().to_dict()
         d["thinking_instructions"] = self._thinking_config.template
-        d["thinking_schema"] = self._thinking_schema
         d["thinking_rounds"] = self._thinking_rounds
         d["stop_early"] = self._stop_early
         return d

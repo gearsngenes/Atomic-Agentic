@@ -20,52 +20,6 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
 # llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
-# --- thinking_schema constrains every thinking round to this exact shape.
-#     Deliberately vocabulary that never claims to BE the answer: "focus" is
-#     this round's own sub-problem, "leads" are candidate lines of reasoning
-#     (each self-scored, giving a tree-of-thought-style breadth-then-narrow
-#     move), "working_hypothesis" is scoped to the round's own focus and
-#     explicitly revisable, and "ruled_out" records eliminated leads so a
-#     later round can see what was already tried and rejected. Nothing here
-#     is "the final answer" -- that's the reply phase's job alone ---
-PUZZLE_THINKING_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "focus": {
-            "type": "string",
-            "description": "The sub-problem this round is working on.",
-        },
-        "leads": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "reasoning": {"type": "string"},
-                    "plausibility": {"type": "number"},
-                },
-                "required": ["reasoning", "plausibility"],
-                "additionalProperties": False,
-            },
-            "description": "Candidate lines of reasoning worth exploring this round, each self-scored.",
-        },
-        "working_hypothesis": {
-            "type": "string",
-            "description": (
-                "The most-supported lead to carry forward -- scoped to this "
-                "round's own focus only, explicitly tentative and revisable. "
-                "Never the puzzle's final solution."
-            ),
-        },
-        "ruled_out": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Leads eliminated this round, and why.",
-        },
-    },
-    "required": ["focus", "leads", "working_hypothesis", "ruled_out"],
-    "additionalProperties": False,
-}
-
 # --- thinking_instructions is the parameterized side of this example
 #     (Examples 1/2 used a plain thinking prompt and a parameterized
 #     role_prompt -- this one shows a plain string role_prompt paired with a
@@ -73,11 +27,10 @@ PUZZLE_THINKING_SCHEMA = {
 #     {verification_style} placeholder, reconciled against role_prompt's own
 #     params the same way at construction time).
 #
-#     The schema alone only constrains SHAPE, not content -- nothing stops a
-#     model from writing the puzzle's actual solution into working_hypothesis
-#     if not told otherwise. The instruction below is the real guardrail: it
-#     explicitly forbids stating the final unlock phrase during thinking, so
-#     the solution only ever appears once, in the reply phase ---
+#     Thoughts are free text, so the instructions below carry the whole
+#     structure (focus, leads, working hypothesis, ruled-out leads) and are the
+#     guardrail: they explicitly forbid stating the final unlock phrase during
+#     thinking, so the solution only ever appears once, in the reply phase ---
 PUZZLE_THINKING_INSTRUCTIONS = PromptConfig(
     template="""\
 You are working through a strictly sequential, multi-stage puzzle -- each
@@ -86,8 +39,9 @@ you cannot know a later stage's answer without first solving every stage
 before it.
 
 Each round, focus on exactly one stage. Propose a few candidate leads for
-that stage with a plausibility score each, note anything you're ruling out
-and why, and commit to a working hypothesis for THIS STAGE ONLY -- never
+that stage with a plausibility score each (0 to 1), note anything you're
+ruling out and why, and commit to a working hypothesis for THIS STAGE ONLY. Write
+each round as labelled lines: Focus, Leads, Working hypothesis, Ruled out. Never
 state the puzzle's overall final answer or unlock phrase while thinking, even
 if you're confident you already know it. The final answer belongs solely in
 your reply, after thinking concludes.
@@ -115,8 +69,7 @@ puzzle_agent = ScratchpadAgent(
     thinking_rounds=3,
     role_prompt="You are a meticulous puzzle solver who shows its work clearly.",
     thinking_instructions=PUZZLE_THINKING_INSTRUCTIONS,
-    thinking_schema=PUZZLE_THINKING_SCHEMA,
-    description="A puzzle solver that explores multiple candidate leads per stage before committing, via schema-structured thinking rounds.",
+    description="A puzzle solver that explores multiple candidate leads per stage before committing, via structured thinking rounds.",
 )
 
 # --- the task itself is a three-stage chain, each stage unsolvable without

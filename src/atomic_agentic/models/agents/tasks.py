@@ -398,7 +398,8 @@ class ThinkingTask(AgentTask):
     name ``"role"`` means the reply phase; any other value (including ``None``)
     means thinking is still in progress. A strategy may use several thinking
     prompt names (for example one per step). The base ``ThinkingAgent`` switches
-    the name to ``"role"`` when its ``_thinking_done`` hook turns true.
+    the name to ``"role"`` on the first ``think`` call at which its
+    ``_thinking_done`` hook is true.
 
     Fields
     ------
