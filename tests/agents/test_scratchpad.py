@@ -101,6 +101,49 @@ class TestConstruction:
         with pytest.raises(AgentError, match="thinking_rounds"):
             make_agent(thinking_rounds=bad)
 
+    @pytest.mark.parametrize("bad", [1, 0, "yes", None])
+    def test_non_bool_stop_early_raises(self, bad: Any) -> None:
+        with pytest.raises(AgentError, match="stop_early"):
+            make_agent(stop_early=bad)
+
+    @pytest.mark.parametrize("bad", [-1, True, "2", 1.5, None])
+    def test_setting_invalid_thinking_rounds_raises_and_keeps_the_value(self, bad: Any) -> None:
+        agent = make_agent(thinking_rounds=2)
+
+        with pytest.raises(AgentError, match="thinking_rounds"):
+            agent.thinking_rounds = bad
+
+        assert agent.thinking_rounds == 2
+
+    def test_thinking_rounds_is_mutable(self) -> None:
+        agent = make_agent(["t1", "t2", "t3", "R"], thinking_rounds=1)
+
+        agent.thinking_rounds = 3
+        result = agent.invoke({"prompt": "hi"})
+
+        assert agent.thinking_rounds == 3
+        assert result.thoughts_produced == 3
+        assert agent._llm_engine.call_count == 4
+
+    def test_lowering_thinking_rounds_to_zero_skips_thinking(self) -> None:
+        agent = make_agent(["R"], thinking_rounds=3)
+
+        agent.thinking_rounds = 0
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.thoughts_produced == 0
+        assert agent._llm_engine.call_count == 1
+
+    def test_mutated_rounds_cap_a_stop_early_agent(self) -> None:
+        agent = make_agent(
+            [step("t1", True), step("t2", True), "R"], thinking_rounds=5, stop_early=True,
+        )
+
+        agent.thinking_rounds = 2
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.thoughts_produced == 2
+
     def test_response_schema_rejects_non_mapping(self) -> None:
         with pytest.raises(AgentError, match="response_schema"):
             make_agent(response_schema="not a dict")  # type: ignore[arg-type]
@@ -109,12 +152,11 @@ class TestConstruction:
         with pytest.raises(TypeError, match="thinking_instructions"):
             make_agent(thinking_instructions=123)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("name", ["thinking_rounds", "stop_early"])
-    def test_properties_are_read_only(self, name: str) -> None:
+    def test_stop_early_is_read_only(self) -> None:
         agent = make_agent()
 
         with pytest.raises(AttributeError):
-            setattr(agent, name, 3)
+            agent.stop_early = True
 
     def test_thinking_rounds_is_not_an_invoke_input(self) -> None:
         agent = make_agent()

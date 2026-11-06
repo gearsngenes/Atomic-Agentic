@@ -48,9 +48,13 @@ class ScratchpadAgent(ThinkingAgent):
 
     ``thinking_rounds`` is the exact number of thinking calls, or the cap when
     ``stop_early`` is on. ``stop_early`` makes every thinking call return
-    ``{thought, more_thinking_required}`` (a string thought and a boolean); thinking ends at the first
-    ``more_thinking_required: false`` or at the cap, and round 1 always runs
-    when ``thinking_rounds >= 1``. Both are fixed at construction.
+    ``{thought, more_thinking_required}`` (a string thought and a boolean);
+    thinking ends at the first ``more_thinking_required: false`` or at the cap,
+    and round 1 always runs when ``thinking_rounds >= 1``.
+
+    ``stop_early`` is fixed at construction. ``thinking_rounds`` is a behavioral
+    knob and may be reassigned (validated like the constructor argument); a call
+    already running reads the new value at its next ``_thinking_done`` check.
     """
 
     _TASK_CLS = ScratchpadTask
@@ -98,12 +102,13 @@ class ScratchpadAgent(ThinkingAgent):
         ``_merge_prompt_parameters``, called inside it, reads
         ``self._thinking_config``.
         """
-        # 1. Validate construction knobs.
-        if type(thinking_rounds) is not int or thinking_rounds < 0:
+        # 1. Validate construction knobs (thinking_rounds through its setter).
+        if type(stop_early) is not bool:
             raise AgentError(
-                f"{type(self).__name__}.thinking_rounds must be a concrete int "
-                f">= 0, got {thinking_rounds!r}."
+                f"{type(self).__name__}.stop_early must be a bool, got "
+                f"{type(stop_early).__name__}."
             )
+        self.thinking_rounds = thinking_rounds
 
         # 2. Store the thinking state the merge hook and hooks read.
         self._thinking_config = normalize_prompt_config(
@@ -113,7 +118,6 @@ class ScratchpadAgent(ThinkingAgent):
             default_description="Default thinking instructions.",
             error_label="thinking_instructions",
         )
-        self._thinking_rounds = thinking_rounds
         self._stop_early = stop_early
         # Built once; the wrapper is the only structured thinking output.
         self._thinking_output = (
@@ -141,8 +145,17 @@ class ScratchpadAgent(ThinkingAgent):
     # ------------------------------------------------------------------ #
     @property
     def thinking_rounds(self) -> int:
-        """Exact thinking-call count, or the cap under ``stop_early``."""
+        """Exact thinking-call count, or the cap under ``stop_early``. Mutable."""
         return self._thinking_rounds
+
+    @thinking_rounds.setter
+    def thinking_rounds(self, value: int) -> None:
+        if type(value) is not int or value < 0:
+            raise AgentError(
+                f"{type(self).__name__}.thinking_rounds must be a concrete int "
+                f">= 0, got {value!r}."
+            )
+        self._thinking_rounds = value
 
     @property
     def stop_early(self) -> bool:

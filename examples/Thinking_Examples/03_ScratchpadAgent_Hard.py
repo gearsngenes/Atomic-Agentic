@@ -1,6 +1,5 @@
 import sys
 import os
-import json
 from dotenv import load_dotenv
 from atomic_agentic.agents import ScratchpadAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -21,7 +20,7 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
 # --- thinking_instructions is the parameterized side of this example
-#     (Examples 1/2 used a plain thinking prompt and a parameterized
+#     (Example 1 used plain prompts and example 2 a parameterized
 #     role_prompt -- this one shows a plain string role_prompt paired with a
 #     thinking_instructions PromptConfig contributing its OWN
 #     {verification_style} placeholder, reconciled against role_prompt's own
@@ -69,7 +68,7 @@ puzzle_agent = ScratchpadAgent(
     thinking_rounds=3,
     role_prompt="You are a meticulous puzzle solver who shows its work clearly.",
     thinking_instructions=PUZZLE_THINKING_INSTRUCTIONS,
-    description="A puzzle solver that explores multiple candidate leads per stage before committing, via structured thinking rounds.",
+    description="A puzzle solver that explores multiple candidate leads per stage before committing, via multi-round labelled thinking.",
 )
 
 # --- the task itself is a three-stage chain, each stage unsolvable without
@@ -102,10 +101,10 @@ result = puzzle_agent.invoke({
 record = puzzle_agent.get_conversation().records[-1:][0]
 
 print(f"TASK: {task}\n")
-print("THINKING THOUGHTS (structured leads explored per stage):")
+print("THINKING THOUGHTS (leads explored per stage):")
 for round_index, thought in enumerate(record.thoughts):
     print(f"  Round {round_index}:")
-    print(json.dumps(thought, indent=4))
+    print(thought)
 
 print(f"\nTHOUGHTS PRODUCED: {result.thoughts_produced}")
 print(f"\nFINAL ANSWER:\n{result.result}")
