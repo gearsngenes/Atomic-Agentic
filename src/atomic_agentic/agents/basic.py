@@ -58,7 +58,9 @@ class BasicAgent(Agent):
         *,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
-        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         records_window: Optional[int] = None,
 
         response_schema: dict[str, Any] | None = None,
@@ -95,7 +97,9 @@ class BasicAgent(Agent):
             record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            bind_response_to=bind_response_to,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
             extra_parameters=role_params,
             records_window=records_window,
 

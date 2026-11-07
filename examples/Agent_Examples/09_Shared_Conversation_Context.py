@@ -15,7 +15,7 @@ not a copy). Consequences shown below:
     critique. (Context variables are not rendered into prompts yet -- a later
     pass -- so that is how the agents inform each other today.)
   * Each agent's response lands in its own context variable via
-    ``bind_response_to``, so after every call the caller can read the latest
+    ``response_to_context``, so after every call the caller can read the latest
     draft, critique and verdict separately from the conversation.
   * Each record carries the ``agent_id`` of the agent that wrote it.
 
@@ -59,7 +59,7 @@ def main() -> None:
             "100 words. When the conversation contains a reviewer critique, "
             "revise your latest draft to address it."
         ),
-        bind_response_to="draft",
+        response_to_context="draft",
     )
     reviewer = BasicAgent(
         name="reviewer",
@@ -72,7 +72,7 @@ def main() -> None:
             "ending; otherwise ask for a revision with one specific critique."
         ),
         response_schema=REVIEW_SCHEMA,
-        bind_response_to=["verdict", "critique"],
+        response_to_context=["verdict", "critique"],
     )
 
     # -- Shared context, defined once on the writer's conversation ---------

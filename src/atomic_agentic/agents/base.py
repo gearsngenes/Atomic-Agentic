@@ -25,6 +25,7 @@ from ..llm.base import LLMEngine
 from ..models.results import AgentResult
 from ..tools import toolify
 from ..models.agents.records import AgentRecord
+from ..models.agents.context import ContextVariable
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
 from ..models.agents.conversations import Conversation
@@ -80,7 +81,7 @@ class Agent(AtomicInvokable, ABC):
     flat sources:
 
     - All ``pre_invoke`` parameters.
-    - Post-only parameters not filled by a ``bind_response_to`` destination
+    - Post-only parameters not filled by a ``response_to_post`` destination
       (those leave the public signature unless pre_invoke/extra_parameters
       also declares them), preserving their original declared kind (no
       forced ``KEYWORD_ONLY`` coercion).
@@ -115,14 +116,28 @@ class Agent(AtomicInvokable, ABC):
     new parameter lands at the position that preserves a valid Python-style
     signature ordering, regardless of its declared kind.
 
-    ``bind_response_to``
-    --------------------
-    Says which pieces of the generated response get which names: a ``str``
-    (whole response), a collection of ``str`` (those keys of a mapping
-    response), or a ``{selector: name}`` dict. A bound name equal to a
-    ``post_invoke`` parameter fills it; nothing is passed to the post stage
-    by default. ``post_invoke=None`` means no post stage. ``**kwargs`` is
-    rejected in ``pre_invoke``/``post_invoke`` (``AgentError``).
+    Binding routes
+    --------------
+    Three construction knobs say where values flow; context never feeds
+    pre/post. ``response_to_post`` and ``response_to_context`` share one
+    grammar for slicing the generated response: a ``str`` (whole response), a
+    collection of ``str`` (those keys of a mapping response), or a
+    ``{selector: name}`` dict.
+
+    - ``response_to_post``: fills ``post_invoke`` parameters (every
+      destination must be one); nothing reaches the post stage by default.
+    - ``response_to_context``: replaces existing writable context variables
+      after the post stage (an absent name is ignored until Pass 13).
+    - ``inputs_to_context``: a collection of input names or an
+      ``{input: name}`` dict. At ``create_task`` -- after input filtering,
+      before ``pre_invoke`` -- each present input (a defaulted one counts)
+      replaces a writable context variable, skips a readonly one, or creates
+      an absent one (no description, render mode ``"s"``). Created variables
+      are per-call: only names the conversation already holds are written
+      back by ``record``.
+
+    ``post_invoke=None`` means no post stage. ``**kwargs`` is rejected in
+    ``pre_invoke``/``post_invoke`` (``AgentError``).
 
     ``record_enabled`` / ``records_window``
     ----------------------------------------
@@ -164,11 +179,12 @@ class Agent(AtomicInvokable, ABC):
 
     Context and recording
     ---------------------
-    Context changes made during a call (``bind_response_to`` values) are
-    written back to the conversation by ``record`` -- the same ``commit`` that
-    appends the turn. So with ``record_enabled`` False neither happens: such an
-    agent (a judge or probe) never changes a conversation, and its
-    ``bind_response_to`` values reach only the result and the post stage.
+    Context changes made during a call (``inputs_to_context`` and
+    ``response_to_context`` values) are written back to the conversation by
+    ``record`` -- the same ``commit`` that appends the turn. So with
+    ``record_enabled`` False neither happens: such an agent (a judge or probe)
+    never changes a conversation, and its bound values reach only the result,
+    the post stage and the call's own rendering.
     """
 
     # ------------------------------------------------------------------ #
@@ -214,7 +230,9 @@ class Agent(AtomicInvokable, ABC):
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
-        bind_response_to: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
     ) -> None:
@@ -270,30 +288,45 @@ class Agent(AtomicInvokable, ABC):
                     f"got kind {p.kind!r}."
                 )
 
-        # ── Response bindings ────────────────────────────────────────────────
-        # A bound post parameter that no other source declares is fed by the
-        # response alone, so it leaves the public signature. One that
-        # pre_invoke/extra_parameters also declares stays in the reconciliation
-        # below: when the response lacks its key, the caller's value is what the
-        # post receives, so the declarations must be compatible.
-        bindings = self._normalize_bind_response_to(bind_response_to, reserved_names)
-        bound_names = (
-            set() if bindings is None
-            else {bindings} if isinstance(bindings, str)
-            else set(bindings.values())
+        # ── Bindings ─────────────────────────────────────────────────────────
+        # A post parameter filled by response_to_post that no other source
+        # declares is fed by the response alone, so it leaves the public
+        # signature. One that pre_invoke/extra_parameters also declares stays in
+        # the reconciliation below: when the response lacks its key, the
+        # caller's value is what the post receives, so the declarations must be
+        # compatible.
+        post_params = list(post_tool.parameters) if post_tool is not None else []
+        inputs_binding = self._normalize_binding(
+            inputs_to_context, reserved_names, route="inputs_to_context", allow_str=False
         )
+        context_binding = self._normalize_binding(
+            response_to_context, reserved_names, route="response_to_context"
+        )
+        post_binding = self._normalize_binding(
+            response_to_post, reserved_names, route="response_to_post"
+        )
+        bound_post = (
+            set() if post_binding is None
+            else {post_binding} if isinstance(post_binding, str)
+            else set(post_binding.values())
+        )
+        not_post = bound_post - {p.name for p in post_params}
+        if not_post:
+            raise AgentError(
+                f"response_to_post destinations {sorted(not_post)} are not post_invoke "
+                "parameters (or there is no post_invoke)."
+            )
         pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
         declared_elsewhere = {p.name for p in pre_declared} | {
             p.name for p in extra_raw
         }
-        response_filled = bound_names - declared_elsewhere
+        response_filled = bound_post - declared_elsewhere
 
         # ── Schema composition ───────────────────────────────────────────────
         # Reserved overlaps are resolved per source, independently; the three
         # sources are then reconciled N-way (pre_invoke > post_invoke >
         # extra_parameters), raising on the first genuine conflict and warning
         # once for compatible-but-not-identical names.
-        post_params = list(post_tool.parameters) if post_tool is not None else []
         pre_params = self._strip_reserved_overlaps(
             pre_declared, reserved, "pre_invoke"
         )
@@ -309,10 +342,25 @@ class Agent(AtomicInvokable, ABC):
         )
         agent_parameters = insert_by_category(insert_by_category([], constructed), reserved)
 
+        # Input sources must be names the constructed agent accepts.
+        if inputs_binding is not None:
+            accepted = {
+                p.name for p in agent_parameters
+                if p.kind not in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+            }
+            unknown = sorted(set(inputs_binding) - accepted)
+            if unknown:
+                raise AgentError(
+                    f"inputs_to_context sources {unknown} are not non-variadic parameters "
+                    "of this agent (a post parameter filled only by response_to_post is not one)."
+                )
+
         # Lifecycle components and the per-consumer name sets create_task slices by.
         self._pre_invoke: Optional[AtomicInvokable] = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
-        self._bind_response_to = bindings  # None | str | dict[Any, str]
+        self._inputs_to_context = inputs_binding  # None | dict[str, str]
+        self._response_to_context = context_binding  # None | str | dict[Any, str]
+        self._response_to_post = post_binding  # None | str | dict[Any, str]
         self._pre_names = frozenset(p.name for p in pre_declared) - reserved_names
         self._post_names = frozenset(p.name for p in post_params) - reserved_names
         self._agentic_names = frozenset(reserved_names | {p.name for p in extra_params})
@@ -394,26 +442,40 @@ class Agent(AtomicInvokable, ABC):
         return [p for p in params if p.name not in stripped_names]
 
     @staticmethod
-    def _normalize_bind_response_to(
-        value: Any, reserved_names: set[str]
+    def _normalize_binding(
+        value: Any,
+        reserved_names: set[str],
+        *,
+        route: str,
+        allow_str: bool = True,
     ) -> Optional[str | dict[Any, str]]:
-        """Validate ``bind_response_to`` and return its normalized form.
+        """Validate one binding knob and return its normalized form.
 
-        1. ``None`` -> ``None``; ``str`` -> the str itself (whole response);
-           ``Mapping`` -> ``dict(value)``; any other non-bytes iterable of
-           names (list, tuple, set, dict view, generator...) -> ``{d: d}``,
-           sorted when unordered; anything else raises.
+        1. ``None`` -> ``None``; ``str`` -> the str itself (whole response;
+           raises when ``allow_str`` is false); ``Mapping`` -> ``dict(value)``;
+           any other non-bytes iterable of names (list, tuple, set, dict view,
+           generator...) -> ``{d: d}``, sorted when unordered; anything else
+           raises.
         2. An empty collection/mapping normalizes to ``None``.
         3. Destinations are stripped of surrounding whitespace (as
            ``ContextVariable``/``ParamSpec`` names are), then each must be an
-           identifier string, must not start with
-           ``TASK_RESULT_PREFIX``, and must not be a reserved parameter name.
-        4. Duplicate destinations raise (checked before collapsing to a dict).
+           identifier string, must not start with ``TASK_RESULT_PREFIX``, and
+           must not be a reserved parameter name.
+        4. Duplicate destinations within this route raise (checked before
+           collapsing to a dict); the same name across routes is legal.
+        5. ``inputs_to_context`` only: the selectors (sources) are stripped and
+           must be identifier strings; membership in the agent's schema is
+           checked by ``__init__``.
         """
         if value is None:
             return None
 
         if isinstance(value, str):
+            if not allow_str:
+                raise AgentError(
+                    f"{route} does not accept a bare str; pass a collection of "
+                    "input names or a {input: destination} mapping."
+                )
             selectors, names = None, [value]
         elif isinstance(value, Mapping):
             selectors, names = list(value), list(value.values())
@@ -423,8 +485,11 @@ class Agent(AtomicInvokable, ABC):
                 names.sort()  # unordered: store deterministically
         else:
             raise AgentError(
-                "bind_response_to must be None, a str, a collection of str, "
-                f"or a mapping of selector -> str; got {type(value).__name__}."
+                f"{route} must be None, "
+                + ("a str, " if allow_str else "")
+                + "a collection of str, or a mapping of "
+                + ("selector" if allow_str else "input name")
+                + f" -> str; got {type(value).__name__}."
             )
 
         if not names:
@@ -434,15 +499,23 @@ class Agent(AtomicInvokable, ABC):
         for n in names:
             if not (isinstance(n, str) and IDENTIFIER_PATTERN.fullmatch(n)):
                 raise AgentError(
-                    f"bind_response_to destination {n!r} must be a valid identifier string."
+                    f"{route} destination {n!r} must be a valid identifier string."
                 )
             if n.startswith(TASK_RESULT_PREFIX) or n in reserved_names:
                 raise AgentError(
-                    f"bind_response_to destination {n!r} is reserved (a framework-reserved "
+                    f"{route} destination {n!r} is reserved (a framework-reserved "
                     f"parameter name or a {TASK_RESULT_PREFIX!r} name)."
                 )
         if len(set(names)) != len(names):
-            raise AgentError("bind_response_to has duplicate destinations.")
+            raise AgentError(f"{route} has duplicate destinations.")
+
+        if selectors is not None and route == "inputs_to_context":
+            selectors = [s.strip() if isinstance(s, str) else s for s in selectors]
+            for s in selectors:
+                if not (isinstance(s, str) and IDENTIFIER_PATTERN.fullmatch(s)):
+                    raise AgentError(
+                        f"{route} source {s!r} must be a valid identifier string."
+                    )
 
         if isinstance(value, str):
             return names[0]
@@ -471,8 +544,8 @@ class Agent(AtomicInvokable, ABC):
         the call was bound to. ``False``: a normal ``AgentResult`` is still
         returned, but nothing is stored in any conversation for that
         invocation -- regardless of ``records_window``. Context write-back
-        (``bind_response_to`` values) is part of the same commit, so it is
-        skipped too.
+        (``inputs_to_context``/``response_to_context`` values) is part of the
+        same commit, so it is skipped too.
         """
         return self._record_enabled
 
@@ -514,6 +587,23 @@ class Agent(AtomicInvokable, ABC):
         """Invokable that converts the response into the final output, or ``None``
         when there is no post stage (the response is returned as-is)."""
         return self._post_invoke
+
+    @property
+    def inputs_to_context(self) -> Optional[dict[str, str]]:
+        """Normalized ``{input name: context name}`` mapping, or ``None``."""
+        return None if self._inputs_to_context is None else dict(self._inputs_to_context)
+
+    @property
+    def response_to_context(self) -> Optional[str | dict[Any, str]]:
+        """Normalized response -> context binding (``None``, a name, or ``{selector: name}``)."""
+        spec = self._response_to_context
+        return dict(spec) if isinstance(spec, dict) else spec
+
+    @property
+    def response_to_post(self) -> Optional[str | dict[Any, str]]:
+        """Normalized response -> ``post_invoke`` binding (``None``, a name, or ``{selector: name}``)."""
+        spec = self._response_to_post
+        return dict(spec) if isinstance(spec, dict) else spec
 
     @property
     def system_prompts(self) -> dict[str, PromptConfig]:
@@ -594,9 +684,12 @@ class Agent(AtomicInvokable, ABC):
         conversation's context taken here -- the seed point; a later
         ``remember()`` is not visible to the task), the ``pre_inputs``/
         ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
-        ``started_at``. ``post_process`` writes bound response values into
-        ``task.context`` (replace-only); any other writer must check a
-        variable's ``readonly`` flag itself.
+        ``started_at``. ``inputs_to_context`` is applied to ``task.context``
+        right after the task is built (before ``_seed_task`` and
+        ``pre_process``): per-call only, since ``record`` writes back just the
+        names the conversation already holds. ``post_process`` writes bound
+        response values into ``task.context`` (replace-only); any other writer
+        must check a variable's ``readonly`` flag itself.
 
         The three views are slices of ``inputs`` by name -- views, not a
         partition: a name consumed by several buckets goes into each. Reserved
@@ -635,8 +728,24 @@ class Agent(AtomicInvokable, ABC):
             run_id=uuid4().hex,
             started_at=datetime.now(timezone.utc),
         )
+        self._write_inputs_to_context(task)
         self._seed_task(task)
         return task
+
+    def _write_inputs_to_context(self, task: AgentTask) -> None:
+        """Route caller inputs into ``task.context`` per ``inputs_to_context``.
+
+        1. ``None`` binding -> nothing.
+        2. Each source present in ``task.inputs`` (a defaulted one counts, since
+           ``filter_inputs`` already injected it) is written under its
+           destination; an absent source is skipped.
+        3. Writes go through ``_write_context`` with ``create=True``.
+        """
+        spec = self._inputs_to_context
+        if spec is None:
+            return
+        bound = {dest: task.inputs[src] for src, dest in spec.items() if src in task.inputs}
+        self._write_context(task, bound, create=True)
 
     def _seed_task(self, task: AgentTask) -> None:
         """Family-specific seeding of a freshly built task, in place.
@@ -864,66 +973,87 @@ class Agent(AtomicInvokable, ABC):
         )
 
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
-        """Slice the generated response per ``bind_response_to``.
+        """Slice the generated response per the two response routes.
 
-        1. ``None`` binding -> ``{}``. A ``str`` binds the whole response; a
-           mapping indexes each selector out of it (a missing key/index is
-           skipped, a present ``None`` is bound, other errors propagate; a
-           ``str``/``bytes`` response raises ``AgentInvocationError`` since it
-           would index characters).
-        2. Bound values named after post parameters overwrite those entries of
-           ``task.post_inputs``; other bound names are not added. With no post
-           stage nothing matches.
+        1. Both routes are sliced first (``_slice_response``), so a bad
+           response shape raises before anything runs or is written.
+        2. The ``response_to_post`` pieces overwrite those entries of
+           ``task.post_inputs`` (every destination is a post parameter, checked
+           at construction).
 
-        Returns the resolved values (a skipped selector has no entry), which
-        ``post_process`` hands to the context sink.
+        Returns the ``response_to_context`` pieces (a skipped selector has no
+        entry), which ``post_process`` hands to the context sink.
         """
-        spec = self._bind_response_to
+        post_bound = self._slice_response(task, self._response_to_post, "response_to_post")
+        context_bound = self._slice_response(
+            task, self._response_to_context, "response_to_context"
+        )
+        task.post_inputs.update(post_bound)
+        return context_bound
+
+    @staticmethod
+    def _slice_response(
+        task: AgentTask, spec: Optional[str | dict[Any, str]], route: str
+    ) -> dict[str, Any]:
+        """Resolve one response binding against ``task.generated_response``.
+
+        ``None`` -> ``{}``. A ``str`` binds the whole response; a mapping
+        indexes each selector out of it (a missing key/index is skipped, a
+        present ``None`` is bound, other errors propagate; a ``str``/``bytes``
+        response raises ``AgentInvocationError`` since it would index
+        characters).
+        """
         if spec is None:
             return {}
         response = task.generated_response
         if isinstance(spec, str):
-            bound = {spec: response}
-        else:
-            if isinstance(response, (str, bytes)):
-                raise AgentInvocationError(
-                    "bind_response_to selectors cannot index a str/bytes response; "
-                    "use the str form to bind the whole response."
-                )
-            bound = {}
-            for selector, destination in spec.items():
-                try:
-                    bound[destination] = response[selector]
-                except (KeyError, IndexError):
-                    continue
-        task.post_inputs.update({k: v for k, v in bound.items() if k in self._post_names})
+            return {spec: response}
+        if isinstance(response, (str, bytes)):
+            raise AgentInvocationError(
+                f"{route} selectors cannot index a str/bytes response; "
+                "use the str form to bind the whole response."
+            )
+        bound = {}
+        for selector, destination in spec.items():
+            try:
+                bound[destination] = response[selector]
+            except (KeyError, IndexError):
+                continue
         return bound
 
     @staticmethod
-    def _write_context(task: AgentTask, bound: Mapping[str, Any]) -> None:
-        """Context sink: replace the value of each bound name that already
-        exists, writable, in ``task.context``.
+    def _write_context(
+        task: AgentTask, bound: Mapping[str, Any], *, create: bool = False
+    ) -> None:
+        """Context sink: write each bound name into ``task.context``.
 
-        A readonly variable is skipped and an absent name is ignored (nothing
-        is created); description and flags are kept. Persisting beyond the call
-        is ``record``'s existing write-back. Per-call state, so no lock.
+        An existing writable variable has its value replaced (description and
+        flags kept); a readonly one is skipped. An absent name is created as a
+        plain ``ContextVariable`` (no description, render mode ``"s"``) when
+        ``create`` is set, else ignored (the replace-only response route).
+        Persisting beyond the call is ``record``'s existing write-back, which
+        covers only names the conversation already holds. Per-call state, so
+        no lock.
         """
         for name, value in bound.items():
             variable = task.context.get(name)
-            if variable is not None and not variable.readonly:
+            if variable is None:
+                if create:
+                    task.context[name] = ContextVariable(name=name, value=value)
+            elif not variable.readonly:
                 task.context[name] = replace(variable, value=value)
 
     def post_process(self, task: AgentTask) -> AgentResult:
         """Resolve response bindings, run ``post_invoke``, write the context
         sink, and build the result.
 
-        1. Slice ``task.generated_response`` per ``bind_response_to`` and, with a
-           post stage, overlay the pieces named after post parameters onto
+        1. Slice ``task.generated_response`` per ``response_to_post`` and
+           ``response_to_context`` and overlay the post pieces onto
            ``task.post_inputs`` (can raise before anything runs).
         2. With no post stage the response is the result; otherwise ``post_invoke``
            runs over ``task.post_inputs``.
-        3. Context sink: bound values replace existing writable ``task.context``
-           variables (``_write_context``).
+        3. Context sink: the ``response_to_context`` values replace existing
+           writable ``task.context`` variables (``_write_context``).
         4. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
         Errors from steps 1-2 propagate unchanged, before the sink and before
         ``record``, so nothing is written and the turn is not recorded.
@@ -1350,11 +1480,9 @@ class Agent(AtomicInvokable, ABC):
             },
             "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
-            "bind_response_to": (
-                dict(self._bind_response_to)
-                if isinstance(self._bind_response_to, dict)
-                else self._bind_response_to
-            ),
+            "inputs_to_context": self.inputs_to_context,
+            "response_to_context": self.response_to_context,
+            "response_to_post": self.response_to_post,
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,

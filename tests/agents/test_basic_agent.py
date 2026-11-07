@@ -580,7 +580,7 @@ class TestBasicAgentTaskBlock:
     def test_bound_response_appears_next_call(self) -> None:
         engine = FakeLLMEngine(responses=["first reply", "second reply"])
         agent = make_basic_agent(
-            engine=engine, record_enabled=True, bind_response_to="draft"
+            engine=engine, record_enabled=True, response_to_context="draft"
         )
         agent.get_conversation().remember("draft", "seed")
 

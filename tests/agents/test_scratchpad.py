@@ -643,7 +643,7 @@ class TestResultAndRecord:
         def shout(response: str) -> str:
             return response.upper()
 
-        agent = make_agent(["t1", "reply"], post_invoke=shout, bind_response_to="response")
+        agent = make_agent(["t1", "reply"], post_invoke=shout, response_to_post="response")
 
         result = agent.invoke({"prompt": "hi"})
 

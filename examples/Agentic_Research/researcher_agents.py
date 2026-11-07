@@ -44,7 +44,7 @@ writer = BasicAgent(
     ),
     pre_invoke=writer_pre,
     post_invoke=writer_post,
-    bind_response_to="result",
+    response_to_post="result",
     record_enabled=True,
 )
 
@@ -78,7 +78,7 @@ critic = BasicAgent(
     ),
     pre_invoke=critic_pre,
     post_invoke=critic_post,
-    bind_response_to="result",
+    response_to_post="result",
     record_enabled=False,
 )
 

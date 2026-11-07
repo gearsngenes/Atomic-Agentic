@@ -80,7 +80,7 @@ haiku_writer = BasicAgent(
     record_enabled=False,
     pre_invoke=haiku_pre,
     post_invoke=haiku_post,
-    bind_response_to="poem",
+    response_to_post="poem",
 )
 
 # ──────────────────────────  MATH SPECIALIST  ───────────────────────
@@ -105,7 +105,7 @@ math_specialist = ScriptActAgent(
     replanning_limit=1,
     pre_invoke=math_pre,
     post_invoke=math_post,
-    bind_response_to="answer",
+    response_to_post="answer",
 )
 math_specialist.register_tools(STAT_TOOLS)
 math_specialist.register_tools(EXPONENT_TOOLS)

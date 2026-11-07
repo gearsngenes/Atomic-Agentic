@@ -284,7 +284,7 @@ class TestToolAgentNamespace:
 
 
 # --------------------------------------------------------------------------- #
-# Base Agent post_invoke/bind_response_to routing, exercised through
+# Base Agent post_invoke/response_to_post routing, exercised through
 # PlanActAgent/ReActAgent with current wire-format scripted responses.
 # --------------------------------------------------------------------------- #
 class TestToolAgentPostInvokeRouting:
@@ -292,7 +292,7 @@ class TestToolAgentPostInvokeRouting:
         agent = make_planact_agent(
             [_scripted_plan(plan=[], return_value=5)],
             post_invoke=package_tool_result,
-            bind_response_to="result",
+            response_to_post="result",
         )
 
         result = agent.invoke({"prompt": "run plan", "label": "planact"})
@@ -304,7 +304,7 @@ class TestToolAgentPostInvokeRouting:
             [json.loads(react_step_json(call=RETURN_TOOL_NAME, arguments=[arg(RETURN_VALUE_FIELD, 7)]))],
             tool_calls_limit=1,
             post_invoke=package_tool_result,
-            bind_response_to="result",
+            response_to_post="result",
         )
 
         result = agent.invoke({"prompt": "run react", "label": "react"})

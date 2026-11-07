@@ -51,7 +51,7 @@ def make_planact_agent(
     regeneration_limit: int = 5,
     fail_fast: bool = True,
     post_invoke: Any = None,
-    bind_response_to: Any = None,
+    response_to_post: Any = None,
     tool_instructions: str | PromptConfig | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
@@ -64,7 +64,7 @@ def make_planact_agent(
         regeneration_limit=regeneration_limit,
         fail_fast=fail_fast,
         post_invoke=post_invoke,
-        bind_response_to=bind_response_to,
+        response_to_post=response_to_post,
         tool_instructions=tool_instructions,
     )
     register_math_tools(agent)
@@ -79,7 +79,7 @@ def make_react_agent(
     regeneration_limit: int = 5,
     fail_fast: bool = False,
     post_invoke: Any = None,
-    bind_response_to: Any = None,
+    response_to_post: Any = None,
     tool_instructions: str | PromptConfig | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
@@ -92,7 +92,7 @@ def make_react_agent(
         regeneration_limit=regeneration_limit,
         fail_fast=fail_fast,
         post_invoke=post_invoke,
-        bind_response_to=bind_response_to,
+        response_to_post=response_to_post,
         tool_instructions=tool_instructions,
     )
     register_math_tools(agent)

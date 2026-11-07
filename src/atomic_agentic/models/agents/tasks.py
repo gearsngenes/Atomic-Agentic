@@ -94,15 +94,17 @@ class AgentTask:
         Per-call working copy of the bound conversation's context, seeded by
         ``create_task`` (a shallow copy; the variables are shared frozen
         objects) and written back by ``record`` -- see its docstring for the
-        rules. ``post_process`` replaces the value of existing writable variables
-        from ``bind_response_to``; any other writer (subclass loop steps) must skip
+        rules. ``create_task`` replaces or creates variables from
+        ``inputs_to_context`` (a created one lives for this call only), and
+        ``post_process`` replaces the value of existing writable variables from
+        ``response_to_context``; any other writer (subclass loop steps) must skip
         or raise on a ``readonly`` variable itself. This dict is not guarded.
 
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
         agent-specific). A name consumed by more than one goes into every
         bucket that declares it. ``post_process`` then overlays the response
-        pieces bound by ``bind_response_to`` onto ``post_inputs`` (only names
+        pieces bound by ``response_to_post`` onto ``post_inputs`` (always names
         the post stage declares), so afterwards it is exactly what
         ``post_invoke`` received.
 
