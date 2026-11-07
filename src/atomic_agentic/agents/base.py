@@ -36,6 +36,7 @@ from ..constants.agents import (
     CONVERSATION_NAME_PATTERN,
     TASK_RESULT_PREFIX,
     PROMPT_PARAM,
+    RUNTIME_PARAM,
 )
 from ..utils.parameters import (
     semantically_identical,
@@ -80,7 +81,8 @@ class Agent(AtomicInvokable, ABC):
     The agent's parameter schema is composed at construction time from four
     flat sources:
 
-    - All ``pre_invoke`` parameters.
+    - All ``pre_invoke`` parameters (the built-in ``prompt`` parameter when
+      there is no ``pre_invoke``).
     - Post-only parameters not filled by a ``response_to_post`` destination
       (those leave the public signature unless pre_invoke/extra_parameters
       also declares them), preserving their original declared kind (no
@@ -88,28 +90,17 @@ class Agent(AtomicInvokable, ABC):
     - ``extra_parameters`` — a flat, subclass-computed source (e.g.
       ``BasicAgent`` passes its role-prompt placeholders as this agent's
       sole ``extra_parameters`` source).
-    - This (sub)class's reserved parameters (``get_reserved_parameters()``;
-      empty by default on base ``Agent``), grafted last.
+    - The runtime context parameter (``**runtime_context``), when
+      ``use_runtime_context`` is set at construction.
 
-    Reserved-name overlaps in pre_invoke/post_invoke/extra_parameters are
-    resolved first, independently per source (never against each other): a
-    declaration matching a reserved name exactly (``semantically_identical``)
-    is silently stripped — it is never forwarded to that source at invocation
-    time regardless of the match. Any other overlap raises ``AgentError``;
-    there is no warning tier on this axis, since a reserved declaration is
-    never negotiable. ``VAR_POSITIONAL``/``VAR_KEYWORD`` parameters are exempt
-    from this check entirely — a catch-all's bucket name colliding with a
-    reserved name is a naming coincidence, not the same slot.
-
-    The remaining pre_invoke/post-only/extra_parameters sources are then
-    reconciled together via one N-way compatibility report
+    The sources are reconciled together via one N-way compatibility report
     (``utils.parameters.build_parameter_reports``) rather than a pairwise
     fold: a name with no shared compatible type, or an incompatible kind,
     across the sources that declare it raises ``AgentError``; a
     compatible-but-not-identical overlap warns once per construction call,
     grouped across every such name — not one warning per name. The
     highest-priority declaring source (``pre_invoke`` > ``post_invoke`` >
-    ``extra_parameters``) supplies ``kind``/``default``/``description``
+    ``extra_parameters`` > runtime) supplies ``kind``/``default``/``description``
     together; the constructed ``type`` is the full witness set of compatible
     type tokens, not just the winning source's own declared type. An
     identical overlap is silent. Grafting uses ``insert_by_category`` so every
@@ -136,8 +127,23 @@ class Agent(AtomicInvokable, ABC):
       are per-call: only names the conversation already holds are written
       back by ``record``.
 
-    ``post_invoke=None`` means no post stage. ``**kwargs`` is rejected in
-    ``pre_invoke``/``post_invoke`` (``AgentError``).
+    ``post_invoke=None`` means no post stage.
+
+    Runtime context
+    ---------------
+    ``**runtime_context`` carries improvised per-call variables that have no
+    explicit conversation mapping. The parameter exists iff
+    ``use_runtime_context`` is set at construction or ``pre_invoke``/
+    ``post_invoke`` declares it; a declaration (or any parameter named
+    ``runtime_context``) must be semantically identical to ``RUNTIME_PARAM``,
+    knob on or off, and that is the only ``**kwargs`` allowed in pre/post
+    (anything else raises ``AgentError``). Pre/post receive the dict only if
+    they declare it. With ``use_runtime_context`` set, ``create_task``
+    flattens the dict into ``task.context`` by its own keys -- before
+    ``inputs_to_context``, so an explicit mapping wins a name clash --
+    replacing a writable variable, skipping a readonly one and creating an
+    absent one (per-call, like ``inputs_to_context``). Without the knob, a
+    parameter declared only by pre/post reaches just that declarer.
 
     ``record_enabled`` / ``records_window``
     ----------------------------------------
@@ -201,22 +207,6 @@ class Agent(AtomicInvokable, ABC):
     _CONTEXT_NAME_PREFIX: str = ""   # "$" for the sigil families (Pass 14b)
     _CONTEXT_FIRST: bool = True      # context block above the task block
 
-    @classmethod
-    def get_reserved_parameters(cls) -> list[ParamSpec]:
-        """Return this Agent (sub)class's framework-reserved parameters.
-
-        Base ``Agent`` reserves nothing by default. A subclass with its own
-        fixed/reserved parameter overrides this as
-        ``return [MY_RESERVED_PARAM] + super().get_reserved_parameters()``
-        -- prepended, not appended -- so the same collision/overlap/graft
-        machinery in ``__init__`` covers its reserved name too, without base
-        ``Agent`` needing advance knowledge of it, and so that each
-        subclass level's own reservation keeps sorting ahead of any
-        reservation declared further up its ancestry, no matter how many
-        levels deep the prepending goes.
-        """
-        return []
-
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
@@ -233,9 +223,12 @@ class Agent(AtomicInvokable, ABC):
         inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
         response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
     ) -> None:
+        if type(use_runtime_context) is not bool:
+            raise ValueError("use_runtime_context must be a bool.")
 
         # ── Pre-invoke ───────────────────────────────────────────────────────
         if pre_invoke is None:
@@ -267,25 +260,38 @@ class Agent(AtomicInvokable, ABC):
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
 
+        # ── Variadic keywords and the runtime name ───────────────────────────
+        # Independent of the knob: a **kwargs parameter must BE the runtime
+        # parameter (every name pre/post consume must be enumerable at
+        # construction), and any parameter NAMED runtime_context must be
+        # identical to it.
         for tool, label in ((pre_tool, "pre_invoke"), (post_tool, "post_invoke")):
             for p in () if tool is None else tool.parameters:
-                if p.kind == ParamSpec.VAR_KEYWORD:
+                if (
+                    p.kind == ParamSpec.VAR_KEYWORD or p.name == RUNTIME_PARAM.name
+                ) and not semantically_identical(p, RUNTIME_PARAM):
                     raise AgentError(
-                        f"Agent.{label} must not declare a **kwargs parameter "
-                        f"({p.name!r}); every name it consumes must be enumerable at "
-                        "construction. Wrap the callable to drop it."
+                        f"Agent.{label} parameter {p.name!r} (kind={p.kind!r}, "
+                        f"type={p.type!r}) must be identical to the runtime context "
+                        f"parameter (**{RUNTIME_PARAM.name}, type Any, no default or "
+                        "description): a **kwargs parameter is allowed only as that "
+                        "parameter, and that name is reserved for it. Wrap the "
+                        "callable to drop it."
                     )
 
-        # ── Reserved and extra parameters ────────────────────────────────────
-        reserved = self.get_reserved_parameters()
-        reserved_names = {p.name for p in reserved}
-
+        # ── Extra parameters ─────────────────────────────────────────────────
         extra_raw = to_paramspec_list(extra_parameters)
         for p in extra_raw:
             if p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
                 raise AgentError(
                     f"extra_parameters entry {p.name!r} must not be variadic; "
                     f"got kind {p.kind!r}."
+                )
+            if p.name == RUNTIME_PARAM.name:
+                raise AgentError(
+                    f"extra_parameters entry {p.name!r} is the runtime context "
+                    "parameter's name; extras cannot be variadic, so it can never "
+                    "match it."
                 )
 
         # ── Bindings ─────────────────────────────────────────────────────────
@@ -297,14 +303,12 @@ class Agent(AtomicInvokable, ABC):
         # compatible.
         post_params = list(post_tool.parameters) if post_tool is not None else []
         inputs_binding = self._normalize_binding(
-            inputs_to_context, reserved_names, route="inputs_to_context", allow_str=False
+            inputs_to_context, route="inputs_to_context", allow_str=False
         )
         context_binding = self._normalize_binding(
-            response_to_context, reserved_names, route="response_to_context"
+            response_to_context, route="response_to_context"
         )
-        post_binding = self._normalize_binding(
-            response_to_post, reserved_names, route="response_to_post"
-        )
+        post_binding = self._normalize_binding(response_to_post, route="response_to_post")
         bound_post = (
             set() if post_binding is None
             else {post_binding} if isinstance(post_binding, str)
@@ -316,6 +320,12 @@ class Agent(AtomicInvokable, ABC):
                 f"response_to_post destinations {sorted(not_post)} are not post_invoke "
                 "parameters (or there is no post_invoke)."
             )
+        if RUNTIME_PARAM.name in bound_post:
+            raise AgentError(
+                f"response_to_post cannot target {RUNTIME_PARAM.name!r}: it is the "
+                "caller's runtime context channel, not a post parameter the "
+                "response may fill."
+            )
         pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
         declared_elsewhere = {p.name for p in pre_declared} | {
             p.name for p in extra_raw
@@ -323,24 +333,21 @@ class Agent(AtomicInvokable, ABC):
         response_filled = bound_post - declared_elsewhere
 
         # ── Schema composition ───────────────────────────────────────────────
-        # Reserved overlaps are resolved per source, independently; the three
-        # sources are then reconciled N-way (pre_invoke > post_invoke >
-        # extra_parameters), raising on the first genuine conflict and warning
-        # once for compatible-but-not-identical names.
-        pre_params = self._strip_reserved_overlaps(
-            pre_declared, reserved, "pre_invoke"
-        )
-        post_only = self._strip_reserved_overlaps(
-            [p for p in post_params if p.name not in response_filled],
-            reserved,
-            "post_invoke",
-        )
-        extra_params = self._strip_reserved_overlaps(extra_raw, reserved, "extra_parameters")
-        reports = build_parameter_reports([pre_params, post_only, extra_params])
+        # The sources are reconciled N-way (pre_invoke > post_invoke >
+        # extra_parameters > runtime), raising on the first genuine conflict and
+        # warning once for compatible-but-not-identical names. Any runtime_context
+        # declaration reaching this point is already identical to RUNTIME_PARAM.
+        post_only = [p for p in post_params if p.name not in response_filled]
+        sources = [pre_declared, post_only, extra_raw]
+        labels = ["pre_invoke", "post_invoke", "extra_parameters"]
+        if use_runtime_context:
+            sources.append([RUNTIME_PARAM])
+            labels.append("use_runtime_context")
+        reports = build_parameter_reports(sources)
         constructed = apply_parameter_reports(
-            reports, ("pre_invoke", "post_invoke", "extra_parameters"), error_cls=AgentError, stacklevel=4
+            reports, tuple(labels), error_cls=AgentError, stacklevel=4
         )
-        agent_parameters = insert_by_category(insert_by_category([], constructed), reserved)
+        agent_parameters = insert_by_category([], constructed)
 
         # Input sources must be names the constructed agent accepts.
         if inputs_binding is not None:
@@ -361,9 +368,10 @@ class Agent(AtomicInvokable, ABC):
         self._inputs_to_context = inputs_binding  # None | dict[str, str]
         self._response_to_context = context_binding  # None | str | dict[Any, str]
         self._response_to_post = post_binding  # None | str | dict[Any, str]
-        self._pre_names = frozenset(p.name for p in pre_declared) - reserved_names
-        self._post_names = frozenset(p.name for p in post_params) - reserved_names
-        self._agentic_names = frozenset(reserved_names | {p.name for p in extra_params})
+        self._pre_names = frozenset(p.name for p in pre_declared)
+        self._post_names = frozenset(p.name for p in post_params)
+        self._agentic_names = frozenset(p.name for p in extra_raw)
+        self._use_runtime_context: bool = use_runtime_context
 
         # System prompt registry — subclasses populate after super().__init__.
         self._system_prompts: dict[str, PromptConfig] = {}
@@ -395,56 +403,8 @@ class Agent(AtomicInvokable, ABC):
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _strip_reserved_overlaps(
-        params: list[ParamSpec],
-        reserved: list[ParamSpec],
-        source_label: str,
-    ) -> list[ParamSpec]:
-        """Strip reserved-name overlaps from one source, independently.
-
-        Never compares this source's declarations to any other source's --
-        each of ``pre_invoke``/``post_invoke``/``extra_parameters`` is
-        checked only against the fixed reserved spec. ``VAR_POSITIONAL``/
-        ``VAR_KEYWORD`` params are exempt entirely, regardless of name -- a
-        catch-all's bucket name colliding with a reserved name is a naming
-        coincidence, not the same slot. For every other param whose name
-        matches a reserved name: ``semantically_identical`` -> stripped
-        silently (redundant, harmless declaration -- no warning); otherwise
-        -> raises ``AgentError`` immediately. There is no warning tier on
-        this axis -- a reserved declaration is never negotiable, it must
-        match exactly or be omitted.
-        """
-        reserved_by_name = {p.name: p for p in reserved}
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        stripped_names: set[str] = set()
-
-        for param in params:
-            if param.kind in variadic_kinds:
-                continue
-            reserved_spec = reserved_by_name.get(param.name)
-            if reserved_spec is None:
-                continue
-            if semantically_identical(param, reserved_spec):
-                stripped_names.add(param.name)
-            else:
-                raise AgentError(
-                    f"{source_label} declares {param.name!r} "
-                    f"(type={param.type!r}, kind={param.kind!r}, "
-                    f"default={param.default!r}, description={param.description!r}), "
-                    "which is not identical to the framework-reserved parameter of "
-                    f"the same name (type={reserved_spec.type!r}, "
-                    f"kind={reserved_spec.kind!r}, default={reserved_spec.default!r}, "
-                    f"description={reserved_spec.description!r}); reserved declarations "
-                    f"must match exactly or be omitted -- they are never forwarded to "
-                    f"{source_label} regardless of compatibility."
-                )
-
-        return [p for p in params if p.name not in stripped_names]
-
-    @staticmethod
     def _normalize_binding(
         value: Any,
-        reserved_names: set[str],
         *,
         route: str,
         allow_str: bool = True,
@@ -459,8 +419,7 @@ class Agent(AtomicInvokable, ABC):
         2. An empty collection/mapping normalizes to ``None``.
         3. Destinations are stripped of surrounding whitespace (as
            ``ContextVariable``/``ParamSpec`` names are), then each must be an
-           identifier string, must not start with ``TASK_RESULT_PREFIX``, and
-           must not be a reserved parameter name.
+           identifier string and must not start with ``TASK_RESULT_PREFIX``.
         4. Duplicate destinations within this route raise (checked before
            collapsing to a dict); the same name across routes is legal.
         5. ``inputs_to_context`` only: the selectors (sources) are stripped and
@@ -501,10 +460,10 @@ class Agent(AtomicInvokable, ABC):
                 raise AgentError(
                     f"{route} destination {n!r} must be a valid identifier string."
                 )
-            if n.startswith(TASK_RESULT_PREFIX) or n in reserved_names:
+            if n.startswith(TASK_RESULT_PREFIX):
                 raise AgentError(
-                    f"{route} destination {n!r} is reserved (a framework-reserved "
-                    f"parameter name or a {TASK_RESULT_PREFIX!r} name)."
+                    f"{route} destination {n!r} is reserved (a "
+                    f"{TASK_RESULT_PREFIX!r} name)."
                 )
         if len(set(names)) != len(names):
             raise AgentError(f"{route} has duplicate destinations.")
@@ -684,18 +643,20 @@ class Agent(AtomicInvokable, ABC):
         conversation's context taken here -- the seed point; a later
         ``remember()`` is not visible to the task), the ``pre_inputs``/
         ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
-        ``started_at``. ``inputs_to_context`` is applied to ``task.context``
-        right after the task is built (before ``_seed_task`` and
-        ``pre_process``): per-call only, since ``record`` writes back just the
-        names the conversation already holds. ``post_process`` writes bound
+        ``started_at``. Right after the task is built (before ``_seed_task``
+        and ``pre_process``) ``_seed_context`` writes the call's
+        ``runtime_context`` dict (when ``use_runtime_context`` is on) and
+        ``inputs_to_context`` into ``task.context``, the explicit mapping
+        winning a name clash: per-call only, since ``record`` writes back just
+        the names the conversation already holds. ``post_process`` writes bound
         response values into ``task.context`` (replace-only); any other writer
         must check a variable's ``readonly`` flag itself.
 
         The three views are slices of ``inputs`` by name -- views, not a
-        partition: a name consumed by several buckets goes into each. Reserved
-        names are excluded from pre/post. Post receives the caller inputs for
-        its declared parameters, with bound values overlaid by ``post_process``.
-        ``agentic_inputs`` holds the reserved parameters plus the
+        partition: a name consumed by several buckets goes into each. Post
+        receives the caller inputs for its declared parameters, with bound
+        values overlaid by ``post_process``; pre/post see ``runtime_context``
+        only if they declare it. ``agentic_inputs`` holds the
         ``extra_parameters``-sourced names
         (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
@@ -728,23 +689,42 @@ class Agent(AtomicInvokable, ABC):
             run_id=uuid4().hex,
             started_at=datetime.now(timezone.utc),
         )
-        self._write_inputs_to_context(task)
+        self._seed_context(task)
         self._seed_task(task)
         return task
 
-    def _write_inputs_to_context(self, task: AgentTask) -> None:
-        """Route caller inputs into ``task.context`` per ``inputs_to_context``.
+    def _seed_context(self, task: AgentTask) -> None:
+        """Seed ``task.context`` from the caller's values, once per call.
 
-        1. ``None`` binding -> nothing.
-        2. Each source present in ``task.inputs`` (a defaulted one counts, since
-           ``filter_inputs`` already injected it) is written under its
-           destination; an absent source is skipped.
-        3. Writes go through ``_write_context`` with ``create=True``.
+        1. With ``use_runtime_context``, the call's ``runtime_context`` dict
+           contributes its entries by their own keys; every key must be an
+           identifier string not starting with ``TASK_RESULT_PREFIX``, else
+           ``AgentInvocationError`` (before anything is written).
+        2. ``inputs_to_context`` then contributes each source present in
+           ``task.inputs`` (a defaulted one counts, since ``filter_inputs``
+           already injected it) under its destination; an absent source is
+           skipped. Merged after the runtime entries, so an explicit mapping
+           wins a name clash.
+        3. One ``_write_context`` with ``create=True``: a writable variable is
+           replaced, a readonly one skipped, an absent one created.
         """
-        spec = self._inputs_to_context
-        if spec is None:
-            return
-        bound = {dest: task.inputs[src] for src, dest in spec.items() if src in task.inputs}
+        bound: dict[str, Any] = {}
+        if self._use_runtime_context:
+            runtime = task.inputs[RUNTIME_PARAM.name]
+            for key in runtime:
+                if not (
+                    isinstance(key, str) and IDENTIFIER_PATTERN.fullmatch(key)
+                ) or key.startswith(TASK_RESULT_PREFIX):
+                    raise AgentInvocationError(
+                        f"{RUNTIME_PARAM.name} key {key!r} must be an identifier string "
+                        f"not starting with {TASK_RESULT_PREFIX!r}."
+                    )
+            bound.update(runtime)
+        if self._inputs_to_context is not None:
+            bound.update(
+                {dest: task.inputs[src] for src, dest in self._inputs_to_context.items()
+                 if src in task.inputs}
+            )
         self._write_context(task, bound, create=True)
 
     def _seed_task(self, task: AgentTask) -> None:
@@ -1483,6 +1463,7 @@ class Agent(AtomicInvokable, ABC):
             "inputs_to_context": self.inputs_to_context,
             "response_to_context": self.response_to_context,
             "response_to_post": self.response_to_post,
+            "use_runtime_context": self._use_runtime_context,
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,

@@ -61,6 +61,7 @@ class BasicAgent(Agent):
         inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
         response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
 
         response_schema: dict[str, Any] | None = None,
@@ -100,6 +101,7 @@ class BasicAgent(Agent):
             inputs_to_context=inputs_to_context,
             response_to_context=response_to_context,
             response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             extra_parameters=role_params,
             records_window=records_window,
 

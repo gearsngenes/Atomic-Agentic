@@ -138,6 +138,7 @@ class ToolAgent(Agent, ABC):
         inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
         response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
         response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         constants: Optional[list[Any]] = None,
@@ -161,7 +162,7 @@ class ToolAgent(Agent, ABC):
             Max dispatched calls allowed in a single concurrently-executed
             batch. ``None`` means unlimited (default).
         pre_invoke, post_invoke, inputs_to_context, response_to_context,
-            response_to_post, records_window
+            response_to_post, use_runtime_context, records_window
             Forwarded to ``Agent.__init__`` unchanged.
         tools : list | None
             Construction-time convenience: registered via ``register_tools()``
@@ -228,6 +229,7 @@ class ToolAgent(Agent, ABC):
             inputs_to_context=inputs_to_context,
             response_to_context=response_to_context,
             response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             records_window=records_window,
             extra_parameters=tool_instructions_params,
         )

@@ -97,21 +97,24 @@ STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
 }
 
 # =============================================================================
-# Agent framework-reserved parameters
+# Built-in agent parameters
 # =============================================================================
-# A subclass's own reserved ParamSpec constants (none currently) are defined
-# here so that the reserved-name reconciliation machinery in Agent.__init__ can
-# compare caller-declared params against the authoritative definition without
-# re-constructing it inline.
-
 # The built-in pre source: with no ``pre_invoke`` the caller's prompt is read
-# straight from this parameter. Not reserved -- it takes the pre_invoke slot in
-# schema composition and reconciles with post/extra declarations like any
-# pre_invoke parameter.
+# straight from this parameter. It takes the pre_invoke slot in schema
+# composition and reconciles with post/extra declarations like any pre_invoke
+# parameter.
 PROMPT_PARAM: ParamSpec = ParamSpec(
     name="prompt", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
     type=("str",),
     description="The prompt to send to the agent.",
+)
+
+# The per-invocation runtime-variables channel. ``description`` is None on
+# purpose: any declaration of this name must be ``semantically_identical`` to
+# this spec, and that comparison includes descriptions.
+RUNTIME_PARAM: ParamSpec = ParamSpec(
+    name="runtime_context", index=0, kind=ParamSpec.VAR_KEYWORD,
+    type=("Any",),
 )
 
 # RETURN_VALUE_FIELD is the kwargs key PlanActAgent uses for its
@@ -409,8 +412,9 @@ __all__ = [
     "REPLY_DIRECTIVE",
     "STOP_EARLY_PROMPT_SECTION",
     "STOP_EARLY_SCHEMA_TEMPLATE",
-    # Framework-reserved parameters
+    # Built-in agent parameters
     "PROMPT_PARAM",
+    "RUNTIME_PARAM",
     # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",
