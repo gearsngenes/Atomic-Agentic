@@ -370,6 +370,7 @@ class TestAgentTaskContextFields:
         assert task.user_prompt == ""
         assert task.conversation is None
         assert task.context == {}
+        assert task.changed_context == set()
         assert task.pre_inputs == {}
         assert task.post_inputs == {}
         assert task.agentic_inputs == {}
@@ -382,11 +383,13 @@ class TestAgentTaskContextFields:
         second = AgentTask(turns=[], inputs={}, system_prompt_name="role")
 
         first.context["x"] = ContextVariable(name="x", value=1)
+        first.changed_context.add("x")
         first.pre_inputs["a"] = 1
         first.post_inputs["b"] = 2
         first.agentic_inputs["c"] = 3
 
         assert second.context == {}
+        assert second.changed_context == set()
         assert second.pre_inputs == {}
         assert second.post_inputs == {}
         assert second.agentic_inputs == {}

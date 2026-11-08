@@ -46,6 +46,15 @@ class TestConversationContextConstruction:
         with pytest.raises(ValueError, match="must equal"):
             Conversation(context={"y": cv("x")})
 
+    def test_rejects_reserved_task_result_name(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            Conversation(context={"task_result_0": cv("task_result_0")})
+
+    def test_slice_keeps_working_with_clean_context(self) -> None:
+        conv = make_conv(x=cv("x"))
+
+        assert conv.slice().context["x"] is conv.context["x"]
+
     def test_equality_is_by_value_over_every_field(self) -> None:
         a = Conversation(context={"x": cv("x")})
         same = Conversation(context={"x": cv("x")})
@@ -76,6 +85,16 @@ class TestRemember:
         assert conv.context["x"].readonly is True
         with pytest.raises(ValueError):
             conv.remember("1bad", 1)
+
+    @pytest.mark.parametrize("key", ["task_result_0", " task_result_x "])
+    def test_reserved_task_result_name_raises_and_leaves_context(self, key: str) -> None:
+        conv = make_conv(x=cv("x"))
+        before = conv.context
+
+        with pytest.raises(ValueError, match="reserved"):
+            conv.remember(key, 1)
+
+        assert conv.context is before
 
     @pytest.mark.parametrize("readonly", [False, True])
     def test_existing_name_raises_and_leaves_context(self, readonly: bool) -> None:
@@ -184,6 +203,15 @@ class TestForget:
 
 
 class TestBulk:
+    def test_remember_many_reserved_name_is_atomic(self) -> None:
+        conv = make_conv(x=cv("x"))
+        before = conv.context
+
+        with pytest.raises(ValueError, match="reserved"):
+            conv.remember_many([cv("ok"), cv("task_result_1")])
+
+        assert conv.context is before
+
     def test_remember_many_adds_new_names(self) -> None:
         conv = make_conv(x=cv("x", 1))
 
@@ -479,26 +507,42 @@ class TestCommit:
 
         assert conv.context["x"].value == 2
 
-    def test_scratch_forgotten_and_readonly_keys_are_skipped(self) -> None:
-        conv = make_conv(ro=cv("ro", 1, readonly=True), keep=cv("keep", 1))
+    def test_absent_name_is_created_as_given(self) -> None:
+        conv = make_conv(keep=cv("keep", 1))
+        new = cv("new", 7, description="d", render_mode="r")
 
-        conv.commit(
-            rec(),
-            {"ro": cv("ro", 99), "scratch": cv("scratch"), "keep": cv("keep", 5)},
+        conv.commit(rec(), {"new": new})
+
+        assert conv.context["new"] is new
+        assert conv.context["keep"].value == 1
+
+    def test_readonly_is_skipped_and_held_writable_keeps_its_metadata(self) -> None:
+        conv = make_conv(
+            ro=cv("ro", 1, readonly=True), keep=cv("keep", 1, description="d", preview_limit=3)
         )
 
+        conv.commit(rec(), {"ro": cv("ro", 99), "keep": cv("keep", 5, description="x")})
+
         assert conv.context["ro"].value == 1
-        assert "scratch" not in conv.context
         assert conv.context["keep"].value == 5
+        assert conv.context["keep"].description == "d"
+        assert conv.context["keep"].preview_limit == 3
 
-    def test_key_forgotten_mid_call_is_not_resurrected(self) -> None:
-        conv = make_conv(x=cv("x", 1))
-        task_context = dict(conv.context)
-        conv.forget("x")
+    def test_only_passed_names_are_touched(self) -> None:
+        conv = make_conv(a=cv("a", 1), b=cv("b", 1))
 
-        conv.commit(rec(), task_context)
+        conv.commit(rec(), {"a": cv("a", 2)})
 
-        assert "x" not in conv.context
+        assert (conv.context["a"].value, conv.context["b"].value) == (2, 1)
+
+    def test_latest_writer_wins_and_held_name_is_not_recreated(self) -> None:
+        conv = Conversation()
+
+        conv.commit(rec("1"), {"x": cv("x", 1, description="first")})
+        conv.commit(rec("2"), {"x": cv("x", 2, description="second")})
+
+        assert conv.context["x"].value == 2
+        assert conv.context["x"].description == "first"
 
     def test_concurrent_commits_keep_every_record_and_child(self) -> None:
         conv = Conversation()

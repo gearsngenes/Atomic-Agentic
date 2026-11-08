@@ -1329,9 +1329,7 @@ class TestAgentSerialization:
         assert data["description"] == "Deterministic writer test agent."
         assert data["record_enabled"] is True
         assert data["records_window"] == 1
-        assert data["conversations"][agent.active_conversation] == [
-            turn.to_dict() for turn in agent.get_conversation().records
-        ]
+        assert "conversations" not in data
         assert "system_prompts" in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
@@ -2469,7 +2467,7 @@ class TestPostProcessAndRecord:
 class TestContextLifecycle:
     @staticmethod
     def _bump(task: AgentTask, key: str, value: Any) -> None:
-        task.context[key] = dataclasses.replace(task.context[key], value=value)
+        Agent._write_context(task, {key: value})
 
     def test_seed_is_a_distinct_equal_copy(self) -> None:
         agent = make_agent()
@@ -2522,10 +2520,11 @@ class TestContextLifecycle:
         assert ctx["k"].value == 1 and ctx["m"].value == 2
         assert len(agent.get_conversation().records) == 1
 
-    def test_key_forgotten_mid_call_is_not_resurrected(self) -> None:
+    def test_undeclared_key_forgotten_mid_call_is_not_resurrected(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.get_conversation().remember("k", 1)
         task, _ = _run_until_post(agent, _INPUTS)
+        self._bump(task, "k", 2)
         agent.get_conversation().forget("k")
 
         agent.record(task)
@@ -2535,11 +2534,46 @@ class TestContextLifecycle:
     def test_scratch_key_is_dropped(self) -> None:
         agent = make_agent(record_enabled=True)
         task, _ = _run_until_post(agent, _INPUTS)
-        task.context["new"] = ContextVariable(name="new", value=1)
+        Agent._write_context(task, {"new": 1}, create=True)
 
         agent.record(task)
 
+        assert "new" in task.changed_context
         assert "new" not in agent.get_conversation().context
+
+    def test_unwritten_name_never_overwrites_a_newer_value(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.get_conversation().remember("k", 1)
+        task, _ = _run_until_post(agent, _INPUTS)
+        agent.get_conversation().update("k", 5)  # another writer, mid-call
+
+        agent.record(task)
+
+        assert agent.get_conversation().context["k"].value == 5
+
+    def test_latest_writer_wins(self) -> None:
+        agent = make_agent(record_enabled=True)
+        agent.get_conversation().remember("k", 1)
+        first, _ = _run_until_post(agent, _INPUTS)
+        second, _ = _run_until_post(agent, _INPUTS)
+        self._bump(first, "k", 2)
+        self._bump(second, "k", 3)
+
+        agent.record(first)
+        agent.record(second)
+
+        assert agent.get_conversation().context["k"].value == 3
+
+    def test_changed_context_starts_empty_and_tracks_writes(self) -> None:
+        agent = make_agent()
+        agent.get_conversation().remember("k", 1)
+        agent.get_conversation().remember("ro", 1, readonly=True)
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+        assert task.changed_context == set()
+
+        Agent._write_context(task, {"k": 2, "ro": 9, "absent": 3})
+
+        assert task.changed_context == {"k"}
 
     def test_write_back_targets_the_bound_conversation(self) -> None:
         agent = make_agent(record_enabled=True)
@@ -2585,6 +2619,7 @@ class TestContextLifecycle:
         task.context["k"] = dataclasses.replace(
             task.context["k"], value=2, description="x", readonly=True
         )
+        task.changed_context.add("k")
 
         agent.record(task)
 
@@ -2653,6 +2688,17 @@ def _names(agent: Agent) -> list[str]:
 class TestBindingConstruction:
     """Grammar and checks, exercised through response_to_context (which has no
     post-parameter requirement)."""
+
+    def test_context_destinations_union_both_routes(self) -> None:
+        agent = make_agent(
+            inputs_to_context={"topic": "ask"}, response_to_context={"a": "x", 0: "y"}
+        )
+
+        assert agent._context_destinations == frozenset({"ask", "x", "y"})
+
+    @pytest.mark.parametrize("value, expected", [("n", {"n"}), (None, set())])
+    def test_context_destinations_str_and_none(self, value: Any, expected: set) -> None:
+        assert make_agent(response_to_context=value)._context_destinations == expected
 
     @pytest.mark.parametrize(
         "value, expected",
@@ -3171,14 +3217,59 @@ class TestContextSink:
         assert task.context["resp"].value == "old"
         assert result.result == "new"
 
-    def test_absent_name_is_ignored_and_nothing_is_created(self) -> None:
+    def test_absent_name_is_created_and_persisted(self) -> None:
         agent = make_value_agent("new", response_to_context="notes", record_enabled=True)
 
         task, _ = self._run(agent)
         agent.record(task)
 
-        assert "notes" not in task.context
+        assert task.context["notes"].value == "new"
+        stored = agent.get_conversation().context["notes"]
+        assert (stored.value, stored.description, stored.readonly) == ("new", None, False)
+
+    def test_created_name_with_record_disabled_is_not_persisted(self) -> None:
+        agent = make_value_agent("new", response_to_context="notes", record_enabled=False)
+
+        agent.invoke({"prompt": "p"})
+
         assert "notes" not in agent.get_conversation().context
+
+    def test_declared_name_forgotten_mid_call_is_recreated(self) -> None:
+        agent = make_value_agent("new", response_to_context="notes", record_enabled=True)
+        agent.get_conversation().remember("notes", "old", "d")
+        task, _ = self._run(agent)
+        agent.get_conversation().forget("notes")
+
+        agent.record(task)
+
+        stored = agent.get_conversation().context["notes"]
+        assert (stored.value, stored.description) == ("new", "d")
+
+    def test_skipped_selector_creates_nothing(self) -> None:
+        agent = make_value_agent(
+            {"a": 1}, response_to_context={"a": "x", "missing": "w"}, record_enabled=True
+        )
+
+        agent.invoke({"prompt": "p"})
+
+        context = agent.get_conversation().context
+        assert context["x"].value == 1
+        assert "w" not in context
+
+    def test_created_name_persists_across_calls(self) -> None:
+        agent = make_value_agent("new", response_to_context="notes", record_enabled=True)
+
+        agent.invoke({"prompt": "p"})
+        task = agent.create_task(agent.filter_inputs({"prompt": "p"}))
+
+        assert task.context["notes"].value == "new"
+
+    def test_async_creates_and_persists(self) -> None:
+        agent = make_value_agent("new", response_to_context="notes", record_enabled=True)
+
+        asyncio.run(agent.async_invoke({"prompt": "p"}))
+
+        assert agent.get_conversation().context["notes"].value == "new"
 
     def test_no_binding_writes_nothing(self) -> None:
         agent = make_value_agent("new", response_to_context=None)
@@ -3383,7 +3474,7 @@ class TestInputsToContext:
 
         assert seen[0] is not None and seen[0].value == "hello"
 
-    def test_created_variable_is_per_call_but_existing_one_persists(self) -> None:
+    def test_declared_destinations_persist_created_or_existing(self) -> None:
         def pre(prompt: str, other: str = "x") -> str:
             return prompt
 
@@ -3398,7 +3489,7 @@ class TestInputsToContext:
         agent.invoke({"prompt": "hello", "other": "kept"})
 
         context = agent.get_conversation().context
-        assert "ask" not in context
+        assert context["ask"].value == "hello"
         assert context["notes"].value == "kept"
 
     def test_record_disabled_persists_nothing(self) -> None:
@@ -3489,7 +3580,7 @@ class TestRuntimeContext:
         with pytest.raises(AgentInvocationError, match="runtime_context key"):
             self._create(agent, {"prompt": "p", "runtime_context": {1: "x"}})
 
-    def test_existing_variable_persists_through_record_but_created_one_does_not(self) -> None:
+    def test_existing_variable_persists_but_undeclared_created_one_does_not(self) -> None:
         agent = make_value_agent("r", use_runtime_context=True, record_enabled=True)
         agent.get_conversation().remember("w", "old")
 

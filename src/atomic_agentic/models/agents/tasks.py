@@ -93,14 +93,20 @@ class AgentTask:
     context : dict[str, ContextVariable]
         Per-call working copy of the bound conversation's context, seeded by
         ``create_task`` (a shallow copy; the variables are shared frozen
-        objects) and written back by ``record`` -- see its docstring for the
-        rules. ``create_task`` replaces or creates variables from the call's
-        ``runtime_context`` dict (when the agent's ``use_runtime_context`` is
-        on) and then from ``inputs_to_context`` (a created one lives for this
-        call only), and
-        ``post_process`` replaces the value of existing writable variables from
-        ``response_to_context``; any other writer (subclass loop steps) must skip
-        or raise on a ``readonly`` variable itself. This dict is not guarded.
+        objects). ``Agent._write_context`` is its only writer: ``create_task``
+        replaces or creates variables from the call's ``runtime_context`` dict
+        (when the agent's ``use_runtime_context`` is on) and then from
+        ``inputs_to_context``, and ``post_process`` replaces or creates
+        variables from ``response_to_context``. Any other writer (subclass loop
+        steps) must call ``_write_context``, or skip or raise on a ``readonly``
+        variable itself. This dict is not guarded. Persistence beyond the call
+        is ``record``'s: see ``changed_context``.
+
+    changed_context : set[str]
+        Names ``_write_context`` wrote during this call (created or replaced).
+        ``record`` offers only these to the conversation, so a name the call
+        never wrote is never persisted and never overwrites a newer value.
+        Empty until a write happens.
 
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
@@ -128,6 +134,7 @@ class AgentTask:
 
     conversation: str | None = None
     context: dict[str, ContextVariable] = field(default_factory=dict)
+    changed_context: set[str] = field(default_factory=set)
     pre_inputs: dict[str, Any] = field(default_factory=dict)
     post_inputs: dict[str, Any] = field(default_factory=dict)
     agentic_inputs: dict[str, Any] = field(default_factory=dict)

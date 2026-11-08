@@ -6,7 +6,8 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from ...constants.agents import RENDER_MODES
+from ...constants.agents import RENDER_MODES, TASK_RESULT_PREFIX
+from ...utils.core import is_reserved_name
 from .context import ContextVariable
 from .records import AgentRecord
 
@@ -55,7 +56,10 @@ class Conversation:
         a new view, so a previously obtained view never changes. Constructor
         input is copied, never aliased; the frozen ``ContextVariable``
         objects are shared and stored values are shared by reference, like
-        reference-copied records.
+        reference-copied records. A name starting with ``task_result_`` is
+        reserved and rejected at construction, ``remember`` and
+        ``remember_many``; ``commit`` creates the absent names its caller
+        passes.
     response_preview_limit, prompt_preview_limit, context_preview_limit:
         Character budgets applied when history responses, history prompts and
         context-variable values are rendered into a prompt. ``None`` is
@@ -117,6 +121,11 @@ class Conversation:
                     f"Conversation.context key {key!r} must equal its "
                     f"variable's name {variable.name!r}."
                 )
+            if is_reserved_name(key):
+                raise ValueError(
+                    f"Conversation.context key {key!r} is reserved (a "
+                    f"{TASK_RESULT_PREFIX!r} name)."
+                )
         self._swap(dict(self.context))
 
     def _swap(self, new: dict[str, ContextVariable]) -> None:
@@ -145,6 +154,11 @@ class Conversation:
             render_mode=render_mode,
             preview_limit=preview_limit,
         )
+        if is_reserved_name(variable.name):
+            raise ValueError(
+                f"Context variable {variable.name!r} is reserved (a "
+                f"{TASK_RESULT_PREFIX!r} name)."
+            )
         with self._lock:
             if variable.name in self.context:
                 raise ValueError(f"Context variable {variable.name!r} already exists.")
@@ -198,6 +212,11 @@ class Conversation:
                     raise TypeError(
                         f"remember_many expects ContextVariable items, got {type(variable)!r}."
                     )
+                if is_reserved_name(variable.name):
+                    raise ValueError(
+                        f"Context variable {variable.name!r} is reserved (a "
+                        f"{TASK_RESULT_PREFIX!r} name)."
+                    )
                 if variable.name in seen:
                     raise ValueError(f"Duplicate context variable name {variable.name!r}.")
                 if variable.name in self.context:
@@ -246,13 +265,17 @@ class Conversation:
 
         1. Append ``record`` to ``records``.
         2. Append it to ``record.prev.children`` when ``prev`` is set.
-        3. Context write-back, in one swap: for every name in ``task_context``
-           that is in ``self.context`` and not ``readonly`` there, the VALUE
-           is replaced (description and flags are kept). Scratch keys, keys
-           forgotten mid-call and readonly destinations are skipped silently;
-           every eligible key is written, changed or not.
+        3. Context write-back, in one swap, over every name in ``task_context``
+           (the caller passes only the variables the call changed): a name
+           absent from ``self.context`` is created as given; a held,
+           non-``readonly`` name has its VALUE replaced (description, flags and
+           limits are kept); a held ``readonly`` name is skipped silently.
+        4. Latest writer wins: step 3 decides against ``self.context`` as it
+           is under the lock, so two calls committing the same name resolve to
+           the later commit's value.
 
-        No type validation; ``record_enabled`` is the caller's concern.
+        No type or prefix validation (the caller's filter keeps reserved names
+        out); ``record_enabled`` is the caller's concern.
         """
         with self._lock:
             self.records.append(record)
@@ -263,8 +286,11 @@ class Conversation:
             self._swap({
                 **current,
                 **{
-                    name: replace(current[name], value=variable.value)
+                    name: (
+                        variable if name not in current
+                        else replace(current[name], value=variable.value)
+                    )
                     for name, variable in task_context.items()
-                    if name in current and not current[name].readonly
+                    if name not in current or not current[name].readonly
                 },
             })

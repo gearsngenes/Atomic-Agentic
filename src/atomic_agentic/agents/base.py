@@ -38,6 +38,7 @@ from ..constants.agents import (
     PROMPT_PARAM,
     RUNTIME_PARAM,
 )
+from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
     insert_by_category,
@@ -117,15 +118,19 @@ class Agent(AtomicInvokable, ABC):
 
     - ``response_to_post``: fills ``post_invoke`` parameters (every
       destination must be one); nothing reaches the post stage by default.
-    - ``response_to_context``: replaces existing writable context variables
-      after the post stage (an absent name is ignored until Pass 13).
+    - ``response_to_context``: after the post stage, replaces a writable
+      context variable, skips a readonly one, or creates an absent one (no
+      description, render mode ``"s"``).
     - ``inputs_to_context``: a collection of input names or an
       ``{input: name}`` dict. At ``create_task`` -- after input filtering,
       before ``pre_invoke`` -- each present input (a defaulted one counts)
       replaces a writable context variable, skips a readonly one, or creates
-      an absent one (no description, render mode ``"s"``). Created variables
-      are per-call: only names the conversation already holds are written
-      back by ``record``.
+      an absent one, the same way.
+
+    Both context routes name *declared destinations*. ``record`` persists a
+    declared destination the call changed -- creating it in the conversation
+    if absent -- and writes back any other changed variable only if the
+    conversation still holds it. See ``record``.
 
     ``post_invoke=None`` means no post stage.
 
@@ -142,8 +147,10 @@ class Agent(AtomicInvokable, ABC):
     flattens the dict into ``task.context`` by its own keys -- before
     ``inputs_to_context``, so an explicit mapping wins a name clash --
     replacing a writable variable, skipping a readonly one and creating an
-    absent one (per-call, like ``inputs_to_context``). Without the knob, a
-    parameter declared only by pre/post reaches just that declarer.
+    absent one. A key that is not a declared destination is per-call: it
+    persists only by replacing a variable the conversation already holds.
+    Without the knob, a parameter declared only by pre/post reaches just that
+    declarer.
 
     ``record_enabled`` / ``records_window``
     ----------------------------------------
@@ -368,6 +375,13 @@ class Agent(AtomicInvokable, ABC):
         self._inputs_to_context = inputs_binding  # None | dict[str, str]
         self._response_to_context = context_binding  # None | str | dict[Any, str]
         self._response_to_post = post_binding  # None | str | dict[Any, str]
+        # Declared destinations: the only names record() may create in a conversation.
+        destinations = set(inputs_binding.values()) if inputs_binding else set()
+        if isinstance(context_binding, str):
+            destinations.add(context_binding)
+        elif context_binding:
+            destinations.update(context_binding.values())
+        self._context_destinations: frozenset[str] = frozenset(destinations)
         self._pre_names = frozenset(p.name for p in pre_declared)
         self._post_names = frozenset(p.name for p in post_params)
         self._agentic_names = frozenset(p.name for p in extra_raw)
@@ -460,7 +474,7 @@ class Agent(AtomicInvokable, ABC):
                 raise AgentError(
                     f"{route} destination {n!r} must be a valid identifier string."
                 )
-            if n.startswith(TASK_RESULT_PREFIX):
+            if is_reserved_name(n):
                 raise AgentError(
                     f"{route} destination {n!r} is reserved (a "
                     f"{TASK_RESULT_PREFIX!r} name)."
@@ -647,10 +661,10 @@ class Agent(AtomicInvokable, ABC):
         and ``pre_process``) ``_seed_context`` writes the call's
         ``runtime_context`` dict (when ``use_runtime_context`` is on) and
         ``inputs_to_context`` into ``task.context``, the explicit mapping
-        winning a name clash: per-call only, since ``record`` writes back just
-        the names the conversation already holds. ``post_process`` writes bound
-        response values into ``task.context`` (replace-only); any other writer
-        must check a variable's ``readonly`` flag itself.
+        winning a name clash: a created variable persists only if it is a
+        declared destination (``record`` decides). ``post_process`` writes bound
+        response values into ``task.context`` the same way (create or replace);
+        any other writer must go through ``_write_context``.
 
         The three views are slices of ``inputs`` by name -- views, not a
         partition: a name consumed by several buckets goes into each. Post
@@ -714,7 +728,7 @@ class Agent(AtomicInvokable, ABC):
             for key in runtime:
                 if not (
                     isinstance(key, str) and IDENTIFIER_PATTERN.fullmatch(key)
-                ) or key.startswith(TASK_RESULT_PREFIX):
+                ) or is_reserved_name(key):
                     raise AgentInvocationError(
                         f"{RUNTIME_PARAM.name} key {key!r} must be an identifier string "
                         f"not starting with {TASK_RESULT_PREFIX!r}."
@@ -1010,18 +1024,20 @@ class Agent(AtomicInvokable, ABC):
         An existing writable variable has its value replaced (description and
         flags kept); a readonly one is skipped. An absent name is created as a
         plain ``ContextVariable`` (no description, render mode ``"s"``) when
-        ``create`` is set, else ignored (the replace-only response route).
-        Persisting beyond the call is ``record``'s existing write-back, which
-        covers only names the conversation already holds. Per-call state, so
-        no lock.
+        ``create`` is set, else ignored. Every name written is added to
+        ``task.changed_context``, which is what ``record`` offers the
+        conversation: every writer into ``task.context`` must come through
+        here, or its write is not persisted. Per-call state, so no lock.
         """
         for name, value in bound.items():
             variable = task.context.get(name)
             if variable is None:
                 if create:
                     task.context[name] = ContextVariable(name=name, value=value)
+                    task.changed_context.add(name)
             elif not variable.readonly:
                 task.context[name] = replace(variable, value=value)
+                task.changed_context.add(name)
 
     def post_process(self, task: AgentTask) -> AgentResult:
         """Resolve response bindings, run ``post_invoke``, write the context
@@ -1032,8 +1048,8 @@ class Agent(AtomicInvokable, ABC):
            ``task.post_inputs`` (can raise before anything runs).
         2. With no post stage the response is the result; otherwise ``post_invoke``
            runs over ``task.post_inputs``.
-        3. Context sink: the ``response_to_context`` values replace existing
-           writable ``task.context`` variables (``_write_context``).
+        3. Context sink: the ``response_to_context`` values create or replace
+           ``task.context`` variables (``_write_context``, readonly skipped).
         4. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
         Errors from steps 1-2 propagate unchanged, before the sink and before
         ``record``, so nothing is written and the turn is not recorded.
@@ -1044,7 +1060,7 @@ class Agent(AtomicInvokable, ABC):
             result = task.generated_response
         else:
             result = self._post_invoke.invoke(task.post_inputs).result
-        self._write_context(task, bound)
+        self._write_context(task, bound, create=True)
         task.ended_at = datetime.now(timezone.utc)
         return self.build_result_from_task(task, result)
 
@@ -1056,7 +1072,7 @@ class Agent(AtomicInvokable, ABC):
             result = task.generated_response
         else:
             result = (await self._post_invoke.async_invoke(task.post_inputs)).result
-        self._write_context(task, bound)
+        self._write_context(task, bound, create=True)
         task.ended_at = datetime.now(timezone.utc)
         return self.build_result_from_task(task, result)
 
@@ -1137,6 +1153,16 @@ class Agent(AtomicInvokable, ABC):
         write-back rules. There is no implicit forking: branching happens only
         through explicit ``import_conversation``.
 
+        Context write-back offers ``commit`` only the variables this call
+        changed (``task.changed_context``), and only those that are a declared
+        destination (``inputs_to_context`` / ``response_to_context``) or that
+        the conversation still holds. So a declared name is created (or
+        re-created if forgotten mid-call: the call's output wins), while a
+        runtime-only key, a scratch name or a non-declared name forgotten
+        mid-call is dropped. The held-name check reads ``conv.context``
+        without its lock (an atomically swapped immutable view); a held name
+        forgotten before the commit is created by it (latest writer wins).
+
         ``prev`` is "the last turn this call read" (``task.turns[-1]``) and is
         provenance only: turn selection never uses it. ``children`` is
         likewise provenance, shared by every conversation that contains a
@@ -1150,7 +1176,12 @@ class Agent(AtomicInvokable, ABC):
 
         with self._invoke_lock:
             conv = self._conversations[task.conversation]
-        conv.commit(record, task.context)
+        changed = {
+            name: task.context[name]
+            for name in task.changed_context
+            if name in self._context_destinations or name in conv.context
+        }
+        conv.commit(record, changed)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -1450,8 +1481,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
         """Return a minimal diagnostic snapshot of this agent."""
-        with self._invoke_lock:
-            conversations = dict(self._conversations)
         d = super().to_dict()
         d.update({
             "system_prompts": {
@@ -1467,8 +1496,5 @@ class Agent(AtomicInvokable, ABC):
             "llm": self._llm_engine.to_dict(),
             "record_enabled": self.record_enabled,
             "records_window": self.records_window,
-            "conversations": {
-                key: [r.to_dict() for r in conv.records]
-                for key, conv in conversations.items()},
         })
         return d

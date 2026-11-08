@@ -10,17 +10,18 @@ Both agents are ``BasicAgent`` instances, so ``import_conversation`` can
 register the writer's Conversation object under the reviewer's key (a share,
 not a copy). Consequences shown below:
 
-  * The reviewer "reads" the draft through the shared HISTORY: the writer's
-    turns are replayed into the reviewer's prompt, and vice versa for the
-    critique. (Context variables are not rendered into prompts yet -- a later
-    pass -- so that is how the agents inform each other today.)
+  * The agents inform each other two ways: through the shared HISTORY (each
+    agent's turns are replayed into the other's prompt) and through the shared
+    CONTEXT (the current ``draft``, ``verdict`` and ``critique`` appear in each
+    agent's task block).
   * Each agent's response lands in its own context variable via
     ``response_to_context``, so after every call the caller can read the latest
     draft, critique and verdict separately from the conversation.
   * Each record carries the ``agent_id`` of the agent that wrote it.
 
-A bound name only writes to an EXISTING, writable variable (nothing is
-created), so the variables are ``remember``-ed up front.
+A bound name is a declared destination: if the conversation lacks it, the call
+creates it, and it persists. The variables are still ``remember``-ed up front
+here only to give them descriptions (a created variable has none).
 """
 from __future__ import annotations
 
