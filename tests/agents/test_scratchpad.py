@@ -13,10 +13,6 @@ from atomic_agentic.agents.scratchpad import ScratchpadAgent
 from atomic_agentic.constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
-    THINKING_INSTRUCTIONS_END,
-    THINKING_INSTRUCTIONS_START,
-    THOUGHTS_END,
-    THOUGHTS_START,
 )
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -24,6 +20,11 @@ from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ScratchpadTask
 from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResult
 
+
+THINKING_INSTRUCTIONS_START = "==== USER-DEFINED THINKING INSTRUCTIONS [START] ===="
+THINKING_INSTRUCTIONS_END = "==== USER-DEFINED THINKING INSTRUCTIONS [END] ===="
+THOUGHTS_START = "==== THOUGHTS [START] ===="
+THOUGHTS_END = "==== THOUGHTS [END] ===="
 
 ROLE = "You are a careful assistant."
 THINK = "Think hard."

@@ -17,8 +17,6 @@ from .thinking import ThinkingAgent
 from ..constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
-    THINKING_INSTRUCTIONS_END,
-    THINKING_INSTRUCTIONS_START,
 )
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
@@ -27,6 +25,7 @@ from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
 from ..models.parameters import ParamSpec
 from ..utils.agents import normalize_prompt_config
+from ..utils.rendering import frame_content
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
@@ -288,8 +287,9 @@ class ScratchpadAgent(ThinkingAgent):
             return messages
         body = messages[0]["content"]
         content = (
-            f"{THINKING_INSTRUCTIONS_START}\n{body}\n{THINKING_INSTRUCTIONS_END}"
-            f"\n\n{STOP_EARLY_PROMPT_SECTION}"
+            frame_content(body, "USER-DEFINED THINKING INSTRUCTIONS")
+            + "\n\n"
+            + STOP_EARLY_PROMPT_SECTION
         )
         return [{"role": "system", "content": content}]
 

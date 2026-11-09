@@ -6,24 +6,20 @@ from collections.abc import Mapping
 from pprint import pformat
 from typing import Any
 
-from ..constants.agents import (
-    CONTEXT_END,
-    CONTEXT_PREAMBLE,
-    CONTEXT_START,
-    TASK_PROMPT_END,
-    TASK_PROMPT_START,
-    THOUGHTS_END,
-    THOUGHTS_START,
-)
+from ..constants.agents import CONTEXT_PREAMBLE, FRAME_SUBJECTS
 from ..models.agents.context import ContextVariable
 
 __all__ = [
     "stringify_value",
     "elide_markers",
+    "frame_content",
     "render_context_entries",
     "render_task_block",
-    "render_thoughts_block",
 ]
+
+_FRAME_MARKER = re.compile(
+    r"==== (?:" + "|".join(re.escape(s) for s in FRAME_SUBJECTS) + r") \[(?:START|END)\] ===="
+)
 
 
 def stringify_value(
@@ -75,23 +71,31 @@ def stringify_value(
 
 
 def elide_markers(text: str) -> str:
-    """Replace every exact occurrence of a framing marker with a placeholder.
+    """Replace every framing marker of a listed subject with ``[marker elided]``.
 
-    1. For each framing marker in (CONTEXT_START, CONTEXT_END,
-       TASK_PROMPT_START, TASK_PROMPT_END, THOUGHTS_START, THOUGHTS_END),
-       replace every exact occurrence with ``[marker elided]``.
-    2. Return the text.
+    1. ``return _FRAME_MARKER.sub("[marker elided]", text)``
 
-    Structural protection only: a variant with different spacing or case
-    passes through untouched.
+    Structural protection only, and only for ``FRAME_SUBJECTS``: a marker with an
+    unlisted subject, or a variant with different spacing or case, passes through
+    untouched.
     """
-    for marker in (
-        CONTEXT_START, CONTEXT_END,
-        TASK_PROMPT_START, TASK_PROMPT_END,
-        THOUGHTS_START, THOUGHTS_END,
-    ):
-        text = text.replace(marker, "[marker elided]")
-    return text
+    return _FRAME_MARKER.sub("[marker elided]", text)
+
+
+def frame_content(body: str, subject: str) -> str:
+    """Wrap ``body`` in a labeled frame.
+
+    1. ``body = elide_markers(body)`` (forged markers of any listed subject)
+    2. Return ``==== {subject} [START] ====``, the body and
+       ``==== {subject} [END] ====``, each on its own line.
+
+    ``subject`` must be one of ``FRAME_SUBJECTS`` (a frame whose subject is not
+    listed would not have its forged markers elided). No runtime guard: every
+    call site's forged-marker behavior is covered by tests. Pure wrap: no
+    truncation or formatting. An empty body yields the two markers with an empty
+    line between them. The caller decides whether to call it at all.
+    """
+    return f"==== {subject} [START] ====\n{elide_markers(body)}\n==== {subject} [END] ===="
 
 
 def render_context_entries(
@@ -161,30 +165,15 @@ def render_task_block(
     *,
     context_first: bool,
 ) -> str:
-    """Wrap ``prompt`` in the task markers and join the context block to it.
+    """Wrap ``prompt`` in the task frame and join the context frame to it.
 
-    The task block is always present. The context block (markers, preamble,
-    entries) is present only when ``entries_text`` is non-empty; its entries
-    arrive already elided from ``render_context_entries``, so only the prompt
-    is elided here.
+    The task frame is always present. The context frame (preamble and entries)
+    is present only when ``entries_text`` is non-empty. ``frame_content`` elides
+    forged markers in both bodies; the entries were already elided field by
+    field in ``render_context_entries``, and elision is idempotent.
     """
-    task = f"{TASK_PROMPT_START}\n{elide_markers(prompt)}\n{TASK_PROMPT_END}"
+    task = frame_content(prompt, "USER TASK PROMPT")
     if not entries_text:
         return task
-    context = f"{CONTEXT_START}\n{CONTEXT_PREAMBLE}\n\n{entries_text}\n{CONTEXT_END}"
+    context = frame_content(f"{CONTEXT_PREAMBLE}\n\n{entries_text}", "RUNTIME CONTEXT")
     return f"{context}\n\n{task}" if context_first else f"{task}\n\n{context}"
-
-
-def render_thoughts_block(body: str) -> str:
-    """Wrap ``body`` in the thoughts markers.
-
-    1. Elide forged framing markers in ``body`` (``elide_markers``).
-    2. Return ``THOUGHTS_START``, the body and ``THOUGHTS_END``, each on its own
-       line.
-
-    Pure wrap: no truncation, no formatting of the body. The caller decides
-    whether to call it at all (the agent omits the block when there are no
-    thoughts). An empty body yields the two markers with an empty line between
-    them.
-    """
-    return f"{THOUGHTS_START}\n{elide_markers(body)}\n{THOUGHTS_END}"

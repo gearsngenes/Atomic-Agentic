@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.constants.agents import TASK_PROMPT_END, TASK_PROMPT_START
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results.structured import StructuredResult
@@ -19,6 +18,8 @@ from ..fake_engines import FakeLLMEngine, echo_latest_user
 pytestmark = [pytest.mark.integration]
 
 ROLE_PROMPT = "You are a deterministic integration-test writer."
+TASK_PROMPT_START = "==== USER TASK PROMPT [START] ===="
+TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
 
 
 def wrap(prompt: str) -> str:

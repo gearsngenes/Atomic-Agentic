@@ -17,7 +17,7 @@ from ..constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
 from ..models.agents.records import ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.results.agents import ThinkingAgentResult
-from ..utils.rendering import render_thoughts_block, stringify_value
+from ..utils.rendering import frame_content, stringify_value
 
 
 class ThinkingAgent(BasicAgent):
@@ -182,7 +182,7 @@ class ThinkingAgent(BasicAgent):
 
         1. ``block = self._render_task_block(task)``
         2. thoughts present: user ``block``, one assistant message holding
-           ``render_thoughts_block(self._render_thoughts(task))``, user directive
+           ``frame_content(self._render_thoughts(task), "THOUGHTS")``, user directive
         3. no thoughts, reply phase: user ``block`` alone
         4. no thoughts, thinking phase: user ``block``, a blank line, directive
         5. ``task.task_messages = <the list>``; return that same list object
@@ -190,7 +190,7 @@ class ThinkingAgent(BasicAgent):
         block = self._render_task_block(task)
         replying = task.system_prompt_name == "role"
         if task.thoughts:
-            body = render_thoughts_block(self._render_thoughts(task))
+            body = frame_content(self._render_thoughts(task), "THOUGHTS")
             messages = [
                 {"role": "user", "content": block},
                 {"role": "assistant", "content": body},

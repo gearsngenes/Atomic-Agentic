@@ -7,10 +7,9 @@ import atomic_agentic.constants.agents as agent_constants
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
-    CONTEXT_END,
-    CONTEXT_START,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
+    FRAME_SUBJECTS,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
     PY_BUILTIN_ALIAS,
@@ -20,14 +19,8 @@ from atomic_agentic.constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
     SUB_NAME_PREFIX,
-    TASK_PROMPT_END,
-    TASK_PROMPT_START,
     TASK_RESULT_PREFIX,
     THINKING_DIRECTIVE,
-    THINKING_INSTRUCTIONS_END,
-    THINKING_INSTRUCTIONS_START,
-    THOUGHTS_END,
-    THOUGHTS_START,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
@@ -95,44 +88,37 @@ class TestUnsupportedExprLabels:
             assert isinstance(label, str) and label.strip()
 
 
-class TestThoughtsMarkers:
-    def test_values(self) -> None:
-        assert THOUGHTS_START == "==== THOUGHTS [START] ===="
-        assert THOUGHTS_END == "==== THOUGHTS [END] ===="
-
-    def test_framed_with_equals_runs(self) -> None:
-        for marker in (THOUGHTS_START, THOUGHTS_END):
-            assert marker.startswith("====")
-            assert marker.endswith("====")
-
-    def test_distinct_from_other_framing_markers(self) -> None:
-        markers = (CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END, THOUGHTS_START, THOUGHTS_END)
-
-        assert len(set(markers)) == len(markers)
-
-    def test_exported(self) -> None:
-        assert "THOUGHTS_START" in agent_constants.__all__
-        assert "THOUGHTS_END" in agent_constants.__all__
-
-
-class TestThinkingInstructionsMarkers:
-    def test_values(self) -> None:
-        assert THINKING_INSTRUCTIONS_START == "==== USER-DEFINED THINKING INSTRUCTIONS [START] ===="
-        assert THINKING_INSTRUCTIONS_END == "==== USER-DEFINED THINKING INSTRUCTIONS [END] ===="
-
-    def test_distinct_from_other_framing_markers(self) -> None:
-        markers = (
-            CONTEXT_START, CONTEXT_END, TASK_PROMPT_START, TASK_PROMPT_END,
-            THOUGHTS_START, THOUGHTS_END,
-            THINKING_INSTRUCTIONS_START, THINKING_INSTRUCTIONS_END,
+class TestFrameSubjects:
+    def test_values_and_order(self) -> None:
+        assert FRAME_SUBJECTS == (
+            "RUNTIME CONTEXT",
+            "USER TASK PROMPT",
+            "THOUGHTS",
+            "STEPS",
+            "USER-DEFINED INSTRUCTIONS",
+            "USER-DEFINED THINKING INSTRUCTIONS",
         )
 
-        assert len(set(markers)) == len(markers)
+    def test_is_a_tuple_of_unique_uppercase_single_line_strings(self) -> None:
+        assert isinstance(FRAME_SUBJECTS, tuple)
+        assert len(set(FRAME_SUBJECTS)) == len(FRAME_SUBJECTS)
+        for subject in FRAME_SUBJECTS:
+            assert isinstance(subject, str)
+            assert subject == subject.upper()
+            assert subject.strip() == subject and "\n" not in subject
+
+    def test_removed_marker_constants_are_gone(self) -> None:
+        for name in (
+            "CONTEXT_START", "CONTEXT_END", "TASK_PROMPT_START", "TASK_PROMPT_END",
+            "THOUGHTS_START", "THOUGHTS_END",
+            "THINKING_INSTRUCTIONS_START", "THINKING_INSTRUCTIONS_END",
+        ):
+            assert not hasattr(agent_constants, name)
+            assert name not in agent_constants.__all__
 
     def test_exported(self) -> None:
         for name in (
-            "THINKING_INSTRUCTIONS_START",
-            "THINKING_INSTRUCTIONS_END",
+            "FRAME_SUBJECTS",
             "STOP_EARLY_PROMPT_SECTION",
             "STOP_EARLY_SCHEMA_TEMPLATE",
             "THINKING_DIRECTIVE",
@@ -175,6 +161,14 @@ class TestDirectives:
     def test_are_distinct_non_empty_strings(self) -> None:
         assert THINKING_DIRECTIVE.strip() and REPLY_DIRECTIVE.strip()
         assert THINKING_DIRECTIVE != REPLY_DIRECTIVE
+
+    def test_name_only_listed_frame_subjects(self) -> None:
+        # The directives refer to frames by subject; keep text, call sites and
+        # FRAME_SUBJECTS in sync.
+        for directive in (THINKING_DIRECTIVE, REPLY_DIRECTIVE):
+            for subject in ("USER TASK PROMPT", "THOUGHTS"):
+                assert subject in directive
+                assert subject in FRAME_SUBJECTS
 
 
 class TestThinkingRoundsParamRemoved:

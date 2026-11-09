@@ -7,15 +7,7 @@ import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
-from atomic_agentic.constants.agents import (
-    CONTEXT_START,
-    REPLY_DIRECTIVE,
-    TASK_PROMPT_END,
-    TASK_PROMPT_START,
-    THINKING_DIRECTIVE,
-    THOUGHTS_END,
-    THOUGHTS_START,
-)
+from atomic_agentic.constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import LLMRecord, ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask
@@ -24,6 +16,13 @@ from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResul
 from .conftest import FakeLLMEngine, StubThinker, make_stub_thinker
 
 HOOKS = ("_thinking_done", "_generate_thoughts", "_agenerate_thoughts")
+CONTEXT_START = "==== RUNTIME CONTEXT [START] ===="
+TASK_PROMPT_START = "==== USER TASK PROMPT [START] ===="
+TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
+THOUGHTS_START = "==== THOUGHTS [START] ===="
+THOUGHTS_END = "==== THOUGHTS [END] ===="
+
+
 def wrap(prompt: str) -> str:
     return f"{TASK_PROMPT_START}\n{prompt}\n{TASK_PROMPT_END}"
 

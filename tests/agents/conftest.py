@@ -7,9 +7,10 @@ import json
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
+from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import LLMRecord
-from atomic_agentic.models.agents.tasks import ThinkingTask
+from atomic_agentic.models.agents.tasks import ThinkingTask, ToolAgentTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from ..fake_engines import FakeLLMEngine
 
@@ -234,3 +235,65 @@ def make_stub_thinker(
         done_after=done_after,
         **kwargs,
     )
+
+
+class StubToolAgent(ToolAgent):
+    """Test-only concrete ToolAgent: no engine call, completes in ``act`` with
+    the response ``"done"``. ``steps_text``/``directive_text`` feed the two
+    frame hooks; a test may reassign them between renders."""
+
+    _INITIAL_PROMPT_NAME = "stub"
+    _TASK_CLS = ToolAgentTask
+
+    def __init__(
+        self,
+        *,
+        steps_text: str = "",
+        directive_text: str = "Proceed.",
+        prompt: str = "You are a stub.\n{TOOLS}\n",
+        **kwargs: Any,
+    ) -> None:
+        self.steps_text = steps_text
+        self.directive_text = directive_text
+        super().__init__(**kwargs)
+        self._system_prompts["stub"] = PromptConfig(template=prompt, description="Stub prompt")
+
+    def think(self, task):
+        return task
+
+    async def async_think(self, task):
+        return task
+
+    def prepare(self, task):
+        return task
+
+    async def async_prepare(self, task):
+        return task
+
+    def act(self, task):
+        task.generated_response = "done"
+        task.complete = True
+        return task
+
+    async def async_act(self, task):
+        return self.act(task)
+
+    def _render_steps(self, task) -> str:
+        return self.steps_text
+
+    def _render_directive(self, task) -> str:
+        return self.directive_text
+
+
+def make_stub_tool_agent(**overrides: Any) -> StubToolAgent:
+    """name="tests", namespace="tests", engine=FakeLLMEngine([]); any keyword
+    (``record_enabled``, ``tools``, ``instructions``, ``steps_text``, ...)
+    overrides or extends the defaults."""
+    kwargs: dict[str, Any] = {
+        "name": "tests",
+        "namespace": "tests",
+        "description": "StubToolAgent under test.",
+        "llm_engine": FakeLLMEngine([]),
+    }
+    kwargs.update(overrides)
+    return StubToolAgent(**kwargs)

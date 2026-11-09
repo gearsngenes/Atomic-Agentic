@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.models.agents.tasks import (
     AgentTask,
     ToolAgentTask,
@@ -14,7 +13,6 @@ from atomic_agentic.models.agents.tasks import (
 )
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.context import ContextVariable
-from ...fake_engines import FakeLLMEngine
 
 
 class TestAgentTask:
@@ -85,8 +83,8 @@ class TestToolAgentTask:
 
         assert task.completed == []
         assert task.failed_statements == []
-        assert task.cache == {}
-        assert task.constant_values == {}
+        assert not hasattr(task, "cache")
+        assert not hasattr(task, "constant_values")
         assert task.regenerations_used == 0
         assert task.tool_calls_used == 0
 
@@ -100,7 +98,7 @@ class TestToolAgentTask:
         # The pre-toolstatement-unification blackboard model (running_
         # blackboard/executed_steps/prepared_steps/valid_cache_indices/
         # failed_cache_indices/retries_used) was fully retired --
-        # completed/failed_statements/cache/constant_values replace it.
+        # completed/failed_statements plus task.context replace it.
         task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
 
         assert not hasattr(task, "running_blackboard")
@@ -122,14 +120,10 @@ class TestToolAgentTask:
         second = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
 
         first.completed.append("marker")  # type: ignore[arg-type]
-        first.cache["x"] = 1
-        first.constant_values["K_X"] = 1
         first.failed_statements.append("marker")  # type: ignore[arg-type]
         first.task_messages.append({"role": "user", "content": "hi"})
 
         assert second.completed == []
-        assert second.cache == {}
-        assert second.constant_values == {}
         assert second.failed_statements == []
         assert second.task_messages == []
 
@@ -145,6 +139,8 @@ class TestPlanActTask:
 
         assert task.pending == []
         assert task.resolved_args == []
+        assert not hasattr(task, "cache")
+        assert not hasattr(task, "constant_values")
 
     def test_no_batch_counter_field(self) -> None:
         # A single compile_batches call per invoke needs no cross-round
@@ -167,6 +163,8 @@ class TestReActTask:
         assert task.generated_step is None
         assert task.resolved_args is None
         assert task.last_call_failed is False
+        assert not hasattr(task, "cache")
+        assert not hasattr(task, "constant_values")
 
     def test_generated_step_holds_a_tool_statement(self) -> None:
         from atomic_agentic.models.agents.blackboard_models import ToolStatement
@@ -286,8 +284,8 @@ class TestScriptActAgentTask:
         # Inherited from ToolAgentTask, not redeclared here.
         assert task.completed == []
         assert task.failed_statements == []
-        assert task.cache == {}
-        assert task.constant_values == {}
+        assert not hasattr(task, "cache")
+        assert not hasattr(task, "constant_values")
         assert task.regenerations_used == 0
         assert task.tool_calls_used == 0
 
@@ -306,14 +304,10 @@ class TestScriptActAgentTask:
         second = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
 
         first.completed.append("marker")  # type: ignore[arg-type]
-        first.cache["x"] = 1
-        first.constant_values["K_X"] = 1
         first.failed_statements.append("marker")  # type: ignore[arg-type]
         first.pending.append(["marker"])  # type: ignore[list-item]
 
         assert second.completed == []
-        assert second.cache == {}
-        assert second.constant_values == {}
         assert second.failed_statements == []
         assert second.pending == []
 
@@ -323,44 +317,6 @@ class TestScriptActAgentTask:
         task.needs_repair = True
 
         assert task.needs_repair is True
-
-
-class TestScriptActAgentTaskConstantValuesSeeding:
-    """
-    Integration-level: constant_values is populated by
-    ScriptActAgent.create_task, not by bare ScriptActAgentTask
-    construction. Cross-invocation/cross-round mutation-persistence
-    behavior belongs to tests/agents/test_script.py's
-    TestScriptActAgentMutationSafety -- these cases stay focused on the
-    field itself getting populated correctly.
-    """
-
-    def test_constant_values_populated_with_the_right_keys_and_values(self) -> None:
-        agent = ScriptActAgent(
-            name="tests", namespace="tests", description="test",
-            llm_engine=FakeLLMEngine(responses=[]),
-        )
-        agent.register_constant([1, 2, 3], alias="mylist")
-
-        task = agent.create_task({})
-
-        task.user_prompt = "test"
-        constant_name = agent.get_constant("mylist").name
-        assert task.constant_values == {constant_name: [1, 2, 3]}
-
-    def test_mutable_constant_value_is_a_deep_copy_not_the_live_object(self) -> None:
-        original = [1, 2, 3]
-        agent = ScriptActAgent(
-            name="tests", namespace="tests", description="test",
-            llm_engine=FakeLLMEngine(responses=[]),
-        )
-        agent.register_constant(original, alias="mylist")
-
-        task = agent.create_task({})
-
-        task.user_prompt = "test"
-        constant_name = agent.get_constant("mylist").name
-        assert task.constant_values[constant_name] is not original
 
 
 class TestAgentTaskContextFields:

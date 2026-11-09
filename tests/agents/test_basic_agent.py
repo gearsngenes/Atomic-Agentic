@@ -6,17 +6,16 @@ import pytest
 import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.constants.agents import (
-    CONTEXT_END,
-    CONTEXT_START,
-    TASK_PROMPT_END,
-    TASK_PROMPT_START,
-)
 from atomic_agentic.exceptions import AgentError
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.parameters import ParamSpec
 from ..fake_engines import FakeLLMEngine, echo_latest_user
+
+CONTEXT_START = "==== RUNTIME CONTEXT [START] ===="
+CONTEXT_END = "==== RUNTIME CONTEXT [END] ===="
+TASK_PROMPT_START = "==== USER TASK PROMPT [START] ===="
+TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
 
 
 def make_basic_agent(

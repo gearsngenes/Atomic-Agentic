@@ -161,25 +161,19 @@ class ToolAgentTask(AgentTask):
         Every call whose dispatch (or, for ``ScriptActAgent``, resolution)
         actually failed this run, in the order observed.
 
-    cache : dict[str, Any]
-        identifier -> resolved value for every call in ``completed``, plus
-        ``task_result_i`` entries seeded once by ``_seed_task``.
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated once by each concrete
-        agent's own ``_seed_task`` and never touched again.
-
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
         call this run -- irreducible; a rejected/regenerated draft leaves
         no artifact anywhere else to derive this from (contrast
         ``tool_calls_used``, fully derivable from ``completed``/
         ``failed_statements``).
+
+    Result bindings and referenceable prior results live in ``task.context``
+    (``task_result_i`` entries seeded by ``ToolAgent._seed_task``; run-local
+    bindings written through ``Agent._write_context``), not on this task.
     """
     completed: list[ToolStatement] = field(default_factory=list)
     failed_statements: list[ToolStatement] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
 
     @property
