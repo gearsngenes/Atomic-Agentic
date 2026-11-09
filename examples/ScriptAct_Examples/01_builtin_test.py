@@ -3,7 +3,8 @@
 Basic decomposition test -- originally mirrored PlanAct_Examples/
 01_prebuilt_tools_test.py (registering EXPONENT_TOOLS/BASIC_MATH_TOOLS/
 CONSOLE_TOOLS), renamed and repurposed once Python builtin calls landed
-(Pass 5.5): no tool lists are registered at all now -- only a PI constant.
+(Pass 5.5): no tool lists are registered at all now -- only a readonly PI
+context variable.
 The whole three-part math task below is solvable via bare arithmetic
 (power/sqrt via `**`) plus builtins (`print`) alone, testing that the
 builtin-support grammar path genuinely replaces what those tool lists used
@@ -41,9 +42,11 @@ agent = ScriptActAgent(
 # No tool lists registered -- the task below is solvable via bare
 # arithmetic and Python builtins alone (see module docstring).
 
-# Register the pi constant (value first, alias second -- ScriptActAgent's
-# register_constant signature is the reverse of v1 ToolAgent's).
-agent.register_constant(math.pi, alias="PI", description="Hardcodes the math constant to 3.14...")
+# pi as a readonly context variable: the model sees it in its context block and
+# can use it by name, but a script cannot reassign it.
+agent.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True
+)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """

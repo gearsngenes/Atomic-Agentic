@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
@@ -15,6 +15,7 @@ from ..constants.agents import (
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
 )
+from ..core.Invokable import AtomicInvokable
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import ToolStatement
 from .agents import (
@@ -24,16 +25,15 @@ from .agents import (
     reject_unsupported_forms,
     strip_code_fence,
 )
-from .rendering import stringify_value
 
 __all__ = [
     "parse_statement_to_slots",
     "parse_generation",
     "rewrite_builtin_calls",
     "validate_references",
+    "check_call_bindings",
     "render_completed_as_python",
     "render_failed_as_python",
-    "render_cache_snapshot",
 ]
 # compile_batches, is_dispatched, and resolve_statement_args live in
 # utils/agents.py, shared with agents/planact.py and agents/react.py --
@@ -442,31 +442,31 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     continuation -- both use this same grammar; there is no separate
     "continuation mode") into a flat slot sequence.
 
-    No pause marker of any kind exists anymore -- the entire generation is
-    always parsed, statement by statement, with two special any-position
-    cases: a bare string-literal statement (a reasoning note -- inert,
-    never stored or dispatched, legal anywhere, not just first; genuinely
-    valid Python this grammar has no other use for, so there is nothing to
-    validate beyond "it's a string"), and an ``ast.If`` node, which now
-    **always** raises, feeding regen-repair -- conditionals are permanently
-    forbidden in this grammar with no silent-truncation tolerance left for
-    them (there is no longer a second terminal, model-authored continuation,
-    for a truncation to hand off to).
+    The entire generation is parsed statement by statement, with two special
+    any-position cases: a bare string-literal statement (a reasoning note --
+    inert, never stored or dispatched, legal anywhere), and an ``ast.If``
+    node, which always produces an error -- conditionals are permanently
+    forbidden in this grammar.
 
-    A ``return`` terminates immediately (whatever follows it, if anything,
-    is never even parsed) -- a later real call must never land in the same
+    A ``return`` terminates immediately (whatever follows it is never
+    parsed or compiled) -- a later real call must never land in the same
     batch as the return and execute anyway, and a second ``return`` must
     never silently overwrite the first.
 
+    Per-statement errors are collected, not fail-fast: one
+    ``BlackboardParseError`` carries every error, one per line, as
+    ``line N: ...`` (line numbers relative to the code after fence removal).
+    A genuine ``ast.parse`` syntax error is fatal and reported alone. When no
+    statement error was found, the consumed statements are compiled inside a
+    function body as a final gate, catching what the statement-level checks
+    cannot (a duplicate keyword argument, assignment to ``__debug__``);
+    skipping the gate otherwise keeps a statement-level message from being
+    shadowed by the compiler's wording.
+
     Falling off the end of the generation with neither a ``return`` nor an
-    ``ast.If`` simply means the plan is done as written -- the caller
+    error simply means the plan is done as written -- the caller
     (``ScriptActAgent._finalize_without_continuation``) infers ``None`` if
     nothing was ever returned.
-
-    Returns the flat slot sequence (no longer a 2-tuple -- there is no
-    continuation signal left to report). Raises ``BlackboardParseError`` on
-    any structural failure (propagated from ``parse_statement_to_slots``, a
-    genuine ``ast.parse`` syntax error, or a conditional statement).
     """
     text = strip_code_fence(raw_text)
 
@@ -481,7 +481,12 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     except SyntaxError as e:
         raise BlackboardParseError(str(e)) from e
 
+    errors: list[str] = []
+    consumed: list[ast.stmt] = []
+
     for node in tree.body:
+        consumed.append(node)
+
         if (
             isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Constant)
@@ -490,19 +495,35 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
             continue
 
         if isinstance(node, ast.If):
-            raise BlackboardParseError(
-                "conditional statements are not permitted in this grammar "
-                "-- compute both branches' own work directly, or "
-                "restructure without a conditional."
+            errors.append(
+                f"line {node.lineno}: conditional statements are not permitted "
+                "in this grammar -- compute both branches' own work directly, "
+                "or restructure without a conditional."
             )
+            continue
 
-        stmt_source = ast.unparse(node)
-        slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
+        try:
+            slots = parse_statement_to_slots(ast.unparse(node), start_index=hoist_index)
+        except BlackboardParseError as e:
+            errors.append(f"line {node.lineno}: {e}")
+            continue
+
         flat_slots.extend(slots)
         hoist_index += len(slots)
 
         if slots and slots[-1].tool == RETURN_ALIAS:
-            return flat_slots
+            break
+
+    if not errors:
+        shell = ast.parse("def _script():\n    pass")
+        shell.body[0].body = consumed
+        try:
+            compile(shell, "<generation>", "exec")
+        except SyntaxError as e:
+            errors.append(f"line {e.lineno}: {e.msg}")
+
+    if errors:
+        raise BlackboardParseError("\n".join(errors))
 
     return flat_slots
 
@@ -555,8 +576,8 @@ def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
 def validate_references(
     slots: list[ToolStatement],
     known_tools: frozenset[str],
-    known_constants: frozenset[str],
-    known_history: frozenset[str],
+    context_names: frozenset[str],
+    readonly_names: frozenset[str],
     tool_calls_limit: Optional[int],
 ) -> list[str]:
     """
@@ -569,29 +590,22 @@ def validate_references(
     already reported that case with a specific message -- this generic
     check must not double-report it); every still-unresolved
     (``ast.expr``-typed) dependency in its ``args`` must already be bound
-    by an earlier slot in this same walk, a registered tool id, a
-    registered constant, or a name in ``known_history`` (a prior
-    invocation's ``task_result_N`` result -- checked identically to a
-    registered constant: always externally known, never introduced
-    mid-walk). An assignment target (``slot.identifier`` not ``None``) that
-    names a registered constant is also rejected here -- constants are
-    reserved, read-only bindings, the same protection ``task_result_*``/
-    ``_SUB_*`` prefixes already get via ``parse_statement_to_slots``'s own
-    LHS check (that check is prefix-based and registry-free by design; this
-    one needs ``known_constants``, so it lives here instead). Comprehensive,
-    not fail-fast: every unresolvable reference across the whole sequence is
-    collected and returned, never just the first (cheaper than discovering
-    one issue per regeneration round when a real tool call could have spent
-    budget in between).
+    by an earlier slot in this same walk or be a name in ``context_names``
+    (every variable in ``task.context``: conversation, runtime, input-bound,
+    earlier-round bindings, ``task_result_N``), and must not be a registered
+    tool id. An assignment target (``slot.identifier`` not ``None``) that
+    names a read-only context variable (``readonly_names``) or a registered
+    tool id is rejected; a writable context name is allowed (it updates the
+    variable). Comprehensive, not fail-fast: every unresolvable reference
+    across the whole sequence is collected and returned, never just the
+    first.
 
     Separately, independent of the per-slot walk: if ``tool_calls_limit``
     is not ``None`` and the count of dispatched slots (registered tool
     calls and approved-builtin calls combined, via ``is_dispatched``;
     ``rhs_assign``/``return`` excluded, hoisted calls included) exceeds it,
     that's also collected as an issue -- one regen-repair round can report
-    both a bad reference and an excess call count together. Tools and
-    builtins are counted identically; there is no separate budget or
-    exemption for either category.
+    both a bad reference and an excess call count together.
 
     Returns ``[]`` if every reference resolves and the plan is within
     budget.
@@ -613,31 +627,26 @@ def validate_references(
             if name in known_tools:
                 # A registered tool id is never a resolvable value -- only
                 # reachable here since attr_call made a bare tool name into
-                # a legal object expression (`sometool.attr()`). Previously
-                # unreachable (a tool name never appeared as a bare Name in
-                # args/kwargs before that mechanism existed), so this was
-                # dead permissiveness, not a real allowance to preserve.
+                # a legal object expression (`sometool.attr()`).
                 issues.append(
                     f"statement producing {label} references {name!r}, a "
                     "registered tool id, as a value -- a tool cannot be used "
                     "as an argument or as the object of an attribute/method "
                     "call; call it directly instead."
                 )
-            elif (
-                name not in bound
-                and name not in known_constants
-                and name not in known_history
-            ):
+            elif name not in bound and name not in context_names:
                 issues.append(
                     f"statement producing {label} references undefined name {name!r}."
                 )
 
         if slot.identifier is not None:
-            if slot.identifier in known_constants:
+            if slot.identifier in readonly_names:
                 issues.append(
-                    f"statement assigns to {slot.identifier!r}, a registered "
-                    "constant's name; constants are read-only and cannot be "
-                    "reassigned."
+                    f"statement assigns to {slot.identifier!r}, a read-only context variable."
+                )
+            elif slot.identifier in known_tools:
+                issues.append(
+                    f"statement assigns to {slot.identifier!r}, a registered tool id."
                 )
             bound.add(slot.identifier)
 
@@ -648,6 +657,43 @@ def validate_references(
             f"exceeding the configured limit of {tool_calls_limit}."
         )
 
+    return issues
+
+
+def check_call_bindings(
+    slots: list[ToolStatement],
+    toolbox: Mapping[str, AtomicInvokable],
+) -> list[str]:
+    """
+    Dry bind: catch argument-shape mistakes at plan time. For each slot whose
+    ``tool`` is a registered tool id (sentinel, builtin and attribute-call
+    slots are skipped), bind placeholder values through the tool's
+    ``_args_kwargs_to_dict`` and report a ``TypeError`` (too many positionals,
+    unknown keyword, duplicate argument) as an issue.
+
+    A slot with a ``*`` unpack or a ``**`` unpack is skipped (arity unknown).
+    No values are evaluated and nothing is dispatched. A missing required
+    argument is not reported (binding does not check it); it still surfaces
+    at invoke time. Returns ``[]`` when every checked call binds.
+    """
+    issues: list[str] = []
+    for slot in slots:
+        if slot.tool not in toolbox:
+            continue
+        if KWARGS_UNPACK_KEY in slot.kwargs or any(
+            isinstance(arg, ast.Starred) for arg in slot.args
+        ):
+            continue
+        try:
+            toolbox[slot.tool]._args_kwargs_to_dict(
+                *([None] * len(slot.args)), **{key: None for key in slot.kwargs}
+            )
+        except TypeError as e:
+            label = slot.identifier if slot.identifier is not None else "(unassigned)"
+            issues.append(
+                f"statement producing {label} calls {slot.tool!r} with arguments "
+                f"that do not fit its signature: {e}"
+            )
     return issues
 
 
@@ -674,9 +720,8 @@ def render_completed_as_python(
 
     No per-slot result preview or ``await`` echo -- both judged noise
     cluttering the reconstructed code itself. A caller needing actual
-    resolved values (a continuation round genuinely needs this -- see
-    ``render_cache_snapshot``) renders them as a separate block instead of
-    interleaving them per line. A ``return`` slot is never expected here
+    resolved values reads them from the context block instead of having
+    them interleaved per line. A ``return`` slot is never expected here
     (it always ends the invoke, so no continuation is ever rendered
     afterward) but is handled defensively rather than crashing. Returns
     the joined lines, or ``""`` for an empty ``completed``.
@@ -714,56 +759,3 @@ def render_failed_as_python(failed: list[ToolStatement]) -> str:
     return "\n".join(
         f"{slot.to_code()}  # FAILED: {slot.exception!r}" for slot in failed
     )
-
-
-def render_cache_snapshot(
-    completed: list[ToolStatement],
-    cache: dict[str, Any],
-    preview_limit: Optional[int],
-) -> str:
-    """
-    Render the current value of every identifier bound by ``completed``
-    this round, as its own fenced block, separate from the reconstructed
-    code (``render_completed_as_python``) -- keeps per-statement lines free
-    of inline value noise while still giving a repair round real
-    visibility into what a prior dispatched call actually returned (the
-    one thing a bare ``name = tool(...)`` statement can never reveal on
-    its own; writing correct fresh code around an existing binding --
-    e.g. reusing a reviewer's actual verdict instead of a fabricated one --
-    depends on this).
-
-    Identifiers are taken from ``completed`` in first-occurrence order,
-    each looked up fresh in ``cache`` (so a reassigned name shows its
-    latest value, not its first -- every identifier bound by a slot in
-    ``completed`` is guaranteed present in ``cache``, populated the moment
-    that slot lands there). Each line is ``name: type = value``
-    (``type(value).__name__``, a runtime snapshot, not a declared/static
-    type), under a leading ``"Cached values:"`` label, wrapped in a
-    triple-backtick fence -- visually distinct from the reconstructed-code
-    block above it, and unambiguous to a model that this section is data,
-    not code to continue writing. ``preview_limit`` limits each
-    rendered value the same way ``Agent.render_turn`` limits a rendered
-    response (``None`` means no truncation; a longer value is cut with a
-    ``...[truncated: N of M chars shown]`` marker; ``0`` shows
-    ``value hidden``) -- guards against dumping an
-    excessively long value into every subsequent generation call. Returns
-    ``""`` when ``completed`` binds no identifiers at all (nothing to
-    show) -- the caller omits the block entirely rather than rendering an
-    empty fence.
-    """
-    ordered: dict[str, Any] = {}
-    for slot in completed:
-        if slot.identifier is not None:
-            ordered[slot.identifier] = cache[slot.identifier]
-
-    if not ordered:
-        return ""
-
-    def preview(value: Any) -> str:
-        return stringify_value(value, mode="r", limit=preview_limit)
-
-    lines = [
-        f"{name}: {type(value).__name__} = {preview(value)}"
-        for name, value in ordered.items()
-    ]
-    return "```\nCached values:\n" + "\n".join(lines) + "\n```"

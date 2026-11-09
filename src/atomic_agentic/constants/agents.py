@@ -159,7 +159,7 @@ RETURN_TOOL_FULL_NAME = (
 #   task-result-reference logic
 # - agents/toolagent.py: ToolAgent.render_turn cross-invocation result
 #   addressing (TASK_RESULT_PREFIX); agents/toolagent.py: _seed_task
-#   seeds the same addressing into task.cache
+#   seeds the same addressing as task_result_i context entries
 #
 # Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/
 # ATTR_CALL_ALIAS can never be real registered tool aliases; SUB_NAME_PREFIX/
@@ -246,15 +246,18 @@ TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
 
 # Expression node types utils/agents.py's reject_unsupported_forms rejects
-# unconditionally (see its own docstring) -- each introduces a local
-# binding scope neither that function nor extract_identifiers has any
-# awareness of.
+# unconditionally (see its own docstring) -- each introduces a binding (or
+# a generator scope) that neither that function nor extract_identifiers
+# tracks.
 UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
     ast.ListComp: "list comprehension",
     ast.SetComp: "set comprehension",
     ast.DictComp: "dict comprehension",
     ast.GeneratorExp: "generator expression",
     ast.Lambda: "lambda",
+    ast.NamedExpr: "walrus assignment",
+    ast.Yield: "yield",
+    ast.YieldFrom: "yield from",
 }
 
 # PlanActAgent's own output_structure schema (agent-taxonomy `planact-

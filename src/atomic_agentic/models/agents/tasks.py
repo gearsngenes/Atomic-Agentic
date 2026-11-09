@@ -200,9 +200,10 @@ class ToolAgentTask(AgentTask):
 class ScriptActAgentTask(ToolAgentTask):
     """
     ScriptActAgent-flavored task, a ``ToolAgentTask`` subclass.
-    ``completed``/``failed_statements``/``cache``/``constant_values``/
-    ``regenerations_used``/``tool_calls_used`` are all inherited; only
-    genuinely ``ScriptActAgent``-specific fields remain declared here.
+    ``completed``/``failed_statements``/``regenerations_used``/
+    ``tool_calls_used`` are all inherited; only genuinely
+    ``ScriptActAgent``-specific fields remain declared here. Result
+    bindings live in ``task.context`` as context variables, not on the task.
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
     zero constructor-time validation (an in-flight, internal-only object,
@@ -227,7 +228,7 @@ class ScriptActAgentTask(ToolAgentTask):
         model-authored way to set this anymore (no ``# PAUSE``, no
         if-cutoff). Cleared by ``think()``/``async_think()``, right after
         generating the granted repair round's fresh content -- the flag's
-        only job is telling ``prepare()``'s and ``_apply_batch_results``'s
+        only job is telling ``act()``'s and ``_apply_batch_results``'s
         own empty-``pending`` checks "stopped, needs a repair round" (leave
         the task incomplete for ``think()`` to regenerate next) apart from
         "genuinely finished" (finalize via ``_finalize_without_continuation``

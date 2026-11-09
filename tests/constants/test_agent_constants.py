@@ -78,9 +78,10 @@ class TestCodeFencePatterns:
 
 
 class TestUnsupportedExprLabels:
-    def test_covers_exactly_the_five_scope_introducing_expression_types(self) -> None:
+    def test_covers_exactly_the_rejected_binding_introducing_expression_types(self) -> None:
         assert set(UNSUPPORTED_EXPR_LABELS.keys()) == {
             ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda,
+            ast.NamedExpr, ast.Yield, ast.YieldFrom,
         }
 
     def test_labels_are_non_empty_strings(self) -> None:

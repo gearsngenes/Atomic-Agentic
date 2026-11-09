@@ -7,7 +7,7 @@ task_result_i cross-invocation addressing (render_turn/_seed_task),
 rather than v1 ToolAgent's <<__cN__>> placeholder scheme.
 
 ONESHOT_PLANNER_PROMPT's STRICT RULES #3 already instructs the model to
-prefer a pre-existing declared name (a constant, an earlier result,
+prefer a pre-existing declared name (a context variable, an earlier
 task_result_i) over hand-writing an equivalent value -- this example is a
 live test of whether that instruction actually gets followed, not just
 stated.
@@ -61,7 +61,9 @@ chatbot = ScriptActAgent(
     tool_calls_limit=5,
 )
 chatbot.register_tools(CORE_TRIG_TOOLS)
-chatbot.register_constant(math.pi, alias="PI", description="The mathematical constant pi.")
+chatbot.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True
+)
 
 TURNS = [
     "What is the sine of PI/6?",

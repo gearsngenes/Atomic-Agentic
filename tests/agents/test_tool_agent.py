@@ -8,7 +8,6 @@ import pytest
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
-from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -267,7 +266,7 @@ class TestToolAgentAbstractContract:
                 name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine([]),
             )
 
-    @pytest.mark.parametrize("family", [PlanActAgent, ReActAgent, ScriptActAgent])
+    @pytest.mark.parametrize("family", [PlanActAgent, ReActAgent])
     def test_family_abstract_sets_include_the_new_frame_hooks(self, family: type) -> None:
         assert {"_render_steps", "_render_directive"} <= family.__abstractmethods__
 

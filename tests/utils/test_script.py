@@ -13,6 +13,7 @@ from atomic_agentic.constants.agents import (
 )
 from atomic_agentic.exceptions import BlackboardParseError
 from atomic_agentic.models.agents.blackboard_models import ToolStatement
+from atomic_agentic.tools import Tool
 from atomic_agentic.utils.agents import (
     compile_batches,
     extract_identifiers,
@@ -20,9 +21,9 @@ from atomic_agentic.utils.agents import (
     resolve_statement_args,
 )
 from atomic_agentic.utils.script import (
+    check_call_bindings,
     parse_generation,
     parse_statement_to_slots,
-    render_cache_snapshot,
     render_completed_as_python,
     rewrite_builtin_calls,
     validate_references,
@@ -364,6 +365,48 @@ class TestParseGeneration:
     def test_empty_generation(self) -> None:
         assert parse_generation("") == []
 
+    def test_all_statement_errors_collected_with_line_numbers(self) -> None:
+        text = "x = add(1, 2)\nif x:\n    y = 1\nz += 1\nw = add(x, 1)"
+
+        with pytest.raises(BlackboardParseError) as excinfo:
+            parse_generation(text)
+
+        lines = str(excinfo.value).split("\n")
+        assert len(lines) == 2
+        assert lines[0].startswith("line 2: ") and "conditional statements" in lines[0]
+        assert lines[1].startswith("line 4: ")
+
+    def test_duplicate_keyword_rejected_by_compile_gate(self) -> None:
+        with pytest.raises(BlackboardParseError, match=r"line 1: .*keyword argument repeated"):
+            parse_generation("x = add(a=1, a=2)")
+
+    def test_debug_assignment_rejected_by_compile_gate(self) -> None:
+        with pytest.raises(BlackboardParseError, match=r"line 2: .*__debug__"):
+            parse_generation("x = add(1, 2)\n__debug__ = 1")
+
+    def test_error_after_return_is_not_reported(self) -> None:
+        slots = parse_generation("return 1\nz += 1\nx = add(a=1, a=2)")
+
+        assert len(slots) == 1
+
+    def test_compile_gate_skipped_when_a_statement_error_exists(self) -> None:
+        text = "await add(1, 2)\nx = add(a=1, a=2)"
+
+        with pytest.raises(BlackboardParseError) as excinfo:
+            parse_generation(text)
+
+        message = str(excinfo.value)
+        assert "'await' is not supported" in message
+        assert "keyword argument repeated" not in message
+
+    def test_walrus_rejected(self) -> None:
+        with pytest.raises(BlackboardParseError, match="walrus assignment"):
+            parse_generation("x = (y := 1)")
+
+    def test_yield_rejected(self) -> None:
+        with pytest.raises(BlackboardParseError, match="yield expressions are not supported"):
+            parse_generation("x = yield 1")
+
 
 class TestIsDispatched:
     def test_rhs_assign_and_return_are_not_dispatched(self) -> None:
@@ -504,27 +547,39 @@ class TestValidateReferences:
 
         assert issues == []
 
-    def test_reference_to_known_constant_is_fine(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_name("K_X"),))
+    def test_reference_to_a_context_name_is_fine(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_name("PI"), _name("task_result_0")))
 
-        issues = validate_references([slot], frozenset({"add"}), frozenset({"K_X"}), frozenset(), None)
-
-        assert issues == []
-
-    def test_reference_to_known_history_is_fine(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_name("task_result_0"),))
-
-        issues = validate_references([slot], frozenset({"add"}), frozenset(), frozenset({"task_result_0"}), None)
+        issues = validate_references(
+            [slot], frozenset({"add"}), frozenset({"PI", "task_result_0"}), frozenset({"PI"}), None
+        )
 
         assert issues == []
 
-    def test_assigning_to_a_constant_name_is_rejected(self) -> None:
-        slot = ToolStatement(identifier="K_X", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+    def test_assigning_to_a_readonly_context_name_is_rejected(self) -> None:
+        slot = ToolStatement(identifier="PI", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
 
-        issues = validate_references([slot], frozenset(), frozenset({"K_X"}), frozenset(), None)
+        issues = validate_references([slot], frozenset(), frozenset({"PI"}), frozenset({"PI"}), None)
 
         assert len(issues) == 1
-        assert "read-only" in issues[0]
+        assert "read-only context variable" in issues[0]
+
+    def test_assigning_to_a_tool_id_is_rejected(self) -> None:
+        slot = ToolStatement(identifier="add", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+
+        issues = validate_references([slot], frozenset({"add"}), frozenset(), frozenset(), None)
+
+        assert len(issues) == 1
+        assert "registered tool id" in issues[0]
+
+    def test_assigning_to_a_writable_context_name_is_allowed(self) -> None:
+        slot = ToolStatement(identifier="notes", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+
+        issues = validate_references(
+            [slot], frozenset(), frozenset({"notes"}), frozenset(), None
+        )
+
+        assert issues == []
 
     def test_tool_call_budget_exceeded_is_reported(self) -> None:
         slots = [
@@ -571,6 +626,69 @@ class TestValidateReferences:
         assert any("unregistered tool" in i for i in issues)
         assert any("undefined name 'z'" in i for i in issues)
         assert any("exceeding the configured limit" in i for i in issues)
+
+
+def _add(a: int, b: int = 0) -> int:
+    return a + b
+
+
+_TOOLBOX = {"add": Tool(function=_add, name="add", namespace="tests", description="Adds.")}
+
+
+class TestCheckCallBindings:
+    def test_clean_call_returns_empty(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1),), kwargs={"b": _const(2)})
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_too_many_positionals(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1), _const(2), _const(3)))
+
+        issues = check_call_bindings([slot], _TOOLBOX)
+
+        assert len(issues) == 1
+        assert "'add'" in issues[0] and "do not fit its signature" in issues[0]
+        assert issues[0].startswith("statement producing y ")
+
+    def test_unknown_keyword(self) -> None:
+        slot = ToolStatement(identifier=None, tool="add", kwargs={"zzz": _const(1)})
+
+        issues = check_call_bindings([slot], _TOOLBOX)
+
+        assert len(issues) == 1
+        assert "(unassigned)" in issues[0]
+
+    def test_duplicate_argument_via_position_and_keyword(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1),), kwargs={"a": _const(2)})
+
+        assert len(check_call_bindings([slot], _TOOLBOX)) == 1
+
+    def test_star_unpack_is_skipped(self) -> None:
+        starred = ast.Starred(value=_name("xs"), ctx=ast.Load())
+        slot = ToolStatement(
+            identifier="y", tool="add", args=(starred, _const(1), _const(2), _const(3)),
+        )
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_kwargs_unpack_is_skipped(self) -> None:
+        slot = ToolStatement(
+            identifier="y", tool="add",
+            args=(_const(1), _const(2), _const(3)), kwargs={KWARGS_UNPACK_KEY: _name("kw")},
+        )
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_builtin_attr_and_sentinel_slots_are_skipped(self) -> None:
+        slots = [
+            ToolStatement(identifier="a", tool=PY_BUILTIN_ALIAS, args=("len", _const(1), _const(2))),
+            ToolStatement(identifier="b", tool=ATTR_CALL_ALIAS, args=(_name("x"), "m", _const(1))),
+            ToolStatement(identifier="c", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
+            ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)}),
+            ToolStatement(identifier="d", tool="not_registered", args=(_const(1),)),
+        ]
+
+        assert check_call_bindings(slots, _TOOLBOX) == []
 
 
 class TestCompileBatches:
@@ -702,55 +820,3 @@ class TestRenderCompletedAsPython:
 
         unrendered = render_completed_as_python([a, b], show_batches=False)
         assert "# Batch" not in unrendered
-
-
-class TestRenderCacheSnapshot:
-    def test_empty_completed(self) -> None:
-        assert render_cache_snapshot([], {}, None) == ""
-
-    def test_completed_with_no_bound_identifiers(self) -> None:
-        slot = ToolStatement(identifier=None, tool="log", args=(_const("hi"),))
-
-        assert render_cache_snapshot([slot], {}, None) == ""
-
-    def test_two_bound_identifiers_in_first_occurrence_order(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-
-        rendered = render_cache_snapshot([a, b], {"a": 1, "b": "two"}, None)
-
-        assert rendered.index("a: int = 1") < rendered.index("b: str = 'two'")
-
-    def test_reassigned_identifier_shows_only_its_latest_value(self) -> None:
-        first = ToolStatement(identifier="a", tool="tool_a")
-        second = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([first, second], {"a": 2}, None)
-
-        assert rendered.count("a:") == 1
-        assert "a: int = 2" in rendered
-
-    def test_preview_limit_truncates_long_values(self) -> None:
-        slot = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([slot], {"a": "x" * 20}, 5)
-
-        # preview() limits repr(value), and repr() of a string includes its
-        # wrapping quote -- the first 5 characters are the quote plus 4 x's,
-        # and the 20-char string's repr is 22 chars long.
-        assert "a: str = 'xxxx...[truncated: 5 of 22 chars shown]" in rendered
-
-    def test_zero_preview_limit_hides_the_value(self) -> None:
-        slot = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([slot], {"a": "secret"}, 0)
-
-        assert "a: str = value hidden" in rendered
-        assert "secret" not in rendered
-
-    def test_no_preview_limit_means_no_truncation(self) -> None:
-        slot = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([slot], {"a": "x" * 20}, None)
-
-        assert "x" * 20 in rendered

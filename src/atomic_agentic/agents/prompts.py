@@ -337,14 +337,12 @@ partial diff.
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/REACT_PROMPT's "$name" sigil
-# references. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
+# references. {TOOLS}/{EXCLUDED_PY_BUILTINS} are filled by
 # ToolAgent._render_system_message (customized here via
-# ScriptActAgent._extra_system_context), mirroring how PLANNER_PROMPT's own
-# {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
-# {TOOL_CALLS_LIMIT} field in this template: validate_references still
-# enforces the budget as a hard backstop, but the model now sees it too,
-# via a separate per-round task message (_render_task_messages's own
-# total/remaining line), not this system-prompt template.
+# ScriptActAgent._extra_system_context). No {TOOL_CALLS_LIMIT} field in this
+# template: validate_references still enforces the budget as a hard
+# backstop, but the model sees it too, via the per-round task directive,
+# not this system-prompt template.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
@@ -352,7 +350,7 @@ ONESHOT_PLANNER_PROMPT = PromptConfig(
 You are a Python code writer: write one restricted-grammar plan (a
 call-dependency graph of results, not arbitrary code -- no conditionals
 or loops) accomplishing the task start to end, assuming success, using
-only the tools/constants below -- nothing else exists (see STRICT RULES).
+only the tools below and the context variables shown -- nothing else exists (see STRICT RULES).
 An assigned name is an ordinary variable, reused, not a placeholder.
 Output only the plan code ONLY -- no prose or markdown fences.
 
@@ -366,13 +364,6 @@ correctly (see OUTPUT FORMAT for `/`/`*` and argument binding).
 Any other Python builtin is callable the same way (`len(x)`, `str(5)`,
 `sorted(items)`, ...) except: {EXCLUDED_PY_BUILTINS}.
 
-# AVAILABLE CONSTANTS
-Each entry is a constant, not a tool: `K_NAME: type` plus a docstring
-description. Bare, no `(...)`, never called -- use verbatim only when an
-argument needs that exact value.
-
-{CONSTANTS}
-
 # STRICT RULES
 1. Only registered tool ids, non-excluded Python builtins, and attribute/
    method access on a value you already hold (`obj.attr`, `obj.method(...)`;
@@ -385,15 +376,15 @@ argument needs that exact value.
    form -- comprehensions, generator expressions, or lambdas -- is
    permitted, called or not.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
-3. Use pre-existing declared names -- constants, earlier results,
+3. Use pre-existing declared names -- context variables, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value
-   (`3.14159` is never `K_PI`); unnamed literals are still written
+   (`3.14159` is never `PI`); unnamed literals are still written
    directly.
-4. Never assign to `task_result_*`/`_SUB_*` names, or to a registered
-   constant's own name -- `task_result_i: Type = value` labels a prior
+4. Never assign to `task_result_*`/`_SUB_*` names, or to a read-only
+   context variable -- `task_result_i: Type = value` labels a prior
    invocation's read-only result, used directly; `_SUB_` names are
-   auto-generated nested-call bindings; a constant is a fixed, read-only
-   value (see AVAILABLE CONSTANTS).
+   auto-generated nested-call bindings; a read-only context variable is a
+   fixed value.
 5. At most one `return`, only as the true last statement you write.
 6. A bare quoted string (prefer triple-quoted) is a reasoning note --
    inert, never bound or dispatched. Write as many as help you think,
@@ -432,18 +423,11 @@ a call that raises, may open a bounded repair round -- a fresh generation
 seeded with everything that already ran.
 
 That round restates the task, then shows what happened, verbatim, never
-yours: completed code, then bound values, then what just failed --
-
-(user) CURRENT TASK:
-Make batter, then bake a cake with it for 250 minutes.
+yours: completed code, then what just failed; values bound so far appear
+in the runtime context --
 
 (assistant) # WORK COMPLETED SO FAR:
 batter = make_batter()
-
-```
-Cached values:
-batter: Batter = Batter()
-```
 
 # THIS BATCH FAILED:
 cake = bake_cake(batter=batter, minutes=250)  # FAILED: ToolInvocationError('Tool.kitchen.bake_cake: invocation failed: minutes out of range')
@@ -453,7 +437,7 @@ instruction to continue, fixing what failed, using the work above as a
 guide.
 
 Never repeat a completed statement or resend the identical failed call --
-the exception and cached values say what's actually wrong; fix that
+the exception and the bound values say what's actually wrong; fix that
 (different arguments, a different approach, ...).
 """,
     description="ScriptActAgent one-shot native-grammar planning prompt.",

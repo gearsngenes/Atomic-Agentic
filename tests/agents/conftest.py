@@ -6,6 +6,7 @@ import json
 
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -35,7 +36,7 @@ def package_tool_result(result: Any, label: str) -> dict[str, Any]:
     return {"label": label, "result": result}
 
 
-def register_math_tools(agent: PlanActAgent | ReActAgent) -> dict[str, str]:
+def register_math_tools(agent: PlanActAgent | ReActAgent | ScriptActAgent) -> dict[str, str]:
     """Register add/multiply/join_text/fail_tool and return their effective
     (bare, unaliased) ids -- each toolified under agent.name as namespace, so
     the effective id (no alias given) is just the function's own __name__."""
@@ -96,6 +97,23 @@ def make_react_agent(
         response_to_post=response_to_post,
         tool_instructions=tool_instructions,
     )
+    register_math_tools(agent)
+    return agent
+
+
+def make_script_agent(engine: FakeLLMEngine, **overrides: Any) -> ScriptActAgent:
+    """name="tests", namespace="tests", the shared math tools registered
+    (add/multiply/join_text/fail_tool); any keyword (``record_enabled``,
+    ``replanning_limit``, ``instructions``, ...) overrides or extends the
+    ScriptActAgent defaults."""
+    kwargs: dict[str, Any] = {
+        "name": "tests",
+        "namespace": "tests",
+        "description": "ScriptActAgent under test.",
+        "llm_engine": engine,
+    }
+    kwargs.update(overrides)
+    agent = ScriptActAgent(**kwargs)
     register_math_tools(agent)
     return agent
 

@@ -27,8 +27,12 @@ not). Every process mechanic -- outliner-first, alternate reviewer/writer,
 always return the writer's latest draft, and the loop count itself via
 `{loops}` -- lives in `ORCHESTRATION_INSTRUCTIONS` instead, standing
 orchestration behavior rather than one-off task text repeated on every
-call. `tool_instructions` renders `{loops}` against this invocation's own
+call. `instructions` renders `{loops}` against this invocation's own
 `task.inputs`, never baked into the task prompt.
+
+State: `latest_draft` and `latest_review` are context variables seeded as empty
+strings. The model sees them in its context block, assigns to them from the
+script, and the example prints both after the run.
 """
 from pathlib import Path
 import logging
@@ -78,35 +82,22 @@ action. Don't force criticism when something works.
 Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
-# Standing orchestration rules, lifted out of the per-invocation task prompt
-# and into tool_instructions -- the process itself (outliner-first, then
-# alternate reviewer/writer, always return the writer's latest draft) is now
-# reusable agent behavior, not one-off task text repeated on every call.
+# Standing role prompt (the agent's `instructions`). The working state lives in
+# two context variables, `latest_draft` and `latest_review`, which the model
+# sees in its context block and updates by assigning to them -- so the prompt
+# can describe a role instead of spelling out variable plumbing.
 ORCHESTRATION_INSTRUCTIONS = """
-You use the provided tools to perform a multi-step story-building process.
-Always call the outliner first, exactly once, before any drafting begins.
-After the outline is ready, call the writer for the first draft using the
-outline. For every subsequent draft, alternate reviewer -> writer: send the
-latest draft to the reviewer, then pass ONLY the reviewer's notes to the
-writer. NEVER pass the outline, story idea, or draft itself to the writer
-again. Always finish by returning the writer's latest draft verbatim -- never
-the outline, reviewer's critique, or a summary of the process.
+You are the *Story Director*, a managing editor who turns a one-sentence idea
+into a polished story by directing three specialists: an outliner, a writer
+and a reviewer.
 
-So in other words:
-Step 1:
-outliner(story_idea) -> outline
-
-Step 2:
-writer(outline=outline) -> latest_draft
-
-Step 3:
-reviewer(draft=latest_draft) -> feedback
-writer(revision_notes=feedback) -> latest_draft
-
-Repeat step 3's review/rewrite EXACTLY {loops} TIMES.
-
-Step N:
-return latest_draft as the final answer, verbatim.
+How you work: outline the idea once, have the writer produce a first draft
+from that outline, then run exactly {loops} review-and-revise cycle(s). Each
+cycle sends the current draft to the reviewer and hands ONLY the reviewer's
+notes to the writer -- the writer never sees the outline, the idea or the
+draft again. Keep `latest_review` and `latest_draft` current as you go, and
+finish by returning `latest_draft` verbatim -- never the outline, the critique
+or a summary of the process.
 """.strip()
 
 sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
@@ -168,8 +159,16 @@ orch = ScriptActAgent(
     record_enabled=True,
     replanning_limit=1,
     pre_invoke=planner_prestep,
-    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
+    instructions=ORCHESTRATION_INSTRUCTIONS,
 )
+
+# Working state, seeded empty. Held by the conversation, so the script's
+# assignments to these names update them and the update persists after the
+# call (new names a script creates, like `outline`, stay per-call).
+conv = orch.get_conversation()
+conv.remember("latest_draft", "", "Latest story draft (writer's most recent output)")
+conv.remember("latest_review", "", "Latest critique of the draft (reviewer's most recent output)")
+conv.remember("outline", "", "Story outline that breaks down the idea (outliner's most recent output)")
 
 # Registered under each agent's own bare name -- no id capture needed, the
 # task prompt below refers to them by the exact same names ScriptActAgent
@@ -185,15 +184,20 @@ if __name__ == "__main__":
     if loops <= 0:
         raise ValueError("loops must be > 0")
 
-    orch.tool_calls_limit = 3 * loops
+    orch.tool_calls_limit = 2 * loops + 2  # outline + first draft + loops * (review + rewrite)
 
     print("\n⇢ Planning + execution …")
     final_draft_md = str(orch.invoke({"story_idea": idea, "loops": loops}).result)
 
-    print("\n========== FINAL DRAFT ==========\n")
-    print(final_draft_md)
+    print("\n========== FINAL VALUES ==========\n")
+    print("\n=== LATEST REVIEW (context variable) ===\n")
+    print(conv.context["latest_review"].value)
+    print("\n=== LATEST DRAFT (context variable) ===\n")
+    print(conv.context["latest_draft"].value)
+    print("\n=== STORY OUTLINE (context variable) ===\n")
+    print(conv.context["outline"].value)
 
-    record = orch.get_conversation().records[-1]
+    record = conv.records[-1]
     print("\n=== EXECUTED SCRIPT ===")
     print(record.render_as_code())
 
