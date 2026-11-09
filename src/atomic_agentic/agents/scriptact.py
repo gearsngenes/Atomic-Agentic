@@ -23,6 +23,7 @@ from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
+    BUILTINS_PREAMBLE,
     EXCLUDED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
@@ -55,12 +56,12 @@ class ScriptActAgent(ToolAgent):
     separate decomposition, orchestration, or synthesis call, and no
     construction-time mode knob.
 
-    Failure-triggered repair only: a generation always terminates
-    at the first of a ``return`` or a defensively-pruned ``if`` statement
-    (the grammar forbids conditionals outright; a model that writes one
-    anyway always has its generation rejected as a regen-repair issue, fed
-    back for a corrected full plan -- there is no silent-truncation
-    tolerance for it). There is no voluntary continuation mechanism of any
+    Failure-triggered repair only: a generation terminates at its first
+    ``return`` (the grammar forbids conditionals outright; a model that
+    writes one has its generation rejected and fed back for a corrected
+    full plan -- never silently truncated). The plan is requested as a
+    single fenced ``python`` block; prose around exactly one block is
+    ignored. There is no voluntary continuation mechanism of any
     kind -- a model never decides to pause; the only way a second round can
     ever start is a real resolution failure (``prepare()``) or execution
     failure (``act()``). On either: ``fail_fast=True`` raises immediately,
@@ -102,6 +103,7 @@ class ScriptActAgent(ToolAgent):
 
     _TASK_CLS = ScriptActAgentTask
     _INITIAL_PROMPT_NAME = "planner"
+    _BUILTINS_PREAMBLE = BUILTINS_PREAMBLE
 
     def __init__(
         self,
@@ -320,15 +322,6 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _extra_system_context(self) -> dict[str, str]:
-        """
-        Adds ``EXCLUDED_PY_BUILTINS`` on top of ``ToolAgent``'s shared
-        ``{TOOLS}`` context -- the one piece of this
-        family's system prompt that isn't generic across every ``ToolAgent``
-        subclass.
-        """
-        return {"EXCLUDED_PY_BUILTINS": ", ".join(sorted(EXCLUDED_PY_BUILTINS))}
-
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #

@@ -94,8 +94,8 @@ and a reviewer.
 How you work: outline the idea once, have the writer produce a first draft
 from that outline, then run exactly {loops} review-and-revise cycle(s). Each
 cycle sends the current draft to the reviewer and hands ONLY the reviewer's
-notes to the writer -- the writer never sees the outline, the idea or the
-draft again. Keep `latest_review` and `latest_draft` current as you go, and
+notes to the writer, who remembers its own draft -- never resend the outline,
+the idea or the draft. Keep `latest_review` and `latest_draft` current as you go, and
 finish by returning `latest_draft` verbatim -- never the outline, the critique
 or a summary of the process.
 """.strip()

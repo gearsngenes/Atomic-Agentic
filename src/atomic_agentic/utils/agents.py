@@ -10,6 +10,7 @@ from typing import Any, Optional
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
+    EMBEDDED_CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
@@ -202,22 +203,29 @@ def extract_identifiers(
 
 def strip_code_fence(raw_text: str) -> str:
     """
-    Strip a markdown code fence wrapping generated text, if present --
-    defensive against a model wrapping otherwise-valid output in a code
-    fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line. Used by ``ScriptActAgent``'s statement parsing
-    (``utils/script.py``).
+    Extract the code from a markdown code fence around generated text, if
+    present. ``ScriptActAgent`` asks for its plan as a single fenced block;
+    this also tolerates a missing or one-sided fence and prose around the
+    block. Generic to any language tag (or none) on the opening fence line.
+    Used by ``ScriptActAgent``'s statement parsing (``utils/script.py``).
 
-    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
-    so its captured inner text is used as-is. If that doesn't match (a model
-    emitting only one side), falls back to stripping a leading and/or
-    trailing fence line independently. Either way, a fence appearing only
-    mid-text is left alone (``ast.parse`` will reject that on its own terms,
-    as a real structural problem).
+    1. A fully matched pair wrapping the whole text (``CODE_FENCE_PATTERN``)
+       -- its inner text is used as-is.
+    2. Exactly one fenced block elsewhere in the text, e.g. with a sentence
+       before or after it (``EMBEDDED_CODE_FENCE_PATTERN``) -- its inner text;
+       the prose outside is dropped. Two or more blocks are ambiguous and fall
+       through to step 3 unchanged, so ``ast.parse`` rejects them.
+    3. Otherwise a leading and/or trailing fence line is stripped
+       independently (a model emitting only one side). A fence appearing only
+       mid-text is left alone (``ast.parse`` will reject that on its own
+       terms, as a real structural problem).
     """
     full_match = CODE_FENCE_PATTERN.match(raw_text)
     if full_match:
         return full_match.group(1)
+    embedded = EMBEDDED_CODE_FENCE_PATTERN.findall(raw_text)
+    if len(embedded) == 1:
+        return embedded[0]
     text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
     text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
     return text

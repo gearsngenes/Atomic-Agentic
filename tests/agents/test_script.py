@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from atomic_agentic.constants.agents import BUILTINS_PREAMBLE
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.tools import attr_call_tool, builtin_call_tool
 from atomic_agentic.constants.agents import (
@@ -289,7 +290,9 @@ class TestPromptContextRendering:
         messages = agent.render_task(_new_task(agent))
 
         system_msg = next(m["content"] for m in messages if m["role"] == "system")
-        assert "eval" in system_msg
+        assert "==== AVAILABLE TOOLS [START] ====" in system_msg
+        assert system_msg.index(agent.actions_context()) < system_msg.index(BUILTINS_PREAMBLE)
+        assert "eval" in BUILTINS_PREAMBLE and BUILTINS_PREAMBLE in system_msg
 
     def test_instructions_are_framed_in_the_system_message(self) -> None:
         agent = _make_agent(_engine(), instructions="Always say please.")

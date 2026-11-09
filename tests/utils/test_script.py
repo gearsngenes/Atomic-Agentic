@@ -362,6 +362,25 @@ class TestParseGeneration:
 
         assert len(slots) == 2
 
+    def test_prose_around_a_single_fenced_block_is_ignored(self) -> None:
+        text = "Here is the plan:\n```python\nx = add(1, 2)\nreturn x\n```\nHope that helps!"
+        slots = parse_generation(text)
+
+        assert len(slots) == 2
+        assert slots[-1].tool == RETURN_ALIAS
+
+    def test_two_fenced_blocks_are_rejected_not_merged(self) -> None:
+        text = "```python\nx = add(1, 2)\n```\nthen\n```python\nreturn x\n```"
+
+        with pytest.raises(BlackboardParseError):
+            parse_generation(text)
+
+    def test_backticks_inside_a_string_do_not_close_the_fence(self) -> None:
+        text = "```python\nx = add('```', 2)\nreturn x\n```"
+        slots = parse_generation(text)
+
+        assert len(slots) == 2
+
     def test_empty_generation(self) -> None:
         assert parse_generation("") == []
 

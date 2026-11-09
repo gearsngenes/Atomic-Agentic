@@ -7,6 +7,7 @@ import atomic_agentic.constants.agents as agent_constants
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
+    EMBEDDED_CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     FRAME_SUBJECTS,
@@ -68,6 +69,13 @@ class TestCodeFencePatterns:
         assert match is not None
         assert match.group(1) == "x = 1"
 
+    def test_embedded_pattern_finds_each_fenced_block_with_prose_around_it(self) -> None:
+        text = "intro\n```python\nx = 1\n```\nmiddle\n```\ny = 2\n```\noutro"
+        assert EMBEDDED_CODE_FENCE_PATTERN.findall(text) == ["x = 1", "y = 2"]
+
+    def test_embedded_pattern_needs_the_closing_fence_on_its_own_line(self) -> None:
+        assert EMBEDDED_CODE_FENCE_PATTERN.findall("```python\nx = '```'\n```") == ["x = '```'"]
+
     def test_leading_code_fence_pattern_matches_only_leading_half(self) -> None:
         assert LEADING_CODE_FENCE_PATTERN.match("```python\nx = 1")
         assert not TRAILING_CODE_FENCE_PATTERN.match("```python\nx = 1")
@@ -96,6 +104,8 @@ class TestFrameSubjects:
             "USER TASK PROMPT",
             "THOUGHTS",
             "STEPS",
+            "TOOL-CALLING INSTRUCTIONS",
+            "AVAILABLE TOOLS",
             "USER-DEFINED INSTRUCTIONS",
             "USER-DEFINED THINKING INSTRUCTIONS",
         )

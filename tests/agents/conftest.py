@@ -268,7 +268,7 @@ class StubToolAgent(ToolAgent):
         *,
         steps_text: str = "",
         directive_text: str = "Proceed.",
-        prompt: str = "You are a stub.\n{TOOLS}\n",
+        prompt: str = "You are a stub.",
         **kwargs: Any,
     ) -> None:
         self.steps_text = steps_text

@@ -48,7 +48,7 @@ from ..exceptions import (
     ToolAgentError,
     ToolRegistrationError,
 )
-from ..constants.agents import TASK_RESULT_PREFIX
+from ..constants.agents import INSTRUCTIONS_PRECEDENCE, TASK_RESULT_PREFIX, TOOLS_PREAMBLE
 from ..constants.core import IDENTIFIER_PATTERN
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
@@ -76,7 +76,7 @@ class ToolAgent(Agent, ABC):
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
     - ``instructions`` (construction-time only, read-only property): standing
-      user guidance rendered after the family prompt inside a
+      user guidance rendered after the tools frame inside a
       ``USER-DEFINED INSTRUCTIONS`` frame, only when set.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
@@ -84,7 +84,9 @@ class ToolAgent(Agent, ABC):
       visible prior turn. ``render_turn`` labels the history with the same
       names.
     - The concrete ``_render_task_messages`` frame and the shared
-      ``_render_system_message`` (built around ``_extra_system_context()``).
+      ``_render_system_message``: framed ``TOOL-CALLING INSTRUCTIONS``
+      (the static family prompt), framed ``AVAILABLE TOOLS`` (``TOOLS_PREAMBLE``,
+      the tool list, then ``_BUILTINS_PREAMBLE``), then the framed user instructions.
     - ``to_dict()`` diagnostics for the above.
 
     What it does not own: any lifecycle hook body, any reference-resolution
@@ -107,8 +109,11 @@ class ToolAgent(Agent, ABC):
       at the end of each round (a forgotten clear shows a stale frame).
     """
 
-    TOOLS_FIELD: ClassVar[str] = "TOOLS"
     INSTRUCTIONS_KEY: ClassVar[str] = "instructions"
+
+    #: Closing text of the ``AVAILABLE TOOLS`` frame, after the tool list;
+    #: empty by default (``ScriptActAgent`` adds the permitted Python builtins).
+    _BUILTINS_PREAMBLE: ClassVar[str] = ""
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
 
@@ -169,9 +174,8 @@ class ToolAgent(Agent, ABC):
             caller who wants template fields of their own. A discovered
             ``{name}`` field becomes a declared parameter of this agent --
             validated/defaulted by the normal ``invoke(inputs)`` pipeline --
-            and is rendered against ``task.inputs`` merged with ``{TOOLS}``
-            and ``_extra_system_context()`` (framework fields win). Frozen at
-            construction -- read-only via the ``instructions`` property.
+            and is rendered against ``task.inputs``. Frozen at construction --
+            read-only via the ``instructions`` property.
 
         ``fail_fast`` is intentionally not a parameter here -- each concrete
         subclass that needs it declares and validates its own. A removed
@@ -673,43 +677,41 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _extra_system_context(self) -> dict[str, str]:
-        """
-        Extra render-context entries a subclass's active system prompt
-        needs beyond ``{TOOLS}``. Default: none. ``ScriptActAgent``
-        overrides this to add ``EXCLUDED_PY_BUILTINS``.
-        """
-        return {}
-
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """
-        Render the active family prompt with the tool context injected, then
-        append the user-defined instructions, if registered, in their frame.
+        Render the system message as up to three framed sections.
 
         1. ``task.system_prompt_name is None`` -> ``[]``.
-        2. Render context: ``{TOOLS}`` plus ``_extra_system_context()``.
-        3. Render the active prompt against it.
-        4. With instructions registered, render them against ``task.inputs``
-           merged under the render context (framework fields win) and append
-           ``"\\n" + frame_content(text, "USER-DEFINED INSTRUCTIONS") + "\\n"``.
+        2. ``TOOL-CALLING INSTRUCTIONS``: the active family prompt, rendered
+           with no fields (it is static).
+        3. ``AVAILABLE TOOLS``: ``TOOLS_PREAMBLE``, ``actions_context()`` and,
+           when the family sets one, ``_BUILTINS_PREAMBLE``.
+        4. With instructions registered: ``INSTRUCTIONS_PRECEDENCE``, then the
+           instructions rendered against ``task.inputs`` in their
+           ``USER-DEFINED INSTRUCTIONS`` frame.
 
-        With no instructions the result is exactly the rendered family prompt.
-        Carries no budget text: per-call facts belong in the directive.
+        Sections are joined by a blank line. Carries no budget text: per-call
+        facts belong in the directive.
         """
         if task.system_prompt_name is None:
             return []
-        render_context = {
-            self.TOOLS_FIELD: self.actions_context(),
-            **self._extra_system_context(),
-        }
-        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        contract = self._system_prompts[task.system_prompt_name].render({})
+        parts = (TOOLS_PREAMBLE, self.actions_context(), self._BUILTINS_PREAMBLE)
+        tools_body = "\n\n".join(part for part in parts if part)
+        sections = [
+            frame_content(contract, "TOOL-CALLING INSTRUCTIONS"),
+            frame_content(tools_body, "AVAILABLE TOOLS"),
+        ]
 
         config = self._system_prompts.get(self.INSTRUCTIONS_KEY)
         if config is not None:
-            text = config.render({**task.inputs, **render_context})
-            rendered += "\n" + frame_content(text, "USER-DEFINED INSTRUCTIONS") + "\n"
+            text = config.render(dict(task.inputs))
+            sections.append(
+                f"{INSTRUCTIONS_PRECEDENCE}\n"
+                f"{frame_content(text, 'USER-DEFINED INSTRUCTIONS')}"
+            )
 
-        return [{"role": "system", "content": rendered}]
+        return [{"role": "system", "content": "\n\n".join(sections)}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """

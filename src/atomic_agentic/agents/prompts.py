@@ -337,12 +337,12 @@ partial diff.
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/REACT_PROMPT's "$name" sigil
-# references. {TOOLS}/{EXCLUDED_PY_BUILTINS} are filled by
-# ToolAgent._render_system_message (customized here via
-# ScriptActAgent._extra_system_context). No {TOOL_CALLS_LIMIT} field in this
-# template: validate_references still enforces the budget as a hard
-# backstop, but the model sees it too, via the per-round task directive,
-# not this system-prompt template.
+# references. The template is static (no fields): ToolAgent._render_system_message
+# frames it as TOOL-CALLING INSTRUCTIONS, then adds the AVAILABLE TOOLS frame
+# (TOOLS_PREAMBLE, the tool list, and for this family BUILTINS_PREAMBLE, all in
+# constants/agents.py). No budget text: validate_references still enforces
+# the tool-call limit as a hard backstop, but the model sees it via the
+# per-round task directive, not the system prompt.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
@@ -350,24 +350,29 @@ ONESHOT_PLANNER_PROMPT = PromptConfig(
 You are a Python code writer: write one restricted-grammar plan (a
 call-dependency graph of results, not arbitrary code -- no conditionals
 or loops) accomplishing the task start to end, assuming success, using
-only the tools below and the context variables shown -- nothing else exists (see STRICT RULES).
+only the tools and permitted builtins in the AVAILABLE TOOLS frame and the
+variables in RUNTIME CONTEXT -- nothing else exists (see STRICT RULES).
 An assigned name is an ordinary variable, reused, not a placeholder.
-Output only the plan code ONLY -- no prose or markdown fences.
+Reply with the plan as a single ```python block and nothing else.
 
-# AVAILABLE TOOLS
-You can call any of the below listed tools like standard Python, using their
-names VERBATIM. Use their doc-strings & function-signatures to bind arguments
-correctly (see OUTPUT FORMAT for `/`/`*` and argument binding).
-
-{TOOLS}
-
-Any other Python builtin is callable the same way (`len(x)`, `str(5)`,
-`sorted(items)`, ...) except: {EXCLUDED_PY_BUILTINS}.
+# RUNTIME CONTEXT
+The task may come with pre-existing variables: values you can refer to by
+name instead of retyping or recomputing, and some you may update. They are
+listed in the task's RUNTIME CONTEXT block and are ordinary names in your plan.
+Entries marked `readonly: yes` are readonly; the rest are writable.
+- Readonly: fixed; read or pass it.
+- Writable: read it, or assign to it to update it (saved after the run).
+- Any other assigned name is scratch for this run.
+Use declared names instead of hand-writing an equivalent value (`3.14159` is
+never `PI`; shown values may be shortened or hidden, the name holds the full
+one); unnamed literals are still written directly. `task_result_i` is an
+earlier run's result: readonly; its value shows in the history as
+`task_result_i: <type> = <value>`, not in the block.
 
 # STRICT RULES
 1. Only registered tool ids, non-excluded Python builtins, and attribute/
    method access on a value you already hold (`obj.attr`, `obj.method(...)`;
-   dunder names excluded) may be used (see AVAILABLE TOOLS) --
+   dunder names excluded) may be used (see the AVAILABLE TOOLS frame) --
    `import <module>`-style statements are illegal, so no module-qualified
    call (e.g. a stdlib function) is ever reachable. Call-free expressions
    (arithmetic, comparisons, ternaries, f-strings, literals) stay
@@ -376,15 +381,10 @@ Any other Python builtin is callable the same way (`len(x)`, `str(5)`,
    form -- comprehensions, generator expressions, or lambdas -- is
    permitted, called or not.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
-3. Use pre-existing declared names -- context variables, earlier results,
-   `task_result_i` -- instead of hand-writing an equivalent value
-   (`3.14159` is never `PI`); unnamed literals are still written
-   directly.
-4. Never assign to `task_result_*`/`_SUB_*` names, or to a read-only
-   context variable -- `task_result_i: Type = value` labels a prior
-   invocation's read-only result, used directly; `_SUB_` names are
-   auto-generated nested-call bindings; a read-only context variable is a
-   fixed value.
+3. Use pre-existing declared names (see RUNTIME CONTEXT) and earlier results
+   instead of hand-writing an equivalent value.
+4. Never assign to `_SUB_*` names (auto-generated nested-call bindings), nor
+   to a readonly context variable or `task_result_*` (see RUNTIME CONTEXT).
 5. At most one `return`, only as the true last statement you write.
 6. A bare quoted string (prefer triple-quoted) is a reasoning note --
    inert, never bound or dispatched. Write as many as help you think,
@@ -401,6 +401,13 @@ Sample plan:
 <var_i> = <tool_i>(...)
 ...
 return <var_n>
+```
+
+With a readonly `draft` and a writable `notes` in context:
+```python
+\"\"\"notes is updated from draft.\"\"\"
+notes = summarize(text=draft)
+return notes
 ```
 
 Ends one of two ways: `return <expression>` -- task done, returns that
