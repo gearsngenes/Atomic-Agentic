@@ -127,7 +127,6 @@ class ReActAgent(ToolAgent):
         *,
         tool_calls_limit: Optional[int] = 25,
         regeneration_limit: int = 5,
-        tool_concurrency_limit: Optional[int] = None,
         fail_fast: bool = False,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -145,6 +144,8 @@ class ReActAgent(ToolAgent):
         user guidance, framed into the system message by the base class).
         There are no constants: pre-existing values are context variables
         (remembered on the conversation, bound from inputs, or runtime).
+        There is no ``tool_concurrency_limit`` parameter: exactly one call is
+        dispatched per round, so the base's limit is fixed at ``1``.
         ``fail_fast`` has no shared home on ``ToolAgent`` (see the
         ``fail_fast`` property below) -- validated and stored locally
         instead. Two defaults deliberately diverge from ``ToolAgent``'s own:
@@ -164,7 +165,7 @@ class ReActAgent(ToolAgent):
             record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
-            tool_concurrency_limit=tool_concurrency_limit,
+            tool_concurrency_limit=1,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             inputs_to_context=inputs_to_context,
@@ -309,6 +310,11 @@ class ReActAgent(ToolAgent):
             tool = self.get_tool(call.tool)
             resolved = tool._args_kwargs_to_dict(*positional, **keyword)
         except Exception as e:
+            # Fed back to the model as regeneration feedback; the traceback is
+            # kept at DEBUG so a genuine framework bug is not lost.
+            logger.debug(
+                f"ReActAgent.{self.name}: could not resolve or bind step", exc_info=True
+            )
             label = call.identifier if call.identifier is not None else "(unassigned)"
             return f"{label}: could not resolve or bind argument(s): {e!r}"
 
@@ -320,12 +326,13 @@ class ReActAgent(ToolAgent):
         ``output_structure``), record the attempt, validate+resolve via
         ``_process_generation_output``, and retry with injected feedback on
         failure until success or the regeneration budget
-        (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Mirrors ``PlanActAgent``'s
+        (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. Mirrors ``PlanActAgent``'s
         own ``DEBUG``-level logging of every raw generated step (see
         ``_process_generation_output`` for the matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -356,10 +363,10 @@ class ReActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -369,6 +376,7 @@ class ReActAgent(ToolAgent):
                         "Produce a corrected step."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -380,6 +388,7 @@ class ReActAgent(ToolAgent):
         check, feedback-message construction, and ``DEBUG``-level logging
         of every raw generated step."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -410,10 +419,10 @@ class ReActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -423,6 +432,7 @@ class ReActAgent(ToolAgent):
                         "Produce a corrected step."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -548,7 +558,7 @@ class ReActAgent(ToolAgent):
         tool = self.get_tool(call.tool)
         try:
             raw_result = tool.invoke(resolved)
-        except BaseException as e:
+        except Exception as e:
             raw_result = e
         return self._apply_call_result(task, call, raw_result)
 
@@ -559,7 +569,7 @@ class ReActAgent(ToolAgent):
         tool = self.get_tool(call.tool)
         try:
             raw_result = await tool.async_invoke(resolved)
-        except BaseException as e:
+        except Exception as e:
             raw_result = e
         return self._apply_call_result(task, call, raw_result)
 

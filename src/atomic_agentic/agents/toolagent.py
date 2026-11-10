@@ -157,7 +157,7 @@ class ToolAgent(Agent, ABC):
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
         regeneration_limit : int
-            Bounded-attempts ceiling for regenerating a single round's
+            Bounded-attempts ceiling for regenerating one generation's
             malformed/invalid draft before raising. Always a plain ``int``,
             never ``None``. Defaults to ``5``.
         tool_concurrency_limit : int | None
@@ -255,7 +255,7 @@ class ToolAgent(Agent, ABC):
 
     @property
     def regeneration_limit(self) -> int:
-        """Bounded-attempts ceiling for regenerating a single round's
+        """Bounded-attempts ceiling for regenerating one generation's
         malformed/invalid draft before raising -- always a plain ``int``,
         never ``None``. Read-only."""
         return self._regeneration_limit

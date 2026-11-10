@@ -61,6 +61,11 @@ class TestReActConstruction:
                 **removed,
             )
 
+    def test_tool_concurrency_limit_is_fixed_at_one(self) -> None:
+        assert make_react_agent([]).tool_concurrency_limit == 1
+        with pytest.raises(TypeError):
+            make_react_agent([], tool_concurrency_limit=4)
+
     def test_fail_fast_must_be_bool(self) -> None:
         with pytest.raises(ToolAgentError):
             ReActAgent(
@@ -956,3 +961,38 @@ class TestReActAsyncAndFailureEdges:
         directive = agent._llm_engine.calls[1][-1]["content"]
         assert "Your last call failed" in directive
         assert "Tool calls remaining: 2 of 3." in directive
+
+
+class TestReActRegenerationAndInterrupts:
+    def test_regeneration_budget_restarts_each_round(self) -> None:
+        # One bad step in round 1 and another in round 2: each round stays
+        # within regeneration_limit=1, so the run survives (a run-wide count
+        # would have raised on the second).
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 1), arg("zzz", 2)]),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 2)], result_name="a"),
+                rstep(call="return", arguments=[arg("val", "$missing")]),
+                rstep(call="return", arguments=[arg("val", "$a")]),
+            ],
+            tool_calls_limit=1,
+            regeneration_limit=1,
+            record_enabled=True,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        assert result.regenerations_used == 2
+
+    def test_keyboard_interrupt_in_a_tool_propagates(self) -> None:
+        def interrupt() -> None:
+            raise KeyboardInterrupt
+
+        agent = make_react_agent(
+            [rstep(call="interrupt", arguments=[])], tool_calls_limit=2, fail_fast=False,
+        )
+        agent.register_tool(interrupt)
+
+        with pytest.raises(KeyboardInterrupt):
+            agent.invoke({"prompt": "run"})

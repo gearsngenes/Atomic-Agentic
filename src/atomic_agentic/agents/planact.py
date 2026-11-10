@@ -74,10 +74,10 @@ from typing import Any, Callable, ClassVar, Mapping, Optional
 from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
-from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
+from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..exceptions import ToolAgentError, ToolInvocationError
+from ..exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
@@ -226,6 +226,17 @@ class PlanActAgent(ToolAgent):
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
 
+    def _validate_effective_tool_id(self, effective_id: str) -> None:
+        """Also rejects the sentinel call names (``return``, ``rhs_assign``):
+        a user tool under either would be treated as the synthesized,
+        never-dispatched sentinel call."""
+        super()._validate_effective_tool_id(effective_id)
+        if effective_id in (RETURN_ALIAS, RHS_ASSIGN_ALIAS):
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {effective_id!r} is a "
+                "reserved sentinel name and cannot be a registered tool id."
+            )
+
     @property
     def fail_fast(self) -> bool:
         """
@@ -304,12 +315,13 @@ class PlanActAgent(ToolAgent):
         Render, call the engine (with ``output_structure``), record the
         attempt, validate/compile via ``_process_generation_output``, and
         retry with injected feedback on failure until success or the
-        regeneration budget (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Logs every raw generated
+        regeneration budget (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. Logs every raw generated
         plan at ``DEBUG`` level (see ``_process_generation_output`` for the
         matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -330,10 +342,10 @@ class PlanActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -343,6 +355,7 @@ class PlanActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -353,6 +366,7 @@ class PlanActAgent(ToolAgent):
         ``async_invoke`` for the engine call. Same ``DEBUG``-level logging of
         every raw generated plan."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -373,10 +387,10 @@ class PlanActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -386,6 +400,7 @@ class PlanActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 

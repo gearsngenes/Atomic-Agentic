@@ -420,13 +420,14 @@ class ScriptActAgent(ToolAgent):
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
         failure until success or the regeneration budget
-        (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. ``regeneration_limit``
+        (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. ``regeneration_limit``
         is always a plain ``int`` (never ``None``), so this check is a
         direct comparison -- no ``None``-guard needed, unlike
         ``tool_calls_limit`` elsewhere in this class.
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -441,10 +442,10 @@ class ScriptActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -454,6 +455,7 @@ class ScriptActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -465,6 +467,7 @@ class ScriptActAgent(ToolAgent):
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -479,10 +482,10 @@ class ScriptActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -492,6 +495,7 @@ class ScriptActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 

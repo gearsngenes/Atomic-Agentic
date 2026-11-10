@@ -649,3 +649,14 @@ class TestPlanActPostInvokeRouting:
         )
 
         assert asyncio.run(agent.async_invoke({"prompt": "go"})).result == "second=5"
+
+
+class TestPlanActSentinelToolNames:
+    @pytest.mark.parametrize("name", ["return", "rhs_assign"])
+    def test_sentinel_names_cannot_be_registered(self, name: str) -> None:
+        def custom() -> None:
+            return None
+
+        agent = make_planact_agent([])
+        with pytest.raises(ToolRegistrationError):
+            agent.register_tool(custom, alias=name)
