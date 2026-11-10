@@ -50,7 +50,9 @@ class TestTranslateCallsReferences:
 
         assert len(issues) == 1
         assert "does not match any context variable or earlier result_name" in issues[0]
+        assert "'$ghost'" in issues[0]
         assert "RUNTIME CONTEXT" in issues[0]
+        assert "in this plan" not in issues[0]
         assert "constant" not in issues[0]
 
     def test_unresolved_embedded_reference_stays_text_without_an_issue(self) -> None:
@@ -129,7 +131,7 @@ class TestTranslateCallsDuplicatesAndBudget:
 
         assert _translate(drafts, limit=2)[0] == []
         issues, _ = _translate(drafts, limit=1)
-        assert len(issues) == 1 and "exceeding the configured limit of 1" in issues[0]
+        assert len(issues) == 1 and "exceeding the 1 still allowed" in issues[0]
 
 
 class TestParseRecordsDuplicateKeywords:

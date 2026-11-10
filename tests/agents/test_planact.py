@@ -270,7 +270,7 @@ class TestPlanActGenerationRetry:
         )
         agent = make_planact_agent([too_many], tool_calls_limit=1, regeneration_limit=0)
 
-        with pytest.raises(ToolAgentError, match="exceeding the configured limit"):
+        with pytest.raises(ToolAgentError, match="exceeding the 1 still allowed"):
             agent.invoke({"prompt": "run"})
 
 

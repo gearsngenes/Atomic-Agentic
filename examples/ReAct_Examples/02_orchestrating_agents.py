@@ -6,10 +6,10 @@ deciding one tool call per round rather than a fixed upfront sequence, so
 it can stop as soon as the reviewer's grade clears the bar instead of
 always running a fixed number of cycles.
 
-`AgenticOrchestrator`'s conversation sets `response_preview_limit` below so
-draft code and review dicts truncate in "Cached values" each round -- without it, the
-full values are always visible, leaving the model no real incentive to
-reference an earlier result by "$name" instead of retyping it.
+`AgenticOrchestrator`'s conversation sets `context_preview_limit` below so
+draft code and review dicts truncate in the runtime-context block each round
+-- without it, the full values are always visible, leaving the model no real
+incentive to reference an earlier result by "$name" instead of retyping it.
 
 "approval_status" is deliberately the first key in CodeReviewer's schema,
 before "feedback": OpenAI's structured output fills object fields in
@@ -21,7 +21,6 @@ entirely by critique text.
 import json
 import logging
 from pathlib import Path
-from pprint import pformat
 
 from atomic_agentic.agents import BasicAgent, ReActAgent
 from atomic_agentic.llm import OpenAIEngine
@@ -149,7 +148,7 @@ orchestrator = ReActAgent(
     record_enabled=True,
     instructions=ORCHESTRATION_INSTRUCTIONS,
 )
-orchestrator.get_conversation().response_preview_limit = 10
+orchestrator.get_conversation().context_preview_limit = 10
 
 # Register both agents as tools -- each reachable by its own bare name
 # (builder.name / reviewer.name) since no alias is given.

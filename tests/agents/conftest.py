@@ -76,7 +76,7 @@ def make_planact_agent(
 
 
 def make_react_agent(
-    responses: list[str],
+    responses: list[Any],
     *,
     record_enabled: bool = False,
     tool_calls_limit: int | None = 3,

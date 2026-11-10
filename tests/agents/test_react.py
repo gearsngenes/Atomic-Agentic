@@ -9,6 +9,7 @@ import pytest
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.tools import return_tool
 from atomic_agentic.exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
+from atomic_agentic.models.agents.blackboard_models import ToolStatement
 
 from .conftest import (
     FakeLLMEngine,
@@ -172,6 +173,7 @@ class TestReActThinkPrepareHandoff:
             tool_calls_limit=1,
         )
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         assert task.generated_step is None
         assert task.resolved_args is None
 
@@ -186,6 +188,7 @@ class TestReActThinkPrepareHandoff:
             [rstep(call="return", arguments=[arg("val", 1)])],
         )
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         task = agent.think(task)
         generated_before = task.generated_step
         resolved_before = task.resolved_args
@@ -202,6 +205,7 @@ class TestReActThinkPrepareHandoff:
             tool_calls_limit=1,
         )
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         task = agent.think(task)
         task = agent.prepare(task)
 
@@ -442,10 +446,14 @@ class TestReActDispatchFailure:
 
     def test_last_call_failed_flag_set_on_failure_and_cleared_on_success(self) -> None:
         agent = make_react_agent(
-            [rstep(call="fail_tool", arguments=[])],
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 2)]),
+            ],
             fail_fast=False,
         )
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         task = agent.think(task)
         task = agent.act(task)
 
@@ -454,24 +462,11 @@ class TestReActDispatchFailure:
         assert task.failed_statements[0].exception is not None
         assert task.completed == []
 
-    def test_failure_is_rendered_for_the_next_round(self) -> None:
-        agent = make_react_agent(
-            [
-                rstep(call="fail_tool", arguments=[]),
-                rstep(call="return", arguments=[arg("val", 1)]),
-            ],
-            fail_fast=False,
-        )
+        task = agent.act(agent.prepare(agent.think(task)))
 
-        agent.invoke({"prompt": "run"})
-
-        engine = agent.llm_engine
-        assert isinstance(engine, FakeLLMEngine)
-        second_call_text = "\n".join(
-            message["content"] for message in engine.calls[1]
-        )
-        assert "YOUR LAST CALL FAILED" in second_call_text
-        assert "intentional failure" in second_call_text
+        assert task.last_call_failed is False
+        assert len(task.completed) == 1
+        assert len(task.failed_statements) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -539,6 +534,7 @@ class TestReActResultModelData:
     def test_zero_record_task_builds_result_with_engine_model_data(self) -> None:
         agent = make_react_agent([])
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         task.ended_at = task.started_at
 
         result = agent.build_result_from_task(task, "done")
@@ -621,6 +617,7 @@ class TestReActContextBinding:
             tool_calls_limit=1,
         )
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        task.user_prompt = "run"
         task = agent.act(agent.prepare(agent.think(task)))
 
         assert task.context["__r0__"].value == 5
@@ -714,6 +711,7 @@ class TestReActRendering:
 
         assert "RUNTIME CONTEXT" in task_block
         assert "name: $a" in task_block
+        assert "value:\n5" in task_block
 
     def test_hidden_context_limit_shows_value_hidden(self) -> None:
         agent = make_react_agent(
@@ -748,7 +746,9 @@ class TestReActRendering:
         assert "YOUR LAST CALL FAILED" in second[1]["content"]
         assert "intentional failure" in second[1]["content"]
         assert "Your last call failed" in second[2]["content"]
-        third = "\n".join(m["content"] for m in agent._llm_engine.calls[2])
+        third = "\n".join(
+            m["content"] for m in agent._llm_engine.calls[2] if m["role"] != "system"
+        )
         assert "YOUR LAST CALL FAILED" not in third
         assert "Your last call failed" not in third
 
@@ -852,3 +852,107 @@ class TestReActPostInvokeRouting:
         result = asyncio.run(agent.async_invoke({"prompt": "go"}))
 
         assert result.result == "second=5"
+
+
+# --------------------------------------------------------------------------- #
+# Async paths, bind mismatches, and failure edge cases
+# --------------------------------------------------------------------------- #
+class TestReActAsyncAndFailureEdges:
+    def test_async_retry_loop_regenerates_then_succeeds(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="return", arguments=[arg("val", "$missing")]),
+                rstep(call="return", arguments=[arg("val", 7)]),
+            ],
+            regeneration_limit=1,
+            record_enabled=True,
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert result.result == 7
+        assert agent.get_conversation().records[-1].regenerations_used == 1
+
+    def test_async_retry_loop_budget_exhausted_raises(self) -> None:
+        agent = make_react_agent(
+            [rstep(call="return", arguments=[arg("val", "$missing")])],
+            regeneration_limit=0,
+        )
+
+        with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+    def test_async_dispatch_failure_is_tolerated_when_not_fail_fast(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="return", arguments=[arg("val", 1)]),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            record_enabled=True,
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert result.result == 1
+        assert result.failed_call_count == 1
+
+    def test_async_dispatch_failure_raises_when_fail_fast(self) -> None:
+        agent = make_react_agent([rstep(call="fail_tool", arguments=[])], fail_fast=True)
+
+        with pytest.raises(ToolInvocationError):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+    def test_fail_fast_wraps_a_non_tool_invocation_error(self) -> None:
+        agent = make_react_agent([], fail_fast=True)
+        task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
+        call = ToolStatement(identifier=None, tool="add")
+
+        with pytest.raises(ToolAgentError, match="tool call failed"):
+            agent._apply_call_result(task, call, RuntimeError("boom"))
+
+    def test_unknown_keyword_is_a_bind_mismatch_and_regenerates(self) -> None:
+        bad = rstep(call="add", arguments=[arg("x", 1), arg("zzz", 2)])
+        good = rstep(call="return", arguments=[arg("val", 1)])
+        agent = make_react_agent(
+            [bad, good], tool_calls_limit=1, regeneration_limit=1, record_enabled=True,
+        )
+
+        assert agent.invoke({"prompt": "run"}).result == 1
+        record = agent.get_conversation().records[-1]
+        assert record.regenerations_used == 1
+        assert record.failed_statements == ()
+
+    def test_failed_call_does_not_update_a_writable_variable(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[], result_name="total"),
+                rstep(call="return", arguments=[arg("val", "$total")]),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            record_enabled=True,
+        )
+        agent.get_conversation().remember("total", 7)
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 7
+        assert agent.get_conversation().context["total"].value == 7
+
+    def test_failed_call_still_spends_budget_in_the_directive(self) -> None:
+        agent = make_react_agent(
+            [
+                rstep(call="fail_tool", arguments=[]),
+                rstep(call="return", arguments=[arg("val", 1)]),
+            ],
+            tool_calls_limit=3,
+            fail_fast=False,
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        directive = agent._llm_engine.calls[1][-1]["content"]
+        assert "Your last call failed" in directive
+        assert "Tool calls remaining: 2 of 3." in directive

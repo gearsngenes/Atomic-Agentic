@@ -1,10 +1,11 @@
 # =============================================================================
-# PlanActAgent/ReActAgent prompts
+# PlanActAgent/ReActAgent/ScriptActAgent prompts
 # =============================================================================
 # Used by:
-# - agents/planact.py, agents/react.py: PlanActAgent and ReActAgent default role prompts
+# - agents/planact.py, agents/react.py, agents/scriptact.py: the three
+#   tool-agent families' default system prompts
 #
-# These prompts live beside the PlanActAgent/ReActAgent protocol constants
+# These prompts live beside the tool-agent protocol constants
 # because they define the LLM-facing side of the same parser/runtime contract.
 # PLANNER_PROMPT and REACT_PROMPT are static templates with no fields: the
 # tool list and the builtins come from the framework's TOOL-CALLING

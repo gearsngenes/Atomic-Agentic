@@ -10,7 +10,6 @@ everything completed so far this run.
 """
 import logging
 import math
-from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
 

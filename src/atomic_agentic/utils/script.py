@@ -536,7 +536,7 @@ def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
     A slot is eligible when its ``tool`` isn't already a sentinel and names
     a real Python builtin. A registered tool can no longer share a name
     with a real, non-excluded builtin at all (enforced at registration time
-    by ``ScriptActAgent._validate_tool_alias``), so there is no precedence
+    by ``ScriptActAgent._validate_effective_tool_id``), so there is no precedence
     rule to apply here -- a name reaching this function is either a
     registered tool (never a builtin) or not, mutually exclusive by
     construction. An eligible slot gets its builtin name spliced in as a

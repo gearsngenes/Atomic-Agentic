@@ -23,7 +23,7 @@ dispatch logic genuinely differs.
 whole-batch cascade-vs-abort, ``ReActAgent``'s governs single-call
 raise-vs-tolerate -- different granularity, coincidentally the same name and
 type, never one shared feature. Each declares its own independently.
-``ScriptActAgent`` has no concept of it at all.
+``ScriptActAgent`` declares its own (repair-round budget exhaustion).
 """
 
 from __future__ import annotations

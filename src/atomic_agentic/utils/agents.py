@@ -57,7 +57,7 @@ def normalize_prompt_config(
     ``None``.
 
     Unifies what were three near-identical coercion functions (role prompt,
-    thinking instructions, tool instructions) into one, parameterized per
+    thinking instructions, tool-agent instructions) into one, parameterized per
     call site rather than derived from a generic label, so existing callers
     get byte-identical ``PromptConfig``/error text.
 
@@ -65,7 +65,7 @@ def normalize_prompt_config(
         - ``default_template`` is ``None`` -- returns ``None``. The one
           branch a role prompt or thinking instructions never take (an
           agent always needs *some* version of either); a caller with no
-          sensible generic fallback (e.g. tool instructions) passes
+          sensible generic fallback (e.g. tool-agent instructions) passes
           ``None`` here to get real absence back instead of boilerplate.
         - ``default_template`` is a ``str`` -- returns
           ``PromptConfig(template=default_template, description=default_description)``.
@@ -387,7 +387,7 @@ def compile_batches(
     (``extract_identifiers(call.args) | extract_identifiers(call.kwargs)``)
     were bound by a call already sitting in that same open batch (i.e. every
     dependency is satisfiable from an earlier, already-closed batch, a
-    registered tool, or a registered constant -- reference validity itself
+    registered tool, or a context variable -- reference validity itself
     is assumed already checked upstream). Otherwise the open batch closes
     first and this call starts a new one.
 

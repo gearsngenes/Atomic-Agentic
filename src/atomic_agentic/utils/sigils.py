@@ -245,12 +245,12 @@ def translate_calls(
             if name in available:
                 return ast.Name(id=name, ctx=ast.Load())
             issues.append(
-                f"{label}: reference {[name]!r} does not match any context "
+                f"{label}: reference '${name}' does not match any context "
                 "variable or earlier result_name (only checked for a value "
                 "that is *entirely* one '$name' token -- a '$name' embedded "
                 "in a longer string is never flagged). Reference only names "
                 "shown in the RUNTIME CONTEXT block or bound by an earlier "
-                "call in this plan."
+                "call this run."
             )
             return ast.Constant(value=value)
 
@@ -367,8 +367,8 @@ def translate_calls(
     real_call_count = sum(1 for draft in drafts if draft.tool != RETURN_ALIAS)
     if tool_calls_limit is not None and real_call_count > tool_calls_limit:
         issues.append(
-            f"the plan calls {real_call_count} tool(s), exceeding the "
-            f"configured limit of {tool_calls_limit}."
+            f"this makes {real_call_count} tool call(s), exceeding the "
+            f"{tool_calls_limit} still allowed by the tool-call limit."
         )
 
     return issues, statements
@@ -495,10 +495,10 @@ def render_failed_as_json(calls: list[ToolStatement]) -> str:
     reconstruction (via ``serialize_call``), plus one additional key per
     entry: ``"error"``, the failed call's own ``str(call.exception)``.
 
-    Exists specifically for a family (``ReActAgent``) whose
-    ``failed_statements`` persist into every future round's rendered
-    snapshot -- neither ``serialize_call`` nor ``render_completed_as_json``
-    carries exception text, and nothing else in this file does either.
+    For the views that must carry the failure reason (``ReActAgent``'s
+    last-failure steps entry, ``PlanActAgent``'s exhausted-plan error) --
+    neither ``serialize_call`` nor ``render_completed_as_json`` carries
+    exception text, and nothing else in this file does either.
 
     Returns ``""`` for an empty ``calls`` list, matching
     ``render_completed_as_json``'s own empty-input contract -- the caller

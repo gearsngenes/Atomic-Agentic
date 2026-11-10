@@ -14,9 +14,8 @@ class ContextVariable:
     """
     Named, mutable-by-replacement runtime value.
 
-    Successor to the old ToolAgent-only, ``inline_limit``-bearing
-    ``ConstantSpec`` -- base-``Agent``-scoped context/memory work builds on
-    this. ``name`` is fixed for life; ``value``/``description`` are updated
+    The base-``Agent``-scoped unit of context/memory work builds on this.
+    ``name`` is fixed for life; ``value``/``description`` are updated
     by constructing a new instance via ``dataclasses.replace`` (never
     in-place mutation, never a dedicated method on this class -- see
     ``type``'s own docstring for why no update methods live here).

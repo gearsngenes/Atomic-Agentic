@@ -266,8 +266,8 @@ class TestToolAgentAbstractContract:
                 name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine([]),
             )
 
-    def test_react_abstract_set_still_includes_the_frame_hooks(self) -> None:
-        assert {"_render_steps", "_render_directive"} <= ReActAgent.__abstractmethods__
+    def test_react_implements_the_frame_hooks(self) -> None:
+        assert ReActAgent.__abstractmethods__ == frozenset()
 
     def test_planact_implements_the_frame_hooks(self) -> None:
         assert PlanActAgent.__abstractmethods__ == frozenset()
