@@ -266,9 +266,11 @@ class TestToolAgentAbstractContract:
                 name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine([]),
             )
 
-    @pytest.mark.parametrize("family", [PlanActAgent, ReActAgent])
-    def test_family_abstract_sets_include_the_new_frame_hooks(self, family: type) -> None:
-        assert {"_render_steps", "_render_directive"} <= family.__abstractmethods__
+    def test_react_abstract_set_still_includes_the_frame_hooks(self) -> None:
+        assert {"_render_steps", "_render_directive"} <= ReActAgent.__abstractmethods__
+
+    def test_planact_implements_the_frame_hooks(self) -> None:
+        assert PlanActAgent.__abstractmethods__ == frozenset()
 
 
 # --------------------------------------------------------------------------- #

@@ -36,10 +36,9 @@ from ..exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
-from ..utils.agents import build_usage_report, compile_batches, is_dispatched, resolve_statement_args
+from ..utils.agents import build_usage_report, check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
-    check_call_bindings,
     parse_generation,
     render_completed_as_python,
     render_failed_as_python,

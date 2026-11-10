@@ -28,8 +28,9 @@ agent.register_tools(EXPONENT_TOOLS)
 agent.register_tools(BASIC_MATH_TOOLS)
 agent.register_tools(CONSOLE_TOOLS)
 
-# Register the pi constant (value first, then alias/description)
-agent.register_constant(math.pi, alias="PI", description="Mathematical constant `pi`")
+# pi as a readonly context variable: the model sees it in its context block and
+# can reference it as "$PI", but a plan cannot reassign it.
+agent.get_conversation().remember("PI", math.pi, "The mathematical constant pi.", readonly=True)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """

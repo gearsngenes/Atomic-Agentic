@@ -53,7 +53,7 @@ Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
 # Standing orchestration rules, lifted out of the per-invocation task prompt
-# and into tool_instructions -- the process itself (outliner-first, then
+# and into the agent's instructions -- the process itself (outliner-first, then
 # alternate reviewer/writer, always return the writer's latest draft) is now
 # reusable agent behavior, not one-off task text repeated on every call.
 ORCHESTRATION_INSTRUCTIONS = """
@@ -130,7 +130,7 @@ orch = PlanActAgent(
     llm_engine=llm_engine,
     record_enabled=False,
     tool_calls_limit=None,
-    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
+    instructions=ORCHESTRATION_INSTRUCTIONS,
 )
 
 # Register agents-as-tools -- each reachable by its own bare agent name

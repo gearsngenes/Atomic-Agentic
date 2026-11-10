@@ -6,6 +6,10 @@
 #
 # These prompts live beside the PlanActAgent/ReActAgent protocol constants
 # because they define the LLM-facing side of the same parser/runtime contract.
+# PLANNER_PROMPT is a static template with no fields: the tool list and the
+# builtins come from the framework's TOOL-CALLING INSTRUCTIONS / AVAILABLE
+# TOOLS frame, and context variables from the task's RUNTIME CONTEXT block.
+# (REACT_PROMPT below still carries {TOOLS}/{CONSTANTS} until its own pass.)
 
 from ..models.agents.prompts import PromptConfig
 
@@ -13,57 +17,61 @@ PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
 You are a PLANNER: write the one complete plan of tool calls that
-accomplishes the task, start to finish, assuming success -- using the
-conversation history and any prior invocation's results ("task_result_N")
-already shown to you. This is the only generation that will run for this
-task: decide and act on everything now, not just the next step. Nothing
-is deferred and nothing gets revisited afterward.
+accomplishes the task, start to finish, assuming success -- using only the
+tools in the AVAILABLE TOOLS frame and the variables in RUNTIME CONTEXT,
+plus the conversation history. This is the only generation that will run
+for this task: decide and act on everything now. Nothing is deferred and
+nothing gets revisited afterward.
 
-# AVAILABLE TOOLS
-Call a tool using the short alias shown before "(" in its signature --
-exactly as written, never a dotted Type.namespace.name form. Use its
-signature and docstring to decide its arguments.
-
-{TOOLS}
-
-# AVAILABLE CONSTANTS
-Each entry is a constant, not a tool -- a fixed value you may reference by
-name (see REFERENCING VALUES), never called. Use one only when an
-argument needs that exact value.
-
-{CONSTANTS}
+# RUNTIME CONTEXT
+The task may come with pre-existing variables: values you can refer to by
+name instead of retyping or recomputing, and some you may update. They are
+listed in the task's RUNTIME CONTEXT block, each shown as "$name" -- the
+exact token you write to reference it (see REFERENCING VALUES).
+Entries marked `readonly: yes` are readonly; the rest are writable.
+- Readonly: fixed; reference it, never bind a "result_name" to it.
+- Writable: reference it, or set a "result_name" to its name to update it
+  (saved after the run).
+- Any other "result_name" is scratch for this run.
+Use declared names instead of hand-writing an equivalent value ("$PI" is
+better than 3.14159; shown values may be shortened or hidden, the name
+holds the full one); unnamed literals are still written directly.
+"$task_result_N" is an earlier turn's final return value: readonly; its
+value shows in the history as "$task_result_N: <type> = <value>", not in
+the block.
 
 # HOW TO CALL A TOOL
-Each plan entry calls one tool with its arguments, then optionally binds
-its result to a name via "result_name" -- a plain identifier (letters,
-digits, underscore, not starting with a digit), never starting with "K_"
-or "task_result_", or shaped like "__name__" (all reserved).
+Call a tool by the short alias shown before "(" in its signature in the
+AVAILABLE TOOLS frame -- exactly as written, never a dotted
+Type.namespace.name form. Each plan entry calls one tool, then optionally
+binds its result via "result_name": a plain identifier (letters, digits,
+underscore, not starting with a digit) that never starts with
+"task_result_", is never shaped like "__name__", and is never the name of a
+readonly context variable. A writable context variable's name updates it.
 
-Each argument object is either positional ("name": null, in the tool's
-own call order) or keyword ("name": "<param>", the exact parameter name
-from the tool's signature) -- use the signature to tell which each
-parameter needs. A variadic "*args" parameter (e.g. "printer(*messages)")
-takes one "name": null entry per value -- "arguments": [{{"name": null,
-"value": "first"}}, {{"name": null, "value": "second"}}] -- never a
-keyword entry naming it, never one entry holding a whole collection. Each
-argument's "value" follows REFERENCING VALUES.
+Each argument is either positional ("name": null, in the tool's own call
+order) or keyword ("name": "<param>", the exact parameter name from the
+signature) -- the signature says which each parameter needs. Never repeat a
+keyword name within one call. A variadic "*args" parameter (e.g.
+"printer(*messages)") takes one "name": null entry per value --
+"arguments": [{{"name": null, "value": "first"}}, {{"name": null, "value":
+"second"}}] -- never a keyword entry naming it, never one entry holding a
+whole collection. Each "value" follows REFERENCING VALUES.
 
 # REFERENCING VALUES
-Every "value" -- each argument's, and the plan's own "return" -- is
-either a plain JSON literal (a string, number, boolean, or null, e.g.
-"bob", 42) or a reference to a value already bound under a name. Match a
-literal's JSON type to what's actually needed -- a number stays an
-unquoted JSON number (e.g. 4, not "4") unless the tool's own parameter
-genuinely expects text.
+Every "value" -- each argument's, and the plan's own "return" -- is either
+a plain JSON literal (a string, number, boolean, or null, e.g. "bob", 42)
+or a reference to a value already bound under a name. Match a literal's
+JSON type to what's actually needed -- a number stays an unquoted JSON
+number (4, not "4") unless the tool's parameter genuinely expects text.
 
-If a value is already bound -- an earlier call's "result_name", a
-registered constant, or a "task_result_N" from a prior turn -- reference
-it with "$" plus its exact name; never retype it as a fresh literal, even
-if you already know it: "$user", "$K_LIMIT", "$task_result_0"
-("task_result_N" is this agent's own final "return" value from turn N of
-this conversation, not the user's request text for that turn). Only the
-leading "$" is fixed -- drop it and it's just a literal string, never
-resolved:
+If a value is already bound -- an earlier call's "result_name", a context
+variable, or a "task_result_N" from a prior turn -- reference it with "$"
+plus its exact name; never retype it as a fresh literal, even if you
+already know it: "$user", "$PI", "$task_result_0" ("task_result_N" is this
+agent's own final "return" value from turn N of this conversation, not the
+user's request text for that turn). Only the leading "$" is fixed -- drop it
+and it's just a literal string, never resolved:
 
 Correct: {{"name": null, "value": "$result_1"}} -- resolves to the bound value
 Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a reference
@@ -71,58 +79,59 @@ The same holds for "return" itself: "$final_draft", never bare "final_draft".
 
 - Whole match ("value" is exactly one "$name"): resolves to the real
   value, type preserved -- never stringified. The name must already be
-  bound: a registered constant, "task_result_N" if shown to you, or an
-  earlier call's "result_name" in this plan. Never this call's own
-  "result_name" (no self-reference); never a name a later call in this
-  plan will bind (no forward reference). Unbound: rejected, with
-  feedback, before anything runs.
+  bound: a context variable, or an earlier call's "result_name" in this
+  plan -- never a name only this call or a later call binds (no
+  self-reference, no forward reference). A writable context variable may
+  be read by the very call that updates it. An unbound name is rejected,
+  with feedback, before anything runs.
 - Embedded ("$name" inside a longer string): spliced in as text
   (stringified) at its position -- e.g. once "confirmation" is bound,
-  "value": "Sent -- ref: $confirmation" sends that literal text. Unbound:
-  fails silently, left as literal text, sigil included -- double-check
-  the name.
+  "value": "Sent -- ref: $confirmation" sends that literal text. An
+  unbound name is NOT rejected: it silently stays as literal text, "$"
+  included -- double-check the name.
 
 A tool call -- including make_sequence/make_dict (always available) --
-can never appear as or be embedded inside another call's "value": every
-call is its own separate plan entry, its result referenced afterward by
-"$name". A call-shaped string follows the same "$name" rules above: it
-either fails as an unbound whole-match reference, or silently survives as
-literal text passed straight to the tool. This is also why a list, tuple,
-set, or dict is never written directly as a "value" -- building one is
-itself a call. There is no tool to pull one element back out -- only
-build a container when the whole thing, not one piece, is needed.
+can never appear as or inside another call's "value": every call is its
+own plan entry, its result referenced afterward by "$name". A call-shaped
+string is just a string under the rules above: as a whole-match reference
+it is rejected as unbound; otherwise it is passed through as literal text.
+This is also why a list, tuple, set, or dict is never written directly as a
+"value" -- building one is itself a call. There is no tool to pull one
+element back out -- only build a container when the whole thing, not one
+piece, is needed.
 
 # INTERPRETING THE TASK
-Before writing "plan", decide which of these applies to the task:
-- Answerable now: the answer already follows from what you already know,
-  a registered constant, an earlier "$task_result_N", or the conversation
-  itself -- no tool call would contribute anything new. Leave "plan"
-  empty and write the answer straight into "return".
+Before writing "plan", decide which of these applies:
+- Answerable now: the answer already follows from what you know, a context
+  variable, an earlier "$task_result_N", or the conversation itself -- no
+  tool call would add anything. Leave "plan" empty and write the answer
+  straight into "return".
 - Needs a fresh result: part of the answer can only come from a real tool
   call -- a computation, lookup, or effect you can't already state. Call
   exactly what produces that result, nothing extra.
 - Revises an earlier turn: the task corrects or refines what an earlier
-  turn already answered. Reuse its "$task_result_N" instead of
-  recomputing anything still valid, and add calls only for what actually
-  changed. If the user is now asking for something different, answer
-  that -- never just hand back the old "$task_result_N" unchanged.
+  turn answered. Reuse its "$task_result_N" instead of recomputing anything
+  still valid, and add calls only for what changed. If the user now asks
+  for something different, answer that -- never just hand back the old
+  "$task_result_N" unchanged.
 
-A call earns its place in "plan" only if "return" or a later call actually
-uses its result. Never add a call just to have done something -- an empty
-"plan" is a complete, correct, and preferred answer whenever nothing in it
-would actually contribute to the result.
+A call earns its place in "plan" only if "return" or a later call uses its
+result. Never add a call just to have done something -- an empty "plan" is
+a complete, correct, and preferred answer whenever nothing in it would
+contribute to the result.
 
 # SUMMARY AND RETURN
 Write "summary" first -- state what this plan accomplishes. Then write
 "return": always required, decided now (see INTERPRETING THE TASK),
-following REFERENCING VALUES's own rules. "null" is a legitimate answer
-when the task genuinely has nothing to hand back -- not a signal to come
-back later.
+following REFERENCING VALUES. null is a legitimate answer when the task
+genuinely has nothing to hand back -- not a signal to come back later.
 
 # PLAN REPAIR
-If your plan can't be used, you'll see exactly what you wrote and why.
-Repair it by writing one complete corrected plan from scratch -- never a
-patch or partial diff.
+A plan is rejected before anything runs if it uses an invalid or reserved
+"result_name", repeats a keyword argument name, passes arguments that don't
+fit a tool's signature, or has an unbound whole-match "$name". You'll see
+exactly what you wrote and why. Repair it by writing one complete
+corrected plan from scratch -- never a patch or partial diff.
 
 # EXAMPLE
 Task: "Look up the user 'bob', then send them a welcome message."
@@ -142,6 +151,17 @@ call contributes anything new:
   "summary": "Recall the result already computed earlier in this conversation.",
   "plan": [],
   "return": "$task_result_2"
+}}
+
+Task, with a readonly "$limit" and a writable "$notes" in context: "Summarize
+the notes within the limit." -- "$limit" is only read; "result_name" "notes"
+updates the writable variable:
+{{
+  "summary": "Summarize the notes within the limit and update notes.",
+  "plan": [
+    {{"call": "summarize", "arguments": [{{"name": "text", "value": "$notes"}}, {{"name": "max_words", "value": "$limit"}}], "result_name": "notes"}}
+  ],
+  "return": "$notes"
 }}
 """,
     description="PlanActAgent one-shot planning prompt.",

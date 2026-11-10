@@ -293,13 +293,14 @@ class ScriptActAgentTask(ToolAgentTask):
 class PlanActTask(ToolAgentTask):
     """
     PlanActAgent-flavored task -- ``ToolStatement``-based batch-execution
-    fields, with no continuation-related fields at all: ``think()`` runs
-    exactly once, ever, per invoke, so there is nothing analogous to a
+    fields, with no continuation-related fields at all: ``think()`` runs the
+    generation once per invoke (a repeat call is a no-op while ``pending``
+    exists or the task is complete), so there is nothing analogous to a
     voluntary multi-round continuation flag, round counter, or continuation
-    note to carry. ``completed``/``failed_statements``/``cache``/
-    ``constant_values``/``tool_calls_used`` are all inherited from
-    ``ToolAgentTask`` -- only ``pending``/``resolved_args`` are genuinely
-    ``PlanActAgent``-specific.
+    note to carry. ``completed``/``failed_statements``/``tool_calls_used``
+    are inherited from ``ToolAgentTask``, and result bindings live in the
+    inherited ``task.context`` (written through ``Agent._write_context``) --
+    only ``pending``/``resolved_args`` are genuinely ``PlanActAgent``-specific.
 
     Fields
     ------

@@ -54,7 +54,8 @@ def make_planact_agent(
     fail_fast: bool = True,
     post_invoke: Any = None,
     response_to_post: Any = None,
-    tool_instructions: str | PromptConfig | None = None,
+    instructions: str | PromptConfig | None = None,
+    **overrides: Any,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
@@ -67,7 +68,8 @@ def make_planact_agent(
         fail_fast=fail_fast,
         post_invoke=post_invoke,
         response_to_post=response_to_post,
-        tool_instructions=tool_instructions,
+        instructions=instructions,
+        **overrides,
     )
     register_math_tools(agent)
     return agent

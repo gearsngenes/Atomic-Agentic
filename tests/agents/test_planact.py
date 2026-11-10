@@ -58,9 +58,20 @@ class TestPlanActConstruction:
         assert agent.tool_calls_limit == 3
         assert agent.regeneration_limit == 2
 
-    def test_tool_instructions_forwarded(self) -> None:
-        agent = make_planact_agent([], tool_instructions="Be terse.")
-        assert agent.tool_instructions == "Be terse."
+    def test_instructions_forwarded(self) -> None:
+        agent = make_planact_agent([], instructions="Be terse.")
+        assert agent.instructions == "Be terse."
+
+    @pytest.mark.parametrize("removed", [{"constants": [1]}, {"tool_instructions": "x"}])
+    def test_removed_constructor_arguments_raise_type_error(self, removed: dict[str, Any]) -> None:
+        with pytest.raises(TypeError):
+            PlanActAgent(
+                name="tests",
+                namespace="tests",
+                description=".",
+                llm_engine=FakeLLMEngine([]),
+                **removed,
+            )
 
     def test_reserved_tools_registered_on_construction(self) -> None:
         agent = make_planact_agent([])
@@ -166,16 +177,20 @@ class TestPlanActSigilResolution:
 
 
 # --------------------------------------------------------------------------- #
-# Constant (K_*) and cross-turn (task_result_N) references
+# Context-variable and cross-turn (task_result_N) references
 # --------------------------------------------------------------------------- #
-class TestPlanActConstantAndCrossTurnReferences:
-    def test_registered_constant_resolves_by_wire_name(self) -> None:
-        agent = make_planact_agent([scripted(plan=[], return_value="$K_LIMIT")])
-        agent.register_constant(10, alias="limit")
+class TestPlanActContextAndCrossTurnReferences:
+    def test_readonly_context_variable_resolves(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value="$limit")])
+        agent.get_conversation().remember("limit", 10, readonly=True)
 
-        result = agent.invoke({"prompt": "run"})
+        assert agent.invoke({"prompt": "run"}).result == 10
 
-        assert result.result == 10
+    def test_writable_context_variable_resolves(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value="$notes")])
+        agent.get_conversation().remember("notes", "draft")
+
+        assert agent.invoke({"prompt": "run"}).result == "draft"
 
     def test_cross_turn_task_result_reference_resolves(self) -> None:
         first_plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
@@ -257,6 +272,176 @@ class TestPlanActGenerationRetry:
 
         with pytest.raises(ToolAgentError, match="exceeding the configured limit"):
             agent.invoke({"prompt": "run"})
+
+
+# --------------------------------------------------------------------------- #
+# Context binding of result names, plan-time checks
+# --------------------------------------------------------------------------- #
+class TestPlanActContextBinding:
+    def test_new_result_name_is_usable_but_not_persisted_when_undeclared(self) -> None:
+        plan = [
+            {"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"},
+            {"call": "multiply", "arguments": [arg("x", "$a"), arg("y", 2)], "result_name": "b"},
+        ]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$b")], record_enabled=True)
+
+        assert agent.invoke({"prompt": "run"}).result == 10
+        assert agent.get_conversation().context == {}
+
+    def test_writable_variable_updated_by_result_name_is_persisted(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "total"}]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$total")], record_enabled=True)
+        agent.get_conversation().remember("total", 0, "Running total")
+
+        agent.invoke({"prompt": "run"})
+
+        variable = agent.get_conversation().context["total"]
+        assert variable.value == 5
+        assert variable.description == "Running total"
+
+    @pytest.mark.parametrize("bad_name", ["limit", "task_result_9"])
+    def test_rejected_result_name_is_regenerated(self, bad_name: str) -> None:
+        bad = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": bad_name}],
+            return_value=None,
+        )
+        good = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent([bad, good], record_enabled=True, regeneration_limit=1)
+        agent.get_conversation().remember("limit", 10, readonly=True)
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        assert agent.get_conversation().records[-1].regenerations_used == 1
+        assert agent.get_conversation().context["limit"].value == 10
+
+    def test_repeated_keyword_name_is_rejected_as_feedback(self) -> None:
+        bad = scripted(
+            plan=[{
+                "call": "add",
+                "arguments": [arg("x", 1), arg("x", 2), arg("y", 3)],
+                "result_name": "a",
+            }],
+            return_value="$a",
+        )
+        good = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 3)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent([bad, good], regeneration_limit=1)
+
+        assert agent.invoke({"prompt": "run"}).result == 4
+        feedback = agent._llm_engine.calls[1][-1]["content"]
+        assert "given more than once" in feedback
+
+    def test_dry_bind_failure_triggers_regeneration_then_succeeds(self) -> None:
+        bad = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("zzz", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        good = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent([bad, good], record_enabled=True, regeneration_limit=1)
+
+        assert agent.invoke({"prompt": "run"}).result == 3
+        assert agent.get_conversation().records[-1].regenerations_used == 1
+        assert "do not fit its signature" in agent._llm_engine.calls[1][-1]["content"]
+
+    def test_dry_bind_failure_with_no_regeneration_budget_raises(self) -> None:
+        bad = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("zzz", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent([bad], regeneration_limit=0)
+
+        with pytest.raises(ToolAgentError, match="do not fit its signature"):
+            agent.invoke({"prompt": "run"})
+
+    def test_fail_fast_false_partial_failure_still_persists_independent_update(self) -> None:
+        plan = [
+            {"call": "fail_tool", "arguments": [], "result_name": "f"},
+            {"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "total"},
+        ]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$total")],
+            fail_fast=False,
+            record_enabled=True,
+        )
+        agent.get_conversation().remember("total", 0)
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 5
+        assert result.failed_call_count == 1
+        assert agent.get_conversation().context["total"].value == 5
+
+
+# --------------------------------------------------------------------------- #
+# What the model sees
+# --------------------------------------------------------------------------- #
+class TestPlanActRendering:
+    @staticmethod
+    def _first_call(agent: PlanActAgent) -> list[dict[str, str]]:
+        agent.invoke({"prompt": "do the thing"})
+        return agent._llm_engine.calls[0]
+
+    def test_first_call_is_one_user_message_ending_with_the_directive(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=1)], record_enabled=True)
+
+        messages = self._first_call(agent)
+
+        users = [m for m in messages if m["role"] == "user"]
+        assert len(users) == 1
+        assert "USER TASK PROMPT" in users[0]["content"]
+        assert users[0]["content"].endswith("Write a plan to accomplish this task now.")
+        assert "CURRENT TASK" not in users[0]["content"]
+        record_messages = agent.get_conversation().records[-1].llm_records[0].messages
+        assert [m for m in record_messages if m["role"] == "user"] == users
+
+    def test_budget_line_appears_only_with_a_limit(self) -> None:
+        limited = make_planact_agent([scripted(plan=[], return_value=1)], tool_calls_limit=3)
+        unlimited = make_planact_agent([scripted(plan=[], return_value=1)])
+
+        assert "You may make at most 3 tool calls total." in self._first_call(limited)[-1]["content"]
+        assert "tool call" not in self._first_call(unlimited)[-1]["content"]
+
+    def test_budget_line_is_singular_for_one_call(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=1)], tool_calls_limit=1)
+
+        assert "at most 1 tool call total." in self._first_call(agent)[-1]["content"]
+
+    def test_context_variable_renders_with_dollar_prefix(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=1)])
+        agent.get_conversation().remember("limit", 10, "A fixed limit.", readonly=True)
+
+        user = self._first_call(agent)[-1]["content"]
+
+        assert "name: $limit" in user
+        assert "RUNTIME CONTEXT" in user
+
+    def test_system_message_frames_tools_and_user_instructions(self) -> None:
+        agent = make_planact_agent(
+            [scripted(plan=[], return_value=1)], instructions="Be terse.",
+        )
+
+        system = next(m["content"] for m in self._first_call(agent) if m["role"] == "system")
+
+        assert "TOOL-CALLING INSTRUCTIONS" in system
+        assert "AVAILABLE TOOLS" in system
+        assert "USER-DEFINED INSTRUCTIONS" in system
+        assert "Be terse." in system
+
+    def test_no_user_instructions_frame_without_instructions(self) -> None:
+        agent = make_planact_agent([scripted(plan=[], return_value=1)])
+
+        system = next(m["content"] for m in self._first_call(agent) if m["role"] == "system")
+
+        assert "USER-DEFINED INSTRUCTIONS" not in system
 
 
 # --------------------------------------------------------------------------- #
@@ -388,3 +573,79 @@ class TestPlanActResultModelData:
         assert result.llm_model_data == agent.llm_engine.model_data
         assert result.failed_call_count == 0
         assert result.regenerations_used == 0
+
+
+# --------------------------------------------------------------------------- #
+# post_invoke / response_to_post routing
+# --------------------------------------------------------------------------- #
+def shout(result: Any) -> str:
+    return f"{result}!"
+
+
+def second_item(second: Any) -> str:
+    return f"second={second}"
+
+
+class TestPlanActPostInvokeRouting:
+    def test_post_invoke_receives_the_whole_response(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$a")],
+            post_invoke=shout,
+            response_to_post="result",
+        )
+
+        assert agent.invoke({"prompt": "go"}).result == "5!"
+
+    def test_response_to_post_selector_slices_the_response(self) -> None:
+        plan = [
+            {
+                "call": "make_sequence",
+                "arguments": [arg(None, 4), arg(None, 5)],
+                "result_name": "pair",
+            },
+        ]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$pair")],
+            post_invoke=second_item,
+            response_to_post={1: "second"},
+        )
+
+        assert agent.invoke({"prompt": "go"}).result == "second=5"
+
+    def test_response_to_post_and_context_can_route_together(self) -> None:
+        plan = [
+            {
+                "call": "make_sequence",
+                "arguments": [arg(None, 4), arg(None, 5)],
+                "result_name": "pair",
+            },
+        ]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$pair")],
+            record_enabled=True,
+            post_invoke=second_item,
+            response_to_post={1: "second"},
+            response_to_context={0: "first"},
+        )
+
+        result = agent.invoke({"prompt": "go"})
+
+        assert result.result == "second=5"
+        assert agent.get_conversation().context["first"].value == 4
+
+    def test_async_post_invoke_routing(self) -> None:
+        plan = [
+            {
+                "call": "make_sequence",
+                "arguments": [arg(None, 4), arg(None, 5)],
+                "result_name": "pair",
+            },
+        ]
+        agent = make_planact_agent(
+            [scripted(plan=plan, return_value="$pair")],
+            post_invoke=second_item,
+            response_to_post={1: "second"},
+        )
+
+        assert asyncio.run(agent.async_invoke({"prompt": "go"})).result == "second=5"

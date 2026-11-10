@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
@@ -15,7 +15,6 @@ from ..constants.agents import (
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
 )
-from ..core.Invokable import AtomicInvokable
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import ToolStatement
 from .agents import (
@@ -31,7 +30,6 @@ __all__ = [
     "parse_generation",
     "rewrite_builtin_calls",
     "validate_references",
-    "check_call_bindings",
     "render_completed_as_python",
     "render_failed_as_python",
 ]
@@ -657,43 +655,6 @@ def validate_references(
             f"exceeding the configured limit of {tool_calls_limit}."
         )
 
-    return issues
-
-
-def check_call_bindings(
-    slots: list[ToolStatement],
-    toolbox: Mapping[str, AtomicInvokable],
-) -> list[str]:
-    """
-    Dry bind: catch argument-shape mistakes at plan time. For each slot whose
-    ``tool`` is a registered tool id (sentinel, builtin and attribute-call
-    slots are skipped), bind placeholder values through the tool's
-    ``_args_kwargs_to_dict`` and report a ``TypeError`` (too many positionals,
-    unknown keyword, duplicate argument) as an issue.
-
-    A slot with a ``*`` unpack or a ``**`` unpack is skipped (arity unknown).
-    No values are evaluated and nothing is dispatched. A missing required
-    argument is not reported (binding does not check it); it still surfaces
-    at invoke time. Returns ``[]`` when every checked call binds.
-    """
-    issues: list[str] = []
-    for slot in slots:
-        if slot.tool not in toolbox:
-            continue
-        if KWARGS_UNPACK_KEY in slot.kwargs or any(
-            isinstance(arg, ast.Starred) for arg in slot.args
-        ):
-            continue
-        try:
-            toolbox[slot.tool]._args_kwargs_to_dict(
-                *([None] * len(slot.args)), **{key: None for key in slot.kwargs}
-            )
-        except TypeError as e:
-            label = slot.identifier if slot.identifier is not None else "(unassigned)"
-            issues.append(
-                f"statement producing {label} calls {slot.tool!r} with arguments "
-                f"that do not fit its signature: {e}"
-            )
     return issues
 
 
