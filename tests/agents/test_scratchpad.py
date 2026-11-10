@@ -164,11 +164,12 @@ class TestConstruction:
 
         assert [p.name for p in agent.parameters] == ["prompt"]
 
-    def test_thinking_prompt_is_registered_under_its_name(self) -> None:
+    def test_thinking_prompt_and_role_prompt_are_stored(self) -> None:
         agent = make_agent()
 
-        assert agent._system_prompts["thinking"].template == THINK
-        assert agent._system_prompts["role"].template == ROLE
+        assert agent._thinking_config.template == THINK
+        assert agent.role_prompt == ROLE
+        assert not hasattr(agent, "_system_prompts")
 
     def test_response_schema_gives_the_default_conversation_json_mode(self) -> None:
         schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
@@ -217,13 +218,12 @@ class TestFixedRounds:
         assert agent._llm_engine.call_count == 3
         assert [c[0]["content"] for c in calls(agent)] == [THINK, THINK, ROLE]
 
-    def test_llm_records_are_tagged_with_the_phase_prompt_names(self) -> None:
+    def test_each_thinking_round_and_the_reply_has_an_llm_record(self) -> None:
         agent = make_agent(["t1", "t2", "R"], thinking_rounds=2, record_enabled=True)
 
         agent.invoke({"prompt": "hi"})
 
-        names = [r.system_prompt_name for r in last_record(agent).llm_records]
-        assert names == ["thinking", "thinking", "role"]
+        assert len(last_record(agent).llm_records) == 3
 
     def test_string_thoughts_are_stripped(self) -> None:
         agent = make_agent(["  a thought \n", "R"], record_enabled=True)
@@ -565,7 +565,7 @@ class TestPlaceholders:
 class TestRendering:
     def _task(self, thoughts: list[Any]) -> ScratchpadTask:
         return ScratchpadTask(
-            turns=[], inputs={}, user_prompt="", system_prompt_name="thinking",
+            turns=[], inputs={}, user_prompt="",
             thoughts=thoughts,
         )
 

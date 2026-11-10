@@ -85,8 +85,9 @@ class ToolAgent(Agent, ABC):
       names.
     - The concrete ``_render_task_messages`` frame and the shared
       ``_render_system_message``: framed ``TOOL-CALLING INSTRUCTIONS``
-      (the static family prompt), framed ``AVAILABLE TOOLS`` (``TOOLS_PREAMBLE``,
-      the tool list, then ``_BUILTINS_PREAMBLE``), then the framed user instructions.
+      (the family's ``TOOL_INSTRUCTIONS``), framed ``AVAILABLE TOOLS``
+      (``_render_actions()``: ``TOOLS_PREAMBLE`` then the tool list), then the
+      framed user instructions.
     - ``to_dict()`` diagnostics for the above.
 
     What it does not own: any lifecycle hook body, any reference-resolution
@@ -113,11 +114,10 @@ class ToolAgent(Agent, ABC):
       at the end of each round (a forgotten clear shows a stale frame).
     """
 
-    INSTRUCTIONS_KEY: ClassVar[str] = "instructions"
-
-    #: Closing text of the ``AVAILABLE TOOLS`` frame, after the tool list;
-    #: empty by default (``ScriptActAgent`` adds the permitted Python builtins).
-    _BUILTINS_PREAMBLE: ClassVar[str] = ""
+    #: The family's static tool-calling instructions (plain text, no fields).
+    #: A concrete family must set it; there is no default, so an omission
+    #: surfaces as an ``AttributeError`` when the system message is rendered.
+    TOOL_INSTRUCTIONS: ClassVar[str]
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
 
@@ -233,8 +233,7 @@ class ToolAgent(Agent, ABC):
         if tools is not None:
             self.register_tools(tools)
 
-        if normalized_instructions is not None:
-            self._system_prompts[self.INSTRUCTIONS_KEY] = normalized_instructions
+        self._instructions = normalized_instructions
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -278,7 +277,7 @@ class ToolAgent(Agent, ABC):
     @property
     def instructions(self) -> Optional[str]:
         """Template of the registered instructions, or None. Read-only."""
-        config = self._system_prompts.get(self.INSTRUCTIONS_KEY)
+        config = self._instructions
         return config.template if config is not None else None
 
     # ------------------------------------------------------------------ #
@@ -681,33 +680,34 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
+    def _render_actions(self) -> str:
+        """
+        The ``AVAILABLE TOOLS`` body: ``TOOLS_PREAMBLE`` then
+        ``actions_context()`` (an empty tool list drops its part). A family that
+        adds text after the tool list overrides this, calling ``super()``.
+        """
+        parts = (TOOLS_PREAMBLE, self.actions_context())
+        return "\n\n".join(part for part in parts if part)
+
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """
         Render the system message as up to three framed sections.
 
-        1. ``task.system_prompt_name is None`` -> ``[]``.
-        2. ``TOOL-CALLING INSTRUCTIONS``: the active family prompt, rendered
-           with no fields (it is static).
-        3. ``AVAILABLE TOOLS``: ``TOOLS_PREAMBLE``, ``actions_context()`` and,
-           when the family sets one, ``_BUILTINS_PREAMBLE``.
-        4. With instructions registered: ``INSTRUCTIONS_PRECEDENCE``, then the
+        1. ``TOOL-CALLING INSTRUCTIONS``: the family's ``TOOL_INSTRUCTIONS``.
+        2. ``AVAILABLE TOOLS``: ``_render_actions()``.
+        3. With instructions set: ``INSTRUCTIONS_PRECEDENCE``, then the
            instructions rendered against ``task.inputs`` in their
            ``USER-DEFINED INSTRUCTIONS`` frame.
 
         Sections are joined by a blank line. Carries no budget text: per-call
         facts belong in the directive.
         """
-        if task.system_prompt_name is None:
-            return []
-        contract = self._system_prompts[task.system_prompt_name].render({})
-        parts = (TOOLS_PREAMBLE, self.actions_context(), self._BUILTINS_PREAMBLE)
-        tools_body = "\n\n".join(part for part in parts if part)
         sections = [
-            frame_content(contract, "TOOL-CALLING INSTRUCTIONS"),
-            frame_content(tools_body, "AVAILABLE TOOLS"),
+            frame_content(self.TOOL_INSTRUCTIONS, "TOOL-CALLING INSTRUCTIONS"),
+            frame_content(self._render_actions(), "AVAILABLE TOOLS"),
         ]
 
-        config = self._system_prompts.get(self.INSTRUCTIONS_KEY)
+        config = self._instructions
         if config is not None:
             text = config.render(dict(task.inputs))
             sections.append(
@@ -847,6 +847,7 @@ class ToolAgent(Agent, ABC):
             "tool_calls_limit": self.tool_calls_limit,
             "regeneration_limit": self.regeneration_limit,
             "tool_concurrency_limit": self.tool_concurrency_limit,
+            "instructions": self.instructions,
             "tools": {
                 name: tool.to_dict()
                 for name, tool in self._toolbox.items()

@@ -159,13 +159,8 @@ def render_context_entries(
     return "---\n" + "\n---\n".join(entries) + "\n---"
 
 
-def render_task_block(
-    prompt: str,
-    entries_text: str,
-    *,
-    context_first: bool,
-) -> str:
-    """Wrap ``prompt`` in the task frame and join the context frame to it.
+def render_task_block(prompt: str, entries_text: str) -> str:
+    """Wrap ``prompt`` in the task frame and put the context frame before it.
 
     The task frame is always present. The context frame (preamble and entries)
     is present only when ``entries_text`` is non-empty. ``frame_content`` elides
@@ -176,4 +171,4 @@ def render_task_block(
     if not entries_text:
         return task
     context = frame_content(f"{CONTEXT_PREAMBLE}\n\n{entries_text}", "RUNTIME CONTEXT")
-    return f"{context}\n\n{task}" if context_first else f"{task}\n\n{context}"
+    return f"{context}\n\n{task}"

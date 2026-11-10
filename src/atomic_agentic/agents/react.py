@@ -97,6 +97,10 @@ class ReActAgent(ToolAgent):
     - Higher latency: one LLM call per step, no concurrency.
     - Step quality depends on the model's ability to select the next best
       action from the rendered history alone.
+    - ``tool_calls_limit=None`` removes the only run-level stop: nothing else
+      ends a run whose model never calls ``return`` (``regeneration_limit``
+      restarts each round, so it does not bound the run). The default is 25;
+      pass ``None`` only when the model is trusted to finish.
     """
 
     # A class attribute (active before __init__ runs) — return_tool plus the
@@ -115,7 +119,7 @@ class ReActAgent(ToolAgent):
     _CONTEXT_NAME_PREFIX: str = "$"
 
     _TASK_CLS = ReActTask
-    _INITIAL_PROMPT_NAME = "reason_then_act"
+    TOOL_INSTRUCTIONS = REACT_PROMPT
 
     def __init__(
         self,
@@ -192,7 +196,6 @@ class ReActAgent(ToolAgent):
         self._seed_reserved_tool(return_tool, RETURN_TOOL_NAME)
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
-        self._system_prompts["reason_then_act"] = REACT_PROMPT
 
     @property
     def fail_fast(self) -> bool:
@@ -358,7 +361,6 @@ class ReActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
@@ -414,7 +416,6 @@ class ReActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)

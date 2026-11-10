@@ -230,14 +230,13 @@ class TestBasicAgentInvoke:
         assert len(agent.get_conversation().records) == 1
         assert agent.get_conversation().records[0].user_prompt == "What is AI?"
 
-    def test_invoke_record_llm_record_has_system_prompt_name_role(self) -> None:
+    def test_invoke_record_has_one_llm_record(self) -> None:
         agent = make_basic_agent(record_enabled=True)
 
         agent.invoke({"prompt": "test"})
 
         record = agent.get_conversation().records[0]
         assert len(record.llm_records) == 1
-        assert record.llm_records[0].system_prompt_name == "role"
 
     def test_invoke_record_messages_contains_last_user_message(self) -> None:
         agent = make_basic_agent(record_enabled=True)
@@ -282,12 +281,12 @@ class TestBasicAgentAsyncInvoke:
 
         assert engine.calls[0][0]["content"] == "You are a pirate."
 
-    def test_async_invoke_llm_record_has_system_prompt_name_role(self) -> None:
+    def test_async_invoke_has_one_llm_record(self) -> None:
         agent = make_basic_agent(record_enabled=True)
 
         asyncio.run(agent.async_invoke({"prompt": "async test"}))
 
-        assert agent.get_conversation().records[0].llm_records[0].system_prompt_name == "role"
+        assert len(agent.get_conversation().records[0].llm_records) == 1
 
 
 class TestBasicAgentResponseSchema:
@@ -397,14 +396,13 @@ class TestBasicAgentSerialization:
 
         assert agent.to_dict()["type"] == "BasicAgent"
 
-    def test_to_dict_has_system_prompts_with_role_key(self) -> None:
+    def test_to_dict_reports_role_prompt_not_a_prompt_registry(self) -> None:
         agent = make_basic_agent(role_prompt="My role.")
 
         data = agent.to_dict()
 
-        assert "system_prompts" in data
-        assert "role" in data["system_prompts"]
-        assert data["system_prompts"]["role"]["template"] == "My role."
+        assert data["role_prompt"] == "My role."
+        assert "system_prompts" not in data
 
     def test_to_dict_omits_extra_context_properties_key(self) -> None:
         agent = make_basic_agent()

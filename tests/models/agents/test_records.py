@@ -209,36 +209,12 @@ class TestLLMRecord:
         assert record.to_dict() == {
             "messages": msgs,
             "llm_result": llm_result.to_dict(),
-            "system_prompt_name": None,
         }
 
-    def test_system_prompt_name_defaults_to_none(self) -> None:
+    def test_has_no_system_prompt_name(self) -> None:
         record = make_llm_record()
-        assert record.system_prompt_name is None
-
-    def test_system_prompt_name_accepts_string(self) -> None:
-        record = LLMRecord(
-            messages=({"role": "user", "content": "hi"},),
-            llm_result=make_llm_result(),
-            system_prompt_name="role",
-        )
-        assert record.system_prompt_name == "role"
-
-    def test_system_prompt_name_rejects_non_string(self) -> None:
-        with pytest.raises(TypeError, match="system_prompt_name"):
-            LLMRecord(
-                messages=({"role": "user", "content": "hi"},),
-                llm_result=make_llm_result(),
-                system_prompt_name=123,  # type: ignore[arg-type]
-            )
-
-    def test_to_dict_includes_system_prompt_name(self) -> None:
-        record = LLMRecord(
-            messages=({"role": "user", "content": "hi"},),
-            llm_result=make_llm_result(),
-            system_prompt_name="role",
-        )
-        assert record.to_dict()["system_prompt_name"] == "role"
+        assert not hasattr(record, "system_prompt_name")
+        assert "system_prompt_name" not in record.to_dict()
 
     def test_rejects_string_as_messages(self) -> None:
         with pytest.raises(TypeError, match="messages"):

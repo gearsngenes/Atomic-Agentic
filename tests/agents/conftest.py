@@ -191,8 +191,6 @@ class StubThinker(ThinkingAgent):
     """Test-only concrete ThinkingAgent: thinks until it holds ``done_after``
     thoughts. Reference implementation of the hook contracts."""
 
-    _INITIAL_PROMPT_NAME = "thinking"
-
     def __init__(
         self,
         *,
@@ -201,10 +199,13 @@ class StubThinker(ThinkingAgent):
         **kwargs: Any,
     ) -> None:
         self._done_after = done_after
+        self._thinking_prompt = thinking_prompt
         super().__init__(**kwargs)
-        self._system_prompts["thinking"] = PromptConfig(
-            template=thinking_prompt, description="Stub thinking prompt"
-        )
+
+    def _render_system_message(self, task: ThinkingTask) -> list[dict[str, str]]:
+        if task.thinking_complete:
+            return super()._render_system_message(task)
+        return [{"role": "system", "content": self._thinking_prompt}]
 
     def _thinking_done(self, task: ThinkingTask) -> bool:
         return len(task.thoughts) >= self._done_after
@@ -216,7 +217,6 @@ class StubThinker(ThinkingAgent):
             LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=result,
-                system_prompt_name=task.system_prompt_name,
             )
         )
         task.thoughts.append(result.result)
@@ -228,7 +228,6 @@ class StubThinker(ThinkingAgent):
             LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=result,
-                system_prompt_name=task.system_prompt_name,
             )
         )
         task.thoughts.append(result.result)
@@ -264,7 +263,6 @@ class StubToolAgent(ToolAgent):
     the response ``"done"``. ``steps_text``/``directive_text`` feed the two
     frame hooks; a test may reassign them between renders."""
 
-    _INITIAL_PROMPT_NAME = "stub"
     _TASK_CLS = ToolAgentTask
 
     def __init__(
@@ -277,8 +275,8 @@ class StubToolAgent(ToolAgent):
     ) -> None:
         self.steps_text = steps_text
         self.directive_text = directive_text
+        self.TOOL_INSTRUCTIONS = prompt
         super().__init__(**kwargs)
-        self._system_prompts["stub"] = PromptConfig(template=prompt, description="Stub prompt")
 
     def think(self, task):
         return task

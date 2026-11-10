@@ -45,7 +45,6 @@ class BasicAgent(Agent):
     DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
 
     _TASK_CLS = AgentTask
-    _INITIAL_PROMPT_NAME = "role"
 
     def __init__(
         self,
@@ -107,8 +106,8 @@ class BasicAgent(Agent):
 
         )
 
-        # 4. Register the role prompt.
-        self._system_prompts["role"] = config
+        # 4. Keep the role prompt.
+        self._role_config = config
 
     # ------------------------------------------------------------------ #
     # Role prompt API
@@ -116,7 +115,7 @@ class BasicAgent(Agent):
     @property
     def role_prompt(self) -> str:
         """Role prompt template string."""
-        return self._system_prompts["role"].template
+        return self._role_config.template
 
     @property
     def response_schema(self) -> dict[str, Any] | None:
@@ -161,6 +160,11 @@ class BasicAgent(Agent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        """The role prompt rendered against ``task.inputs``, as the single
+        system message."""
+        return [{"role": "system", "content": self._role_config.render(task.inputs)}]
+
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.
 
@@ -195,7 +199,6 @@ class BasicAgent(Agent):
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         )
         task.llm_records.append(llm_record)
         task.generated_response = text
@@ -217,7 +220,6 @@ class BasicAgent(Agent):
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         )
         task.llm_records.append(llm_record)
         task.generated_response = text

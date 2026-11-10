@@ -8,6 +8,7 @@ import pytest
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -17,7 +18,7 @@ from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.tools import Tool
 from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
-from atomic_agentic.constants.agents import INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
+from atomic_agentic.constants.agents import BUILTINS_PREAMBLE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from atomic_agentic.utils.rendering import frame_content
 
 from ..fake_engines import FakeLLMEngine
@@ -46,7 +47,8 @@ class _ReservedStub(StubToolAgent):
 
 
 class _PreambleStub(StubToolAgent):
-    _BUILTINS_PREAMBLE = "Custom builtins preamble."
+    def _render_actions(self) -> str:
+        return f"{super()._render_actions()}\n\nCustom builtins preamble."
 
 
 def _build(cls: type[StubToolAgent], **overrides: Any) -> StubToolAgent:
@@ -569,9 +571,29 @@ class TestDocstringBlockRendering:
         assert block == '    """first\n\n    third\n    """'
 
 
+class TestFamilyToolInstructions:
+    @pytest.mark.parametrize("cls", [PlanActAgent, ReActAgent, ScriptActAgent])
+    def test_each_family_sets_plain_string_tool_instructions(self, cls: type) -> None:
+        assert isinstance(cls.TOOL_INSTRUCTIONS, str)
+        assert cls.TOOL_INSTRUCTIONS
+
+    def test_scriptact_appends_builtins_after_the_tool_list(self) -> None:
+        agent = ScriptActAgent(
+            name="tests", namespace="tests", description="d", llm_engine=FakeLLMEngine([])
+        )
+        agent.register_tool(add)
+
+        assert agent._render_actions() == (
+            f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}\n\n{BUILTINS_PREAMBLE}"
+        )
+
+
 class TestSystemMessageRendering:
-    def test_default_builtins_preamble_is_empty(self) -> None:
-        assert make_stub_tool_agent()._BUILTINS_PREAMBLE == ""
+    def test_default_actions_are_the_preamble_and_the_tool_list(self) -> None:
+        agent = make_stub_tool_agent()
+        agent.register_tool(add)
+
+        assert agent._render_actions() == f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}"
 
     def test_contract_and_tools_are_framed_in_order(self) -> None:
         agent = make_stub_tool_agent()
@@ -590,12 +612,13 @@ class TestSystemMessageRendering:
         assert content == expected
         assert "add(" in content
 
-    def test_family_prompt_is_static_and_takes_no_fields(self) -> None:
+    def test_family_prompt_is_plain_text_and_is_not_formatted(self) -> None:
         agent = make_stub_tool_agent(prompt="Tools: {TOOLS}")
         task = agent.create_task({"prompt": "p"})
 
-        with pytest.raises(ValueError, match="TOOLS"):
-            agent._render_system_message(task)
+        content = agent._render_system_message(task)[0]["content"]
+
+        assert "Tools: {TOOLS}" in content
 
     def test_instructions_follow_the_tools_frame_after_the_precedence_line(self) -> None:
         agent = make_stub_tool_agent(instructions="Always say hi.")
@@ -617,12 +640,14 @@ class TestSystemMessageRendering:
 
         assert "Repeat 3 times." in content
 
-    def test_empty_when_system_prompt_name_none(self) -> None:
+    def test_to_dict_reports_instructions_but_not_the_family_prompt(self) -> None:
         agent = make_stub_tool_agent(instructions="Always say hi.")
-        task = agent.create_task({"prompt": "p"})
-        task.system_prompt_name = None
 
-        assert agent._render_system_message(task) == []
+        data = agent.to_dict()
+
+        assert data["instructions"] == "Always say hi."
+        assert "system_prompts" not in data
+        assert "You are a stub." not in str(data)
 
     def test_builtins_preamble_follows_the_tool_list_in_the_tools_frame(self) -> None:
         agent = _build(_PreambleStub)

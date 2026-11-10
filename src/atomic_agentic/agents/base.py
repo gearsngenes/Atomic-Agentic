@@ -26,7 +26,6 @@ from ..models.results import AgentResult
 from ..tools import toolify
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
-from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
 from ..models.agents.conversations import Conversation
 
@@ -67,8 +66,8 @@ class Agent(AtomicInvokable, ABC):
     lifecycle by hand, but delegates the actual LLM work to the ``think``/
     ``prepare``/``act`` abstract-or-overridable hooks that concrete
     subclasses implement. A family varies ``create_task`` only through the
-    ``_TASK_CLS``/``_INITIAL_PROMPT_NAME`` class attributes and the
-    ``_seed_task`` hook -- ``create_task`` itself is never overridden.
+    ``_TASK_CLS`` class attribute and the ``_seed_task`` hook --
+    ``create_task`` itself is never overridden.
 
     Lifecycle
     ---------
@@ -204,15 +203,12 @@ class Agent(AtomicInvokable, ABC):
     # Class-level configuration
     # ------------------------------------------------------------------ #
     # The only per-family variation ``create_task`` consults: which task
-    # class to build and which system prompt it starts on. Further per-family
-    # seeding goes through ``_seed_task``.
+    # class to build. Further per-family seeding goes through ``_seed_task``.
     _TASK_CLS: type[AgentTask] = AgentTask
-    _INITIAL_PROMPT_NAME: str | None = None
 
-    # Context-block placement and naming, read by _render_task_block. A family
-    # overrides these as class attributes; nothing else about the block varies.
+    # Context-entry name prefix, read by _render_task_block. A family overrides
+    # it as a class attribute; nothing else about the block varies.
     _CONTEXT_NAME_PREFIX: str = ""   # "$" for the sigil families (Pass 14b)
-    _CONTEXT_FIRST: bool = True      # context block above the task block
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -386,9 +382,6 @@ class Agent(AtomicInvokable, ABC):
         self._post_names = frozenset(p.name for p in post_params)
         self._agentic_names = frozenset(p.name for p in extra_raw)
         self._use_runtime_context: bool = use_runtime_context
-
-        # System prompt registry — subclasses populate after super().__init__.
-        self._system_prompts: dict[str, PromptConfig] = {}
 
         # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
@@ -578,11 +571,6 @@ class Agent(AtomicInvokable, ABC):
         spec = self._response_to_post
         return dict(spec) if isinstance(spec, dict) else spec
 
-    @property
-    def system_prompts(self) -> dict[str, PromptConfig]:
-        """Shallow copy of the system prompt registry."""
-        return dict(self._system_prompts)
-
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
@@ -640,8 +628,8 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Every step of invoke()/async_invoke() is a public method (see invoke's
     # docstring for the sequence). create_task is concrete and never
-    # overridden; a family varies it only through _TASK_CLS /
-    # _INITIAL_PROMPT_NAME and the _seed_task hook. think/prepare ship as
+    # overridden; a family varies it only through _TASK_CLS and the
+    # _seed_task hook. think/prepare ship as
     # no-ops; act stays hard-abstract -- every subclass's advance-by-one-round
     # execution logic genuinely differs.
     def create_task(self, inputs: Mapping[str, Any]) -> AgentTask:
@@ -675,9 +663,9 @@ class Agent(AtomicInvokable, ABC):
         (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
 
-        The task class and starting system prompt come from ``_TASK_CLS`` and
-        ``_INITIAL_PROMPT_NAME``; ``_seed_task`` then does any family-specific
-        seeding. Not overridden by subclasses. Pure computation, no I/O.
+        The task class comes from ``_TASK_CLS``; ``_seed_task`` then does any
+        family-specific seeding. Not overridden by subclasses. Pure
+        computation, no I/O.
         """
         with self._invoke_lock:
             active_key = self._active_conversation
@@ -694,7 +682,6 @@ class Agent(AtomicInvokable, ABC):
         task = self._TASK_CLS(
             turns=turns,
             inputs=inputs,
-            system_prompt_name=self._INITIAL_PROMPT_NAME,
             conversation=active_key,
             context=dict(conversation.context),
             pre_inputs={k: v for k, v in inputs.items() if k in self._pre_names},
@@ -879,10 +866,8 @@ class Agent(AtomicInvokable, ABC):
         Concrete, class-independent pipeline shared by every phase and
         every family: system message, then historic turns, then this
         phase's own task messages. Family/phase-specific behavior lives
-        entirely in ``_render_task_messages`` (and, for a family with a
-        richer system-prompt context, in what it passes to
-        ``_render_system_message``) — this method never branches on
-        ``task.system_prompt_name`` itself.
+        entirely in ``_render_system_message`` and ``_render_task_messages``
+        — this method never branches on a phase itself.
 
         ``additional_messages`` (``None`` treated as ``[]``) is appended
         directly onto whatever ``_render_task_messages`` returns.
@@ -895,24 +880,15 @@ class Agent(AtomicInvokable, ABC):
         task_messages.extend(additional_messages or [])
         return system + task.historic_messages + task_messages
 
+    @abstractmethod
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
-        """Render ``task``'s active system prompt, if any.
+        """Return this call's system message: ``[]`` for none, otherwise a
+        single ``{"role": "system", "content": ...}`` dict.
 
-        Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
-        Otherwise renders ``self._system_prompts[task.system_prompt_name]``
-        against ``task.inputs`` and returns a single-element system message
-        list. An unregistered name raises ``KeyError`` naturally — an
-        internal-contract violation, not guarded against.
-
-        A family whose active template needs a richer context than
-        ``task.inputs`` alone (e.g. tool/constants data) overrides this
-        method wholesale, builds its own context, and renders directly —
-        there is no parameterized "extra context" hook here by design.
+        Hard-abstract: the base has no prompt of its own. A pure function of
+        the agent and the task.
         """
-        if task.system_prompt_name is None:
-            return []
-        rendered = self._system_prompts[task.system_prompt_name].render(task.inputs)
-        return [{"role": "system", "content": rendered}]
+        ...
 
     @abstractmethod
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
@@ -938,7 +914,7 @@ class Agent(AtomicInvokable, ABC):
     def _render_task_block(self, task: AgentTask) -> str:
         """Build the single user-message text for a context-aware task.
 
-        The wrapped current prompt, preceded (by default) by a context block.
+        The wrapped current prompt, preceded by a context block.
         Private and overridable; ``BasicAgent`` calls it from
         ``_render_task_messages``, and later passes reuse it for the other
         families.
@@ -949,8 +925,8 @@ class Agent(AtomicInvokable, ABC):
            (known hazard).
         2. ``render_context_entries`` over ``task.context`` (the call's working
            copy, never a first-round snapshot) with this family's name prefix.
-        3. ``render_task_block`` wraps ``task.user_prompt`` and places the
-           context block per ``_CONTEXT_FIRST``.
+        3. ``render_task_block`` wraps ``task.user_prompt`` and puts the
+           context block before it.
 
         Never modifies ``task.user_prompt`` or ``task.context``. The prompt is
         always wrapped; the context block appears only when ``task.context`` is
@@ -962,9 +938,7 @@ class Agent(AtomicInvokable, ABC):
         entries = render_context_entries(
             task.context, limit=limit, name_prefix=self._CONTEXT_NAME_PREFIX
         )
-        return render_task_block(
-            task.user_prompt, entries, context_first=self._CONTEXT_FIRST
-        )
+        return render_task_block(task.user_prompt, entries)
 
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
         """Slice the generated response per the two response routes.
@@ -1483,10 +1457,6 @@ class Agent(AtomicInvokable, ABC):
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
         d.update({
-            "system_prompts": {
-                key: {"template": cfg.template, "description": cfg.description}
-                for key, cfg in self._system_prompts.items()
-            },
             "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
             "inputs_to_context": self.inputs_to_context,

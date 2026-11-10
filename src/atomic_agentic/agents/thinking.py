@@ -25,26 +25,24 @@ class ThinkingAgent(BasicAgent):
     Abstract ``BasicAgent`` subclass: think, then reply.
 
     Construction is ``BasicAgent``'s, unchanged (no ``__init__`` override, no
-    thinking-specific parameter). A concrete subclass sets
-    ``_INITIAL_PROMPT_NAME`` to its (first) thinking prompt name (it would
-    otherwise inherit ``"role"`` and skip thinking), registers its thinking
-    prompt(s) in ``self._system_prompts``, and implements the three abstract
-    hooks. The reply phase always uses the role prompt, registered by
-    ``BasicAgent`` under ``"role"``. A thinking prompt registered this way is
-    rendered against ``task.inputs`` only: a ``{placeholder}`` in it is not wired
-    into the agent's parameters by this base (only role-prompt placeholders are);
-    a subclass that wants them in the signature does so through
-    ``_merge_prompt_parameters``.
+    thinking-specific parameter). A concrete subclass implements the three
+    abstract hooks and supplies its thinking-phase system message by
+    overriding ``_render_system_message``; while thinking, this base renders
+    none. The reply phase uses the role prompt, rendered by ``BasicAgent``. A
+    thinking prompt a subclass renders itself sees ``task.inputs`` only: a
+    ``{placeholder}`` in it is not wired into the agent's parameters by this base
+    (only role-prompt placeholders are); a subclass that wants them in the
+    signature does so through ``_merge_prompt_parameters``.
 
-    Phase: ``task.system_prompt_name`` is the indicator. ``"role"`` (the reply
-    phase's prompt name) means reply; any other value means thinking.
+    Phase: ``task.thinking_complete``. False means thinking, True means reply (the
+    "reply phase" below). ``think`` is its only writer.
 
     Lifecycle (one ``invoke``): ``create_task``, then the base loop. Each pass
-    runs ``think`` (switch the name to ``"role"`` if ``_thinking_done``, else
-    generate), ``prepare`` (no-op) and ``act`` (no-op until the reply phase). The
-    switch therefore lands on the pass after the last thought is generated, and
-    ``act`` replies in that same pass. ``_thinking_done`` is only ever called on a
-    complete task, after ``summarize`` and ``pre_process``.
+    runs ``think`` (set the flag from ``_thinking_done``, then generate if it is
+    still false), ``prepare`` (no-op) and ``act`` (no-op until the flag is true).
+    The flag therefore turns true on the pass after the last thought is
+    generated, and ``act`` replies in that same pass. ``_thinking_done`` is only
+    ever called on a complete task, after ``summarize`` and ``pre_process``.
 
     Rendering (every call, ``_render_task_messages``), after the system message
     and history. The task block is the context block (when ``task.context`` is
@@ -93,13 +91,12 @@ class ThinkingAgent(BasicAgent):
 
         1. build the messages with ``self.render_task(task)`` (rebuilt each
            call, so it reflects ``task.thoughts`` so far); a strategy that
-           needs a different system prompt for this step sets
-           ``task.system_prompt_name`` to one of its registered thinking names
-           first
+           needs a different system message for this step overrides
+           ``_render_system_message`` and reads its own task state
         2. make the engine call(s) the strategy needs with ``self._llm_engine``
         3. for every call append
-           ``LLMRecord(messages=list(task.task_messages), llm_result=...,
-           system_prompt_name=task.system_prompt_name)`` to ``task.llm_records``
+           ``LLMRecord(messages=list(task.task_messages), llm_result=...)`` to
+           ``task.llm_records``
         4. append the produced thought(s), any type, to ``task.thoughts``
         5. leave the task in a state where ``_thinking_done`` will eventually
            be true
@@ -134,45 +131,52 @@ class ThinkingAgent(BasicAgent):
     # ------------------------------------------------------------------ #
     def think(self, task: ThinkingTask) -> ThinkingTask:
         """
-        1. if ``self._thinking_done(task)``: set ``task.system_prompt_name =
-           "role"``
-        2. otherwise ``self._generate_thoughts(task)``
+        1. ``task.thinking_complete = self._thinking_done(task)``
+        2. if not complete: ``self._generate_thoughts(task)``
         3. return ``task``
         """
-        if self._thinking_done(task):
-            task.system_prompt_name = "role"
-        else:
+        task.thinking_complete = self._thinking_done(task)
+        if not task.thinking_complete:
             self._generate_thoughts(task)
         return task
 
     async def async_think(self, task: ThinkingTask) -> ThinkingTask:
         """Async mirror of ``think``: step 2 is ``await
         self._agenerate_thoughts(task)``."""
-        if self._thinking_done(task):
-            task.system_prompt_name = "role"
-        else:
+        task.thinking_complete = self._thinking_done(task)
+        if not task.thinking_complete:
             await self._agenerate_thoughts(task)
         return task
 
     def act(self, task: ThinkingTask) -> ThinkingTask:
         """
-        1. if ``task.system_prompt_name != "role"``: return ``task``
+        1. if not ``task.thinking_complete``: return ``task``
         2. return ``super().act(task)`` (``BasicAgent``: one engine call with
            ``response_schema``, ``generated_response`` set, task complete)
         """
-        if task.system_prompt_name != "role":
+        if not task.thinking_complete:
             return task
         return super().act(task)
 
     async def async_act(self, task: ThinkingTask) -> ThinkingTask:
         """Async mirror of ``act`` (``await super().async_act(task)``)."""
-        if task.system_prompt_name != "role":
+        if not task.thinking_complete:
             return task
         return await super().async_act(task)
 
     # ------------------------------------------------------------------ #
     # Rendering (concrete)
     # ------------------------------------------------------------------ #
+    def _render_system_message(self, task: ThinkingTask) -> list[dict[str, str]]:
+        """
+        1. while thinking (``not task.thinking_complete``): ``[]``; a concrete
+           strategy overrides this to render its thinking message
+        2. otherwise the role message (``BasicAgent``'s)
+        """
+        if not task.thinking_complete:
+            return []
+        return super()._render_system_message(task)
+
     def _render_task_messages(self, task: ThinkingTask) -> list[dict[str, str]]:
         """
         Rebuilt on every call (no build-once guard; this family never retries).
@@ -188,7 +192,7 @@ class ThinkingAgent(BasicAgent):
         5. ``task.task_messages = <the list>``; return that same list object
         """
         block = self._render_task_block(task)
-        replying = task.system_prompt_name == "role"
+        replying = task.thinking_complete
         if task.thoughts:
             body = frame_content(self._render_thoughts(task), "THOUGHTS")
             messages = [

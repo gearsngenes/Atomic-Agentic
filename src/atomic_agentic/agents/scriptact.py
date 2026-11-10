@@ -101,8 +101,7 @@ class ScriptActAgent(ToolAgent):
     """
 
     _TASK_CLS = ScriptActAgentTask
-    _INITIAL_PROMPT_NAME = "planner"
-    _BUILTINS_PREAMBLE = BUILTINS_PREAMBLE
+    TOOL_INSTRUCTIONS = ONESHOT_PLANNER_PROMPT
 
     def __init__(
         self,
@@ -132,8 +131,9 @@ class ScriptActAgent(ToolAgent):
         ``instructions``, regeneration_limit/tool_calls_limit/
         tool_concurrency_limit validation+storage, construction-time tools
         registration all happen there) -- this ``__init__`` only handles what's
-        genuinely local to this class: ``replanning_limit``, ``fail_fast``,
-        and the ``"planner"`` system prompt. ``replanning_limit`` defaults
+        genuinely local to this class: ``replanning_limit`` and ``fail_fast``
+        (the planning prompt is the class attribute ``TOOL_INSTRUCTIONS``).
+        ``replanning_limit`` defaults
         to ``2`` -- a repairs-only budget never has to cover the free
         initial plan, so it doesn't need a large ceiling.
         ``fail_fast`` defaults to ``False`` -- repair is the normal path
@@ -168,7 +168,9 @@ class ScriptActAgent(ToolAgent):
             )
         self._fail_fast = fail_fast
 
-        self._system_prompts["planner"] = ONESHOT_PLANNER_PROMPT
+    def _render_actions(self) -> str:
+        """The tools frame body plus the permitted Python builtins text."""
+        return f"{super()._render_actions()}\n\n{BUILTINS_PREAMBLE}"
 
     # ------------------------------------------------------------------ #
     # Construction-time / mutable knobs
@@ -437,7 +439,6 @@ class ScriptActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
@@ -477,7 +478,6 @@ class ScriptActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)

@@ -37,8 +37,8 @@ class ScratchpadAgent(ThinkingAgent):
     """
     N rounds of notes, then the reply.
 
-    Two phases: thinking (system prompt ``"thinking"``, the author's
-    ``thinking_instructions``) then reply (``"role"``). The thinker does not
+    Two phases: thinking (the author's ``thinking_instructions`` as the system
+    message) then reply (the role prompt). The thinker does not
     see the role prompt; an author who wants the persona there writes it into
     ``thinking_instructions``, ideally through a placeholder shared with
     ``role_prompt``. ``thinking_instructions`` placeholders join the agent's
@@ -57,7 +57,6 @@ class ScratchpadAgent(ThinkingAgent):
     """
 
     _TASK_CLS = ScratchpadTask
-    _INITIAL_PROMPT_NAME = "thinking"
 
     DEFAULT_THINKING_PROMPT: str = (
         "You are a thinking assistant that produces various thoughts, "
@@ -126,7 +125,7 @@ class ScratchpadAgent(ThinkingAgent):
             copy.deepcopy(STOP_EARLY_SCHEMA_TEMPLATE) if stop_early else None
         )
 
-        # 3. Construct through BasicAgent, then register the thinking prompt.
+        # 3. Construct through BasicAgent.
         super().__init__(
             name=name,
             namespace=namespace,
@@ -143,7 +142,6 @@ class ScratchpadAgent(ThinkingAgent):
             records_window=records_window,
             response_schema=response_schema,
         )
-        self._system_prompts[self._INITIAL_PROMPT_NAME] = self._thinking_config
 
     # ------------------------------------------------------------------ #
     # Properties (read-only)
@@ -222,7 +220,6 @@ class ScratchpadAgent(ThinkingAgent):
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         ))
 
         thought = engine_result.result
@@ -251,7 +248,6 @@ class ScratchpadAgent(ThinkingAgent):
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         ))
 
         thought = engine_result.result
@@ -275,22 +271,23 @@ class ScratchpadAgent(ThinkingAgent):
     # ------------------------------------------------------------------ #
     def _render_system_message(self, task: ScratchpadTask) -> list[dict[str, str]]:
         """
-        1. ``stop_early`` off, or the reply phase: the inherited message
-        2. otherwise the rendered instructions between the instruction markers,
-           followed by the early-stop format section
+        1. thinking finished: the inherited (role) message
+        2. otherwise the thinking instructions rendered against ``task.inputs``
+        3. with ``stop_early``: those between the instruction markers, followed
+           by the early-stop format section
 
         ``stop_early`` is fixed at construction, so the agent attribute is read
         directly; nothing is snapshotted on the task.
         """
-        messages = super()._render_system_message(task)
-        if not self._stop_early or task.system_prompt_name == "role":
-            return messages
-        body = messages[0]["content"]
-        content = (
-            frame_content(body, "USER-DEFINED THINKING INSTRUCTIONS")
-            + "\n\n"
-            + STOP_EARLY_PROMPT_SECTION
-        )
+        if task.thinking_complete:
+            return super()._render_system_message(task)
+        content = self._thinking_config.render(task.inputs)
+        if self._stop_early:
+            content = (
+                frame_content(content, "USER-DEFINED THINKING INSTRUCTIONS")
+                + "\n\n"
+                + STOP_EARLY_PROMPT_SECTION
+            )
         return [{"role": "system", "content": content}]
 
     # ------------------------------------------------------------------ #

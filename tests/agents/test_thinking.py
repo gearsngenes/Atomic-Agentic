@@ -8,8 +8,7 @@ import pytest
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
-from atomic_agentic.models.agents.prompts import PromptConfig
-from atomic_agentic.models.agents.records import LLMRecord, ThinkingAgentRecord
+from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask
 from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResult
 
@@ -95,7 +94,7 @@ class TestPhaseGating:
 
             task = agent.create_task(agent.filter_inputs({"prompt": "hi"}))
 
-            assert task.system_prompt_name == "thinking"
+            assert not task.thinking_complete
 
     def test_think_flips_to_reply_when_done_without_a_call(self) -> None:
         agent = make_stub_thinker([], done_after=0)
@@ -105,7 +104,7 @@ class TestPhaseGating:
 
         assert agent._llm_engine.call_count == 0
         assert task.thoughts == []
-        assert task.system_prompt_name == "role"
+        assert task.thinking_complete
         assert not task.complete
 
     def test_think_generates_while_not_done_and_does_not_flip_that_pass(self) -> None:
@@ -114,13 +113,13 @@ class TestPhaseGating:
 
         agent.think(task)
 
-        # the stub's hooks never assign the prompt name; the flip is the base's
+        # the stub's hooks never assign the flag; the base's think is its only writer
         assert task.thoughts == ["T0"]
-        assert task.system_prompt_name == "thinking"
+        assert not task.thinking_complete
 
         agent.think(task)
 
-        assert task.system_prompt_name == "role"
+        assert task.thinking_complete
         assert agent._llm_engine.call_count == 1
 
     def test_think_after_the_flip_never_generates_again(self) -> None:
@@ -131,7 +130,7 @@ class TestPhaseGating:
             agent.think(task)
 
         assert agent._llm_engine.call_count == 1
-        assert task.system_prompt_name == "role"
+        assert task.thinking_complete
 
     def test_act_in_thinking_phase_is_a_noop(self) -> None:
         agent = make_stub_thinker([], done_after=1)
@@ -141,7 +140,7 @@ class TestPhaseGating:
 
         assert agent._llm_engine.call_count == 0
         assert not task.complete
-        assert task.system_prompt_name == "thinking"
+        assert not task.thinking_complete
 
     def test_async_gates_match_sync(self) -> None:
         reply_agent = make_stub_thinker([], done_after=0)
@@ -152,7 +151,7 @@ class TestPhaseGating:
         asyncio.run(reply_agent.async_think(reply_task))
         asyncio.run(think_agent.async_act(think_task))
 
-        assert reply_task.system_prompt_name == "role"
+        assert reply_task.thinking_complete
         assert reply_agent._llm_engine.call_count == 0
         assert think_agent._llm_engine.call_count == 0
         assert not think_task.complete
@@ -165,14 +164,14 @@ class TestPhaseGating:
         for _ in range(done_after):
             task = agent.act(agent.prepare(agent.think(task)))
             assert not task.complete
-            assert task.system_prompt_name == "thinking"
+            assert not task.thinking_complete
 
         task = agent.act(agent.prepare(agent.think(task)))
 
         assert task.complete
         assert task.generated_response == "REPLY"
         assert agent._llm_engine.call_count == done_after + 1
-        assert [r.system_prompt_name for r in task.llm_records] == ["thinking"] * done_after + ["role"]
+        assert len(task.llm_records) == done_after + 1
 
     def test_done_after_zero_makes_exactly_one_call(self) -> None:
         agent = make_stub_thinker(["REPLY"], done_after=0)
@@ -249,27 +248,13 @@ class TestRendering:
 
         assert all(call[-1]["role"] == "user" for call in agent._llm_engine.calls)
 
-    def test_strategy_can_use_several_thinking_prompt_names(self) -> None:
+    def test_strategy_can_render_a_different_system_message_per_step(self) -> None:
         class StepThinker(StubThinker):
-            def __init__(self, **kwargs) -> None:
-                super().__init__(**kwargs)
-                self._system_prompts["step0"] = PromptConfig(template="Step zero.", description="s0")
-                self._system_prompts["step1"] = PromptConfig(template="Step one.", description="s1")
-
-            _INITIAL_PROMPT_NAME = "step0"
-
-            def _generate_thoughts(self, task: ThinkingTask) -> None:
-                task.system_prompt_name = f"step{len(task.thoughts)}"
-                messages = self.render_task(task)
-                result = self._llm_engine.invoke({"messages": messages})
-                task.llm_records.append(
-                    LLMRecord(
-                        messages=list(task.task_messages),
-                        llm_result=result,
-                        system_prompt_name=task.system_prompt_name,
-                    )
-                )
-                task.thoughts.append(result.result)
+            def _render_system_message(self, task: ThinkingTask) -> list[dict[str, str]]:
+                if task.thinking_complete:
+                    return super()._render_system_message(task)
+                text = "Step zero." if not task.thoughts else "Step one."
+                return [{"role": "system", "content": text}]
 
         agent = StepThinker(
             name="tests", namespace="tests", description="steps",
@@ -282,7 +267,7 @@ class TestRendering:
         calls = agent._llm_engine.calls
         assert [c[0]["content"] for c in calls] == ["Step zero.", "Step one.", "Reply role."]
         llm_records = agent.get_conversation().records[0].llm_records
-        assert [r.system_prompt_name for r in llm_records] == ["step0", "step1", "role"]
+        assert len(llm_records) == 3
 
     @pytest.mark.parametrize("done_after", [0, 1, 2, 3])
     def test_no_call_has_consecutive_user_messages(self, done_after: int) -> None:
@@ -388,9 +373,23 @@ class TestRenderThoughtsDefault:
         assert text == 'a\n\n---\n\n{\n  "k": 1\n}'
 
 
-class TestInitialPromptName:
-    def test_the_base_does_not_override_basic_agents_name(self) -> None:
-        assert ThinkingAgent._INITIAL_PROMPT_NAME == BasicAgent._INITIAL_PROMPT_NAME == "role"
+class TestNoPromptRegistry:
+    def test_the_base_has_no_initial_prompt_name(self) -> None:
+        assert not hasattr(ThinkingAgent, "_INITIAL_PROMPT_NAME")
+
+    def test_no_system_message_while_thinking_in_the_abstract_base(self) -> None:
+        class Bare(StubThinker):
+            _render_system_message = ThinkingAgent._render_system_message
+
+        agent = Bare(
+            name="tests", namespace="tests", description="bare",
+            llm_engine=FakeLLMEngine([]), role_prompt="Reply role.", done_after=1,
+        )
+        task = new_task(agent)
+
+        assert agent._render_system_message(task) == []
+        task.thinking_complete = True
+        assert agent._render_system_message(task)[0]["content"] == "Reply role."
 
 
 class TestRecordAndResult:
@@ -445,13 +444,13 @@ class TestRecordAndResult:
         assert result.thoughts_produced == 1
         assert agent.get_conversation().records == []
 
-    def test_llm_records_count_and_prompt_names(self) -> None:
+    def test_llm_records_count(self) -> None:
         agent = make_stub_thinker(["A", "B", "R"], done_after=2, record_enabled=True)
 
         agent.invoke({"prompt": "hi"})
 
         llm_records = agent.get_conversation().records[0].llm_records
-        assert [r.system_prompt_name for r in llm_records] == ["thinking", "thinking", "role"]
+        assert len(llm_records) == 3
 
     def test_earlier_thoughts_do_not_enter_later_history(self) -> None:
         agent = make_stub_thinker(["THOUGHT_ONE", "R1", "THOUGHT_TWO", "R2"], done_after=1, record_enabled=True)
@@ -520,7 +519,7 @@ class TestHookContracts:
         for _ in range(3):
             agent.think(task)
 
-        assert task.system_prompt_name == "thinking"
+        assert not task.thinking_complete
         assert not task.complete
         assert agent._llm_engine.call_count == 0
 
@@ -574,7 +573,7 @@ class TestSkippedThinkingRecord:
         record = agent.get_conversation().records[0]
         assert isinstance(record, ThinkingAgentRecord)
         assert record.thoughts == ()
-        assert [r.system_prompt_name for r in record.llm_records] == ["role"]
+        assert len(record.llm_records) == 1
 
 
 class TestForgedMarkersInThoughts:

@@ -46,14 +46,12 @@ class AgentTask:
         ``""`` so a task can exist before ``pre_process`` runs; ``pre_process``
         always overwrites it.
 
-    system_prompt_name : str | None
-        Identifies which entry in ``self._system_prompts`` governs the
-        current phase — read by ``render_task``/``_render_system_message``
-        to select and render the active system prompt. Required (no
-        default): every concrete subclass must decide it explicitly.
-        ``None`` is a legitimate value meaning "render no system message at
-        all," not a not-yet-set placeholder — though no concrete subclass
-        shipped today ever constructs a task with ``None``.
+    thinking_complete : bool
+        ``True`` when the task needs no further thinking before ``act``.
+        Defaults to ``True`` (a single-phase agent has nothing to think
+        about). ``ThinkingTask`` defaults it to ``False`` and
+        ``ThinkingAgent.think`` is its only writer. Tool families do not use
+        it.
 
     llm_records : list[LLMRecord]
         Accumulator for every LLM generation made while producing this
@@ -123,7 +121,6 @@ class AgentTask:
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
-    system_prompt_name: str | None
 
     user_prompt: str = ""
     llm_records: list[LLMRecord] = field(default_factory=list)
@@ -141,6 +138,7 @@ class AgentTask:
     run_id: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    thinking_complete: bool = True
 
 
 @dataclass(slots=True)
@@ -404,12 +402,10 @@ class ThinkingTask(AgentTask):
     """
     ThinkingAgent-family task.
 
-    No phase field: ``AgentTask.system_prompt_name`` is the phase indicator. The
-    name ``"role"`` means the reply phase; any other value (including ``None``)
-    means thinking is still in progress. A strategy may use several thinking
-    prompt names (for example one per step). The base ``ThinkingAgent`` switches
-    the name to ``"role"`` on the first ``think`` call at which its
-    ``_thinking_done`` hook is true.
+    Thinking is in progress while ``thinking_complete`` is ``False`` (this task's
+    default, unlike the base task's). The base ``ThinkingAgent.think`` sets it
+    from its ``_thinking_done`` hook at the start of every pass; nothing else
+    writes it. Once true, ``act`` makes the reply call.
 
     Fields
     ------
@@ -422,6 +418,7 @@ class ThinkingTask(AgentTask):
         ``_build_record_from_task``. There is no round counter or budget here:
         those, if any, belong to the strategy.
     """
+    thinking_complete: bool = False
     thoughts: list[Any] = field(default_factory=list)
 
 

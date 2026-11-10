@@ -16,7 +16,6 @@ from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.context import ContextVariable
-from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import to_paramspec_list
@@ -33,10 +32,12 @@ class _MinimalAgent(Agent):
 
     ``act`` performs a single engine call and completes the task; tests
     that never call invoke() don't need this to run. No ``create_task``
-    override -- Agent's concrete base implementation (bare AgentTask,
-    ``system_prompt_name=None``) is sufficient. ``think``/``prepare`` stay
-    inherited no-ops.
+    override -- Agent's concrete base implementation (bare AgentTask) is
+    sufficient. ``think``/``prepare`` stay inherited no-ops.
     """
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        return [{"role": "system", "content": "minimal"}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
@@ -92,9 +93,9 @@ class _EchoAgent(Agent):
     def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
         self._echo_system_prompt = system_prompt
         super().__init__(**kwargs)
-        self._system_prompts["system"] = PromptConfig(
-            template=system_prompt, description="Echo agent system prompt."
-        )
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        return [{"role": "system", "content": self._echo_system_prompt}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
@@ -148,6 +149,9 @@ class _LifecycleOrderAgent(Agent):
         self._rounds_remaining = rounds
         self.call_log: list[str] = []
         super().__init__(**kwargs)
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        return []
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
@@ -1330,7 +1334,7 @@ class TestAgentSerialization:
         assert data["record_enabled"] is True
         assert data["records_window"] == 1
         assert "conversations" not in data
-        assert "system_prompts" in data
+        assert "system_prompts" not in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
         assert data["response_to_post"] == agent._response_to_post == "result"
@@ -1338,13 +1342,10 @@ class TestAgentSerialization:
         assert data["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data)
 
-    def test_to_dict_includes_system_prompts_key(self) -> None:
-        agent = make_agent()
+    def test_to_dict_has_no_system_prompts_key(self) -> None:
+        data = make_agent().to_dict()
 
-        data = agent.to_dict()
-
-        assert "system_prompts" in data
-        assert "system" in data["system_prompts"]
+        assert "system_prompts" not in data
 
     def test_to_dict_excludes_passthrough_inputs(self) -> None:
         agent = make_agent()
@@ -1880,18 +1881,17 @@ class TestNWayWitnessOrderIndependence:
             )
 
 
-class TestUpdatePrompt:
-    def test_system_prompts_property_returns_shallow_copy(self) -> None:
+class TestNoSystemPromptRegistry:
+    def test_agent_has_no_system_prompt_registry(self) -> None:
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
-        copy = agent.system_prompts
-        copy["mutated"] = PromptConfig(template="x", description="d")
 
-        assert "mutated" not in agent.system_prompts
+        assert not hasattr(agent, "system_prompts")
+        assert not hasattr(agent, "_system_prompts")
 
 
 class TestAgentRecordsNeverStoredWhenRecordDisabled:
@@ -2641,6 +2641,9 @@ class _ValueAgent(Agent):
     def __init__(self, *, response_value: Any, **kwargs: Any) -> None:
         self._response_value = response_value
         super().__init__(**kwargs)
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        return []
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
@@ -3731,6 +3734,9 @@ class TestRuntimeContext:
 # ─────────────────────────────────────────────────────────────────────────────
 class _NoCallAgent(Agent):
     """Agent that completes its task without ever calling the engine."""
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        return []
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:

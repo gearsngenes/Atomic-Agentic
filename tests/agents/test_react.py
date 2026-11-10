@@ -523,16 +523,11 @@ class TestReActRecordAndResultShape:
         assert result.failed_call_count == 1
         assert result.usage_report.total_failed == 1
 
-    def test_llm_record_system_prompt_name_is_reason_then_act(self) -> None:
-        agent = make_react_agent(
-            [rstep(call="return", arguments=[arg("val", 1)])],
-            record_enabled=True,
-        )
+    def test_tool_instructions_is_the_react_prompt(self) -> None:
+        from atomic_agentic.agents.prompts import REACT_PROMPT
 
-        agent.invoke({"prompt": "run"})
-
-        for rec in agent.get_conversation().records[-1].llm_records:
-            assert rec.system_prompt_name == "reason_then_act"
+        assert ReActAgent.TOOL_INSTRUCTIONS is REACT_PROMPT
+        assert isinstance(ReActAgent.TOOL_INSTRUCTIONS, str)
 
 
 class TestReActResultModelData:

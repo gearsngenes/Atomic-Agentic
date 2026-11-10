@@ -158,7 +158,7 @@ class PlanActAgent(ToolAgent):
     _CONTEXT_NAME_PREFIX: str = "$"
 
     _TASK_CLS = PlanActTask
-    _INITIAL_PROMPT_NAME = "plan_first"
+    TOOL_INSTRUCTIONS = PLANNER_PROMPT
 
     def __init__(
         self,
@@ -190,8 +190,8 @@ class PlanActAgent(ToolAgent):
         (remembered on the conversation, bound from inputs, or runtime).
         ``fail_fast`` has no shared home on ``ToolAgent`` (see the
         ``fail_fast`` property below) -- validated and stored locally
-        instead. ``"plan_first"`` is the key under which the built-in
-        planning prompt is registered in ``self._system_prompts``.
+        instead. The built-in planning prompt is the class attribute
+        ``TOOL_INSTRUCTIONS``.
         """
         super().__init__(
             name=name,
@@ -219,7 +219,6 @@ class PlanActAgent(ToolAgent):
             )
         self._fail_fast = fail_fast
 
-        self._system_prompts["plan_first"] = PLANNER_PROMPT
         # Seeded directly, bypassing register_tool -- both are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
         # attempt to register something under a reserved id.
@@ -337,7 +336,6 @@ class PlanActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
@@ -382,7 +380,6 @@ class PlanActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)

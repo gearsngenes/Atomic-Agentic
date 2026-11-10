@@ -17,16 +17,15 @@ from atomic_agentic.models.agents.context import ContextVariable
 
 class TestAgentTask:
     def test_required_fields_are_stored(self) -> None:
-        task = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = AgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.turns == []
         assert task.inputs == {}
         assert task.user_prompt == "hi"
-        assert task.system_prompt_name == "role"
 
     def test_defaults(self) -> None:
-        first = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
-        second = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        first = AgentTask(turns=[], inputs={}, user_prompt="hi")
+        second = AgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert first.llm_records == []
         assert first.complete is False
@@ -43,7 +42,7 @@ class TestAgentTask:
         assert second.task_messages == []
 
     def test_is_mutable(self) -> None:
-        task = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = AgentTask(turns=[], inputs={}, user_prompt="hi")
 
         task.complete = True
         task.generated_response = "x"
@@ -52,34 +51,36 @@ class TestAgentTask:
         assert task.generated_response == "x"
 
 
-class TestAgentTaskSystemPromptName:
-    """system_prompt_name is required (no default), but None is a
-    legitimate value distinct from "not set" -- it means "render no system
-    message at all"."""
+class TestThinkingComplete:
+    """``thinking_complete`` replaced ``system_prompt_name``: True by default
+    for a single-phase task, False for a thinking task."""
 
-    def test_required_no_default(self) -> None:
-        with pytest.raises(TypeError):
-            AgentTask(turns=[], inputs={}, user_prompt="hi")  # type: ignore[call-arg]
+    def test_agent_task_defaults_to_complete(self) -> None:
+        assert AgentTask(turns=[], inputs={}).thinking_complete is True
 
-    def test_none_is_a_legal_explicit_value(self) -> None:
-        task = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name=None)
+    def test_tool_task_defaults_to_complete(self) -> None:
+        assert ToolAgentTask(turns=[], inputs={}).thinking_complete is True
 
-        assert task.system_prompt_name is None
+    def test_thinking_task_defaults_to_not_complete(self) -> None:
+        assert ThinkingTask(turns=[], inputs={}).thinking_complete is False
 
-    def test_string_value_is_stored(self) -> None:
-        task = AgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="plan_first")
+    def test_no_system_prompt_name_field(self) -> None:
+        assert not hasattr(AgentTask(turns=[], inputs={}), "system_prompt_name")
 
-        assert task.system_prompt_name == "plan_first"
+    def test_is_mutable(self) -> None:
+        task = ThinkingTask(turns=[], inputs={})
+        task.thinking_complete = True
+        assert task.thinking_complete is True
 
 
 class TestToolAgentTask:
     def test_inherits_agent_task_fields(self) -> None:
-        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert isinstance(task, AgentTask)
 
     def test_added_field_defaults(self) -> None:
-        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.completed == []
         assert task.failed_statements == []
@@ -99,7 +100,7 @@ class TestToolAgentTask:
         # blackboard/executed_steps/prepared_steps/valid_cache_indices/
         # failed_cache_indices/retries_used) was fully retired --
         # completed/failed_statements plus task.context replace it.
-        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "running_blackboard")
         assert not hasattr(task, "executed_steps")
@@ -111,13 +112,13 @@ class TestToolAgentTask:
     def test_no_messages_field(self) -> None:
         # ToolAgentTask.messages was removed -- superseded by base
         # AgentTask's historic_messages/task_messages split.
-        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "messages")
 
     def test_default_factories_are_independent_per_instance(self) -> None:
-        first = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
-        second = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+        first = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
+        second = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         first.completed.append("marker")  # type: ignore[arg-type]
         first.failed_statements.append("marker")  # type: ignore[arg-type]
@@ -130,12 +131,12 @@ class TestToolAgentTask:
 
 class TestPlanActTask:
     def test_inherits_tool_agent_task_fields(self) -> None:
-        task = PlanActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="plan_first")
+        task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert isinstance(task, ToolAgentTask)
 
     def test_added_field_defaults(self) -> None:
-        task = PlanActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="plan_first")
+        task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.pending == []
         assert task.resolved_args == []
@@ -146,19 +147,19 @@ class TestPlanActTask:
         # A single compile_batches call per invoke needs no cross-round
         # ToolStatement.batch_index uniqueness tracking -- unlike
         # ScriptActAgentTask, which can regenerate multiple times.
-        task = PlanActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="plan_first")
+        task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "batch_counter")
 
 
 class TestReActTask:
     def test_inherits_tool_agent_task_fields(self) -> None:
-        task = ReActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="reason_then_act")
+        task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert isinstance(task, ToolAgentTask)
 
     def test_added_field_defaults(self) -> None:
-        task = ReActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="reason_then_act")
+        task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.generated_step is None
         assert task.resolved_args is None
@@ -171,7 +172,7 @@ class TestReActTask:
 
         step = ToolStatement(identifier=None, tool="add")
         task = ReActTask(
-            turns=[], inputs={}, user_prompt="hi", system_prompt_name="reason_then_act",
+            turns=[], inputs={}, user_prompt="hi",
             generated_step=step,
         )
 
@@ -182,7 +183,7 @@ class TestReActTask:
         # both dropped from the pre-rewrite shape, along with
         # next_step_index/step_meta. Every round renders a full snapshot of
         # completed/cache instead.
-        task = ReActTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="reason_then_act")
+        task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "next_step_index")
         assert not hasattr(task, "step_meta")
@@ -190,47 +191,46 @@ class TestReActTask:
 
 class TestThinkingTask:
     def test_inherits_agent_task_fields(self) -> None:
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert isinstance(task, AgentTask)
 
     def test_added_field_defaults(self) -> None:
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.thoughts == []
 
     def test_no_retries_or_rounds_used_fields(self) -> None:
         # No retry-budget field and no separate round counter: the base
         # keeps no budget or count (those, if any, belong to the strategy).
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "retries_used")
         assert not hasattr(task, "rounds_used")
 
     def test_no_thinking_rounds_field(self) -> None:
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "thinking_rounds")
 
     def test_no_phase_field(self) -> None:
-        # ThinkingTask deliberately has no phase field -- system_prompt_name
-        # (base AgentTask) doubles as the phase discriminator: "role" means
-        # the reply phase, anything else means a thinking round is active.
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        # The phase is the base ``thinking_complete`` flag, not a separate
+        # ``phase`` field.
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "phase")
 
     def test_thoughts_holds_raw_values_directly(self) -> None:
         task = ThinkingTask(
-            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking",
+            turns=[], inputs={}, user_prompt="hi",
             thoughts=["a raw thought", {"focus": "x"}, None, 3, [1, {"k": ["v"]}]],
         )
 
         assert task.thoughts == ["a raw thought", {"focus": "x"}, None, 3, [1, {"k": ["v"]}]]
 
     def test_default_factories_are_independent_per_instance(self) -> None:
-        first = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
-        second = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        first = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
+        second = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         first.thoughts.append("x")
 
@@ -240,7 +240,7 @@ class TestThinkingTask:
 class TestScratchpadTask:
     def _make(self, **kwargs) -> ScratchpadTask:
         return ScratchpadTask(
-            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", **kwargs
+            turns=[], inputs={}, user_prompt="hi", **kwargs
         )
 
     def test_is_a_thinking_task(self) -> None:
@@ -261,19 +261,19 @@ class TestScratchpadTask:
         assert second.more_thinking_required is True
 
     def test_base_thinking_task_has_no_flag(self) -> None:
-        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "more_thinking_required")
 
 
 class TestScriptActAgentTask:
     def test_inherits_tool_agent_task_fields(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert isinstance(task, ToolAgentTask)
 
     def test_added_field_defaults(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.pending == []
         assert task.resolved_args == []
@@ -293,15 +293,15 @@ class TestScriptActAgentTask:
         # planning_rounds_used/continue_planning/continuation_note were all
         # retired by the repair-on-failure rework (Pass 8) -- needs_repair/
         # repair_rounds_used/repair_batch_start replace them.
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "planning_rounds_used")
         assert not hasattr(task, "continue_planning")
         assert not hasattr(task, "continuation_note")
 
     def test_default_factories_are_independent_per_instance(self) -> None:
-        first = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
-        second = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        first = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
+        second = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         first.completed.append("marker")  # type: ignore[arg-type]
         first.failed_statements.append("marker")  # type: ignore[arg-type]
@@ -312,7 +312,7 @@ class TestScriptActAgentTask:
         assert second.pending == []
 
     def test_needs_repair_round_trips(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
 
         task.needs_repair = True
 
@@ -321,7 +321,7 @@ class TestScriptActAgentTask:
 
 class TestAgentTaskContextFields:
     def test_new_fields_default(self) -> None:
-        task = AgentTask(turns=[], inputs={}, system_prompt_name="role")
+        task = AgentTask(turns=[], inputs={})
 
         assert task.user_prompt == ""
         assert task.conversation is None
@@ -335,8 +335,8 @@ class TestAgentTaskContextFields:
         assert task.ended_at is None
 
     def test_new_mutable_fields_are_per_instance(self) -> None:
-        first = AgentTask(turns=[], inputs={}, system_prompt_name="role")
-        second = AgentTask(turns=[], inputs={}, system_prompt_name="role")
+        first = AgentTask(turns=[], inputs={})
+        second = AgentTask(turns=[], inputs={})
 
         first.context["x"] = ContextVariable(name="x", value=1)
         first.changed_context.add("x")
@@ -354,7 +354,7 @@ class TestAgentTaskContextFields:
         "task_cls", [ToolAgentTask, ScriptActAgentTask, PlanActTask, ReActTask, ThinkingTask]
     )
     def test_subclass_tasks_inherit_new_fields(self, task_cls: type[AgentTask]) -> None:
-        task = task_cls(turns=[], inputs={}, system_prompt_name="role")
+        task = task_cls(turns=[], inputs={})
 
         assert task.user_prompt == ""
         assert task.context == {}
