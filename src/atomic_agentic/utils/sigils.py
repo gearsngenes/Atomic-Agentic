@@ -16,7 +16,6 @@ from ..constants.agents import (
 from ..constants.core import IDENTIFIER_PATTERN
 from ..models.agents.blackboard_models import ToolStatement
 from .agents import extract_identifiers
-from .rendering import stringify_value
 
 __all__ = [
     "build_planact_schema",
@@ -28,7 +27,6 @@ __all__ = [
     "serialize_call",
     "render_completed_as_json",
     "render_failed_as_json",
-    "render_cache_snapshot",
 ]
 
 
@@ -512,67 +510,3 @@ def render_failed_as_json(calls: list[ToolStatement]) -> str:
         [{**serialize_call(call), "error": str(call.exception)} for call in calls],
         indent=2,
     )
-
-
-def render_cache_snapshot(
-    completed: list[ToolStatement],
-    cache: dict[str, Any],
-    preview_limit: Optional[int],
-) -> str:
-    """
-    Mirrors ``utils/script.py``'s ``render_cache_snapshot`` over
-    ``ToolStatement`` -- structurally identical (same ordering, same fenced
-    block, same ``name: type = value`` line shape, same truncation
-    semantics), except for the value serialization itself. Renders the
-    current value of every identifier bound by ``completed`` this round,
-    each looked up fresh in ``cache`` (so a reassigned name shows its
-    latest value), as its own fenced ``"Cached values:"`` block.
-    ``preview_limit`` limits each rendered value (``None`` means no
-    truncation; a longer value is cut with a ``...[truncated: N of M chars
-    shown]`` marker; ``0`` shows ``value hidden``). Returns ``""`` when ``completed`` binds no identifiers at
-    all. ``cache`` only ever holds fully-resolved plain Python values,
-    never ``ast.expr`` nodes, regardless of how a value's source was
-    written.
-
-    Value serialization deliberately diverges from ``ScriptActAgent``'s own
-    ``render_cache_snapshot``, which uses a ``repr()``-based preview: this
-    agent's whole continuation context is JSON-styled (see
-    ``render_completed_as_json``, rendered directly above this block at the
-    call site), so a ``repr()`` preview (Python's ``True``/``None``/
-    single-quoted strings) would be a real vocabulary clash sitting next to
-    valid JSON. ``json.dumps()`` is tried first;
-    ``cache``'s values aren't guaranteed JSON-safe (a tool may legitimately
-    return an arbitrary Python object, not just JSON primitives), so a
-    ``TypeError`` falls back to ``repr()`` rather than propagating. The
-    ``type(value).__name__`` annotation on each line is kept regardless of
-    which serialization path a given value took -- useful context either
-    way, independent of how the value itself gets rendered.
-
-    Every rendered name is unconditionally prefixed with ``"$"`` -- the
-    literal token needed to reference it under PlanActAgent's/ReActAgent's
-    own ``$name``-sigil grammar. No flag is needed here (contrast
-    ``toolagent.py``'s ``_SIGIL_REFERENCES``): this function is called
-    exclusively from those two families' own ``_render_task_messages``,
-    never from ``ScriptActAgent``, which has its own separate, bare,
-    real-Python-identifier ``render_cache_snapshot`` in ``utils/script.py``.
-    """
-    ordered: dict[str, Any] = {}
-    for call in completed:
-        if call.identifier is not None:
-            ordered[call.identifier] = cache[call.identifier]
-
-    if not ordered:
-        return ""
-
-    def preview(value: Any) -> str:
-        try:
-            text = json.dumps(value)
-        except TypeError:
-            text = repr(value)
-        return stringify_value(text, mode="s", limit=preview_limit)
-
-    lines = [
-        f"${name}: {type(value).__name__} = {preview(value)}"
-        for name, value in ordered.items()
-    ]
-    return "```\nCached values:\n" + "\n".join(lines) + "\n```"

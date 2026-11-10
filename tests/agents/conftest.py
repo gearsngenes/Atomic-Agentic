@@ -84,7 +84,8 @@ def make_react_agent(
     fail_fast: bool = False,
     post_invoke: Any = None,
     response_to_post: Any = None,
-    tool_instructions: str | PromptConfig | None = None,
+    instructions: str | PromptConfig | None = None,
+    **overrides: Any,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
@@ -97,7 +98,8 @@ def make_react_agent(
         fail_fast=fail_fast,
         post_invoke=post_invoke,
         response_to_post=response_to_post,
-        tool_instructions=tool_instructions,
+        instructions=instructions,
+        **overrides,
     )
     register_math_tools(agent)
     return agent

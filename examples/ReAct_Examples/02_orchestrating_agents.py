@@ -124,7 +124,7 @@ reviewer = BasicAgent(
 )
 
 # Standing orchestration rules, lifted out of the per-invocation task prompt
-# and into tool_instructions -- the builder/reviewer interaction contract
+# and into instructions -- the builder/reviewer interaction contract
 # (strict alternation, how to branch on the three-tier grade, when to stop,
 # what to return) is reusable agent behavior, not one-off task text
 # repeated on every call. Keeps `task` below down to just the content request.
@@ -147,7 +147,7 @@ orchestrator = ReActAgent(
     llm_engine=llm_engine,
     tool_calls_limit=10,
     record_enabled=True,
-    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
+    instructions=ORCHESTRATION_INSTRUCTIONS,
 )
 orchestrator.get_conversation().response_preview_limit = 10
 

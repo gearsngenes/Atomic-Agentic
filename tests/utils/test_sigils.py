@@ -3,66 +3,12 @@ from __future__ import annotations
 import ast
 
 from atomic_agentic.constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
-from atomic_agentic.models.agents.blackboard_models import ToolStatement
 from atomic_agentic.utils.sigils import (
     parse_generation,
     parse_react_call,
-    render_cache_snapshot,
     translate_calls,
 )
 from atomic_agentic.utils.sigils import _DraftCall
-
-
-# --------------------------------------------------------------------------- #
-# render_cache_snapshot -- "$" prefix coverage only. Mirrors
-# tests/utils/test_script.py's own same-named-function tests in shape
-# (empty-input, bound-identifiers, truncation); this file stays scoped to
-# the one behavior this task changed, not a full sigils.py sweep.
-# --------------------------------------------------------------------------- #
-class TestRenderCacheSnapshotSigil:
-    def test_empty_completed_returns_empty_string(self) -> None:
-        assert render_cache_snapshot([], {}, None) == ""
-
-    def test_bound_name_is_prefixed_with_sigil(self) -> None:
-        stmt = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([stmt], {"a": 1}, None)
-
-        assert "$a: int = 1" in rendered
-        assert "\na: int = 1" not in rendered
-        assert not rendered.startswith("```\nCached values:\na:")
-
-    def test_multiple_bound_names_all_sigiled(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-
-        rendered = render_cache_snapshot([a, b], {"a": 1, "b": "two"}, None)
-
-        assert "$a: int = 1" in rendered
-        assert "$b: str = \"two\"" in rendered
-
-
-class TestRenderCacheSnapshotLimit:
-    def test_preview_limit_cuts_with_the_marker(self) -> None:
-        stmt = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([stmt], {"a": "x" * 20}, 5)
-
-        # json.dumps wraps the string in quotes: 22 chars, first 5 shown.
-        assert '$a: str = "xxxx...[truncated: 5 of 22 chars shown]' in rendered
-
-    def test_zero_preview_limit_hides_the_value(self) -> None:
-        stmt = ToolStatement(identifier="a", tool="tool_a")
-
-        rendered = render_cache_snapshot([stmt], {"a": "secret"}, 0)
-
-        assert "$a: str = value hidden" in rendered
-        assert "secret" not in rendered
-
-    def test_no_preview_limit_means_no_truncation(self) -> None:
-        stmt = ToolStatement(identifier="a", tool="tool_a")
-
-        assert "x" * 20 in render_cache_snapshot([stmt], {"a": "x" * 20}, None)
 
 
 def _draft(

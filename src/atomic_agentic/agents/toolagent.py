@@ -99,6 +99,10 @@ class ToolAgent(Agent, ABC):
       retries); ends with staged work for ``prepare``; no tool effects.
     - ``prepare``: resolution only -- bind the staged statements' arguments
       against ``task.context[name].value``; no model call, no tool I/O.
+      A family that dispatches exactly one call per round and can resolve it
+      at generation time (``ReActAgent``) resolves inside ``think``'s
+      regeneration loop instead, so a resolution failure is regeneration
+      feedback; its ``prepare`` is a documented no-op.
     - ``act``: effects -- dispatch tools, bind results into ``task.context``
       via ``Agent._write_context(task, {...}, create=True)``, and set
       ``task.generated_response`` and ``task.complete``.
@@ -806,7 +810,8 @@ class ToolAgent(Agent, ABC):
         """Resolution only: bind the staged statements' arguments against
         ``task.context[name].value``; no model call, no tool I/O.
         Hard-abstract -- each family's resolve/cascade logic differs enough
-        that no shared body fits."""
+        that no shared body fits. ``ReActAgent`` resolves inside ``think``
+        and implements this as a no-op."""
         ...
 
     @abstractmethod

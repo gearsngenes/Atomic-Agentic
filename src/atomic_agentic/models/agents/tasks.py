@@ -333,15 +333,17 @@ class ReActTask(ToolAgentTask):
     ReActAgent-flavored task: one registered-tool call generated, resolved,
     and dispatched per round, via provider-native structured output
     (``REACT_OUTPUT_SCHEMA``) -- the per-step sibling to ``PlanActTask``'s
-    one-shot multi-call plan. ``completed``/``failed_statements``/``cache``/
-    ``constant_values``/``tool_calls_used`` are all inherited from
-    ``ToolAgentTask`` -- only ``generated_step``/``resolved_args``/
-    ``last_call_failed`` are genuinely ``ReActAgent``-specific.
+    one-shot multi-call plan. ``completed``/``failed_statements``/
+    ``tool_calls_used`` are all inherited from ``ToolAgentTask`` -- only
+    ``generated_step``/``resolved_args``/``last_call_failed`` are genuinely
+    ``ReActAgent``-specific. Result bindings live in ``task.context``
+    (written through ``Agent._write_context``).
 
     No fixed-size preallocated board and no observability-decay window --
-    every round renders a full snapshot of ``completed``/``cache`` instead
-    (``utils.sigils.render_completed_as_json``/``render_cache_snapshot``,
-    reused unmodified). No ``pending: list[list[ToolStatement]]`` batch
+    every round renders the full ``completed`` call log (plus the last
+    failure) as the steps block, and the bound values through the context
+    block (``utils.sigils.render_completed_as_json``/``render_failed_as_json``).
+    No ``pending: list[list[ToolStatement]]`` batch
     field either -- unlike ``PlanActTask``, this family dispatches exactly
     one call per round, never a concurrency batch. No ``__post_init__`` --
     matches every other ``*Task`` in this family: an in-flight,

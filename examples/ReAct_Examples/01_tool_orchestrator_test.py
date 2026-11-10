@@ -38,9 +38,10 @@ orchestrator.register_tools(BASIC_MATH_TOOLS)
 orchestrator.register_tools(CONSOLE_TOOLS)
 orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below needs both
 
-orchestrator.register_constant(
-    math.pi, "PI",
-    "Mathematical constant `pi` placeholder",
+# A fixed value the model may reference as $PI: a readonly context variable
+# on the agent's conversation.
+orchestrator.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True,
 )
 
 task = """

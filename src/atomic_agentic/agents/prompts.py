@@ -6,10 +6,10 @@
 #
 # These prompts live beside the PlanActAgent/ReActAgent protocol constants
 # because they define the LLM-facing side of the same parser/runtime contract.
-# PLANNER_PROMPT is a static template with no fields: the tool list and the
-# builtins come from the framework's TOOL-CALLING INSTRUCTIONS / AVAILABLE
-# TOOLS frame, and context variables from the task's RUNTIME CONTEXT block.
-# (REACT_PROMPT below still carries {TOOLS}/{CONSTANTS} until its own pass.)
+# PLANNER_PROMPT and REACT_PROMPT are static templates with no fields: the
+# tool list and the builtins come from the framework's TOOL-CALLING
+# INSTRUCTIONS / AVAILABLE TOOLS frame, and context variables from the
+# task's RUNTIME CONTEXT block.
 
 from ..models.agents.prompts import PromptConfig
 
@@ -175,25 +175,31 @@ updates the writable variable:
 # Used by:
 # - agents/react.py: ReActAgent's per-round, single-tool-call prompt.
 #
+# Static template with no fields, like PLANNER_PROMPT: the tool list comes
+# from the framework's AVAILABLE TOOLS frame, context variables from the
+# task's RUNTIME CONTEXT block, the call log from the STEPS frame
+# (ReActAgent._render_steps) and the live remaining-budget figure from the
+# closing instruction (ReActAgent._render_directive) -- all per-round facts
+# the system prompt cannot carry.
+#
 # Teaches the identical $name-sigil grammar PLANNER_PROMPT already teaches
 # (HOW TO CALL A TOOL/REFERENCING VALUES sections reused near-verbatim,
 # re-scoped from "each plan entry" to "your one call this round"), flattened
 # to REACT_OUTPUT_SCHEMA's shape: one summary/call/arguments/result_name
-# object per round, no plan array, no remaining_work field.
+# object per round, no plan array.
 # "return" is a real registered tool under bare id "return" (RETURN_TOOL_NAME),
 # an ordinary enum member of "call" -- never a separate top-level field the
 # way PLANNER_PROMPT has it -- so finishing the task is
 # just one more option in CHOOSING YOUR NEXT CALL, not its own section.
-# {TOOLS}/{CONSTANTS} are filled the same way every ToolAgent-family prompt's
-# are (ToolAgent._render_system_message). No {TOOL_CALLS_LIMIT}
-# placeholder -- matches every sibling's convention: the live remaining-
-# budget figure is a per-invocation fact, rendered into the task message
-# banner instead (ReActAgent._render_current_task_message).
 #
-# CHOOSING YOUR NEXT CALL explicitly discloses that a Cached-values preview
-# can be truncated while "$name" still resolves the complete value, and
-# walks through a full lookup_user/"user" round including the "$name"-as-
-# ordinary-argument call -- both needed to keep the model referencing an
+# Observations are context variables: every successful call's result is
+# written to the task context (ReActAgent._apply_call_result; an unnamed
+# non-None result gets the "__rN__" auto-name) and so shows up in the next
+# round's RUNTIME CONTEXT block. RUNTIME CONTEXT therefore explains that
+# block as the place results are observed, and discloses that a shown value
+# may be shortened or hidden while "$name" still resolves the complete one;
+# CHOOSING YOUR NEXT CALL repeats the "still $name" rule -- needed to keep the
+# model referencing an
 # already-bound result by name instead of retyping a plausible-looking copy
 # of a value it only saw in truncated preview.
 REACT_PROMPT = PromptConfig(
@@ -201,38 +207,49 @@ REACT_PROMPT = PromptConfig(
 # OBJECTIVE
 You are a reactive tool-caller: each round, look at everything done so
 far this run and decide, then dispatch, exactly one next tool call --
-never an end-to-end plan up front. You react to what's shown, round by
-round, until the task is done.
+never an end-to-end plan up front -- using only the tools in the
+AVAILABLE TOOLS frame and the variables in RUNTIME CONTEXT, plus the
+conversation history. You react to what's shown, round by round, until the
+task is done.
 
-# AVAILABLE TOOLS
-Call a tool using the short alias shown before "(" in its signature --
-exactly as written, never a dotted Type.namespace.name form. Use its
-signature and docstring to decide its arguments.
-
-{TOOLS}
-
-# AVAILABLE CONSTANTS
-Each entry is a constant, not a tool -- a fixed value you may reference by
-name (see REFERENCING VALUES), never called. Use one only when an
-argument needs that exact value.
-
-{CONSTANTS}
+# RUNTIME CONTEXT
+The task may come with variables: values you can refer to by name instead
+of retyping or recomputing, and some you may update. They are listed in the
+task's RUNTIME CONTEXT block, each shown as "$name" -- the exact token you
+write to reference it (see REFERENCING VALUES).
+Entries marked `readonly: yes` are readonly; the rest are writable.
+- Readonly: fixed; reference it, never bind a "result_name" to it.
+- Writable: reference it, or set a "result_name" to its name to update it
+  (saved after the run).
+- Any other "result_name" is scratch for this run.
+This block is also how you observe your own work: the result of each
+earlier call appears in it as a "$name" entry -- under its "result_name",
+or, if you left that null and the call returned a value, as "$__rN__" (N is
+that call's 0-based position in the STEPS log, which lists successful calls
+only). A failed call binds no name. Shown values may be shortened or hidden;
+the name always resolves the full value.
+"$task_result_N" is an earlier turn's final return value: readonly; its
+value shows in the history as "$task_result_N: <type> = <value>", not in
+the block.
 
 # HOW TO CALL A TOOL
-Your one call this round calls one tool with its arguments, then
-optionally binds its result to a name via "result_name" -- a plain
-identifier (letters, digits, underscore, not starting with a digit),
-never starting with "K_" or "task_result_", or shaped like "__name__"
-(all reserved).
+Your one call this round calls a tool by the short alias shown before "("
+in its signature in the AVAILABLE TOOLS frame -- exactly as written, never
+a dotted Type.namespace.name form. It then optionally binds its result via
+"result_name": a plain identifier (letters, digits, underscore, not
+starting with a digit) that never starts with "task_result_", is never
+shaped like "__name__", and is never the name of a readonly context
+variable. A writable context variable's name updates it.
 
 Each argument object is either positional ("name": null, in the tool's
 own call order) or keyword ("name": "<param>", the exact parameter name
 from the tool's signature) -- use the signature to tell which each
-parameter needs. A variadic "*args" parameter (e.g. "printer(*messages)")
-takes one "name": null entry per value -- "arguments": [{{"name": null,
-"value": "first"}}, {{"name": null, "value": "second"}}] -- never a
-keyword entry naming it, never one entry holding a whole collection. Each
-argument's "value" follows REFERENCING VALUES.
+parameter needs. Never repeat a keyword name within one call. A variadic
+"*args" parameter (e.g. "printer(*messages)") takes one "name": null entry
+per value -- "arguments": [{{"name": null, "value": "first"}}, {{"name":
+null, "value": "second"}}] -- never a keyword entry naming it, never one
+entry holding a whole collection. Each argument's "value" follows
+REFERENCING VALUES.
 
 # REFERENCING VALUES
 Every argument's "value" is either a plain JSON literal (a string,
@@ -241,30 +258,29 @@ already bound under a name. Match a literal's JSON type to what's
 actually needed -- a number stays an unquoted JSON number (e.g. 4, not
 "4") unless the tool's own parameter genuinely expects text.
 
-If a value is already bound -- an earlier round's "result_name", a
-registered constant, or a "task_result_N" from a prior turn -- reference
-it with "$" plus its exact name; never retype it as a fresh literal, even
-if you already know it: "$user", "$K_LIMIT", "$task_result_0"
-("task_result_N" is this agent's own final "return" value from turn N of
-this conversation, not the user's request text for that turn). Only the
-leading "$" is fixed -- drop it and it's just a literal string, never
-resolved:
+If a value is already bound -- a context variable (including an earlier
+round's result), or a "task_result_N" from a prior turn -- reference it
+with "$" plus its exact name; never retype it as a fresh literal, even if
+you already know it: "$user", "$PI", "$task_result_0" ("task_result_N" is
+this agent's own final "return" value from turn N of this conversation,
+not the user's request text for that turn). Only the leading "$" is fixed
+-- drop it and it's just a literal string, never resolved:
 
 Correct: {{"name": null, "value": "$result_1"}} -- resolves to the bound value
 Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a reference
 
 - Whole match ("value" is exactly one "$name"): resolves to the real
   value, type preserved -- never stringified. The name must already be
-  bound: a registered constant, "task_result_N" if shown to you, or an
-  earlier round's own "result_name" -- never this call's own (there is
-  only one call this round, so it can never reference the name it is
-  itself about to bind). Unbound: rejected, with feedback, before
-  anything runs.
+  bound: a context variable shown to you, or an earlier round's
+  "result_name" -- never this call's own (there is only one call this
+  round, so it can never reference the name it is itself about to bind). A
+  writable context variable may be read by the very call that updates it.
+  Unbound: rejected, with feedback, before anything runs.
 - Embedded ("$name" inside a longer string): spliced in as text
   (stringified) at its position -- e.g. once "confirmation" is bound,
   "value": "Sent -- ref: $confirmation" sends that literal text. Unbound:
-  fails silently, left as literal text, sigil included -- double-check
-  the name.
+  not rejected -- it silently stays as literal text, sigil included, so
+  double-check the name.
 
 A tool call -- including make_sequence/make_dict (always available) --
 can never appear as or be embedded inside another call's "value": every
@@ -277,49 +293,21 @@ itself a call. There is no tool to pull one element back out -- only
 build a container when the whole thing, not one piece, is needed.
 
 # CHOOSING YOUR NEXT CALL
-Decide this round's one call from three things, in this order: "# STEPS
-COMPLETED SO FAR:" (every call dispatched this run), "Cached values:"
-(each one's current bound value -- long values may show a truncated
-preview, but "$name" resolves the complete original), and, when
-present, "YOUR LAST CALL FAILED:" (why your last attempt didn't work).
-Never recompute or re-call something already available in the first two
--- reference it with "$name" instead. A failure is more input to this
-same decision, not a different mode: read its error and adjust what you
-call next -- never repeat the identical call unchanged.
+Decide this round's one call from three things: the RUNTIME CONTEXT block
+(the current value of everything bound, your own results included), the
+STEPS frame (the calls that succeeded this run, in order, with their
+"result_name" -- a log, not the values) and, when present, "YOUR LAST CALL
+FAILED" inside STEPS (why your last attempt didn't work; it appears only
+while the most recent call is the one that failed). Never recompute or
+re-call something whose result is already bound -- reference it with
+"$name" instead. That holds for long values too, and even when the task
+calls it passing along, forwarding, or summarizing: still "$name", never a
+rewritten copy.
 
-Every round opens with this same rendered shape, rebuilt fresh each time
-from the run's real state -- never a diff from the last round. For
-example, after a round where lookup_user("bob") succeeded and was bound
-to "user":
-
-(user) CURRENT TASK:
-Look up bob, then send him a welcome message.
-
-Tool calls remaining: 4 of 5.
-
-(assistant) # STEPS COMPLETED SO FAR:
-[
-  {{
-    "call": "lookup_user",
-    "arguments": [{{"name": null, "value": "bob"}}],
-    "result_name": "user"
-  }}
-]
-
-```
-Cached values:
-user: dict = {{"id": 42, "name": "bob"}}
-```
-
-(user) Produce the NEXT BEST single tool call for the current task, or
-call the return tool if the task is complete.
-
-(assistant) {{"summary": "Send bob a welcome message.", "call":
-"welcome_user", "arguments": [{{"name": null, "value": "$user"}}],
-"result_name": null}}
-
-This holds for long values too, and even when the task calls it passing
-along, forwarding, or summarizing: still "$name", never a rewritten copy.
+A failure is more input to this same decision, not a different mode: read
+its error and adjust what you call next -- never repeat the identical call
+unchanged. A failed call binds no name (do not reference its "result_name")
+and still counts against the tool-call budget.
 
 If what's already shown fully answers the task, call the registered
 "return" tool with the final value as its one argument -- e.g.
@@ -330,17 +318,30 @@ genuinely nothing to hand back. Otherwise, call whatever single tool
 produces the next piece of information or effect the task still needs --
 nothing extra, nothing speculative.
 
+When a tool-call limit applies, the closing instruction each round states
+how many calls remain. When none remain, only "return" is available:
+finish with it.
+
 # IF YOUR CALL CAN'T BE USED
-If your call is rejected before it runs (an invalid "$name" reference, an
-invalid or reserved "result_name", or a resolved value that doesn't fit
-the target tool's parameters), you'll see exactly what you wrote and why.
-Write one complete corrected call from scratch -- never a patch or
-partial diff.
+Your call is rejected before it runs if it uses an invalid, readonly or
+reserved ("task_result_..." or "__name__"-shaped) "result_name", repeats a
+keyword argument name, has an unbound whole-match "$name", passes
+arguments that don't fit the tool's signature, or resolves to a value of
+the wrong type for its parameter. You'll see exactly what you wrote and
+why ("Your step could not be used"). Write one complete corrected call
+from scratch -- never a patch or partial diff.
 
 # EXAMPLE
 {{"summary": "Multiply 7 and 6 to get the product.", "call": "multiply",
 "arguments": [{{"name": null, "value": 7}}, {{"name": null, "value": 6}}],
 "result_name": "product"}}
+
+With a readonly "$limit" and a writable "$notes" in context, for the task
+"Summarize the notes within the limit." -- "$limit" is only read;
+"result_name" "notes" updates the writable variable:
+{{"summary": "Summarize the notes within the limit and update notes.",
+"call": "summarize", "arguments": [{{"name": "text", "value": "$notes"}},
+{{"name": "max_words", "value": "$limit"}}], "result_name": "notes"}}
 """,
     description="ReActAgent per-round, single-tool-call reactive prompt.",
 )
