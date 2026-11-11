@@ -6,10 +6,10 @@ deciding one tool call per round rather than a fixed upfront sequence, so
 it can stop as soon as the reviewer's grade clears the bar instead of
 always running a fixed number of cycles.
 
-`AgenticOrchestrator` sets `response_preview_limit` below so draft code and
-review dicts truncate in "Cached values" each round -- without it, the
-full values are always visible, leaving the model no real incentive to
-reference an earlier result by "$name" instead of retyping it.
+`AgenticOrchestrator`'s conversation sets `context_preview_limit` below so
+draft code and review dicts truncate in the runtime-context block each round
+-- without it, the full values are always visible, leaving the model no real
+incentive to reference an earlier result by "$name" instead of retyping it.
 
 "approval_status" is deliberately the first key in CodeReviewer's schema,
 before "feedback": OpenAI's structured output fills object fields in
@@ -21,10 +21,12 @@ entirely by critique text.
 import json
 import logging
 from pathlib import Path
-from pprint import pformat
 
 from atomic_agentic.agents import BasicAgent, ReActAgent
 from atomic_agentic.llm import OpenAIEngine
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 
@@ -66,7 +68,7 @@ builder = BasicAgent(
         "the form '#- path/to/module.py' (including the first module). Put each module's "
         "source after its header, then begin the next module with the next header."
     ),
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=builder_prestep,
     records_window=10,
 )
@@ -106,7 +108,7 @@ reviewer = BasicAgent(
         "- 'Outstanding': clean and idiomatic, free of the issues above -- nothing left to fix.\n"
         "In 'feedback', return ONLY specific revision critiques that justify the grade -- no rewriting."
     ),
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=reviewer_prestep,
     records_window=10,
     response_schema={
@@ -121,7 +123,7 @@ reviewer = BasicAgent(
 )
 
 # Standing orchestration rules, lifted out of the per-invocation task prompt
-# and into tool_instructions -- the builder/reviewer interaction contract
+# and into instructions -- the builder/reviewer interaction contract
 # (strict alternation, how to branch on the three-tier grade, when to stop,
 # what to return) is reusable agent behavior, not one-off task text
 # repeated on every call. Keeps `task` below down to just the content request.
@@ -143,10 +145,10 @@ orchestrator = ReActAgent(
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm_engine,
     tool_calls_limit=10,
-    context_enabled=True,
-    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
-    response_preview_limit=10,
+    record_enabled=True,
+    instructions=ORCHESTRATION_INSTRUCTIONS,
 )
+orchestrator.get_conversation().context_preview_limit = 10
 
 # Register both agents as tools -- each reachable by its own bare name
 # (builder.name / reviewer.name) since no alias is given.
@@ -166,7 +168,7 @@ task = (
 )
 
 result = orchestrator.invoke({"prompt": task}).result
-record = orchestrator.get_conversation()[-1]
+record = orchestrator.get_conversation().records[-1]
 serialized_record = json.dumps(record.to_dict(), indent=2)
 
 out_dir = Path("examples/output_markdowns")

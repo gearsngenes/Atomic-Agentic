@@ -23,7 +23,7 @@ auto-grafted onto the agent's own schema, so e.g. drafter_post can read
 revision_count straight from GraphFlow's accumulated state and return the
 incremented dict itself. toolify is used only for triage and the two
 routers, which are genuinely plain deterministic Python with no LLM call.
-context_enabled=False throughout: GraphFlow's accumulated state is the one
+record_enabled=False throughout: GraphFlow's accumulated state is the one
 channel data flows through here, not each agent's own turn history.
 """
 
@@ -77,7 +77,8 @@ drafter = BasicAgent(
     ),
     pre_invoke=drafter_pre,
     post_invoke=drafter_post,
-    context_enabled=True,
+    response_to_post="result",
+    record_enabled=True,
 )
 
 
@@ -111,7 +112,8 @@ fact_checker = BasicAgent(
     ),
     pre_invoke=fact_pre,
     post_invoke=fact_post,
-    context_enabled=False,
+    response_to_post="result",
+    record_enabled=False,
 )
 
 
@@ -140,7 +142,8 @@ style_editor = BasicAgent(
     ),
     pre_invoke=style_pre,
     post_invoke=style_post,
-    context_enabled=False,
+    response_to_post="result",
+    record_enabled=False,
 )
 
 

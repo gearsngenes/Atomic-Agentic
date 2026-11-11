@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
 from .blackboard_models import ToolStatement
+from .context import ContextVariable
 from .records import AgentRecord, LLMRecord
 
 __all__ = [
@@ -14,6 +16,7 @@ __all__ = [
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
+    "ScratchpadTask",
 ]
 
 
@@ -22,7 +25,7 @@ class AgentTask:
     """
     Base run-task contract for one Agent invocation.
 
-    Drives an invocation through ``_initialize_task`` then
+    Drives an invocation through ``create_task`` then
     ``think``/``prepare``/``act`` each round. ``BasicAgent`` uses this base
     class directly; it needs nothing beyond these fields.
 
@@ -30,8 +33,8 @@ class AgentTask:
     ------
     turns : list[AgentRecord]
         The selected conversation turns for this invocation (same list
-        ``_initialize_task`` received). Used for ``prev`` linkage when
-        building the completed record.
+        ``create_task`` pinned). Used for ``prev`` linkage when
+        building the completed record (``turns[-1]``, if any).
 
     inputs : dict[str, Any]
         The full, untouched ``inputs`` mapping from the base ``Agent``
@@ -39,16 +42,16 @@ class AgentTask:
 
     user_prompt : str
         The fully-resolved prompt string produced by ``pre_invoke`` for this
-        invocation (matches ``AgentRecord.user_prompt`` 1:1).
+        invocation (matches ``AgentRecord.user_prompt`` 1:1). Defaults to
+        ``""`` so a task can exist before ``pre_process`` runs; ``pre_process``
+        always overwrites it.
 
-    system_prompt_name : str | None
-        Identifies which entry in ``self._system_prompts`` governs the
-        current phase — read by ``render_task``/``_render_system_message``
-        to select and render the active system prompt. Required (no
-        default): every concrete subclass must decide it explicitly.
-        ``None`` is a legitimate value meaning "render no system message at
-        all," not a not-yet-set placeholder — though no concrete subclass
-        shipped today ever constructs a task with ``None``.
+    thinking_complete : bool
+        ``True`` when the task needs no further thinking before ``act``.
+        Defaults to ``True`` (a single-phase agent has nothing to think
+        about). ``ThinkingTask`` defaults it to ``False`` and
+        ``ThinkingAgent.think`` is its only writer. Tool families do not use
+        it.
 
     llm_records : list[LLMRecord]
         Accumulator for every LLM generation made while producing this
@@ -68,28 +71,74 @@ class AgentTask:
 
     historic_messages : list[dict[str, str]]
         Rendered ``turns``, built lazily once per invoke by
-        ``Agent._render_historic_messages`` and reused for the rest of it.
+        ``Agent.summarize`` and reused for the rest of it.
         Never rebuilt mid-invoke — turn-rendering is phase-invariant,
-        governed only by ``response_preview_limit``, itself static
-        per-agent config.
+        governed only by the bound conversation's preview limits, read from
+        the conversation (``task.conversation``) when it is built.
 
     task_messages : list[dict[str, str]]
-        Phase-scoped LLM-facing content, lazily built by each subclass's
-        ``render_task`` when empty and grown by ``additional_messages``
-        across generation retries within one phase. Cleared by the owning
-        subclass at its own phase boundary (e.g. ``PlanActAgent`` once
-        planning finishes; ``ReActAgent`` after each step commits).
+        The task-message list most recently built by ``_render_task_messages``
+        (what ``LLMRecord`` copies right after a render). A family that retries
+        within a phase builds it once per phase and grows it with
+        ``additional_messages``, clearing it at its own phase boundary (e.g.
+        ``PlanActAgent`` once planning finishes). A family that never retries
+        (``ThinkingAgent``) rebuilds it on every call.
+
+    conversation : str | None
+        Registry key of the conversation this invocation is bound to. ``None``
+        until ``create_task`` populates it.
+
+    context : dict[str, ContextVariable]
+        Per-call working copy of the bound conversation's context, seeded by
+        ``create_task`` (a shallow copy; the variables are shared frozen
+        objects). ``Agent._write_context`` is its only writer: ``create_task``
+        replaces or creates variables from the call's ``runtime_context`` dict
+        (when the agent's ``use_runtime_context`` is on) and then from
+        ``inputs_to_context``, and ``post_process`` replaces or creates
+        variables from ``response_to_context``. Any other writer (subclass loop
+        steps) must call ``_write_context``, or skip or raise on a ``readonly``
+        variable itself. This dict is not guarded. Persistence beyond the call
+        is ``record``'s: see ``changed_context``.
+
+    changed_context : set[str]
+        Names ``_write_context`` wrote during this call (created or replaced).
+        ``record`` offers only these to the conversation, so a name the call
+        never wrote is never persisted and never overwrites a newer value.
+        Empty until a write happens.
+
+    pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
+        Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
+        agent-specific -- the ``extra_parameters``-sourced names). A name
+        consumed by more than one goes into every
+        bucket that declares it. ``post_process`` then overlays the response
+        pieces bound by ``response_to_post`` onto ``post_inputs`` (always names
+        the post stage declares), so afterwards it is exactly what
+        ``post_invoke`` received.
+
+    run_id, started_at, ended_at : str | None, datetime | None, datetime | None
+        Identity and timing shared by the result and the record built from
+        this task. ``None`` until ``create_task`` mints them.
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
-    user_prompt: str
-    system_prompt_name: str | None
 
+    user_prompt: str = ""
     llm_records: list[LLMRecord] = field(default_factory=list)
     complete: bool = False
     generated_response: Any = NO_VAL
     historic_messages: list[dict[str, str]] = field(default_factory=list)
     task_messages: list[dict[str, str]] = field(default_factory=list)
+
+    conversation: str | None = None
+    context: dict[str, ContextVariable] = field(default_factory=dict)
+    changed_context: set[str] = field(default_factory=set)
+    pre_inputs: dict[str, Any] = field(default_factory=dict)
+    post_inputs: dict[str, Any] = field(default_factory=dict)
+    agentic_inputs: dict[str, Any] = field(default_factory=dict)
+    run_id: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    thinking_complete: bool = True
 
 
 @dataclass(slots=True)
@@ -110,25 +159,19 @@ class ToolAgentTask(AgentTask):
         Every call whose dispatch (or, for ``ScriptActAgent``, resolution)
         actually failed this run, in the order observed.
 
-    cache : dict[str, Any]
-        identifier -> resolved value for every call in ``completed``, plus
-        ``task_result_i`` entries seeded once at ``_initialize_task``.
-
-    constant_values : dict[str, Any]
-        Registered-constant name -> value, populated once by each concrete
-        agent's own ``_initialize_task`` and never touched again.
-
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
         call this run -- irreducible; a rejected/regenerated draft leaves
         no artifact anywhere else to derive this from (contrast
         ``tool_calls_used``, fully derivable from ``completed``/
         ``failed_statements``).
+
+    Result bindings and referenceable prior results live in ``task.context``
+    (``task_result_i`` entries seeded by ``ToolAgent._seed_task``; run-local
+    bindings written through ``Agent._write_context``), not on this task.
     """
     completed: list[ToolStatement] = field(default_factory=list)
     failed_statements: list[ToolStatement] = field(default_factory=list)
-    cache: dict[str, Any] = field(default_factory=dict)
-    constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
 
     @property
@@ -155,9 +198,10 @@ class ToolAgentTask(AgentTask):
 class ScriptActAgentTask(ToolAgentTask):
     """
     ScriptActAgent-flavored task, a ``ToolAgentTask`` subclass.
-    ``completed``/``failed_statements``/``cache``/``constant_values``/
-    ``regenerations_used``/``tool_calls_used`` are all inherited; only
-    genuinely ``ScriptActAgent``-specific fields remain declared here.
+    ``completed``/``failed_statements``/``regenerations_used``/
+    ``tool_calls_used`` are all inherited; only genuinely
+    ``ScriptActAgent``-specific fields remain declared here. Result
+    bindings live in ``task.context`` as context variables, not on the task.
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
     zero constructor-time validation (an in-flight, internal-only object,
@@ -182,7 +226,7 @@ class ScriptActAgentTask(ToolAgentTask):
         model-authored way to set this anymore (no ``# PAUSE``, no
         if-cutoff). Cleared by ``think()``/``async_think()``, right after
         generating the granted repair round's fresh content -- the flag's
-        only job is telling ``prepare()``'s and ``_apply_batch_results``'s
+        only job is telling ``act()``'s and ``_apply_batch_results``'s
         own empty-``pending`` checks "stopped, needs a repair round" (leave
         the task incomplete for ``think()`` to regenerate next) apart from
         "genuinely finished" (finalize via ``_finalize_without_continuation``
@@ -247,13 +291,14 @@ class ScriptActAgentTask(ToolAgentTask):
 class PlanActTask(ToolAgentTask):
     """
     PlanActAgent-flavored task -- ``ToolStatement``-based batch-execution
-    fields, with no continuation-related fields at all: ``think()`` runs
-    exactly once, ever, per invoke, so there is nothing analogous to a
+    fields, with no continuation-related fields at all: ``think()`` runs the
+    generation once per invoke (a repeat call is a no-op while ``pending``
+    exists or the task is complete), so there is nothing analogous to a
     voluntary multi-round continuation flag, round counter, or continuation
-    note to carry. ``completed``/``failed_statements``/``cache``/
-    ``constant_values``/``tool_calls_used`` are all inherited from
-    ``ToolAgentTask`` -- only ``pending``/``resolved_args`` are genuinely
-    ``PlanActAgent``-specific.
+    note to carry. ``completed``/``failed_statements``/``tool_calls_used``
+    are inherited from ``ToolAgentTask``, and result bindings live in the
+    inherited ``task.context`` (written through ``Agent._write_context``) --
+    only ``pending``/``resolved_args`` are genuinely ``PlanActAgent``-specific.
 
     Fields
     ------
@@ -286,15 +331,17 @@ class ReActTask(ToolAgentTask):
     ReActAgent-flavored task: one registered-tool call generated, resolved,
     and dispatched per round, via provider-native structured output
     (``REACT_OUTPUT_SCHEMA``) -- the per-step sibling to ``PlanActTask``'s
-    one-shot multi-call plan. ``completed``/``failed_statements``/``cache``/
-    ``constant_values``/``tool_calls_used`` are all inherited from
-    ``ToolAgentTask`` -- only ``generated_step``/``resolved_args``/
-    ``last_call_failed`` are genuinely ``ReActAgent``-specific.
+    one-shot multi-call plan. ``completed``/``failed_statements``/
+    ``tool_calls_used`` are all inherited from ``ToolAgentTask`` -- only
+    ``generated_step``/``resolved_args``/``last_call_failed`` are genuinely
+    ``ReActAgent``-specific. Result bindings live in ``task.context``
+    (written through ``Agent._write_context``).
 
     No fixed-size preallocated board and no observability-decay window --
-    every round renders a full snapshot of ``completed``/``cache`` instead
-    (``utils.sigils.render_completed_as_json``/``render_cache_snapshot``,
-    reused unmodified). No ``pending: list[list[ToolStatement]]`` batch
+    every round renders the full ``completed`` call log (plus the last
+    failure) as the steps block, and the bound values through the context
+    block (``utils.sigils.render_completed_as_json``/``render_failed_as_json``).
+    No ``pending: list[list[ToolStatement]]`` batch
     field either -- unlike ``PlanActTask``, this family dispatches exactly
     one call per round, never a concurrency batch. No ``__post_init__`` --
     matches every other ``*Task`` in this family: an in-flight,
@@ -353,43 +400,40 @@ class ReActTask(ToolAgentTask):
 @dataclass(slots=True)
 class ThinkingTask(AgentTask):
     """
-    ThinkingAgent-flavored task.
+    ThinkingAgent-family task.
 
-    No ``phase`` field: ``AgentTask.system_prompt_name`` doubles as the
-    phase discriminator. The name ``"role"`` is reserved for the reply
-    phase; any other value (``ThinkingAgent.THINKING_PROMPT_NAME``) means a
-    thinking round is still active. This is why the field is required (no
-    default) on the base ``AgentTask`` — every concrete subclass must
-    decide it explicitly, and here that decision *is* the phase.
-
-    No retry-budget field: a thinking round either produces a non-empty
-    stripped string (or structured value, once ``thinking_schema`` exists)
-    or ``think()`` raises outright — there is no malformed-output case to
-    retry against, since there is no parsing step left to fail partially.
+    Thinking is in progress while ``thinking_complete`` is ``False`` (this task's
+    default, unlike the base task's). The base ``ThinkingAgent.think`` sets it
+    from its ``_thinking_done`` hook at the start of every pass; nothing else
+    writes it. Once true, ``act`` makes the reply call.
 
     Fields
     ------
-    thoughts : list[str | int | float | bool | list | dict | None]
-        Task-local accumulator, one raw value per completed round (widened
-        type declared for ``thinking_schema`` support). Persisted onto the
-        completed ``ThinkingAgentRecord.thoughts`` tuple verbatim at
-        ``_build_record_from_task`` time -- there is no agent-level
-        accumulator; the record is the only place this content survives
-        past the task's own lifetime. Its own length doubles as the
-        completed-round count — no separate counter field is kept.
-
-    thinking_rounds : int
-        Validated per-invocation round budget, resolved once by
-        ``ThinkingAgent._initialize_task`` from the reserved
-        ``thinking_rounds`` runtime parameter and never changed for the
-        rest of this task's lifetime. Declared with a default of ``1``
-        only because Python dataclass field ordering requires every field
-        following ``AgentTask``'s own defaulted fields to carry one too —
-        the real value is always passed explicitly at construction
-        (mirrors ``ToolAgentTask.regenerations_used: int = 0``'s identical
-        precedent). ``think()``/``async_think()`` read this field directly
-        instead of any agent-level attribute — there is no construction-time
-        equivalent left; the round budget is purely per-invocation now.
+    thoughts : list[Any]
+        Task-local list of thoughts, appended by the strategy's
+        ``_generate_thoughts``. Each element may be any type, including nested
+        structures; how they are rendered and interpreted is the strategy's
+        (``_render_thoughts``). Persisted onto the completed
+        ``ThinkingAgentRecord.thoughts`` tuple verbatim by
+        ``_build_record_from_task``. There is no round counter or budget here:
+        those, if any, belong to the strategy.
     """
-    thoughts: list[str | int | float | bool | list | dict | None] = field(default_factory=list)
-    thinking_rounds: int = 1
+    thinking_complete: bool = False
+    thoughts: list[Any] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ScratchpadTask(ThinkingTask):
+    """
+    ScratchpadAgent task.
+
+    Fields
+    ------
+    more_thinking_required : bool
+        The model's latest "keep thinking" decision under ``stop_early``.
+        ``True`` (the default) means the model has not ended thinking;
+        ``ScratchpadAgent._generate_thoughts`` overwrites it after every
+        thinking call when ``stop_early`` is on and never touches it
+        otherwise.
+    """
+    more_thinking_required: bool = True

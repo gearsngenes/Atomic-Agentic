@@ -18,6 +18,12 @@ from ..fake_engines import FakeLLMEngine, echo_latest_user
 pytestmark = [pytest.mark.integration]
 
 ROLE_PROMPT = "You are a deterministic integration-test writer."
+TASK_PROMPT_START = "==== USER TASK PROMPT [START] ===="
+TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
+
+
+def wrap(prompt: str) -> str:
+    return f"{TASK_PROMPT_START}\n{prompt}\n{TASK_PROMPT_END}"
 
 
 def build_prompt(topic: str, tone: str = "neutral") -> str:
@@ -45,7 +51,7 @@ def summarize_agent_result(
 def make_agent(
     *,
     engine: FakeLLMEngine | None = None,
-    context_enabled: bool = False,
+    record_enabled: bool = False,
     records_window: int | None = None,
 ) -> BasicAgent:
     return BasicAgent(
@@ -54,23 +60,24 @@ def make_agent(
         description="Deterministic writer integration-test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=ROLE_PROMPT,
-        context_enabled=context_enabled,
+        record_enabled=record_enabled,
         records_window=records_window,
         pre_invoke=build_prompt,
         post_invoke=package_response,
+        response_to_post="result",
     )
 
 
 def make_structured_agent(
     *,
     engine: FakeLLMEngine | None = None,
-    context_enabled: bool = False,
+    record_enabled: bool = False,
     records_window: int | None = None,
 ) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable]:
     resolved_engine = engine or FakeLLMEngine(response_fn=echo_latest_user())
     agent = make_agent(
         engine=resolved_engine,
-        context_enabled=context_enabled,
+        record_enabled=record_enabled,
         records_window=records_window,
     )
     structured_agent = StructuredInvokable(
@@ -85,12 +92,12 @@ def make_structured_agent(
 def make_agent_sequential_flow(
     *,
     engine: FakeLLMEngine | None = None,
-    context_enabled: bool = False,
+    record_enabled: bool = False,
     records_window: int | None = None,
 ) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable, SequentialFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
-        context_enabled=context_enabled,
+        record_enabled=record_enabled,
         records_window=records_window,
     )
     flow = SequentialFlow(
@@ -124,7 +131,8 @@ class TestAgentStructuredBasicPipeline:
         result = flow.invoke({"topic": "pytest", "tone": "strict"})
 
         expected_prompt = "Write about pytest in a strict tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_message = wrap(expected_prompt)
+        expected_raw = f"ECHO: {expected_message}"
 
         assert isinstance(result, SequentialFlowResult)
         assert result.result == {
@@ -136,7 +144,7 @@ class TestAgentStructuredBasicPipeline:
         assert engine.calls == [
             [
                 {"role": "system", "content": ROLE_PROMPT},
-                {"role": "user", "content": expected_prompt},
+                {"role": "user", "content": expected_message},
             ]
         ]
 
@@ -148,9 +156,9 @@ class TestAgentStructuredBasicPipeline:
 
         assert isinstance(step_result, StructuredResult)
         assert step_result.result == result.result
-        # This agent is constructed with context_enabled=False (the
+        # This agent is constructed with record_enabled=False (the
         # make_agent_sequential_flow default), so nothing is stored.
-        assert agent.get_conversation() == []
+        assert agent.get_conversation().records == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
         _engine, _agent, structured_agent = make_structured_agent()
@@ -165,7 +173,7 @@ class TestAgentStructuredBasicPipeline:
         result = flow.invoke({"topic": "composition", "tone": "direct"})
 
         expected_prompt = "Write about composition in a direct tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_raw = f"ECHO: {wrap(expected_prompt)}"
         expected_first = {
             "final": expected_raw,
             "length": len(expected_raw),
@@ -182,18 +190,20 @@ class TestAgentStructuredBasicPipeline:
             expected_second,
         ]
 
-    def test_wrapped_context_enabled_agent_preserves_history_across_flow_invokes(
+    def test_wrapped_record_enabled_agent_preserves_history_across_flow_invokes(
         self,
     ) -> None:
         engine, agent, _structured_agent, flow = make_agent_sequential_flow(
-            context_enabled=True,
+            record_enabled=True,
         )
 
         first = flow.invoke({"topic": "first topic", "tone": "plain"})
         second = flow.invoke({"topic": "second topic", "tone": "plain"})
 
-        assert first.result["final"] == "ECHO: Write about first topic in a plain tone."
-        assert second.result["final"] == "ECHO: Write about second topic in a plain tone."
+        first_prompt = "Write about first topic in a plain tone."
+        second_prompt = "Write about second topic in a plain tone."
+        assert first.result["final"] == f"ECHO: {wrap(first_prompt)}"
+        assert second.result["final"] == f"ECHO: {wrap(second_prompt)}"
         assert len(engine.calls) == 2
 
         second_call_messages = engine.calls[1]
@@ -203,9 +213,9 @@ class TestAgentStructuredBasicPipeline:
             "assistant",
             "user",
         ]
-        assert second_call_messages[1]["content"] == "Write about first topic in a plain tone."
-        assert second_call_messages[2]["content"] == "ECHO: Write about first topic in a plain tone."
-        assert second_call_messages[3]["content"] == "Write about second topic in a plain tone."
+        assert second_call_messages[1]["content"] == first_prompt
+        assert second_call_messages[2]["content"] == f"ECHO: {wrap(first_prompt)}"
+        assert second_call_messages[3]["content"] == wrap(second_prompt)
 
     def test_async_structured_agent_sequential_flow_pipeline(self) -> None:
         engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
@@ -215,7 +225,7 @@ class TestAgentStructuredBasicPipeline:
         )
 
         expected_prompt = "Write about async pytest in a strict tone."
-        expected_raw = f"ECHO: {expected_prompt}"
+        expected_raw = f"ECHO: {wrap(expected_prompt)}"
 
         assert isinstance(result, SequentialFlowResult)
         assert result.result == {
@@ -230,7 +240,7 @@ class TestAgentStructuredBasicPipeline:
         self,
     ) -> None:
         _engine, agent, structured_agent, flow = make_agent_sequential_flow(
-            context_enabled=True,
+            record_enabled=True,
             records_window=1,
         )
 
@@ -249,7 +259,7 @@ class TestAgentStructuredBasicPipeline:
         assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT
-        assert agent_snapshot["context_enabled"] is True
+        assert agent_snapshot["record_enabled"] is True
         assert agent_snapshot["records_window"] == 1
         assert agent_snapshot["pre_invoke"]["name"] == "pre_invoke"
         assert agent_snapshot["post_invoke"]["name"] == "post_invoke"

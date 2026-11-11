@@ -1,8 +1,12 @@
-﻿import logging
+import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
 
 from shared_engine import llm_engine
 
@@ -16,7 +20,7 @@ agent = PlanActAgent(
     namespace="examples",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 # Register tool lists
@@ -24,8 +28,9 @@ agent.register_tools(EXPONENT_TOOLS)
 agent.register_tools(BASIC_MATH_TOOLS)
 agent.register_tools(CONSOLE_TOOLS)
 
-# Register the pi constant (value first, then alias/description)
-agent.register_constant(math.pi, alias="PI", description="Mathematical constant `pi`")
+# pi as a readonly context variable: the model sees it in its context block and
+# can reference it as "$PI", but a plan cannot reassign it.
+agent.get_conversation().remember("PI", math.pi, "The mathematical constant pi.", readonly=True)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -42,5 +47,5 @@ from pprint import pprint
 print("\n=== FINAL AGENT RESULT ===")
 pprint(result)
 print("EXECUTED CALLS AFTER MATH DEMO:")
-print(agent.get_conversation()[-1].render_as_code())
+print(agent.get_conversation().records[-1].render_as_code())
 agent.clear_memory()

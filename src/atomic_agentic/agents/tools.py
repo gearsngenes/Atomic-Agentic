@@ -5,9 +5,9 @@ from typing import Any, Literal
 
 from ..tools import Tool
 from ..constants.agents import (
+    ALLOWED_ATTR_METHODS,
+    ALLOWED_PY_BUILTINS,
     ATTR_CALL_ALIAS,
-    DUNDER_ATTRIBUTE_PATTERN,
-    EXCLUDED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
     RETURN_TOOL_FULL_NAME,
@@ -17,54 +17,13 @@ from ..constants.agents import (
 )
 
 __all__ = [
-    "identity_pre_tool",
-    "identity_post_tool",
     "return_tool",
     "builtin_call_tool",
     "attr_call_tool",
     "call_python_builtin",
     "make_sequence",
     "make_dict",
-    "get_item",
 ]
-
-
-def identity_pre(prompt: str) -> str:
-    """
-    Default pre-invoke identity function.
-
-    Requires exactly ``{"prompt": str}`` and returns the prompt string
-    unchanged. Wrapped as a Tool and used when no explicit ``pre_invoke``
-    Tool is provided to ``Agent``.
-    """
-    if not isinstance(prompt, str):
-        raise ValueError("prompt must be a string")
-    return prompt
-
-identity_pre_tool = Tool(
-    function=identity_pre,
-    name="identity_pre",
-    namespace="base_agent",
-    description="Default pre-invoke identity function that requires {'prompt': str} and returns the prompt string.",
-)
-
-
-def identity_post(result: Any) -> Any:
-    """
-    Default post-invoke identity function.
-
-    This function accepts a single argument named ``result`` and returns it
-    unchanged. It is wrapped as a Tool and used when no explicit ``post_invoke``
-    Tool is provided.
-    """
-    return result
-
-identity_post_tool = Tool(
-    function=identity_post,
-    name="identity_post",
-    namespace="base_agent",
-    description="Default post-invoke identity function that accepts a single argument 'result' and returns it unchanged.",
-)
 
 
 def _return(val: Any) -> Any:
@@ -94,7 +53,21 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
     )
 
 
-def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
+def _reject_callable_arguments(args: tuple, kwargs: dict) -> None:
+    """
+    Reject a callable argument at a dispatcher. A bound method read off a
+    value (``s.format``) is a plain attribute read, so it can reach a
+    callable-taking builtin or method (``map``, ``sorted(key=...)``) and be
+    invoked there, bypassing the per-class method table. Nothing legitimate
+    passes a callable: the argument eval has no builtins, so ``str``/``int``
+    can't even be named.
+    """
+    for value in (*args, *kwargs.values()):
+        if callable(value):
+            raise ValueError("callable arguments are not available here")
+
+
+def call_python_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     """
     Dispatch body for ScriptActAgent's approved-Python-builtin calls.
 
@@ -107,13 +80,16 @@ def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     on an otherwise legitimate call). Unpacked only internally, right at
     the real invocation.
 
-    Raises ``ValueError`` for an excluded or nonexistent builtin name --
+    Raises ``ValueError`` for a name outside ``ALLOWED_PY_BUILTINS`` --
     the authoritative runtime gate; ``utils/script.py``'s
     ``rewrite_builtin_calls`` already guarantees this can't happen for a
     slot it rewrote, but this check doesn't trust that upstream guarantee.
     """
-    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
+    if name not in ALLOWED_PY_BUILTINS:
         raise ValueError(f"python builtin {name!r} is not available here")
+    if name == "type" and (len(args) != 1 or kwargs):
+        raise ValueError("type() takes exactly one positional argument here")
+    _reject_callable_arguments(args, kwargs)
     fn = getattr(builtins, name)
     return fn(*args, **kwargs)
 
@@ -124,7 +100,7 @@ def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 # needed: nothing references this Tool by a full_name string, only by
 # direct object reference from agents/scriptact.py.
 builtin_call_tool = Tool(
-    function=_call_py_builtin,
+    function=call_python_builtin,
     name=PY_BUILTIN_ALIAS,
     namespace="scriptact_agent",
     description=(
@@ -151,16 +127,24 @@ def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> 
     legitimate call). Unpacked only internally, right at the real
     invocation.
 
-    Raises ``ValueError`` for a dunder method name -- the authoritative
-    runtime gate, matching ``_call_py_builtin``'s own posture: dunder names
-    are already rejected at parse time (``utils/script.py``'s
-    ``_hoist_calls``/``_build_call_slot`` checks), but this is the one
-    remaining sandbox-escape surface in the whole grammar, so this check
-    doesn't trust that upstream guarantee either.
+    Raises ``ValueError`` unless the receiver's most specific class (walking
+    its MRO, so a subclass resolves to its nearest table class) is in
+    ``ALLOWED_ATTR_METHODS`` and lists ``method_name`` -- the authoritative
+    runtime gate; it doesn't trust that parse time (``utils/script.py``)
+    already rejected unknown or dunder names. The method is called off that
+    table class (``str.strip(obj, ...)``), never off the instance, so a
+    subclass override or instance attribute can't change what runs.
     """
-    if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
-        raise ValueError(f"attribute/method name {method_name!r} is not available here")
-    return getattr(obj, method_name)(*args, **kwargs)
+    for cls in type(obj).__mro__:
+        allowed = ALLOWED_ATTR_METHODS.get(cls)
+        if allowed is not None:
+            break
+    else:
+        raise ValueError(f"method calls on {type(obj).__name__!r} values are not available here")
+    if method_name not in allowed:
+        raise ValueError(f"method {cls.__name__}.{method_name} is not available here")
+    _reject_callable_arguments(args, kwargs)
+    return getattr(cls, method_name)(obj, *args, **kwargs)
 
 
 # Never registered into any agent's toolbox -- resolved directly by
@@ -178,33 +162,6 @@ attr_call_tool = Tool(
         "through get_tool()."
     ),
 )
-
-
-def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
-    """
-    Call a Python builtin function by name and return its result.
-
-    "name" must be the exact name of an available Python builtin (e.g.
-    "len", "round", "sorted") -- never free-form text, and never another
-    expression to evaluate. Any remaining positional and keyword arguments
-    are passed through to that builtin exactly as given.
-
-    Raises ValueError if "name" is not the name of an available builtin.
-    """
-    # A plain *args/**kwargs splat is safe here -- deliberately not the
-    # packed-tuple/dict signature ScriptActAgent's own builtin_call_tool/
-    # attr_call_tool dispatch bodies use. Those needed packing because their
-    # own fixed identifying parameters (name+args+kwargs as one unit;
-    # obj/method_name) sit in the same positional/keyword namespace as the
-    # real wrapped call's own arguments, and a wrapped call's own keyword
-    # genuinely could collide with "obj"/"method_name" in ordinary usage.
-    # This function has only one fixed leading parameter (name), and no
-    # real Python builtin's own call needs a keyword literally named "name"
-    # passed through it, so the same collision risk doesn't apply.
-    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
-        raise ValueError(f"python builtin {name!r} is not available here")
-    fn = getattr(builtins, name)
-    return fn(*args, **kwargs)
 
 
 def make_sequence(*items: Any, sequence_type: Literal["list", "tuple", "set"] = "list") -> list | tuple | set:
@@ -257,23 +214,3 @@ def make_dict(**pairs: Any) -> dict:
     # implicit-contract ambiguity make_sequence's own sequence_type/items
     # ordering avoids structurally (see its own comment).
     return dict(**pairs)
-
-
-def get_item(container: Any, key: Any) -> Any:
-    """
-    Return one element from a container -- container[key].
-
-    For a list or tuple, "key" is an integer index. For a dict, "key" is
-    one of its keys. (A set has no positional or key-based access at all,
-    so it cannot be used here.)
-
-    Raises whatever error the container itself raises for an invalid key
-    or index (e.g. IndexError, KeyError, TypeError).
-    """
-    # No defensive wrapping -- a KeyError/IndexError/TypeError this raises
-    # naturally surfaces as-is, per this codebase's "let natural exceptions
-    # surface" discipline. No get_attr sibling tool exists (kept the tool
-    # surface smaller; revisit only if live testing shows a real need) --
-    # get_item alone covers both list/tuple-by-index and dict-by-key access,
-    # the two shapes make_sequence/make_dict actually produce.
-    return container[key]

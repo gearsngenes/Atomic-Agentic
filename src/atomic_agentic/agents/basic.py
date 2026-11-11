@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 import logging
 
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import LLMRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
+from ..models.parameters import ParamSpec
 from ..utils.agents import normalize_prompt_config
 from .base import Agent
 
@@ -31,9 +33,18 @@ class BasicAgent(Agent):
     mutation API for it, matching the fixed-topology invariant every other
     ``AtomicInvokable`` in this codebase already follows (parameters are
     resolved once at construction and are immutable thereafter).
+
+    The single user message each call sends is a task block: the current
+    prompt wrapped in the task markers, preceded by a runtime-context block
+    when the call's context has any variable (see ``_render_task_block``).
+    History stays raw. When a ``response_schema`` is set, the agent's default
+    conversations use render mode ``"j"`` so structured replies replay in
+    history as JSON, not as a Python repr.
     """
 
     DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
+
+    _TASK_CLS = AgentTask
 
     def __init__(
         self,
@@ -42,13 +53,16 @@ class BasicAgent(Agent):
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str | PromptConfig | None = None,
-        context_enabled: bool = True,
+        record_enabled: bool = True,
         *,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
+
         response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
@@ -59,30 +73,13 @@ class BasicAgent(Agent):
             default_description="Default assistant role prompt",
             error_label="role_prompt",
         )
-        role_params = list(config.parameters)
+        role_params = self._merge_prompt_parameters(list(config.parameters))
 
-        # 2. Delegate to Agent base; role placeholders are the sole
-        # extra_parameters source.
-        super().__init__(
-            name=name,
-            namespace=namespace,
-            description=description,
-            llm_engine=llm_engine,
-            context_enabled=context_enabled,
-            pre_invoke=pre_invoke,
-            post_invoke=post_invoke,
-            post_result_key=post_result_key,
-            extra_parameters=role_params,
-            records_window=records_window,
-            response_preview_limit=response_preview_limit,
-        )
-
-        # 3. Register the role prompt.
-        self._system_prompts["role"] = config
-
-        # 4. Validate and store response_schema -- no deeper validation
+        # 2. Validate and store response_schema -- no deeper validation
         # (no JSON-Schema key checks), matching LLMEngine's own
-        # output_structure contract.
+        # output_structure contract. Stored before the base init because
+        # Agent.__init__ builds the default conversation through
+        # _new_conversation(), which reads it.
         if response_schema is not None and not isinstance(response_schema, Mapping):
             raise AgentError(
                 f"{type(self).__name__}.response_schema must be a dict/Mapping "
@@ -90,13 +87,35 @@ class BasicAgent(Agent):
             )
         self._response_schema = response_schema
 
+        # 3. Delegate to Agent base; role placeholders are the sole
+        # extra_parameters source.
+        super().__init__(
+            name=name,
+            namespace=namespace,
+            description=description,
+            llm_engine=llm_engine,
+            record_enabled=record_enabled,
+            pre_invoke=pre_invoke,
+            post_invoke=post_invoke,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
+            extra_parameters=role_params,
+            records_window=records_window,
+
+        )
+
+        # 4. Keep the role prompt.
+        self._role_config = config
+
     # ------------------------------------------------------------------ #
     # Role prompt API
     # ------------------------------------------------------------------ #
     @property
     def role_prompt(self) -> str:
         """Role prompt template string."""
-        return self._system_prompts["role"].template
+        return self._role_config.template
 
     @property
     def response_schema(self) -> dict[str, Any] | None:
@@ -104,36 +123,64 @@ class BasicAgent(Agent):
         ``None`` requests plain text. Frozen at construction -- no setter."""
         return self._response_schema
 
+    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
+        """Seam for a subclass that registers more prompt templates than the
+        role prompt and wants their placeholders in the agent's signature.
+
+        1. return ``role_params`` unchanged (``BasicAgent``: identity)
+
+        An override returns the full list of prompt-derived parameters, the
+        role prompt's included and first so it keeps priority. It runs inside
+        ``__init__`` before ``Agent.__init__``, so it may read only attributes
+        the subclass set before calling ``super().__init__``.
+        """
+        return role_params
+
+    # ------------------------------------------------------------------ #
+    # Conversation defaults
+    # ------------------------------------------------------------------ #
+    def _new_conversation(self):
+        """Build one fresh default conversation for this agent.
+
+        1. no ``response_schema``: the base default.
+        2. otherwise ``Conversation(render_mode="j")``, so structured
+           (dict/list) replies replay in history as JSON, not as a Python
+           repr.
+
+        Applies to every default conversation this agent builds, including
+        those after ``clear_memory()`` and ``remove_conversation("default")``,
+        and to ``create_conversation()`` calls that omit ``render_mode``.
+        Conversations imported from elsewhere keep their own settings.
+        """
+        new_convo = super()._new_conversation()
+        if self._response_schema is not None:
+            new_convo.render_mode = "j"
+        return new_convo
+
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """Build this invocation's task, stamping the role-prompt name.
-
-        ``Agent``'s concrete base implementation builds a bare ``AgentTask``
-        from ``turns``/``prompt``/``inputs``; this override adds only the
-        ``system_prompt_name`` stamp ``render_task`` needs.
-        """
-        task = super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
-        task.system_prompt_name = "role"
-        return task
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        """The role prompt rendered against ``task.inputs``, as the single
+        system message."""
+        return [{"role": "system", "content": self._role_config.render(task.inputs)}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.
 
-        ``task.task_messages`` is a single message the first time it's
-        built (the raw ``user_prompt``, unwrapped) and never grows further
-        — ``BasicAgent`` has no retry loop, so this branch never re-triggers
-        within one invocation once set.
+        1. if ``task.task_messages`` is non-empty, return it (build-once
+           contract; ``BasicAgent`` never retries, so this holds once set).
+        2. otherwise store one user message holding ``_render_task_block``.
+        3. return ``task.task_messages``.
+
+        The message is the wrapped prompt, preceded by the context block when
+        ``task.context`` is non-empty. ``task.user_prompt`` is not modified;
+        the sent message is what the ``LLMRecord`` stores.
         """
         if not task.task_messages:
-            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+            task.task_messages = [
+                {"role": "user", "content": self._render_task_block(task)}
+            ]
         return task.task_messages
 
     def act(self, task: AgentTask) -> AgentTask:
@@ -152,7 +199,6 @@ class BasicAgent(Agent):
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         )
         task.llm_records.append(llm_record)
         task.generated_response = text
@@ -160,11 +206,7 @@ class BasicAgent(Agent):
         return task
 
     async def async_act(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``act``.
-
-        Awaits the engine's native async path directly rather than relying
-        on ``Agent``'s inherited ``asyncio.to_thread``-wrapping default.
-        """
+        """Async mirror of ``act``, awaiting the engine's native async path."""
         messages = self.render_task(task)
         engine_result = await self._llm_engine.async_invoke({
             "messages": messages,
@@ -174,7 +216,6 @@ class BasicAgent(Agent):
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name=task.system_prompt_name,
         )
         task.llm_records.append(llm_record)
         task.generated_response = text

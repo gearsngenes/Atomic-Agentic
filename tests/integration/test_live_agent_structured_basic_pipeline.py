@@ -82,9 +82,10 @@ def make_live_openai_agent() -> BasicAgent:
         description="Live OpenAI writer agent for integration tests.",
         llm_engine=_openai_engine(),
         role_prompt=ROLE_PROMPT,
-        context_enabled=False,
+        record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,
+        response_to_post="result",
     )
 
 

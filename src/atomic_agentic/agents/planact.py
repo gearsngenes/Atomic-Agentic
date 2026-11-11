@@ -12,7 +12,10 @@ Design: uses ``$name``-sigil argument resolution, translated into real
 ``ast.expr`` nodes on a shared ``ToolStatement`` (``utils/sigils.py``'s
 ``translate_calls``), and ``ToolStatement``-based batch compilation
 (``utils/agents.py``'s ``compile_batches``/``resolve_statement_args``,
-reused directly). No multi-round continuation of any kind -- a one-shot
+reused directly). Values live in ``task.context``: pre-existing context
+variables are referenced as ``$name``, and each ``result_name`` becomes a
+context variable of the task (persisted only by the usual conversation
+rules). No multi-round continuation of any kind -- a one-shot
 planner decides everything in a single generation, which
 is also why it needs cascade-failure handling (``fail_fast=False``): with no
 continuation round to hand a failure to, independent branches of the same
@@ -42,8 +45,10 @@ its own final batch.
 
 Execution
 ---------
-Generation and validation happen once, in ``think()``. ``prepare()`` resolves
-each batch's ``$name`` references via ``resolve_statement_args`` as it's reached.
+Generation and validation happen once, in ``think()``; the plan is checked
+(including a dry bind of every tool call's arguments) before anything runs.
+``prepare()`` resolves each batch's ``$name`` references against
+``task.context`` via ``resolve_statement_args`` as it's reached.
 ``act()``/``async_act()`` dispatch each batch concurrently and apply results.
 On a resolution or execution failure: ``fail_fast=True`` raises immediately;
 ``fail_fast=False`` (cascade) skips only the calls that transitively depend
@@ -54,7 +59,7 @@ prevents the plan's own ``return`` call from ever executing.
 Contrast
 --------
 For adaptive, step-by-step iteration see ``agents/react.py`` (``ReActAgent``).
-For the shared tool/constant registry, execution knobs, and lifecycle
+For the shared tool registry, execution knobs, and lifecycle
 contract see ``agents/toolagent.py`` (``ToolAgent``).
 """
 
@@ -63,24 +68,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Any, Callable, ClassVar, Optional
+from collections.abc import Iterable
+from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
-from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, TASK_RESULT_PREFIX
+from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..exceptions import ToolAgentError, ToolInvocationError
+from ..exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import PlanActTask
-from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
+from ..models.agents.records import ToolAgentRecord, LLMRecord
 from ..models.results.agents import ToolAgentResult
-from ..utils.agents import compile_batches, extract_identifiers, is_dispatched, resolve_statement_args
+from ..utils.agents import (
+    build_usage_report,
+    check_call_bindings,
+    compile_batches,
+    extract_identifiers,
+    is_dispatched,
+    resolve_statement_args,
+)
 from ..utils.core import run_coro_sync
 from ..utils.sigils import (
     build_planact_schema,
@@ -133,13 +145,17 @@ class PlanActAgent(ToolAgent):
     # composite-value-building utility tools this family's schema text
     # tells the model to use. No return_tool entry -- PlanActAgent never
     # registers a real return tool (its return value comes from the
-    # synthesized RETURN_ALIAS call instead). No get_item entry: too niche
-    # relative to make_sequence/make_dict/return, and its presence in
-    # AVAILABLE TOOLS pulls live generations toward container-shaped
-    # detours a flat call sequence doesn't need.
+    # synthesized RETURN_ALIAS call instead).
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {"make_sequence", "make_dict"}
     )
+
+    # This family's $name-sigil grammar (utils/sigils.py): context entries
+    # render as "$name", history labels as "$task_result_i".
+    _CONTEXT_NAME_PREFIX: str = "$"
+
+    _TASK_CLS = PlanActTask
+    TOOL_INSTRUCTIONS = PLANNER_PROMPT
 
     def __init__(
         self,
@@ -147,51 +163,51 @@ class PlanActAgent(ToolAgent):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
         tool_concurrency_limit: Optional[int] = None,
         fail_fast: bool = True,
-        response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        constants: Optional[list[Any]] = None,
-        constant_aliases: Optional[list[Optional[str]]] = None,
-        constant_descriptions: Optional[list[Optional[str]]] = None,
-        tool_instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Every parameter except ``fail_fast`` forwards verbatim to
-        ``ToolAgent.__init__`` -- no ``extra_parameters`` keyword, matching
-        that base class's own signature exactly (it accepts none).
+        ``ToolAgent.__init__`` (``instructions`` is the optional standing
+        user guidance, framed into the system message by the base class).
+        There are no constants: pre-existing values are context variables
+        (remembered on the conversation, bound from inputs, or runtime).
         ``fail_fast`` has no shared home on ``ToolAgent`` (see the
         ``fail_fast`` property below) -- validated and stored locally
-        instead. ``"plan_first"`` is the key under which the built-in
-        planning prompt is registered in ``self._system_prompts``.
+        instead. The built-in planning prompt is the class attribute
+        ``TOOL_INSTRUCTIONS``.
         """
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
-            response_preview_limit=response_preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             records_window=records_window,
             tools=tools,
-            constants=constants,
-            constant_aliases=constant_aliases,
-            constant_descriptions=constant_descriptions,
-            tool_instructions=tool_instructions,
+            instructions=instructions,
         )
 
         if not isinstance(fail_fast, bool):
@@ -200,12 +216,22 @@ class PlanActAgent(ToolAgent):
             )
         self._fail_fast = fail_fast
 
-        self._system_prompts["plan_first"] = PLANNER_PROMPT
         # Seeded directly, bypassing register_tool -- both are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
         # attempt to register something under a reserved id.
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
+
+    def _validate_effective_tool_id(self, effective_id: str) -> None:
+        """Also rejects the sentinel call names (``return``, ``rhs_assign``):
+        a user tool under either would be treated as the synthesized,
+        never-dispatched sentinel call."""
+        super()._validate_effective_tool_id(effective_id)
+        if effective_id in (RETURN_ALIAS, RHS_ASSIGN_ALIAS):
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {effective_id!r} is a "
+                "reserved sentinel name and cannot be a registered tool id."
+            )
 
     @property
     def fail_fast(self) -> bool:
@@ -227,72 +253,22 @@ class PlanActAgent(ToolAgent):
         return d
 
     # ------------------------------------------------------------------ #
-    # Shared per-invocation helpers
-    # ------------------------------------------------------------------ #
-    # _copy_for_task_namespace now inherited from ToolAgent unchanged.
-
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> PlanActTask:
-        """
-        Build a bare ``PlanActTask``, seed its ``cache`` with every visible
-        prior turn's
-        result under ``task_result_{i}`` (unconditional over whatever
-        ``turns`` contains -- every committed turn is definitionally a
-        completed success under this model), and seed ``constant_values``
-        from every registered constant. Both copied via
-        ``_copy_for_task_namespace`` exactly once here.
-        """
-        task = PlanActTask(
-            turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="plan_first",
-        )
-        for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
-                turn.generated_response
-            )
-        for spec in self._constants.values():
-            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
-        return task
-
-    # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _render_current_task_message(self, task: PlanActTask) -> dict[str, str]:
-        """
-        The "what is the task" user message. Carries the ``tool_calls_limit``
-        text -- moved out of the system prompt entirely (see
-        ``ToolAgent._render_system_message``) since it's a
-        per-invocation fact, not a standing instruction, and showing it
-        here avoids spending system-prompt tokens on it every construction
-        even though this family only ever renders one round.
-        """
-        content = f"CURRENT TASK:\n{task.user_prompt}"
-        if self.tool_calls_limit is not None:
-            plural = "s" if self.tool_calls_limit != 1 else ""
-            content += f"\n\nYou may make at most {self.tool_calls_limit} tool call{plural} total."
-        return {"role": "user", "content": content}
+    def _render_steps(self, task: PlanActTask) -> str:
+        """Always ``""``: a one-shot planner has no completed work or repair
+        to show before its only generation, so the base emits no STEPS block."""
+        return ""
 
-    def _render_task_messages(self, task: PlanActTask) -> list[dict[str, str]]:
-        """
-        Build-once contract. No continuation branch exists at all -- this
-        family never re-enters ``think()`` after its one real generation
-        call. Regen-repair feedback (on a semantic validation failure) is
-        injected by the retry loop itself as ``additional_messages``, never
-        through this method.
-        """
-        if task.task_messages:
-            return task.task_messages
-
-        banner = self._render_current_task_message(task)
-        task.task_messages = [{
-            "role": "user",
-            "content": f"{banner['content']}\n\nWrite a plan to accomplish this task now.",
-        }]
-        return task.task_messages
+    def _render_directive(self, task: PlanActTask) -> str:
+        """The plan-now instruction, plus the total ``tool_calls_limit``
+        line when a limit is set."""
+        directive = "Write a plan to accomplish this task now."
+        limit = self.tool_calls_limit
+        if limit is not None:
+            plural = "s" if limit != 1 else ""
+            directive += f"\n\nYou may make at most {limit} tool call{plural} total."
+        return directive
 
     # ------------------------------------------------------------------ #
     # Generation (think())
@@ -302,24 +278,24 @@ class PlanActAgent(ToolAgent):
     ) -> list[list[ToolStatement]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse (``parse_generation``, raw JSON -> drafts), translate
-        (``translate_calls``, drafts -> validated ``ToolStatement``s against
-        the remaining tool-call budget), and compile into batches. Returns
-        the compiled batches on success, or a feedback string describing
-        every problem found on failure. No final-round-defer check -- there
-        is no rounds concept to bound.
+
+        1. ``parse_generation``: raw JSON -> drafts.
+        2. ``translate_calls`` against the names in ``task.context`` (and its
+           readonly subset), the registered tool ids (never a valid
+           ``result_name``) and the tool-call budget -> ``ToolStatement``s.
+        3. ``check_call_bindings``: dry-bind each registered-tool call.
+        4. Any issues from 2-3 are returned as one numbered feedback string;
+           otherwise the calls are compiled into dependency batches.
         """
         drafts = parse_generation(raw_output)
 
-        remaining_budget = self._tool_calls_limit
-        constant_names = frozenset(task.constant_values)
-        task_result_names = frozenset(
-            name for name in task.cache if name.startswith(TASK_RESULT_PREFIX)
-        )
-        known_names = frozenset(task.cache) | constant_names
+        context_names = frozenset(task.context)
+        readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         issues, calls = translate_calls(
-            drafts, remaining_budget, known_names, constant_names, task_result_names
+            drafts, self._tool_calls_limit, context_names, readonly_names,
+            frozenset(self._toolbox),
         )
+        issues += check_call_bindings(calls, self._toolbox)
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
@@ -337,12 +313,13 @@ class PlanActAgent(ToolAgent):
         Render, call the engine (with ``output_structure``), record the
         attempt, validate/compile via ``_process_generation_output``, and
         retry with injected feedback on failure until success or the
-        regeneration budget (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Logs every raw generated
+        regeneration budget (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. Logs every raw generated
         plan at ``DEBUG`` level (see ``_process_generation_output`` for the
         matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -358,15 +335,14 @@ class PlanActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -376,6 +352,7 @@ class PlanActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -386,6 +363,7 @@ class PlanActAgent(ToolAgent):
         ``async_invoke`` for the engine call. Same ``DEBUG``-level logging of
         every raw generated plan."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -401,15 +379,14 @@ class PlanActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -419,6 +396,7 @@ class PlanActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -455,108 +433,93 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
+    def _record_failures(
+        self, task: PlanActTask, failed: list[ToolStatement], *, executing: bool,
+    ) -> None:
+        """
+        The one failure policy for ``prepare`` (``executing=False``) and
+        ``_apply_batch_results`` (``executing=True``). The caller has already
+        set ``call.exception`` on every call in ``failed`` (never empty).
+
+        1. ``fail_fast=True``: raise. While executing, the first failure's
+           ``ToolInvocationError`` is re-raised as-is, anything else is
+           wrapped in ``ToolAgentError``; while resolving, one
+           ``ToolAgentError`` lists every failure.
+        2. ``fail_fast=False``: record onto ``task.failed_statements`` and
+           cascade-skip every later-batch call that transitively depends on a
+           failed identifier. Skipped calls are never added to ``completed``
+           or ``failed_statements``.
+        """
+        if self._fail_fast:
+            if executing:
+                first = failed[0]
+                if isinstance(first.exception, ToolInvocationError):
+                    raise first.exception
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool call failed "
+                    f"for {first.tool!r} (identifier={first.identifier!r}): {first.exception}"
+                ) from first.exception
+            issues_msg = "\n".join(f"{i + 1}. {c.exception}" for i, c in enumerate(failed))
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: batch could not be resolved:\n{issues_msg}"
+            )
+
+        task.failed_statements.extend(failed)
+        failed_identifiers = {c.identifier for c in failed if c.identifier is not None}
+        poisoned = find_cascade_failures(failed_identifiers, task.pending[1:])
+        self._drop_poisoned_calls(task.pending[1:], poisoned)
+
     def prepare(self, task: PlanActTask) -> PlanActTask:
         """
         Resolve the next pending batch's args. This family has no
         continuation round to fall back to on a resolution failure:
 
         1. If ``task.pending`` is empty: reset ``task.resolved_args`` and
-           return unchanged (no ``continue_planning`` branch to check --
-           if the return call never executed, ``act()``'s own final-batch
-           check is what raises, not this method).
+           return unchanged (``act()``'s own final-batch check raises if the
+           return call never executed).
         2. For every call in ``task.pending[0]``: resolve its args against
-           ``{**task.cache, **task.constant_values}`` *and* bind them
-           against the target tool's real parameter contract
-           (``tool._args_kwargs_to_dict``) in the same ``try``/``except`` --
-           both are collected as one "could not resolve or bind" failure
-           category, rather than stopping at the first. Storing the
-           already-bound dict here (not a raw ``(positional, keyword)``
-           tuple) means the surviving-batch pass below never needs to
-           re-derive it or re-branch on ``RETURN_ALIAS``.
-        3. If any resolution/binding issues:
-           - ``fail_fast=True``: raise ``ToolAgentError`` immediately,
-             listing every issue.
-           - ``fail_fast=False``: for each call that failed, set
-             ``call.exception = ToolAgentError(<issue text>)`` and append it
-             to ``task.failed_statements``; collect the identifiers of every
-             such call; call ``find_cascade_failures`` against
-             ``task.pending[1:]`` (later batches only -- the current batch's
-             own poisoned entries are handled separately, by the
-             ``resolved_by_index`` deletion loop just below) to find every
-             later-batch call that transitively depends on one of them;
-             drop every such call from those later batches -- cascade-
-             skipped calls are never added to ``completed``/
-             ``failed_statements`` (never attempted).
-        4. Collect the surviving calls' already-bound dicts (no
-           re-computation) into ``task.resolved_args`` -- may be empty if
-           the whole batch was cascade-affected; ``act()`` treats that as a
-           legal no-op.
+           the values in ``task.context`` *and* bind them against the target
+           tool's real parameter contract (``tool._args_kwargs_to_dict``). A
+           failure sets ``call.exception`` and joins ``failed``; a success
+           keeps the call and its bound dict.
+        3. Any failures go through ``_record_failures`` (raises under
+           ``fail_fast``; otherwise records and cascade-skips later batches).
+        4. The surviving calls and bound dicts become ``pending[0]`` and
+           ``task.resolved_args`` -- possibly empty, which ``act()`` treats
+           as a legal no-op.
         """
         if not task.pending:
             task.resolved_args = []
             return task
 
         batch = task.pending[0]
-        resolution_namespace = {**task.cache, **task.constant_values}
+        namespace = {n: v.value for n, v in task.context.items()}
 
-        resolved_by_index: dict[int, dict[str, Any]] = {}
-        issues: list[str] = []
-        failed_identifiers: set[str] = set()
+        survivors: list[ToolStatement] = []
+        resolved: list[dict[str, Any]] = []
+        failed: list[ToolStatement] = []
 
-        for i, call in enumerate(batch):
+        for call in batch:
             label = call.identifier if call.identifier is not None else "(unassigned)"
             try:
-                positional, keyword = resolve_statement_args(call, resolution_namespace)
+                positional, keyword = resolve_statement_args(call, namespace)
                 if call.tool == RETURN_ALIAS:
                     bound = {RETURN_VALUE_FIELD: keyword[RETURN_VALUE_FIELD]}
                 else:
-                    tool = self.get_tool(call.tool)
-                    bound = tool._args_kwargs_to_dict(*positional, **keyword)
+                    bound = self.get_tool(call.tool)._args_kwargs_to_dict(*positional, **keyword)
             except Exception as e:
-                issue = f"{label}: could not resolve or bind argument(s): {e!r}"
-                issues.append(issue)
-                if not self._fail_fast:
-                    call.exception = ToolAgentError(issue)
-                    task.failed_statements.append(call)
-                    if call.identifier is not None:
-                        failed_identifiers.add(call.identifier)
+                call.exception = ToolAgentError(
+                    f"{label}: could not resolve or bind argument(s): {e!r}"
+                )
+                failed.append(call)
                 continue
-            resolved_by_index[i] = bound
+            survivors.append(call)
+            resolved.append(bound)
 
-        if issues and self._fail_fast:
-            issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: batch could not be resolved:\n{issues_msg}"
-            )
+        if failed:
+            self._record_failures(task, failed, executing=False)
 
-        if failed_identifiers:
-            poisoned = find_cascade_failures(failed_identifiers, task.pending[1:])
-            self._drop_poisoned_calls(task.pending[1:], poisoned)
-            # The current batch's own surviving entries may also reference
-            # a poisoned name from a sibling failure within this same
-            # batch -- filter resolved_by_index accordingly. Given today's
-            # compile_batches/translate_calls invariants (a call depending on
-            # another can never land in the same batch as it -- the
-            # dependency forces a batch split first), this loop can't
-            # currently find a match; kept anyway as cheap insurance against
-            # a future compile_batches change reintroducing a same-batch
-            # dependency, rather than relying on that invariant silently.
-            for i, call in enumerate(batch):
-                if i not in resolved_by_index:
-                    continue
-                refs = set(extract_identifiers(call.args)) | set(extract_identifiers(call.kwargs))
-                if refs & poisoned:
-                    del resolved_by_index[i]
-
-        resolved: list[dict[str, Any]] = []
-        surviving_batch: list[Any] = []
-        for i, call in enumerate(batch):
-            if i not in resolved_by_index:
-                continue
-            resolved.append(resolved_by_index[i])
-            surviving_batch.append(call)
-
-        task.pending[0] = surviving_batch
+        task.pending[0] = survivors
         task.resolved_args = resolved
         return task
 
@@ -612,73 +575,44 @@ class PlanActAgent(ToolAgent):
         raw_results: list[Any],
     ) -> PlanActTask:
         """
-        Shared post-gather bookkeeping for ``act``/``async_act``. This
-        family has no continuation round to fall back to, so a failure here
-        is handled entirely by the ``fail_fast``/cascade fork below rather
-        than ever triggering a forced continuation:
+        Shared post-gather bookkeeping for ``act``/``async_act``:
 
-        1. Partition ``raw_results`` into successes/failures (same
-           ``is_dispatched`` gate, same ``BaseException`` check).
-        2. No failures: apply successes into ``completed``/``cache``; if
-           the ``RETURN_ALIAS`` call succeeded, set
-           ``generated_response``/``complete``; pop the batch.
-        3. Failures present:
-           - ``fail_fast=True``: raise immediately (preserve
-             ``ToolInvocationError`` as-is; wrap anything else in
-             ``ToolAgentError``).
-           - ``fail_fast=False``: record each failure onto
-             ``failed_statements``, cascade-skip every later-batch call
-             that transitively depends on one of the failed identifiers
-             (``find_cascade_failures`` + ``_drop_poisoned_calls``), apply
-             this batch's own surviving successes, pop the batch.
-        4. After popping: if ``task.pending`` is now empty and
-           ``task.complete`` is still ``False`` -- the return call never
-           executed (failed directly, or was cascade-skipped). Raise
-           ``ToolAgentError`` summarizing every failure recorded in
-           ``task.failed_statements``. Otherwise return ``task`` normally.
+        1. Partition ``raw_results`` into failures (a dispatched call whose
+           result is a ``BaseException``; ``call.exception`` is set) and
+           successes.
+        2. Successes join ``task.completed``; each named result is bound, and
+           a ``RETURN_ALIAS`` success sets ``generated_response`` and
+           ``complete``.
+        3. Bound names are written to ``task.context`` in one
+           ``_write_context`` (creating new variables), before the failure
+           branch so a partly failed batch keeps its successes.
+        4. Failures go through ``_record_failures``.
+        5. Pop the batch; if ``task.pending`` is now empty and the task is not
+           complete, ``_check_plan_exhausted`` raises.
         """
-        triples = list(zip(batch, resolved, raw_results))
-        failures = [
-            (call, kwargs, raw) for call, kwargs, raw in triples
-            if is_dispatched(call) and isinstance(raw, BaseException)
-        ]
-        successes = [
-            (call, kwargs, raw) for call, kwargs, raw in triples
-            if not (is_dispatched(call) and isinstance(raw, BaseException))
-        ]
-
-        if failures:
-            if self._fail_fast:
-                call, _kwargs, raw_error = failures[0]
-                if isinstance(raw_error, ToolInvocationError):
-                    raise raw_error
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed "
-                    f"for {call.tool!r} (identifier={call.identifier!r}): {raw_error}"
-                ) from raw_error
-
-            failed_identifiers: set[str] = set()
-            for call, _kwargs, raw_error in failures:
-                call.exception = raw_error
-                task.failed_statements.append(call)
-                if call.identifier is not None:
-                    failed_identifiers.add(call.identifier)
-
-            poisoned = find_cascade_failures(failed_identifiers, task.pending[1:])
-            self._drop_poisoned_calls(task.pending[1:], poisoned)
-
-        for call, kwargs, value in successes:
+        failed: list[ToolStatement] = []
+        bound: dict[str, Any] = {}
+        for call, kwargs, raw in zip(batch, resolved, raw_results):
+            if is_dispatched(call) and isinstance(raw, BaseException):
+                call.exception = raw
+                failed.append(call)
+                continue
             task.completed.append(call)
             if call.tool != RETURN_ALIAS:
-                call.result = value
-                unwrapped = value.result
+                call.result = raw
+                unwrapped = raw.result
             else:
-                unwrapped = value
+                unwrapped = raw
             if call.identifier is not None:
-                task.cache[call.identifier] = unwrapped
+                bound[call.identifier] = unwrapped
             if call.tool == RETURN_ALIAS:
                 task.generated_response = kwargs[RETURN_VALUE_FIELD]
                 task.complete = True
+
+        self._write_context(task, bound, create=True)
+
+        if failed:
+            self._record_failures(task, failed, executing=True)
 
         task.pending.pop(0)
         task.resolved_args = []
@@ -738,59 +672,38 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Record / result construction
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: PlanActTask,
-        turns: list[AgentRecord],
-    ) -> ToolAgentRecord:
+    def _build_record_from_task(self, task: PlanActTask) -> ToolAgentRecord:
         """
         Assemble a completed ``ToolAgentRecord`` from a finished
         ``PlanActTask``. No agent-level global blackboard to persist into
         -- each record owns its own calls outright.
         """
-        prev = turns[-1] if turns else None
         return ToolAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
+            **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
             regenerations_used=task.regenerations_used,
         )
 
-    def build_result_from_record(
-        self,
-        record: ToolAgentRecord,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ToolAgentResult:
+    def build_result_from_task(self, task: PlanActTask, result: Any) -> ToolAgentResult:
         """
-        Construct this agent's ``ToolAgentResult`` envelope directly
-        from a completed ``ToolAgentRecord``, following the base
-        method's own documented contract shape (``base.py``'s
-        ``build_result_from_record``).
-
-        Derives ``usage_report`` from ``record.usage_report()`` (see that
-        method's own docstring) and ``failed_call_count`` from
-        ``len(record.failed_statements)``.
+        Construct this agent's ``ToolAgentResult`` envelope directly from a
+        finished ``PlanActTask`` (independent of the record). Derives
+        ``usage_report`` via ``build_usage_report`` and ``failed_call_count``
+        from ``len(task.failed_statements)``.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
-
-        usage_report = record.usage_report()
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ToolAgentResult,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            usage_report=usage_report,
-            failed_call_count=len(record.failed_statements),
-            regenerations_used=record.regenerations_used,
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
         )

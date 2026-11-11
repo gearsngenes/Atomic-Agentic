@@ -20,7 +20,7 @@ Agent_Atom = BasicAgent(
     You are a helpful and enthusiastic assistant named Agent Atom.
     You always end your responses with excitement and emojis.""",
     description= "A generically helpful conversational AI assistant for basic Q&A",
-    context_enabled=True)
+    record_enabled=True)
 
 # --- begin a conversation with the agent ---
 print(f"Chat with {Agent_Atom.name}! To exit the conversation, type 'q' or 'exit'!")

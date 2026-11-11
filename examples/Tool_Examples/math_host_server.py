@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 
@@ -7,7 +7,11 @@ from dotenv import load_dotenv
 from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS
 
 load_dotenv()
 
@@ -22,7 +26,7 @@ def main() -> None:
         namespace="math_host",
         description="A tool-using planner that solves problems with the local math tools.",
         llm_engine=llm,
-        context_enabled=False,
+        record_enabled=False,
         tool_calls_limit=12,
     )
     math_agent.register_tools(BASIC_MATH_TOOLS, name_collision_policy="raise")
@@ -35,7 +39,7 @@ def main() -> None:
         host="localhost",
         port=7000,
     )
-    host.run_server(debug=True)
+    host.run_server()
 
 
 if __name__ == "__main__":

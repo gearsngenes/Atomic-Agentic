@@ -28,6 +28,10 @@ import logging
 
 from atomic_agentic.agents import ScriptActAgent
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +52,7 @@ agent = ScriptActAgent(
     namespace="examples",
     description="Testing framework-only repair rounds via a coerced divide-by-zero.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=2,
     fail_fast=False,
 )
@@ -79,7 +83,7 @@ print("\n=== BUDGET ACCOUNTING (new this pass) ===")
 print(f"regenerations_used: {result.regenerations_used}")
 print(f"repair_rounds_used: {result.repair_rounds_used}")
 
-record = agent.get_conversation()[-1]
+record = agent.get_conversation().records[-1]
 print("\n=== EXECUTED SCRIPT (successful statements only) ===")
 print(record.render_as_code())
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict
+from uuid import uuid4
 
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
-from ..results.agents import AgentResult, ToolUsageRecord, ToolUsageReport
+from ..results.agents import ToolUsageReport
 from ..results.llm import LLMResult
 from .blackboard_models import ToolStatement
 
@@ -22,7 +24,7 @@ from .blackboard_models import ToolStatement
 # utils.script to already be fully initialized -- they aren't yet, since
 # we're still inside their own top-level import statement. Deferring to
 # call time breaks the cycle with no behavior change (every such function is
-# only ever invoked well after import time). ToolUsageRecord (imported at
+# only ever invoked well after import time). ToolUsageReport (imported at
 # module level above) is a different, proven-safe case -- it comes from
 # ..results.agents, which never imports back into models.agents at all, so
 # no cycle exists for it.
@@ -66,16 +68,10 @@ class LLMRecord:
     llm_result:
         The complete LLMResult produced by this generation, including token
         usage, model identity, timing, and run identity.
-
-    system_prompt_name:
-        Key in the producing agent's ``system_prompts`` dict used to generate
-        the system prompt for this LLM call. ``None`` for static or legacy
-        callers that do not participate in the ``system_prompts`` API.
     """
 
     messages: tuple[dict[str, str], ...]
     llm_result: LLMResult
-    system_prompt_name: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.messages, (str, bytes)) or not isinstance(self.messages, (list, tuple)):
@@ -109,18 +105,12 @@ class LLMRecord:
                 "LLMRecord.llm_result must be an LLMResult instance, "
                 f"got {type(self.llm_result).__name__}."
             )
-        if self.system_prompt_name is not None and not isinstance(self.system_prompt_name, str):
-            raise TypeError(
-                "LLMRecord.system_prompt_name must be a str or None, "
-                f"got {type(self.system_prompt_name).__name__}."
-            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
             "messages": list(self.messages),
             "llm_result": self.llm_result.to_dict(),
-            "system_prompt_name": self.system_prompt_name,
         }
 
 
@@ -130,20 +120,26 @@ class AgentRecord:
     Canonical memory record for one completed Agent invocation.
 
     A record stores the lifecycle artifacts needed to reconstruct future
-    LLM-facing context. It is related to, but distinct from, AgentResult:
-    AgentResult is the public successful-invocation envelope carrying LLM
-    accounting; AgentRecord is the memory/rendering record. The completed
-    record points to its AgentResult via ``final_result``.
+    LLM-facing context. It carries its own identity (``run_id``) and timing
+    (``started_at``/``ended_at``) directly -- no attached ``AgentResult``.
+    A record's processed, post-``post_invoke`` output is deliberately NOT
+    recoverable from history: only ``run_id``/timing (identity + rendering
+    material) and the raw ``generated_response`` persist. A caller wanting
+    the processed result must capture it from ``invoke()``'s live return
+    value at call time.
 
-    Records form a doubly-linked tree via ``prev``/``children``: each
+    Records are linked in both directions via ``prev``/``children``: each
     committed record points backward to the most recent record that was used
     as context when it was created (``prev``), and that target record points
     forward to every record that was ever committed on top of it
     (``children``). ``prev=None`` marks a chain root (first invocation or a
     fresh start). Walking ``prev`` backward from any record reconstructs the
     exact conversation branch that produced it; a target with more than one
-    child marks a fork point where more than one conversation continued from
-    the same record.
+    child marks a branch point where more than one conversation (or racing
+    call) continued from the same record. Under a shared conversation a
+    record may gain sibling ``children`` from different agents, while the
+    conversation's list order stays commit order. Provenance only: turn
+    selection never reads it.
 
     Fields
     ------
@@ -155,7 +151,7 @@ class AgentRecord:
     inputs:
         The full filtered top-level inputs mapping for this invocation (post
         ``filter_inputs``, pre pre/post-invoke slicing) — the same dict the
-        task's ``_initialize_task`` received. Retained for
+        task's ``create_task`` pinned. Retained for
         provenance/observability only; not consumed when reconstructing this
         turn's rendered content (``render_turn`` uses ``user_prompt``
         verbatim).
@@ -164,22 +160,34 @@ class AgentRecord:
         Raw post-engine response material for this invocation, prior to
         ``post_invoke`` processing.
 
-    final_result:
-        The completed ``AgentResult`` for this invocation. ``None`` during
-        the draft phase (between ``_build_record_from_task`` and
-        ``build_result_from_record`` completion); an ``AgentResult``
-        instance on all stored records.
+    run_id:
+        This record's own identity. Optional at construction
+        (``None``-default, keyword-only) -- auto-minted via ``uuid4().hex``
+        in ``__post_init__`` if omitted, mirroring ``AtomicResult.run_id``'s
+        own precedent. ``Agent.record`` always passes an explicit
+        value in production; the default exists purely for bare-
+        construction convenience (tests, ad-hoc usage).
+
+    started_at, ended_at:
+        This invocation's timing envelope. Same optional/auto-fill shape as
+        ``run_id`` -- both default to a single shared
+        ``datetime.now(timezone.utc)`` call in ``__post_init__`` if either
+        is omitted. No type/shape validation beyond the fill logic itself --
+        framework-internal plumbing, not a validated external boundary.
+
+    agent_id:
+        The writing agent, ``f"{full_name};{instance_id}"``; ``None`` for
+        bare construction. Provenance only -- history replay does not
+        distinguish writers.
 
     llm_records:
         Complete record of every LLM generation that contributed to this
-        invocation. Empty tuple during the draft phase; populated by
-        ``_build_record_from_task`` from the task's accumulated
-        ``llm_records``.
+        invocation, populated by ``_build_record_from_task`` from the
+        task's accumulated ``llm_records``.
 
     prev:
         The most recent ``AgentRecord`` that was used as context for this
-        invocation, or ``None`` if no prior context was used. Always points
-        to a completed (non-draft) record on any record committed to history.
+        invocation, or ``None`` if no prior context was used.
 
     children:
         Every ``AgentRecord`` (across every conversation) that named this
@@ -188,15 +196,19 @@ class AgentRecord:
         than a singly-linked chain. Mutable-in-place despite this being a
         frozen dataclass — ``hash=False, compare=False`` mirrors ``inputs``'s
         existing treatment, so appending to it post-construction doesn't
-        disturb hashing/equality. Never reassigned after construction, only
-        ever mutated via ``.append(...)``; expected to always start empty at
-        construction time (a record cannot have children before it exists).
+        disturb hashing/equality. Deliberately a list, not a tuple: later
+        commits append to it in place. Never reassigned after construction;
+        expected to always start empty (a record cannot have children before
+        it exists).
     """
 
     user_prompt: str
     generated_response: Any
+    run_id: str | None = field(default=None, kw_only=True)
+    started_at: datetime | None = field(default=None, kw_only=True)
+    ended_at: datetime | None = field(default=None, kw_only=True)
+    agent_id: str | None = field(default=None, kw_only=True)
     inputs: dict = field(default_factory=dict, hash=False, compare=False)
-    final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
     children: list["AgentRecord"] = field(default_factory=list, hash=False, compare=False)
@@ -209,47 +221,21 @@ class AgentRecord:
             )
         object.__setattr__(self, "inputs", dict(self.inputs))
 
+        # Identity/timing auto-fill -- mirrors AtomicResult.run_id's own
+        # None-default-then-mint precedent. Production (Agent.record) always
+        # supplies explicit values; this exists purely for bare-construction
+        # convenience.
+        object.__setattr__(self, "run_id", self.run_id or uuid4().hex)
+        now = datetime.now(timezone.utc) if self.started_at is None or self.ended_at is None else None
+        object.__setattr__(self, "started_at", self.started_at or now)
+        object.__setattr__(self, "ended_at", self.ended_at or now)
+
         if not isinstance(self.llm_records, (tuple, list)) or isinstance(self.llm_records, (str, bytes)):
             raise TypeError(
                 "AgentRecord.llm_records must be a sequence of LLMRecord instances, "
                 f"got {type(self.llm_records).__name__}."
             )
-        normalized = tuple(self.llm_records)
-        for index, record in enumerate(normalized):
-            if not isinstance(record, LLMRecord):
-                raise TypeError(
-                    "AgentRecord.llm_records must contain only LLMRecord instances; "
-                    f"item {index} is {type(record).__name__}."
-                )
-        object.__setattr__(self, "llm_records", normalized)
-
-        if self.prev is not None:
-            if not isinstance(self.prev, AgentRecord):
-                raise TypeError(
-                    f"AgentRecord.prev must be an AgentRecord or None, "
-                    f"got {type(self.prev).__name__}."
-                )
-            if self.prev.final_result is None:
-                raise ValueError(
-                    "AgentRecord.prev must point to a completed record "
-                    "(final_result is not None); cannot link to a draft."
-                )
-
-        if not isinstance(self.children, (list, tuple)) or isinstance(self.children, (str, bytes)):
-            raise TypeError(
-                "AgentRecord.children must be a list of AgentRecord instances, "
-                f"got {type(self.children).__name__}."
-            )
-        for index, child in enumerate(self.children):
-            if not isinstance(child, AgentRecord):
-                raise TypeError(
-                    "AgentRecord.children must contain only AgentRecord instances; "
-                    f"item {index} is {type(child).__name__}."
-                )
-        # Deliberately NOT normalized to tuple -- children is the one field
-        # exempt from this class's "normalize sequences to tuple" convention,
-        # exactly like the existing inputs dict exemption. It must stay a
-        # mutable list so later commits can append to it in place.
+        object.__setattr__(self, "llm_records", tuple(self.llm_records))
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -257,10 +243,13 @@ class AgentRecord:
             "user_prompt": self.user_prompt,
             "inputs": self.inputs,
             "generated_response": self.generated_response,
-            "final_result": self.final_result.to_dict() if self.final_result is not None else None,
+            "run_id": self.run_id,
+            "agent_id": self.agent_id,
+            "started_at": self.started_at.isoformat(),
+            "ended_at": self.ended_at.isoformat(),
             "llm_records": [r.to_dict() for r in self.llm_records],
-            "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
-            "child_ids": [c.final_result.run_id for c in self.children],
+            "prev_run_id": self.prev.run_id if self.prev is not None else None,
+            "child_ids": [c.run_id for c in self.children],
         }
 
 
@@ -369,26 +358,9 @@ class ToolAgentRecord(AgentRecord):
         sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
         statement, whose ``tool`` is already the real identity).
         """
-        from ...utils.agents import is_dispatched, tool_identity
+        from ...utils.agents import build_usage_report
 
-        counts: dict[str, int] = {}
-        for call in (*self.statements, *self.failed_statements):
-            if is_dispatched(call):
-                identity = tool_identity(call)
-                counts[identity] = counts.get(identity, 0) + 1
-
-        by_tool = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in counts.items()
-        )
-        total_dispatched = sum(r.call_count for r in by_tool)
-        total_failed = sum(1 for call in self.failed_statements if is_dispatched(call))
-
-        return ToolUsageReport(
-            by_tool=by_tool,
-            total_dispatched=total_dispatched,
-            total_failed=total_failed,
-        )
+        return build_usage_report(self.statements, self.failed_statements)
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,17 +516,18 @@ class ScriptActAgentRecord(ToolAgentRecord):
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed thinking-capable agent
-    invocation (currently only ``ThinkingAgent``).
+    Canonical memory record for one completed thinking-agent invocation
+    (any ``ThinkingAgent`` subclass).
 
     In addition to the base AgentRecord lifecycle artifacts, a
     ThinkingAgentRecord stores the full thought content produced by the
-    invocation directly -- one raw value per completed round, in order.
-    Mirrors ``AgentRecord.llm_records``'s own pattern (the full artifact
-    lives on the record, not a span into some agent-level accumulator).
+    invocation directly -- one value per thought, in order. Mirrors
+    ``AgentRecord.llm_records``'s own pattern (the full artifact lives on the
+    record, not a span into some agent-level accumulator). The tuple is
+    shallow: the thought values are shared with the task, not copied.
     """
 
-    thoughts: tuple[str | int | float | bool | list | dict | None, ...] = ()
+    thoughts: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds

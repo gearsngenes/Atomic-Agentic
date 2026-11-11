@@ -1,8 +1,11 @@
-﻿from pathlib import Path
+from pathlib import Path
 import logging
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 
@@ -50,7 +53,7 @@ Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
 # Standing orchestration rules, lifted out of the per-invocation task prompt
-# and into tool_instructions -- the process itself (outliner-first, then
+# and into the agent's instructions -- the process itself (outliner-first, then
 # alternate reviewer/writer, always return the writer's latest draft) is now
 # reusable agent behavior, not one-off task text repeated on every call.
 ORCHESTRATION_INSTRUCTIONS = """
@@ -103,7 +106,7 @@ writer = BasicAgent(
     description="Writes a first draft from an outline, then revises using only reviewer notes.",
     llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=writer_pre,
 )
 
@@ -116,7 +119,7 @@ reviewer = BasicAgent(
     description="Reviews drafts and provides revision notes.",
     llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
-    context_enabled=True,
+    record_enabled=True,
     pre_invoke=reviewer_pre,
 )
 
@@ -125,9 +128,9 @@ orch = PlanActAgent(
     namespace="examples",
     description="Plan-once agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    record_enabled=False,
     tool_calls_limit=None,
-    tool_instructions=ORCHESTRATION_INSTRUCTIONS,
+    instructions=ORCHESTRATION_INSTRUCTIONS,
 )
 
 # Register agents-as-tools -- each reachable by its own bare agent name

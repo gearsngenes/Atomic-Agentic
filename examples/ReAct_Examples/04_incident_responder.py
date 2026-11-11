@@ -22,6 +22,10 @@ from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
@@ -130,7 +134,7 @@ responder = ReActAgent(
     # example.
     fail_fast=False,
     tool_calls_limit=8,
-    context_enabled=True,
+    record_enabled=True,
 )
 responder.register_tools([check_service_health, check_dependencies, restart_service, page_oncall])
 
@@ -151,7 +155,7 @@ final_result = responder.invoke({"prompt": task})
 
 print(f"\nIncident summary: {final_result.result}")
 
-record = responder.get_conversation()[-1]
+record = responder.get_conversation().records[-1]
 print("\nCalls made:")
 print(record.render_as_code())
 

@@ -231,6 +231,15 @@ class LLMEngine(AtomicInvokable, ABC):
         provider SDK allows it to be configured."""
         return self._timeout_seconds
 
+    @property
+    def model_data(self) -> LLMModelData:
+        """Configured model identity for this engine.
+
+        Derived from engine configuration, so it is available without making
+        an LLM call. Delegates to ``_get_model_data``.
+        """
+        return self._get_model_data()
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #

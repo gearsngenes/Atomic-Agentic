@@ -1,4 +1,4 @@
-﻿"""05_mcp_planner_test.py
+"""05_mcp_planner_test.py
 
 PlanActAgent planning against a local MCP server.
 
@@ -9,6 +9,10 @@ Updated to use PlanActAgent (formerly PlannerAgent).
 """
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.mcp import MCPClientHub
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 

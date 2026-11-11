@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import pprint
@@ -14,9 +14,9 @@ def summarize_result(*, result: str) -> dict[str, Any]:
     """
     Non-default post-invoke hook.
 
-    The Agent stores both:
-    - raw_response: direct LLM text
-    - final_response: this structured dict
+    Only the raw LLM text (``generated_response``) persists on the
+    record — this structured dict is the live ``invoke()`` return value's
+    ``.result`` only; it is not recoverable from history afterward.
     """
     return {
         "text": result.strip(),
@@ -34,11 +34,13 @@ def main() -> None:
         description="Basic Agent demo showing canonical turn history and rendering.",
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",
-        context_enabled=True,
+        record_enabled=True,
         records_window=None,
         post_invoke=summarize_result,
-        response_preview_limit=300,
+        response_to_post="result",
     )
+    # Preview limits live on the conversation, not the agent.
+    agent.get_conversation().response_preview_limit = 300
 
     result = agent.invoke(
         {
@@ -50,25 +52,23 @@ def main() -> None:
     pprint.pp(result.result)
 
     print("\n=== Canonical turn history: agent.get_conversation() ===")
-    for i, turn in enumerate(agent.get_conversation()):
+    for i, turn in enumerate(agent.get_conversation().records):
         print(f"\nTurn {i}")
         print("prompt:")
         pprint.pp(turn.user_prompt)
         print("raw_response:")
         pprint.pp(turn.generated_response)
-        print("final_response:")
-        pprint.pp(turn.final_result)
+        print("run_id:")
+        pprint.pp(turn.run_id)
 
     print("\n=== Rendered turn ===")
-    pprint.pp(agent.render_turn(agent.get_conversation()[0]))
+    pprint.pp(agent.render_turn(agent.get_conversation().records[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
-    next_messages = agent.build_messages(
-        system_prompt = agent.role_prompt,
-        turns = agent.get_conversation(),
-        prompt = "Now explain why turn-native memory is useful."
-    )
-    pprint.pp(next_messages)
+    task = agent.create_task({"prompt": "Now explain why turn-native memory is useful."})
+    agent.summarize(task)
+    agent.pre_process(task)
+    pprint.pp(agent.render_task(task))
 
 
 if __name__ == "__main__":

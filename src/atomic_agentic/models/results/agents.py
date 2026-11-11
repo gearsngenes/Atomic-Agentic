@@ -134,8 +134,8 @@ class AgentResult(AtomicResult):
         report usage are omitted. Empty tuple is valid.
 
     llm_model_data:
-        Model identity associated with the LLM activity that produced this
-        Agent result. Sourced from the last LLMRecord's engine model_data.
+        Model identity of the engine that served this invocation, read from
+        the engine's configuration when the result is built.
     """
 
     llm_token_usage: tuple[TokenUsage, ...]
@@ -197,8 +197,8 @@ class ToolAgentResult(AgentResult):
     usage_report:
         ``ToolUsageReport`` summarizing per-tool call counts plus
         ``total_dispatched``/``total_failed`` for the invocation. Re-derived
-        (by the caller, e.g. ``PlanActAgent.build_result_from_record``) from
-        ``record.usage_report()`` rather than a blackboard span.
+        (by the caller, e.g. ``PlanActAgent.build_result_from_task``) via
+        ``utils.agents.build_usage_report`` over the task's statements.
 
     failed_call_count:
         Count of calls whose dispatch actually raised this run -- a cheap
@@ -238,9 +238,9 @@ class ScriptActAgentResult(ToolAgentResult):
     Successful ScriptActAgent invocation result, a ``ToolAgentResult``
     subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
     are all real, inherited, required fields -- ``agents/scriptact.py``'s
-    ``build_result_from_record`` populates ``usage_report``/
-    ``failed_call_count`` via ``record.usage_report()``/
-    ``len(record.failed_statements)``, mirroring ``PlanActAgent``'s/
+    ``build_result_from_task`` populates ``usage_report``/
+    ``failed_call_count`` via ``build_usage_report``/
+    ``len(task.failed_statements)``, mirroring ``PlanActAgent``'s/
     ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
     genuinely ``ScriptActAgent``-specific.
 
@@ -273,32 +273,30 @@ class ScriptActAgentResult(ToolAgentResult):
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentResult(AgentResult):
     """
-    Successful thinking-capable agent invocation result (currently only
-    ``ThinkingAgent``).
+    Successful thinking-agent invocation result (every ``ThinkingAgent``
+    subclass), built by ``ThinkingAgent.build_result_from_task``.
 
-    Extends ``AgentResult`` with a derived count of completed thinking
-    rounds -- mirrors how ``llm_token_usage`` is already a derived
-    reduction of ``record.llm_records``, not a duplicate of it. A caller
-    needing the actual thought content reads it off the record instead
-    (``agent.get_conversation(turns=1)[0].thoughts`` for the invocation
-    just made; scan ``get_conversation(conversation_id, turns=None)`` and
-    match ``r.final_result.run_id`` for an older one).
+    Extends ``AgentResult`` with the count of thoughts the invocation
+    produced -- a derived reduction like ``llm_token_usage``, not a duplicate
+    of the record. A caller needing the thought content reads it off the
+    record (``agent.get_record(run_id=result.run_id).thoughts``); with
+    ``record_enabled=False`` this count is the only trace of the thinking.
 
     No ``__post_init__`` override needed -- plain ``int`` field, no
     cross-field validation, matching this class's existing precedent (the
-    value is always internally computed as ``len(record.thoughts)``, never
+    value is always internally computed as ``len(task.thoughts)``, never
     caller-supplied at a real boundary).
 
     Fields
     ------
-    thinking_rounds_used:
-        Count of thinking rounds completed during this invocation.
+    thoughts_produced:
+        ``len(task.thoughts)`` at the end of the invocation.
     """
 
-    thinking_rounds_used: int = 0
+    thoughts_produced: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
-        data["thinking_rounds_used"] = self.thinking_rounds_used
+        data["thoughts_produced"] = self.thoughts_produced
         return data

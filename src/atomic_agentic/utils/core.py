@@ -7,11 +7,13 @@ from dataclasses import fields
 from types import MappingProxyType
 from typing import Any
 
+from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.core import HeaderValue, T
 
 __all__ = [
     "apply_name_filter",
     "dataclass_record_to_dict",
+    "is_reserved_name",
     "normalize_headers",
     "run_coro_async",
     "run_coro_sync",
@@ -32,6 +34,16 @@ def dataclass_record_to_dict(record: Any) -> dict[str, Any]:
     """
     data = {field.name: getattr(record, field.name) for field in fields(record)}
     return {"type": type(record).__name__, **data}
+
+
+def is_reserved_name(name: str) -> bool:
+    """
+    Whether ``name`` is a reserved ``task_result_`` name.
+
+    The single place the prefix test lives; callers raise their own exception
+    types. Pure name rule, so ``ContextVariable`` itself stays name-neutral.
+    """
+    return name.startswith(TASK_RESULT_PREFIX)
 
 
 async def _await_value(awaitable: Awaitable[T]) -> T:

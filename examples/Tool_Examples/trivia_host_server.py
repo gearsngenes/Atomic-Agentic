@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 
@@ -26,7 +26,7 @@ def main() -> None:
             "When given a prompt or topic, return one accurate and interesting trivia fact "
             "in 2-4 sentences."
         ),
-        context_enabled=False,
+        record_enabled=False,
     )
 
     host = PyA2AtomicHost(
@@ -37,7 +37,7 @@ def main() -> None:
         host="localhost",
         port=6000,
     )
-    host.run_server(debug=True)
+    host.run_server()
 
 
 if __name__ == "__main__":

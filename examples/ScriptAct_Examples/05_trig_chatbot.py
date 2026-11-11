@@ -1,13 +1,13 @@
 """06_trig_chatbot.py
 
 A fixed, scripted sequence of trig/geometry questions run as separate turns
-against the same context_enabled=True ScriptActAgent -- testing whether it
+against the same record_enabled=True ScriptActAgent -- testing whether it
 correctly reuses an EARLIER turn's result via ScriptActAgent's own
-task_result_i cross-invocation addressing (render_turn/_initialize_task),
+task_result_i cross-invocation addressing (render_turn/_seed_task),
 rather than v1 ToolAgent's <<__cN__>> placeholder scheme.
 
 ONESHOT_PLANNER_PROMPT's STRICT RULES #3 already instructs the model to
-prefer a pre-existing declared name (a constant, an earlier result,
+prefer a pre-existing declared name (a context variable, an earlier
 task_result_i) over hand-writing an equivalent value -- this example is a
 live test of whether that instruction actually gets followed, not just
 stated.
@@ -26,7 +26,7 @@ Turn sequence, each deliberately probing a different angle:
    AND answer together -- the hardest reuse case, since it needs both a
    piece of `task_result_i` (the answer) and something never stored as a
    value at all (the ORIGINAL PROMPT TEXT of turn 0), which only lives in
-   the rendered conversation history, not the cache.
+   the rendered conversation history, not the context variables.
 
 After each turn, prints the answer plus record.render_as_code() -- that's
 what makes reuse vs. hallucination vs. wasted recompute actually visible,
@@ -36,7 +36,11 @@ import logging
 import math
 
 from atomic_agentic.agents import ScriptActAgent
-from atomic_agentic.tools.prebuilt import TRIG_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import TRIG_TOOLS
 
 from shared_engine import llm_engine
 
@@ -45,7 +49,7 @@ logging.basicConfig(level=logging.INFO)
 # Curated subset -- the 6 primary trig/inverse-trig functions. TRIG_TOOLS'
 # cotangent/hyperbolic variants add prompt surface without adding anything
 # this example is testing.
-_trig_by_name = {tool.name: tool for tool in TRIG_TOOLS}
+_trig_by_name = {fn.__name__: fn for fn in TRIG_TOOLS}
 CORE_TRIG_TOOLS = [_trig_by_name[name] for name in ("sin", "cos", "tan", "asin", "acos", "atan")]
 
 chatbot = ScriptActAgent(
@@ -53,11 +57,13 @@ chatbot = ScriptActAgent(
     namespace="examples",
     description="Answers trig/geometry questions conversationally, reusing prior answers when relevant.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     tool_calls_limit=5,
 )
 chatbot.register_tools(CORE_TRIG_TOOLS)
-chatbot.register_constant(math.pi, alias="PI", description="The mathematical constant pi.")
+chatbot.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True
+)
 
 TURNS = [
     "What is the sine of PI/6?",
@@ -73,6 +79,6 @@ if __name__ == "__main__":
         result = chatbot.invoke({"prompt": turn})
         print(f"Bot: {result.result}")
 
-        record = chatbot.get_conversation()[-1]
+        record = chatbot.get_conversation().records[-1]
         print("--- Executed script this turn ---")
         print(record.render_as_code())

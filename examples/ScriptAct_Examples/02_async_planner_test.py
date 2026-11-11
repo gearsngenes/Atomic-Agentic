@@ -16,14 +16,18 @@ ScriptActAgentRecord.render_as_code() -- its `# Batch N:` grouping is the
 visible proof of what actually happened, replacing the old "did the model
 write await" inspection (there's nothing left for the model to write or
 omit here). This is the one deliberate deviation from the PlanAct original,
-which uses `context_enabled=False` and never inspects history (a JSON plan
+which uses `record_enabled=False` and never inspects history (a JSON plan
 isn't as directly inspectable); ScriptActAgent's render_as_code() is worth the
-extra `context_enabled=True` here.
+extra `record_enabled=True` here.
 """
 import logging
 import time
 
 from atomic_agentic.agents import ScriptActAgent
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 
@@ -40,7 +44,7 @@ async_tester = ScriptActAgent(
     namespace="examples",
     description="Tests the ability to run independent statements concurrently.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=1,
 )
 
@@ -61,6 +65,6 @@ if __name__ == "__main__":
 
     print("Time taken:", end - start, "seconds")
 
-    record = async_tester.get_conversation()[-1]
+    record = async_tester.get_conversation().records[-1]
     print("\n=== EXECUTED SCRIPT (grouped by concurrent batch) ===")
     print(record.render_as_code())

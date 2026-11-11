@@ -10,10 +10,13 @@ everything completed so far this run.
 """
 import logging
 import math
-from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -26,26 +29,30 @@ orchestrator = ReActAgent(
     llm_engine=llm_engine,
     records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
-    context_enabled=True,
+    record_enabled=True,
+    
 )
 
 orchestrator.register_tools(BASIC_MATH_TOOLS)
 orchestrator.register_tools(CONSOLE_TOOLS)
 orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below needs both
 
-orchestrator.register_constant(
-    math.pi, "PI",
-    "Mathematical constant `pi` placeholder",
+# A fixed value the model may reference as $PI: a readonly context variable
+# on the agent's conversation.
+orchestrator.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True,
 )
 
 task = """
-1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
-2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
-3) Compute the volume of a cylinder with radius of 2 and height of 10 [V(r, h) = pi * r^2 * h].
+Solve EACH question and print its result:
+1) The area of a circle with a radius of 5 (pi * r^2).
+2) The hypotenuse length of a triangle with legs a=3, b=4
+3) The volume of a cylinder with radius of 2 and height of 10 (pi * r^2 * h).
 
-Do NOT skip any steps, and do NOT attempt to combine them into a single calculation.
+Print each question-answer pair after solving it in the format:
+"<question>: <calculated_answer>\n"
 
-Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
+Stop once you've answered each question. Return None.
 """
 
 final_result = orchestrator.invoke({"prompt": task})
@@ -53,4 +60,4 @@ final_result = orchestrator.invoke({"prompt": task})
 print(f"\nFinal Result: {final_result.result}")
 
 print("\nExecuted calls:\n")
-print(orchestrator.get_conversation()[-1].render_as_code())
+print(orchestrator.get_conversation().records[-1].render_as_code())

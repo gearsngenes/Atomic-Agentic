@@ -7,7 +7,9 @@ from .records import (
     ScriptActAgentToolUsage,
     ThinkingAgentRecord,
 )
-from .blackboard_models import ToolStatement, ConstantSpec
+from .conversations import Conversation
+from .blackboard_models import ToolStatement
+from .context import ContextVariable
 from .tasks import (
     AgentTask,
     ToolAgentTask,
@@ -15,6 +17,7 @@ from .tasks import (
     PlanActTask,
     ReActTask,
     ThinkingTask,
+    ScratchpadTask,
 )
 
 __all__ = [
@@ -25,12 +28,14 @@ __all__ = [
     "ScriptActAgentRecord",
     "ScriptActAgentToolUsage",
     "ThinkingAgentRecord",
+    "Conversation",
     "ToolStatement",
-    "ConstantSpec",
+    "ContextVariable",
     "AgentTask",
     "ToolAgentTask",
     "ScriptActAgentTask",
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
+    "ScratchpadTask",
 ]

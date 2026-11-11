@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Set as AbstractSet
 from typing import (
     Any,
     Callable,
@@ -11,13 +12,12 @@ from typing import (
 )
 from dataclasses import replace
 from datetime import datetime, timezone
-import asyncio
+from uuid import uuid4
 import logging
 
 from ..exceptions import (
     AgentError,
     AgentInvocationError,
-    ToolInvocationError,
 )
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
@@ -25,18 +25,19 @@ from ..llm.base import LLMEngine
 from ..models.results import AgentResult
 from ..tools import toolify
 from ..models.agents.records import AgentRecord
-from ..models.agents.prompts import PromptConfig
+from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask
+from ..models.agents.conversations import Conversation
 
-logger = logging.getLogger(__name__)
-
-from .tools import identity_pre_tool, identity_post_tool
+from ..constants.core import IDENTIFIER_PATTERN
 from ..constants.agents import (
-    RUN_ID_PARAM,
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
-    TRAILING_FORK_INDEX_PATTERN,
+    TASK_RESULT_PREFIX,
+    PROMPT_PARAM,
+    RUNTIME_PARAM,
 )
+from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
     insert_by_category,
@@ -44,7 +45,13 @@ from ..utils.parameters import (
     build_parameter_reports,
     apply_parameter_reports,
 )
-from ..utils.agents import stringify_result
+from ..utils.rendering import (
+    render_context_entries,
+    render_task_block,
+    stringify_value,
+)
+
+logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -53,124 +60,155 @@ class Agent(AtomicInvokable, ABC):
     """
     Abstract base for schema-driven LLM agents.
 
-    ``Agent`` owns the full invocation lifecycle shell — input filtering,
-    turn selection, pre/post-invoke dispatch, record management — but
-    delegates the actual LLM work to the ``_initialize_task``/``think``/
+    ``Agent`` owns the full invocation lifecycle shell as a sequence of
+    named, public steps (``create_task``, ``summarize``, ``pre_process``,
+    ``post_process``, ``record``) so a caller can assemble their own
+    lifecycle by hand, but delegates the actual LLM work to the ``think``/
     ``prepare``/``act`` abstract-or-overridable hooks that concrete
-    subclasses implement.
+    subclasses implement. A family varies ``create_task`` only through the
+    ``_TASK_CLS`` class attribute and the ``_seed_task`` hook --
+    ``create_task`` itself is never overridden.
 
     Lifecycle
     ---------
-    ``invoke(inputs)`` follows this sequence:
-
-    1. ``filter_inputs`` collects declared keys and injects defaults.
-    2. Reserved names (``run_id`` by default; see ``get_reserved_parameters``)
-       are read non-destructively — ``inputs`` itself is never mutated.
-    3. Remaining inputs are sliced into ``pre_inputs`` / ``post_inputs`` by
-       name membership against ``pre_invoke`` / ``post_invoke``'s own
-       declared parameters, excluding reserved names.
-    4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
-    5. Turns are selected from the active conversation via
-       ``_resolve_context`` if ``context_enabled`` is True and
-       ``records_window != 0``; ``run_id`` is resolved only within that
-       conversation.
-    6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
-       full filtered ``inputs`` dict untouched — not a slice, not popped of
-       anything; then, every round, unconditionally: ``task = think(task);
-       task = prepare(task); task = act(task)`` — until ``task.complete``.
-    7. ``post_invoke`` transforms the raw response into the final result.
-    8. ``_commit_emit`` assembles the completed ``AgentRecord`` (with
-       ``inputs`` set to the exact same full dict passed to
-       ``_initialize_task``) and the final ``AgentResult`` together, then
-       either appends the record in place or forks a new conversation --
-       decided by a fresh children check at commit time -- unless context/
-       window is disabled, in which case nothing is stored at all.
+    ``invoke(inputs)`` runs the public steps spelled out in its docstring
+    (``async_invoke`` mirrors it); each can also be called by hand to assemble
+    a custom lifecycle. ``record`` is the only step that runs under the lock,
+    and nothing is stored at all when ``record_enabled`` is false.
 
     Schema composition
     -------------------
     The agent's parameter schema is composed at construction time from four
     flat sources:
 
-    - All ``pre_invoke`` parameters.
-    - Post-only non-result parameters, preserving their original declared
-      kind (no forced ``KEYWORD_ONLY`` coercion).
+    - All ``pre_invoke`` parameters (the built-in ``prompt`` parameter when
+      there is no ``pre_invoke``).
+    - Post-only parameters not filled by a ``response_to_post`` destination
+      (those leave the public signature unless pre_invoke/extra_parameters
+      also declares them), preserving their original declared kind (no
+      forced ``KEYWORD_ONLY`` coercion).
     - ``extra_parameters`` — a flat, subclass-computed source (e.g.
       ``BasicAgent`` passes its role-prompt placeholders as this agent's
       sole ``extra_parameters`` source).
-    - This (sub)class's reserved parameters (``get_reserved_parameters()``;
-      ``run_id`` by default), grafted last.
+    - The runtime context parameter (``**runtime_context``), when
+      ``use_runtime_context`` is set at construction.
 
-    Reserved-name overlaps in pre_invoke/post_invoke/extra_parameters are
-    resolved first, independently per source (never against each other): a
-    declaration matching a reserved name exactly (``semantically_identical``)
-    is silently stripped — it is never forwarded to that source at invocation
-    time regardless of the match. Any other overlap raises ``AgentError``;
-    there is no warning tier on this axis, since a reserved declaration is
-    never negotiable. ``VAR_POSITIONAL``/``VAR_KEYWORD`` parameters are exempt
-    from this check entirely — a catch-all's bucket name colliding with a
-    reserved name is a naming coincidence, not the same slot.
-
-    The remaining pre_invoke/post-only/extra_parameters sources are then
-    reconciled together via one N-way compatibility report
+    The sources are reconciled together via one N-way compatibility report
     (``utils.parameters.build_parameter_reports``) rather than a pairwise
     fold: a name with no shared compatible type, or an incompatible kind,
     across the sources that declare it raises ``AgentError``; a
     compatible-but-not-identical overlap warns once per construction call,
     grouped across every such name — not one warning per name. The
     highest-priority declaring source (``pre_invoke`` > ``post_invoke`` >
-    ``extra_parameters``) supplies ``kind``/``default``/``description``
+    ``extra_parameters`` > runtime) supplies ``kind``/``default``/``description``
     together; the constructed ``type`` is the full witness set of compatible
     type tokens, not just the winning source's own declared type. An
     identical overlap is silent. Grafting uses ``insert_by_category`` so every
     new parameter lands at the position that preserves a valid Python-style
     signature ordering, regardless of its declared kind.
 
-    ``context_enabled``
-    -------------------
-    ``True``:  ``_resolve_context`` selects prior turns from the active
-    conversation for each invocation, and may trigger a fork.
-    ``False``: turns are always ``[]``; ``run_id`` is ignored.
-    ``records_window == 0`` behaves the same as ``context_enabled=False``
-    for a given invocation. In either case, nothing is stored -- no record
-    is appended to any conversation -- though the invocation still returns
-    a normal ``AgentResult``.
+    Binding routes
+    --------------
+    Three construction knobs say where values flow; context never feeds
+    pre/post. ``response_to_post`` and ``response_to_context`` share one
+    grammar for slicing the generated response: a ``str`` (whole response), a
+    collection of ``str`` (those keys of a mapping response), or a
+    ``{selector: name}`` dict.
+
+    - ``response_to_post``: fills ``post_invoke`` parameters (every
+      destination must be one); nothing reaches the post stage by default.
+    - ``response_to_context``: after the post stage, replaces a writable
+      context variable, skips a readonly one, or creates an absent one (no
+      description, render mode ``"s"``).
+    - ``inputs_to_context``: a collection of input names or an
+      ``{input: name}`` dict. At ``create_task`` -- after input filtering,
+      before ``pre_invoke`` -- each present input (a defaulted one counts)
+      replaces a writable context variable, skips a readonly one, or creates
+      an absent one, the same way.
+
+    Both context routes name *declared destinations*. ``record`` persists a
+    declared destination the call changed -- creating it in the conversation
+    if absent -- and writes back any other changed variable only if the
+    conversation still holds it. See ``record``.
+
+    ``post_invoke=None`` means no post stage.
+
+    Runtime context
+    ---------------
+    ``**runtime_context`` carries improvised per-call variables that have no
+    explicit conversation mapping. The parameter exists iff
+    ``use_runtime_context`` is set at construction or ``pre_invoke``/
+    ``post_invoke`` declares it; a declaration (or any parameter named
+    ``runtime_context``) must be semantically identical to ``RUNTIME_PARAM``,
+    knob on or off, and that is the only ``**kwargs`` allowed in pre/post
+    (anything else raises ``AgentError``). Pre/post receive the dict only if
+    they declare it. With ``use_runtime_context`` set, ``create_task``
+    flattens the dict into ``task.context`` by its own keys -- before
+    ``inputs_to_context``, so an explicit mapping wins a name clash --
+    replacing a writable variable, skipping a readonly one and creating an
+    absent one. A key that is not a declared destination is per-call: it
+    persists only by replacing a variable the conversation already holds.
+    Without the knob, a parameter declared only by pre/post reaches just that
+    declarer.
+
+    ``record_enabled`` / ``records_window``
+    ----------------------------------------
+    Two fully independent axes. ``record_enabled`` (write): ``True``
+    persists the completed turn; ``False`` stores nothing, regardless of
+    ``records_window``. ``records_window`` (read): ``0`` means no prior
+    turns are read this call; ``N`` means the last ``N``; ``None`` means
+    full history -- independent of ``record_enabled``.
+
+        record_enabled=True,  records_window=None  -- read all, persist (default)
+        record_enabled=False, records_window=0     -- read nothing, persist nothing
+        record_enabled=False, records_window=None  -- read all, persist nothing (judge/probe)
+        record_enabled=True,  records_window=0     -- read nothing, persist anyway
 
     Conversation storage
     --------------------
     History is stored per-conversation in ``self._conversations: dict[str,
-    list[AgentRecord]]``, seeded with a single empty ``"default"``
-    conversation at construction. Exactly one conversation is "active" at a
-    time (``self._active_conversation``); ``invoke``/``async_invoke`` always
-    read from and (when they commit) write to whichever conversation is
-    active at call time. ``run_id`` targets a specific record *within the
-    active conversation only* -- an unknown ``run_id`` raises ``ValueError``.
-    Continuing from a childless record appends in place; continuing from a
-    record that already has children forks a new conversation instead
-    (``create_conversation``/``fork_conversation``/
-    ``set_active_conversation``/``delete_conversation`` provide the explicit,
-    non-invocation-triggered counterparts to this implicit fork-on-invoke
-    behavior).
+    Conversation]``, seeded with a single empty ``"default"`` conversation
+    at construction. Exactly one conversation is "active" at a time
+    (``self._active_conversation``); ``invoke``/``async_invoke`` always read
+    from and (when they commit) write to whichever conversation is active at
+    call time -- always its own current tail, never an arbitrary earlier
+    record. Retargeting to an earlier point requires an explicit
+    ``import_conversation`` (of a ``Conversation.slice``) or
+    ``switch_conversation`` call before invoking (``create_conversation``/
+    ``get_record``/``remove_conversation`` round out the rest of the explicit
+    conversation-management API). Context mutation goes through the
+    conversation itself (``agent.get_conversation(name).remember(...)``).
+    There is no implicit forking: two invocations racing to extend the same
+    tail both append to their bound conversation in commit order
+    (``Conversation.commit`` serializes the commits), each with ``prev`` set
+    to the record it read.
+
+    A conversation may be shared: ``import_conversation`` registers the same
+    object under a key, so several agents (of any type) can read and extend
+    one history and context. Each reader renders the records with its own
+    ``render_turn``. The registry itself (which keys exist, which is active)
+    stays per-agent under ``_invoke_lock``.
+
+    Context and recording
+    ---------------------
+    Context changes made during a call (``inputs_to_context`` and
+    ``response_to_context`` values) are written back to the conversation by
+    ``record`` -- the same ``commit`` that appends the turn. So with
+    ``record_enabled`` False neither happens: such an agent (a judge or probe)
+    never changes a conversation, and its bound values reach only the result,
+    the post stage and the call's own rendering.
     """
 
     # ------------------------------------------------------------------ #
     # Class-level configuration
     # ------------------------------------------------------------------ #
-    @classmethod
-    def get_reserved_parameters(cls) -> list[ParamSpec]:
-        """Return this Agent (sub)class's framework-reserved parameters.
+    # The only per-family variation ``create_task`` consults: which task
+    # class to build. Further per-family seeding goes through ``_seed_task``.
+    _TASK_CLS: type[AgentTask] = AgentTask
 
-        Base ``Agent`` reserves only ``run_id``. A subclass with its own
-        fixed/reserved parameter overrides this as
-        ``return [MY_RESERVED_PARAM] + super().get_reserved_parameters()``
-        -- prepended, not appended -- so the same collision/overlap/graft
-        machinery in ``__init__`` covers its reserved name too, without base
-        ``Agent`` needing advance knowledge of it, and so that ``run_id``
-        (the most generic reservation, defined here at the root) keeps
-        sorting last among reserved keyword-only parameters in the final
-        schema no matter how many subclass levels each prepend their own
-        more-specific reservation ahead of it.
-        """
-        return [RUN_ID_PARAM]
+    # Context-entry name prefix, read by _render_task_block. A family overrides
+    # it as a class attribute; nothing else about the block varies.
+    _CONTEXT_NAME_PREFIX: str = ""   # "$" for the sigil families (Pass 14b)
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -181,19 +219,23 @@ class Agent(AtomicInvokable, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = True,
+        record_enabled: bool = True,
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
     ) -> None:
+        if type(use_runtime_context) is not bool:
+            raise ValueError("use_runtime_context must be a bool.")
 
         # ── Pre-invoke ───────────────────────────────────────────────────────
         if pre_invoke is None:
-            pre_tool = identity_pre_tool
+            pre_tool = None  # no pre stage: the caller's prompt passes straight through
         elif isinstance(pre_invoke, AtomicInvokable):
             pre_tool = pre_invoke
         else:
@@ -203,14 +245,14 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
-        if pre_tool.return_type.lower() not in {"any", "str"}:
+        if pre_tool is not None and pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError(
                 "Agent.pre_invoke must return a type 'str'|'any'"
             )
 
         # ── Post-invoke ──────────────────────────────────────────────────────
         if post_invoke is None:
-            post_tool = identity_post_tool
+            post_tool = None  # no post stage: the response is returned as-is
         elif isinstance(post_invoke, AtomicInvokable):
             post_tool = post_invoke
         else:
@@ -220,168 +262,234 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
-        if len(post_tool.parameters) == 0:
-            raise AgentError("Agent.post_invoke must expect at least 1 argument")
 
-        # 3. Reserved parameters for this (sub)class, computed once.
-        reserved = self.get_reserved_parameters()
-        reserved_names = {p.name for p in reserved}
+        # ── Variadic keywords and the runtime name ───────────────────────────
+        # Independent of the knob: a **kwargs parameter must BE the runtime
+        # parameter (every name pre/post consume must be enumerable at
+        # construction), and any parameter NAMED runtime_context must be
+        # identical to it.
+        for tool, label in ((pre_tool, "pre_invoke"), (post_tool, "post_invoke")):
+            for p in () if tool is None else tool.parameters:
+                if (
+                    p.kind == ParamSpec.VAR_KEYWORD or p.name == RUNTIME_PARAM.name
+                ) and not semantically_identical(p, RUNTIME_PARAM):
+                    raise AgentError(
+                        f"Agent.{label} parameter {p.name!r} (kind={p.kind!r}, "
+                        f"type={p.type!r}) must be identical to the runtime context "
+                        f"parameter (**{RUNTIME_PARAM.name}, type Any, no default or "
+                        "description): a **kwargs parameter is allowed only as that "
+                        "parameter, and that name is reserved for it. Wrap the "
+                        "callable to drop it."
+                    )
 
-        # 4. Normalize extra_parameters; reject variadic entries.
+        # ── Extra parameters ─────────────────────────────────────────────────
         extra_raw = to_paramspec_list(extra_parameters)
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
         for p in extra_raw:
-            if p.kind in variadic_kinds:
+            if p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
                 raise AgentError(
                     f"extra_parameters entry {p.name!r} must not be variadic; "
                     f"got kind {p.kind!r}."
                 )
-
-        # 5. Resolve post_result_key against post_tool.parameters directly
-        # (unstripped of any reserved-name overlaps).
-        if post_result_key is None:
-            resolved_post_result_key = post_tool.parameters[0].name
-        else:
-            if not isinstance(post_result_key, str) or not post_result_key.strip():
-                raise AgentError("post_result_key must be None or a non-empty string.")
-            resolved_post_result_key = post_result_key.strip()
-            if resolved_post_result_key not in {p.name for p in post_tool.parameters}:
+            if p.name == RUNTIME_PARAM.name:
                 raise AgentError(
-                    "post_result_key must name one of post_invoke's declared parameters; "
-                    f"got {resolved_post_result_key!r}."
+                    f"extra_parameters entry {p.name!r} is the runtime context "
+                    "parameter's name; extras cannot be variadic, so it can never "
+                    "match it."
                 )
 
-        # 6. The result-routing slot can never itself be a reserved name.
-        if resolved_post_result_key in reserved_names:
+        # ── Bindings ─────────────────────────────────────────────────────────
+        # A post parameter filled by response_to_post that no other source
+        # declares is fed by the response alone, so it leaves the public
+        # signature. One that pre_invoke/extra_parameters also declares stays in
+        # the reconciliation below: when the response lacks its key, the
+        # caller's value is what the post receives, so the declarations must be
+        # compatible.
+        post_params = list(post_tool.parameters) if post_tool is not None else []
+        inputs_binding = self._normalize_binding(
+            inputs_to_context, route="inputs_to_context", allow_str=False
+        )
+        context_binding = self._normalize_binding(
+            response_to_context, route="response_to_context"
+        )
+        post_binding = self._normalize_binding(response_to_post, route="response_to_post")
+        bound_post = (
+            set() if post_binding is None
+            else {post_binding} if isinstance(post_binding, str)
+            else set(post_binding.values())
+        )
+        not_post = bound_post - {p.name for p in post_params}
+        if not_post:
             raise AgentError(
-                f"post_result_key {resolved_post_result_key!r} is a framework-reserved "
-                "parameter name; it cannot also serve as the internal "
-                "result-routing slot."
+                f"response_to_post destinations {sorted(not_post)} are not post_invoke "
+                "parameters (or there is no post_invoke)."
             )
+        if RUNTIME_PARAM.name in bound_post:
+            raise AgentError(
+                f"response_to_post cannot target {RUNTIME_PARAM.name!r}: it is the "
+                "caller's runtime context channel, not a post parameter the "
+                "response may fill."
+            )
+        pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
+        declared_elsewhere = {p.name for p in pre_declared} | {
+            p.name for p in extra_raw
+        }
+        response_filled = bound_post - declared_elsewhere
 
-        # 7. Post-only parameters: post_tool's declared params minus the result key.
-        post_only_raw = [
-            p for p in post_tool.parameters if p.name != resolved_post_result_key
-        ]
-
-        # 8. Reserved-overlap pass, fully independent per source (never
-        # compared against each other for a reserved name).
-        pre_params = self._strip_reserved_overlaps(
-            list(pre_tool.parameters), reserved, "pre_invoke"
-        )
-        post_only = self._strip_reserved_overlaps(post_only_raw, reserved, "post_invoke")
-        extra_params = self._strip_reserved_overlaps(extra_raw, reserved, "extra_parameters")
-
-        # 9. N-way peer reconciliation: pre_invoke > post_invoke > extra_parameters.
-        reports = build_parameter_reports([pre_params, post_only, extra_params])
-
-        # 10. Apply reports: raises on the first genuine conflict; emits at
-        # most one grouped UserWarning for compatible-but-not-identical names.
+        # ── Schema composition ───────────────────────────────────────────────
+        # The sources are reconciled N-way (pre_invoke > post_invoke >
+        # extra_parameters > runtime), raising on the first genuine conflict and
+        # warning once for compatible-but-not-identical names. Any runtime_context
+        # declaration reaching this point is already identical to RUNTIME_PARAM.
+        post_only = [p for p in post_params if p.name not in response_filled]
+        sources = [pre_declared, post_only, extra_raw]
+        labels = ["pre_invoke", "post_invoke", "extra_parameters"]
+        if use_runtime_context:
+            sources.append([RUNTIME_PARAM])
+            labels.append("use_runtime_context")
+        reports = build_parameter_reports(sources)
         constructed = apply_parameter_reports(
-            reports, ("pre_invoke", "post_invoke", "extra_parameters"), error_cls=AgentError, stacklevel=4
+            reports, tuple(labels), error_cls=AgentError, stacklevel=4
         )
+        agent_parameters = insert_by_category([], constructed)
 
-        # 11. Category-normalize the reconciled peer schema.
-        combined = insert_by_category([], constructed)
+        # Input sources must be names the constructed agent accepts.
+        if inputs_binding is not None:
+            accepted = {
+                p.name for p in agent_parameters
+                if p.kind not in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+            }
+            unknown = sorted(set(inputs_binding) - accepted)
+            if unknown:
+                raise AgentError(
+                    f"inputs_to_context sources {unknown} are not non-variadic parameters "
+                    "of this agent (a post parameter filled only by response_to_post is not one)."
+                )
 
-        # 12. Final reserved-parameter graft — produces the schema directly.
-        agent_parameters = insert_by_category(combined, reserved)
-
-        # Store lifecycle components.
-        self._pre_invoke = pre_tool
-        self._post_invoke = post_tool
-        self._post_result_key = resolved_post_result_key
-
-        # System prompt registry — subclasses populate after super().__init__.
-        self._system_prompts: dict[str, PromptConfig] = {}
+        # Lifecycle components and the per-consumer name sets create_task slices by.
+        self._pre_invoke: Optional[AtomicInvokable] = pre_tool
+        self._post_invoke: Optional[AtomicInvokable] = post_tool
+        self._inputs_to_context = inputs_binding  # None | dict[str, str]
+        self._response_to_context = context_binding  # None | str | dict[Any, str]
+        self._response_to_post = post_binding  # None | str | dict[Any, str]
+        # Declared destinations: the only names record() may create in a conversation.
+        destinations = set(inputs_binding.values()) if inputs_binding else set()
+        if isinstance(context_binding, str):
+            destinations.add(context_binding)
+        elif context_binding:
+            destinations.update(context_binding.values())
+        self._context_destinations: frozenset[str] = frozenset(destinations)
+        self._pre_names = frozenset(p.name for p in pre_declared)
+        self._post_names = frozenset(p.name for p in post_params)
+        self._agentic_names = frozenset(p.name for p in extra_raw)
+        self._use_runtime_context: bool = use_runtime_context
 
         # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
-        self._context_enabled: bool = context_enabled
+        self._record_enabled: bool = record_enabled
 
-        if records_window is not None and (not type(records_window) is int or records_window < 0):
-            raise AgentError("records_window must be an int >= 0 or be 'None'.")
+        if records_window is not None and (type(records_window) is not int or records_window < 0):
+            raise ValueError("records_window must be an int >= 0 or be 'None'.")
         self._records_window: Optional[int] = records_window
 
-        self._conversations: dict[str, List[AgentRecord]] = {
-            DEFAULT_CONVERSATION_NAME: []
+        self._conversations: dict[str, Conversation] = {
+            DEFAULT_CONVERSATION_NAME: self._new_conversation()
         }
         self._active_conversation: str = DEFAULT_CONVERSATION_NAME
-        self._branch_counter: int = 0
-
-        if response_preview_limit is None:
-            self._response_preview_limit = None
-        elif type(response_preview_limit) is not int or response_preview_limit <= 0:
-            raise AgentError("response_preview_limit must be None or a positive integer > 0.")
-        else:
-            self._response_preview_limit = response_preview_limit
 
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             parameters=agent_parameters,
-            return_type=self._post_invoke.return_type,
+            return_type=(
+                self._post_invoke.return_type if self._post_invoke is not None else "any"
+            ),
         )
 
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _strip_reserved_overlaps(
-        params: list[ParamSpec],
-        reserved: list[ParamSpec],
-        source_label: str,
-    ) -> list[ParamSpec]:
-        """Strip reserved-name overlaps from one source, independently.
+    def _normalize_binding(
+        value: Any,
+        *,
+        route: str,
+        allow_str: bool = True,
+    ) -> Optional[str | dict[Any, str]]:
+        """Validate one binding knob and return its normalized form.
 
-        Never compares this source's declarations to any other source's --
-        each of ``pre_invoke``/``post_invoke``/``extra_parameters`` is
-        checked only against the fixed reserved spec. ``VAR_POSITIONAL``/
-        ``VAR_KEYWORD`` params are exempt entirely, regardless of name -- a
-        catch-all's bucket name colliding with a reserved name is a naming
-        coincidence, not the same slot. For every other param whose name
-        matches a reserved name: ``semantically_identical`` -> stripped
-        silently (redundant, harmless declaration -- no warning); otherwise
-        -> raises ``AgentError`` immediately. There is no warning tier on
-        this axis -- a reserved declaration is never negotiable, it must
-        match exactly or be omitted.
+        1. ``None`` -> ``None``; ``str`` -> the str itself (whole response;
+           raises when ``allow_str`` is false); ``Mapping`` -> ``dict(value)``;
+           any other non-bytes iterable of names (list, tuple, set, dict view,
+           generator...) -> ``{d: d}``, sorted when unordered; anything else
+           raises.
+        2. An empty collection/mapping normalizes to ``None``.
+        3. Destinations are stripped of surrounding whitespace (as
+           ``ContextVariable``/``ParamSpec`` names are), then each must be an
+           identifier string and must not start with ``TASK_RESULT_PREFIX``.
+        4. Duplicate destinations within this route raise (checked before
+           collapsing to a dict); the same name across routes is legal.
+        5. ``inputs_to_context`` only: the selectors (sources) are stripped and
+           must be identifier strings; membership in the agent's schema is
+           checked by ``__init__``.
         """
-        reserved_by_name = {p.name: p for p in reserved}
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        stripped_names: set[str] = set()
+        if value is None:
+            return None
 
-        for param in params:
-            if param.kind in variadic_kinds:
-                continue
-            reserved_spec = reserved_by_name.get(param.name)
-            if reserved_spec is None:
-                continue
-            if semantically_identical(param, reserved_spec):
-                stripped_names.add(param.name)
-            else:
+        if isinstance(value, str):
+            if not allow_str:
                 raise AgentError(
-                    f"{source_label} declares {param.name!r} "
-                    f"(type={param.type!r}, kind={param.kind!r}, "
-                    f"default={param.default!r}, description={param.description!r}), "
-                    "which is not identical to the framework-reserved parameter of "
-                    f"the same name (type={reserved_spec.type!r}, "
-                    f"kind={reserved_spec.kind!r}, default={reserved_spec.default!r}, "
-                    f"description={reserved_spec.description!r}); reserved declarations "
-                    f"must match exactly or be omitted -- they are never forwarded to "
-                    f"{source_label} regardless of compatibility."
+                    f"{route} does not accept a bare str; pass a collection of "
+                    "input names or a {input: destination} mapping."
                 )
+            selectors, names = None, [value]
+        elif isinstance(value, Mapping):
+            selectors, names = list(value), list(value.values())
+        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            selectors, names = None, list(value)
+            if isinstance(value, AbstractSet) and all(isinstance(n, str) for n in names):
+                names.sort()  # unordered: store deterministically
+        else:
+            raise AgentError(
+                f"{route} must be None, "
+                + ("a str, " if allow_str else "")
+                + "a collection of str, or a mapping of "
+                + ("selector" if allow_str else "input name")
+                + f" -> str; got {type(value).__name__}."
+            )
 
-        return [p for p in params if p.name not in stripped_names]
+        if not names:
+            return None
+
+        names = [n.strip() if isinstance(n, str) else n for n in names]
+        for n in names:
+            if not (isinstance(n, str) and IDENTIFIER_PATTERN.fullmatch(n)):
+                raise AgentError(
+                    f"{route} destination {n!r} must be a valid identifier string."
+                )
+            if is_reserved_name(n):
+                raise AgentError(
+                    f"{route} destination {n!r} is reserved (a "
+                    f"{TASK_RESULT_PREFIX!r} name)."
+                )
+        if len(set(names)) != len(names):
+            raise AgentError(f"{route} has duplicate destinations.")
+
+        if selectors is not None and route == "inputs_to_context":
+            selectors = [s.strip() if isinstance(s, str) else s for s in selectors]
+            for s in selectors:
+                if not (isinstance(s, str) and IDENTIFIER_PATTERN.fullmatch(s)):
+                    raise AgentError(
+                        f"{route} source {s!r} must be a valid identifier string."
+                    )
+
+        if isinstance(value, str):
+            return names[0]
+        return dict(zip(names if selectors is None else selectors, names))
 
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
-    @property
-    def post_result_key(self) -> str:
-        """Post-invoke parameter name that receives the task's raw generated response."""
-        return self._post_result_key
-
     @property
     def llm_engine(self) -> LLMEngine:
         """LLMEngine used for this agent."""
@@ -394,20 +502,24 @@ class Agent(AtomicInvokable, ABC):
         self._llm_engine = engine
 
     @property
-    def context_enabled(self) -> bool:
-        """Whether the agent feeds prior turns into each invocation.
+    def record_enabled(self) -> bool:
+        """Whether this agent persists each invocation's completed turn.
 
-        When ``False``, turns are always ``[]`` and nothing is stored in any
-        conversation for that invocation, though a normal ``AgentResult`` is
-        still returned.
+        Write-only axis, independent of ``records_window`` (the read
+        axis). ``True``: the completed turn is appended to the conversation
+        the call was bound to. ``False``: a normal ``AgentResult`` is still
+        returned, but nothing is stored in any conversation for that
+        invocation -- regardless of ``records_window``. Context write-back
+        (``inputs_to_context``/``response_to_context`` values) is part of the
+        same commit, so it is skipped too.
         """
-        return self._context_enabled
+        return self._record_enabled
 
-    @context_enabled.setter
-    def context_enabled(self, value: bool) -> None:
+    @record_enabled.setter
+    def record_enabled(self, value: bool) -> None:
         if type(value) is not bool:
-            raise ValueError("context_enabled must be a bool.")
-        self._context_enabled = value
+            raise ValueError("record_enabled must be a bool.")
+        self._record_enabled = value
 
     @property
     def records_window(self) -> Optional[int]:
@@ -421,11 +533,6 @@ class Agent(AtomicInvokable, ABC):
         self._records_window = value
 
     @property
-    def response_preview_limit(self) -> Optional[int]:
-        """Character limit for rendered assistant responses. ``None`` means no truncation."""
-        return self._response_preview_limit
-
-    @property
     def active_conversation(self) -> str:
         """Key of the currently active conversation."""
         return self._active_conversation
@@ -436,101 +543,267 @@ class Agent(AtomicInvokable, ABC):
         return list(self._conversations.keys())
 
     @property
-    def pre_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the input mapping into a prompt string."""
+    def pre_invoke(self) -> Optional[AtomicInvokable]:
+        """Invokable that converts the input mapping into a prompt string, or
+        ``None`` when there is no pre stage (the caller's ``prompt`` is used as-is)."""
         return self._pre_invoke
 
     @property
-    def post_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the task's raw generated response into the final agent output."""
+    def post_invoke(self) -> Optional[AtomicInvokable]:
+        """Invokable that converts the response into the final output, or ``None``
+        when there is no post stage (the response is returned as-is)."""
         return self._post_invoke
 
     @property
-    def system_prompts(self) -> dict[str, PromptConfig]:
-        """Shallow copy of the system prompt registry."""
-        return dict(self._system_prompts)
+    def inputs_to_context(self) -> Optional[dict[str, str]]:
+        """Normalized ``{input name: context name}`` mapping, or ``None``."""
+        return None if self._inputs_to_context is None else dict(self._inputs_to_context)
+
+    @property
+    def response_to_context(self) -> Optional[str | dict[Any, str]]:
+        """Normalized response -> context binding (``None``, a name, or ``{selector: name}``)."""
+        spec = self._response_to_context
+        return dict(spec) if isinstance(spec, dict) else spec
+
+    @property
+    def response_to_post(self) -> Optional[str | dict[Any, str]]:
+        """Normalized response -> ``post_invoke`` binding (``None``, a name, or ``{selector: name}``)."""
+        spec = self._response_to_post
+        return dict(spec) if isinstance(spec, dict) else spec
 
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def build_messages(
+    def render_turn(
         self,
-        system_prompt: str,
-        turns: List[AgentRecord],
-        prompt: str,
+        turn: AgentRecord,
+        *,
+        response_preview_limit: Optional[int] = None,
+        prompt_preview_limit: Optional[int] = None,
+        render_mode: str = "s",
+        **kwargs: Any,
     ) -> List[Dict[str, str]]:
-        """Render provider-facing message dicts from canonical turn inputs.
-
-        Each supplied turn is rendered through ``render_turn``. The current
-        prompt is appended as the final user message.
-        """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-        if turns:
-            for turn in turns:
-                messages.extend(self.render_turn(turn))
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
-    def render_turn(self, turn: AgentRecord) -> List[Dict[str, str]]:
         """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
         The assistant content is always ``turn.generated_response`` — the
-        LLM's own raw output, never ``post_invoke``'s transformed
-        ``final_result``. ``response_preview_limit`` is applied only to the
-        rendered text. ``turn.user_prompt`` is used verbatim as the user
-        message content — it is already a fully-resolved string, not a
-        template.
+        LLM's own raw output, never ``post_invoke``'s transformed result
+        (not retained on the record at all). ``turn.user_prompt`` is the user
+        message content — already a fully-resolved string, not a template.
+        Each is cut by its limit (``None`` truncates nothing, ``0`` hides the
+        text); ``summarize`` passes the bound conversation's limits and
+        ``render_mode`` (how the response is formatted; the prompt is always a
+        plain string), so called directly with no arguments nothing is
+        truncated and the response is rendered with ``str``.
+
+        ``**kwargs`` is accepted and ignored at this level — base rendering
+        has no family-specific use for it. A subclass override consumes
+        whatever keys it needs (e.g. ``ToolAgent``'s required ``index``)
+        and forwards ``**kwargs`` (limits included) through its own
+        ``super().render_turn`` call if it still wants this base behavior too.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
                 f"render_turn expected AgentRecord, got {type(turn)!r}"
             )
 
-        response_text = stringify_result(turn.generated_response)
-
-        if (
-            self._response_preview_limit is not None
-            and len(response_text) > self._response_preview_limit
-        ):
-            response_text = response_text[: self._response_preview_limit] + "..."
-
         return [
-            {"role": "user", "content": turn.user_prompt},
-            {"role": "assistant", "content": response_text},
+            {
+                "role": "user",
+                "content": stringify_value(
+                    turn.user_prompt, mode="s", limit=prompt_preview_limit
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": stringify_value(
+                    turn.generated_response,
+                    mode=render_mode,
+                    limit=response_preview_limit,
+                ),
+            },
         ]
 
     # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks
+    # Task-lifecycle steps
     # ------------------------------------------------------------------ #
-    # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
-    # bare AgentTask is subclass-agnostic base-contract work. BasicAgent
-    # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
-    # since only PlanActAgent/ReActAgent/ScriptActAgent know how to build
-    # their own richer AgentTask subclass; the bare AgentTask this base method returns
-    # isn't sufficient for them. act stays @abstractmethod here — every
-    # subclass's advance-by-one-round execution logic genuinely differs.
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """Build and return this invocation's AgentTask.
+    # Every step of invoke()/async_invoke() is a public method (see invoke's
+    # docstring for the sequence). create_task is concrete and never
+    # overridden; a family varies it only through _TASK_CLS and the
+    # _seed_task hook. think/prepare ship as
+    # no-ops; act stays hard-abstract -- every subclass's advance-by-one-round
+    # execution logic genuinely differs.
+    def create_task(self, inputs: Mapping[str, Any]) -> AgentTask:
+        """Build this invocation's task from the filtered ``inputs``.
 
-        Receives the selected conversation turns, the current prompt
-        string, and the full filtered ``inputs`` dict — untouched. Concrete
-        base implementation just wraps the three into a bare ``AgentTask``;
-        subclasses that need a richer ``AgentTask`` subclass (with
-        additional bookkeeping fields populated) override this.
+        Reads: the active conversation (name and records), ``records_window``,
+        the pre/post/agentic parameter names, ``inputs``. Writes (onto the new
+        task): ``conversation`` (the active name, snapshotted here so a later
+        ``switch_conversation`` cannot retarget this call), ``turns`` (a
+        pinned copy of the window: ``records_window == 0`` -> ``[]``,
+        ``None`` -> all, ``N`` -> the last ``N``), ``inputs`` (the same full
+        mapping, untouched), ``context`` (a shallow copy of the bound
+        conversation's context taken here -- the seed point; a later
+        ``remember()`` is not visible to the task), the ``pre_inputs``/
+        ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
+        ``started_at``. Right after the task is built (before ``_seed_task``
+        and ``pre_process``) ``_seed_context`` writes the call's
+        ``runtime_context`` dict (when ``use_runtime_context`` is on) and
+        ``inputs_to_context`` into ``task.context``, the explicit mapping
+        winning a name clash: a created variable persists only if it is a
+        declared destination (``record`` decides). ``post_process`` writes bound
+        response values into ``task.context`` the same way (create or replace);
+        any other writer must go through ``_write_context``.
 
-        ``system_prompt_name`` is set to ``None`` here — this base hook has
-        no domain knowledge of which (if any) system prompt applies;
-        subclasses that need one override this and set it explicitly
-        (``BasicAgent`` calls ``super()._initialize_task(...)`` then stamps
-        ``"role"`` over this ``None``).
+        The three views are slices of ``inputs`` by name -- views, not a
+        partition: a name consumed by several buckets goes into each. Post
+        receives the caller inputs for its declared parameters, with bound
+        values overlaid by ``post_process``; pre/post see ``runtime_context``
+        only if they declare it. ``agentic_inputs`` holds the
+        ``extra_parameters``-sourced names
+        (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
+        etc. are render context, not agent parameters).
+
+        The task class comes from ``_TASK_CLS``; ``_seed_task`` then does any
+        family-specific seeding. Not overridden by subclasses. Pure
+        computation, no I/O.
         """
-        return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name=None)
+        with self._invoke_lock:
+            active_key = self._active_conversation
+            conversation = self._conversations[active_key]
+        history = conversation.records
+        window = self._records_window
+        if window == 0:
+            turns: list[AgentRecord] = []
+        elif window is None:
+            turns = list(history)
+        else:
+            turns = history[-window:]
+
+        task = self._TASK_CLS(
+            turns=turns,
+            inputs=inputs,
+            conversation=active_key,
+            context=dict(conversation.context),
+            pre_inputs={k: v for k, v in inputs.items() if k in self._pre_names},
+            post_inputs={k: v for k, v in inputs.items() if k in self._post_names},
+            agentic_inputs={k: v for k, v in inputs.items() if k in self._agentic_names},
+            run_id=uuid4().hex,
+            started_at=datetime.now(timezone.utc),
+        )
+        self._seed_context(task)
+        self._seed_task(task)
+        return task
+
+    def _seed_context(self, task: AgentTask) -> None:
+        """Seed ``task.context`` from the caller's values, once per call.
+
+        1. With ``use_runtime_context``, the call's ``runtime_context`` dict
+           contributes its entries by their own keys; every key must be an
+           identifier string not starting with ``TASK_RESULT_PREFIX``, else
+           ``AgentInvocationError`` (before anything is written).
+        2. ``inputs_to_context`` then contributes each source present in
+           ``task.inputs`` (a defaulted one counts, since ``filter_inputs``
+           already injected it) under its destination; an absent source is
+           skipped. Merged after the runtime entries, so an explicit mapping
+           wins a name clash.
+        3. One ``_write_context`` with ``create=True``: a writable variable is
+           replaced, a readonly one skipped, an absent one created.
+        """
+        bound: dict[str, Any] = {}
+        if self._use_runtime_context:
+            runtime = task.inputs[RUNTIME_PARAM.name]
+            for key in runtime:
+                if not (
+                    isinstance(key, str) and IDENTIFIER_PATTERN.fullmatch(key)
+                ) or is_reserved_name(key):
+                    raise AgentInvocationError(
+                        f"{RUNTIME_PARAM.name} key {key!r} must be an identifier string "
+                        f"not starting with {TASK_RESULT_PREFIX!r}."
+                    )
+            bound.update(runtime)
+        if self._inputs_to_context is not None:
+            bound.update(
+                {dest: task.inputs[src] for src, dest in self._inputs_to_context.items()
+                 if src in task.inputs}
+            )
+        self._write_context(task, bound, create=True)
+
+    def _seed_task(self, task: AgentTask) -> None:
+        """Family-specific seeding of a freshly built task, in place.
+
+        Called once by ``create_task`` after construction. Default: nothing
+        to seed. ``ToolAgent`` seeds its cache and constants.
+        """
+
+    def summarize(self, task: AgentTask) -> AgentTask:
+        """Render ``task.turns`` into ``task.historic_messages``.
+
+        Reads ``task.turns``; writes ``task.historic_messages``; returns
+        ``task``. Each turn is rendered with its 0-based position within
+        *this invocation's* ``task.turns`` passed as ``index`` --
+        window-relative (after any ``records_window`` truncation), not the
+        turn's position in the full stored conversation. Base rendering
+        ignores it; ``ToolAgent``'s ``render_turn`` requires it. Empty
+        ``turns`` leaves ``historic_messages`` empty. Renders only -- there
+        is no compaction yet. Each turn is limited by the bound conversation's
+        ``prompt_preview_limit`` / ``response_preview_limit`` / ``render_mode``,
+        read here when the messages are built.
+        """
+        conv = self._conversations[task.conversation]
+        rendered: list[dict[str, str]] = []
+        for i, turn in enumerate(task.turns):
+            rendered.extend(
+                self.render_turn(
+                    turn,
+                    index=i,
+                    response_preview_limit=conv.response_preview_limit,
+                    prompt_preview_limit=conv.prompt_preview_limit,
+                    render_mode=conv.render_mode,
+                )
+            )
+        task.historic_messages = rendered
+        return task
+
+    async def async_summarize(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``summarize``; pure computation, so it runs inline."""
+        return self.summarize(task)
+
+    def pre_process(self, task: AgentTask) -> AgentTask:
+        """Run ``pre_invoke`` over ``task.pre_inputs`` to produce the prompt.
+
+        Reads ``task.pre_inputs``; always overwrites ``task.user_prompt``;
+        returns ``task``. With no ``pre_invoke`` the prompt is
+        ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
+        propagate unchanged. A non-``str`` prompt raises
+        ``AgentInvocationError`` -- a prompt string is required.
+        """
+        logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
+        if self._pre_invoke is None:
+            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
+        else:
+            raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
+            subject = "pre_invoke returned a non-string result"
+        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        return task
+
+    async def async_pre_process(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``pre_process``."""
+        logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
+        if self._pre_invoke is None:
+            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
+        else:
+            raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
+            subject = "pre_invoke returned a non-string result"
+        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        return task
+
+    @staticmethod
+    def _require_prompt_str(raw_prompt: Any, subject: str) -> str:
+        if not isinstance(raw_prompt, str):
+            raise AgentInvocationError(
+                f"{subject} (type={type(raw_prompt)!r}); a prompt string is required"
+            )
+        return raw_prompt
 
     def think(self, task: AgentTask) -> AgentTask:
         """Advance ``task``'s reasoning phase by one round.
@@ -542,8 +815,9 @@ class Agent(AtomicInvokable, ABC):
         return task
 
     async def async_think(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``think``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self.think, task)
+        """Async mirror of ``think``; the default is a no-op, so it runs inline.
+        A family that overrides ``think`` must override this too."""
+        return task
 
     def prepare(self, task: AgentTask) -> AgentTask:
         """Advance ``task``'s preparation phase by one round.
@@ -553,8 +827,9 @@ class Agent(AtomicInvokable, ABC):
         return task
 
     async def async_prepare(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``prepare``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self.prepare, task)
+        """Async mirror of ``prepare``; the default is a no-op, so it runs inline.
+        A family that overrides ``prepare`` must override this too."""
+        return task
 
     @abstractmethod
     def act(self, task: AgentTask) -> AgentTask:
@@ -591,67 +866,36 @@ class Agent(AtomicInvokable, ABC):
         Concrete, class-independent pipeline shared by every phase and
         every family: system message, then historic turns, then this
         phase's own task messages. Family/phase-specific behavior lives
-        entirely in ``_render_task_messages`` (and, for a family with a
-        richer system-prompt context, in what it passes to
-        ``_render_system_message``) — this method never branches on
-        ``task.system_prompt_name`` itself.
+        entirely in ``_render_system_message`` and ``_render_task_messages``
+        — this method never branches on a phase itself.
 
         ``additional_messages`` (``None`` treated as ``[]``) is appended
-        directly onto whatever ``_render_task_messages`` returns — which is
-        ``task.task_messages`` itself, so the extension persists there too,
-        across generation retries within one phase.
+        directly onto whatever ``_render_task_messages`` returns.
 
         Pure computation, no I/O — the same method serves both the sync and
         async lifecycle paths; there is no ``_async_render_task``.
         """
         system = self._render_system_message(task)
-        history = self._render_historic_messages(task)
         task_messages = self._render_task_messages(task)
         task_messages.extend(additional_messages or [])
-        return system + history + task_messages
+        return system + task.historic_messages + task_messages
 
+    @abstractmethod
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
-        """Render ``task``'s active system prompt, if any.
+        """Return this call's system message: ``[]`` for none, otherwise a
+        single ``{"role": "system", "content": ...}`` dict.
 
-        Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
-        Otherwise renders ``self._system_prompts[task.system_prompt_name]``
-        against ``task.inputs`` and returns a single-element system message
-        list. An unregistered name raises ``KeyError`` naturally — an
-        internal-contract violation, not guarded against.
-
-        A family whose active template needs a richer context than
-        ``task.inputs`` alone (e.g. tool/constants data) overrides this
-        method wholesale, builds its own context, and renders directly —
-        there is no parameterized "extra context" hook here by design.
+        Hard-abstract: the base has no prompt of its own. A pure function of
+        the agent and the task.
         """
-        if task.system_prompt_name is None:
-            return []
-        rendered = self._system_prompts[task.system_prompt_name].render(task.inputs)
-        return [{"role": "system", "content": rendered}]
-
-    def _render_historic_messages(self, task: AgentTask) -> list[dict[str, str]]:
-        """Lazily render ``task.turns`` into ``task.historic_messages``.
-
-        Built once per invoke and reused thereafter. If ``task.turns`` is
-        empty, ``task.historic_messages`` correctly stays empty — later
-        calls re-checking an empty ``turns`` are a harmless no-op, not an
-        ambiguous state.
-        """
-        if task.historic_messages:
-            return task.historic_messages
-        if not task.turns:
-            return task.historic_messages
-        rendered: list[dict[str, str]] = []
-        for turn in task.turns:
-            rendered.extend(self.render_turn(turn))
-        task.historic_messages = rendered
-        return task.historic_messages
+        ...
 
     @abstractmethod
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this round's phase-specific task messages.
 
-        Every implementation must follow this contract:
+        Build-once contract (``additional_messages`` passed to ``render_task``
+        extend the stored list, so they persist across retries within a phase):
 
         1. If ``task.task_messages`` is already non-empty, this phase's
            messages are already built for this round — return it as-is
@@ -662,612 +906,549 @@ class Agent(AtomicInvokable, ABC):
            on the task, not a copy.
 
         Hard-abstract, no shared content — base ``Agent`` has no phase of
-        its own to render generically.
+        its own to render generically. A family whose task message carries
+        the prompt and context builds its text with ``_render_task_block``.
         """
         ...
 
-    async def _async_initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """Async mirror of ``_initialize_task``; default offloads to a worker thread."""
-        return await asyncio.to_thread(
-            self._initialize_task, turns=turns, prompt=prompt, inputs=inputs
-        )
+    def _render_task_block(self, task: AgentTask) -> str:
+        """Build the single user-message text for a context-aware task.
 
-    def _build_record_from_task(
-        self,
-        task: AgentTask,
-        turns: list[AgentRecord],
-    ) -> AgentRecord:
+        The wrapped current prompt, preceded by a context block.
+        Private and overridable; ``BasicAgent`` calls it from
+        ``_render_task_messages``, and later passes reuse it for the other
+        families.
+
+        1. ``limit`` is the bound conversation's ``context_preview_limit``,
+           read now (not cached), so an edit made before this render is seen.
+           A removed conversation raises ``KeyError``, as in ``summarize``
+           (known hazard).
+        2. ``render_context_entries`` over ``task.context`` (the call's working
+           copy, never a first-round snapshot) with this family's name prefix.
+        3. ``render_task_block`` wraps ``task.user_prompt`` and puts the
+           context block before it.
+
+        Never modifies ``task.user_prompt`` or ``task.context``. The prompt is
+        always wrapped; the context block appears only when ``task.context`` is
+        non-empty (a variable with a hidden value still counts); the prompt is
+        never truncated. A pure function of the task and the conversation's
+        limit.
+        """
+        limit = self._conversations[task.conversation].context_preview_limit
+        entries = render_context_entries(
+            task.context, limit=limit, name_prefix=self._CONTEXT_NAME_PREFIX
+        )
+        return render_task_block(task.user_prompt, entries)
+
+    def _bind_response(self, task: AgentTask) -> dict[str, Any]:
+        """Slice the generated response per the two response routes.
+
+        1. Both routes are sliced first (``_slice_response``), so a bad
+           response shape raises before anything runs or is written.
+        2. The ``response_to_post`` pieces overwrite those entries of
+           ``task.post_inputs`` (every destination is a post parameter, checked
+           at construction).
+
+        Returns the ``response_to_context`` pieces (a skipped selector has no
+        entry), which ``post_process`` hands to the context sink.
+        """
+        post_bound = self._slice_response(task, self._response_to_post, "response_to_post")
+        context_bound = self._slice_response(
+            task, self._response_to_context, "response_to_context"
+        )
+        task.post_inputs.update(post_bound)
+        return context_bound
+
+    @staticmethod
+    def _slice_response(
+        task: AgentTask, spec: Optional[str | dict[Any, str]], route: str
+    ) -> dict[str, Any]:
+        """Resolve one response binding against ``task.generated_response``.
+
+        ``None`` -> ``{}``. A ``str`` binds the whole response; a mapping
+        indexes each selector out of it (a missing key/index is skipped, a
+        present ``None`` is bound, other errors propagate; a ``str``/``bytes``
+        response raises ``AgentInvocationError`` since it would index
+        characters).
+        """
+        if spec is None:
+            return {}
+        response = task.generated_response
+        if isinstance(spec, str):
+            return {spec: response}
+        if isinstance(response, (str, bytes)):
+            raise AgentInvocationError(
+                f"{route} selectors cannot index a str/bytes response; "
+                "use the str form to bind the whole response."
+            )
+        bound = {}
+        for selector, destination in spec.items():
+            try:
+                bound[destination] = response[selector]
+            except (KeyError, IndexError):
+                continue
+        return bound
+
+    @staticmethod
+    def _write_context(
+        task: AgentTask, bound: Mapping[str, Any], *, create: bool = False
+    ) -> None:
+        """Context sink: write each bound name into ``task.context``.
+
+        An existing writable variable has its value replaced (description and
+        flags kept); a readonly one is skipped. An absent name is created as a
+        plain ``ContextVariable`` (no description, render mode ``"s"``) when
+        ``create`` is set, else ignored. Every name written is added to
+        ``task.changed_context``, which is what ``record`` offers the
+        conversation: every writer into ``task.context`` must come through
+        here, or its write is not persisted. Per-call state, so no lock.
+        """
+        for name, value in bound.items():
+            variable = task.context.get(name)
+            if variable is None:
+                if create:
+                    task.context[name] = ContextVariable(name=name, value=value)
+                    task.changed_context.add(name)
+            elif not variable.readonly:
+                task.context[name] = replace(variable, value=value)
+                task.changed_context.add(name)
+
+    def post_process(self, task: AgentTask) -> AgentResult:
+        """Resolve response bindings, run ``post_invoke``, write the context
+        sink, and build the result.
+
+        1. Slice ``task.generated_response`` per ``response_to_post`` and
+           ``response_to_context`` and overlay the post pieces onto
+           ``task.post_inputs`` (can raise before anything runs).
+        2. With no post stage the response is the result; otherwise ``post_invoke``
+           runs over ``task.post_inputs``.
+        3. Context sink: the ``response_to_context`` values create or replace
+           ``task.context`` variables (``_write_context``, readonly skipped).
+        4. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
+        Errors from steps 1-2 propagate unchanged, before the sink and before
+        ``record``, so nothing is written and the turn is not recorded.
+        """
+        logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
+        bound = self._bind_response(task)
+        if self._post_invoke is None:
+            result = task.generated_response
+        else:
+            result = self._post_invoke.invoke(task.post_inputs).result
+        self._write_context(task, bound, create=True)
+        task.ended_at = datetime.now(timezone.utc)
+        return self.build_result_from_task(task, result)
+
+    async def async_post_process(self, task: AgentTask) -> AgentResult:
+        """Async mirror of ``post_process``."""
+        logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
+        bound = self._bind_response(task)
+        if self._post_invoke is None:
+            result = task.generated_response
+        else:
+            result = (await self._post_invoke.async_invoke(task.post_inputs)).result
+        self._write_context(task, bound, create=True)
+        task.ended_at = datetime.now(timezone.utc)
+        return self.build_result_from_task(task, result)
+
+    def _record_base_fields(self, task: AgentTask) -> dict[str, Any]:
+        """Common ``AgentRecord`` kwargs for a finished task.
+
+        Identity and timing come from the task; ``prev`` is the last turn this
+        call read (``task.turns[-1]``), ``None`` when it read none;
+        ``agent_id`` names this agent as the writer. Family overrides of
+        ``_build_record_from_task`` splat this and add their own fields.
+        """
+        return {
+            "user_prompt": task.user_prompt,
+            "generated_response": task.generated_response,
+            "run_id": task.run_id,
+            "started_at": task.started_at,
+            "ended_at": task.ended_at,
+            "inputs": task.inputs,
+            "llm_records": tuple(task.llm_records),
+            "prev": task.turns[-1] if task.turns else None,
+            "agent_id": f"{self.full_name};{self.instance_id}",
+        }
+
+    def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
         ``BasicAgent`` uses this base implementation as-is; ``PlanActAgent``/
-        ``ReActAgent``/``ScriptActAgent`` each override it directly (not via
-        a shared ``ToolAgent`` implementation) to return their own richer
-        ``ToolAgentRecord``-family (or, for ``ScriptActAgent``,
-        ``ScriptActAgentRecord``) subclass. ``final_result`` is
-        deliberately left at its dataclass default (``None``) — it is not
-        knowable until
-        ``build_result_from_record`` runs afterward; the caller attaches it
-        via ``dataclasses.replace(...)``.
+        ``ReActAgent``/``ScriptActAgent``/``ThinkingAgent`` each override it
+        to return their own richer record subclass, built from
+        ``_record_base_fields`` plus their own fields.
         """
-        prev = turns[-1] if turns else None
-        return AgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
-        )
+        return AgentRecord(**self._record_base_fields(task))
 
     # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
-    def build_result_from_record(
-        self,
-        record: AgentRecord,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> AgentResult:
+    def build_result_from_task(self, task: AgentTask, result: Any) -> AgentResult:
         """Construct this Agent's ``AgentResult`` envelope directly from a
-        completed ``AgentRecord``, wrapping the low-level ``_make_result``
-        primitive.
+        finished task, wrapping the low-level ``_make_result`` primitive.
 
-        Public — external subclasses may legitimately override this to
+        Public -- external subclasses may legitimately override this to
         choose a more specific result class or add subclass-specific result
-        fields.
+        fields. Built independently of the record: both read the task.
 
-        ``result`` (the post-``post_invoke`` final caller-facing value) and
-        ``started_at``/``ended_at`` (the outer invocation's timing envelope)
-        are not derivable from the record, so both stay explicit parameters —
-        distinct from ``record.generated_response``, which is the
-        pre-``post_invoke`` raw value.
+        ``result`` (the post-``post_invoke`` final caller-facing value) is not
+        on the task, so it stays an explicit parameter -- distinct from
+        ``task.generated_response``, the pre-``post_invoke`` raw value.
+        ``run_id`` and ``started_at``/``ended_at`` come from the task.
+
+        ``llm_model_data`` comes from the engine's configuration, so a task
+        that finished without any LLM call still builds a result.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=AgentResult,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
         )
 
-    def _commit_emit(
-        self,
-        task: AgentTask,
-        turns: list[AgentRecord],
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        *,
-        active_key: str,
-    ) -> AgentResult:
-        """Assemble, commit, and return this invocation's final ``AgentResult``.
+    def record(self, task: AgentTask) -> None:
+        """Build this invocation's ``AgentRecord`` from the task and commit it.
 
-        Shared tail for both ``invoke``/``async_invoke``, called once the
-        task-lifecycle loop has completed and ``post_invoke`` has produced
-        ``result``. Pure computation, no I/O — one method serves both
-        lifecycle paths. ``active_key`` is the active-conversation snapshot
-        taken by ``_resolve_context`` before the task-lifecycle loop ran; no
-        separate ``target`` parameter is needed here since ``record.prev``
-        already equals the resolved target (or ``None``) once step 1
-        completes -- ``turns`` was constructed by ``_resolve_context`` to
-        always end exactly at that target.
+        Reads the task's record fields and bound conversation name; returns
+        nothing. Shared by ``invoke`` and ``async_invoke``.
 
-        1. ``record = self._build_record_from_task(task, turns)``, validated
-           as an ``AgentRecord``.
-        2. ``agent_result = self.build_result_from_record(record,
-           result=result, started_at=started_at, ended_at=ended_at)``.
-        3. ``record = replace(record, final_result=agent_result)``.
-        4. Under ``self._invoke_lock``: if context/window is disabled,
-           return ``agent_result`` with nothing stored. Otherwise, a fresh
-           children check on ``record.prev`` decides append-vs-fork --
-           delegating fork construction to the same ``fork_conversation``
-           primitive exposed publicly -- and the record is appended to the
-           resolved conversation, with ``target.children`` updated to match.
-        5. Return ``agent_result``.
+        The record is built first (independent of the result). With
+        ``record_enabled`` False nothing is stored. Otherwise the conversation
+        bound at ``create_task`` is looked up under ``self._invoke_lock``
+        (even if the active one has since changed) and ``Conversation.commit``
+        runs outside it, so the agent and conversation locks are never held
+        together; see ``commit`` for the append, ``children`` link and context
+        write-back rules. There is no implicit forking: branching happens only
+        through explicit ``import_conversation``.
+
+        Context write-back offers ``commit`` only the variables this call
+        changed (``task.changed_context``), and only those that are a declared
+        destination (``inputs_to_context`` / ``response_to_context``) or that
+        the conversation still holds. So a declared name is created (or
+        re-created if forgotten mid-call: the call's output wins), while a
+        runtime-only key, a scratch name or a non-declared name forgotten
+        mid-call is dropped. The held-name check reads ``conv.context``
+        without its lock (an atomically swapped immutable view); a held name
+        forgotten before the commit is created by it (latest writer wins).
+
+        ``prev`` is "the last turn this call read" (``task.turns[-1]``) and is
+        provenance only: turn selection never uses it. ``children`` is
+        likewise provenance, shared by every conversation that contains a
+        record, so a record continued by two racing calls or two agents simply
+        has two children. With ``records_window == 0`` the record is a chain
+        root (``prev=None``).
         """
-        record = self._build_record_from_task(task, turns)
-        if not isinstance(record, AgentRecord):
-            raise AgentInvocationError(
-                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-            )
-
-        agent_result = self.build_result_from_record(
-            record,
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
-
-        record = replace(record, final_result=agent_result)
+        if not self._record_enabled:
+            return
+        record = self._build_record_from_task(task)
 
         with self._invoke_lock:
-            if not (self._context_enabled and self._records_window != 0):
-                return agent_result
-
-            # Fresh (not stale) children check, taken under the same lock as
-            # the mutation below -- this is what makes two concurrent
-            # commits targeting the same childless point resolve safely:
-            # whichever commits second observes the first's already-appended
-            # child and forks instead of colliding.
-            target = record.prev
-            if target is not None and target.children:
-                dest_key = self.fork_conversation(
-                    conversation_id=active_key,
-                    run_id=target.final_result.run_id,
-                    fork_name=None,
-                )
-            else:
-                dest_key = active_key
-
-            self._conversations[dest_key].append(record)
-            if target is not None:
-                target.children.append(record)
-
-        return agent_result
+            conv = self._conversations[task.conversation]
+        changed = {
+            name: task.context[name]
+            for name in task.changed_context
+            if name in self._context_destinations or name in conv.context
+        }
+        conv.commit(record, changed)
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     def clear_memory(self) -> None:
-        """Hard-reset all conversation storage to the just-constructed state.
+        """Factory-reset all conversation storage to the just-constructed state.
 
-        Every conversation is discarded; ``self._conversations`` becomes
-        ``{"default": []}`` and the active conversation resets to
-        ``"default"``. ``self._branch_counter`` is deliberately NOT reset --
-        an auto-generated conversation name must never be reissued, even
-        across a full clear. Takes ``self._invoke_lock`` like every other
-        conversation-mutating method -- without it, an in-flight
-        ``invoke``/``async_invoke`` whose ``_resolve_context`` snapshot
-        predates this call could have its later ``_commit_emit`` reference a
-        conversation key this reset just removed.
+        Every conversation is unregistered from this agent, including its
+        context and preview limits (a conversation shared with another agent
+        stays intact there); ``self._conversations`` becomes a single fresh
+        ``"default"`` built by ``_new_conversation()`` and the active
+        conversation resets to ``"default"``.
+        Takes ``self._invoke_lock`` like every other registry-mutating method
+        -- without it, an in-flight ``invoke``/``async_invoke`` whose
+        ``create_task`` snapshot predates this call could have its later
+        ``record`` reference a conversation key this reset just removed.
         """
         with self._invoke_lock:
-            self._conversations = {DEFAULT_CONVERSATION_NAME: []}
+            self._conversations = {
+                DEFAULT_CONVERSATION_NAME: self._new_conversation()
+            }
             self._active_conversation = DEFAULT_CONVERSATION_NAME
 
-    def get_conversation(
-        self,
-        conversation_id: str | None = None,
-        turns: int | None = None,
-    ) -> list[AgentRecord]:
-        """Return a conversation's history (or a tail slice of it), oldest-first.
+    def _new_conversation(self) -> Conversation:
+        """Build one fresh, empty default conversation for this agent.
 
-        A plain dict-key lookup, not a ``.prev``-walk -- each conversation's
-        stored list is already the full forward-ordered trail, so no
-        traversal is needed to reconstruct it. ``conversation_id`` is a
-        dict key, not a record identity: once forking exists, a single
-        ``AgentRecord`` can legitimately belong to more than one
-        conversation's list, so "the conversation containing run_id X" is no
-        longer an unambiguous question.
+        1. return ``Conversation()`` -- all default limits and render_mode
+           ``"s"``.
+        2. pure: no I/O, no lock, and it must not read ``AtomicInvokable``
+           state or anything a subclass sets after ``Agent.__init__`` (it runs
+           inside ``Agent.__init__`` before the invokable parts are
+           initialized).
 
-        Parameters
-        ----------
-        conversation_id:
-            Conversation key to read. ``None`` resolves to the active
-            conversation. An unknown key raises ``AgentInvocationError``.
-        turns:
-            Maximum number of trailing records to return. ``None`` means the
-            full history. ``0`` always raises ``ValueError``.
+        The single source of every default conversation this agent builds: the
+        initial ``"default"``, the one rebuilt by ``clear_memory()``, the one
+        rebuilt by ``remove_conversation("default")``, and the starting point
+        ``create_conversation`` overlays its arguments onto. A subclass
+        overrides it to give its conversations different defaults
+        (``BasicAgent``: render_mode ``"j"`` when it has a response_schema).
         """
-        if turns == 0:
+        return Conversation()
+
+    def _check_new_conversation_name(self, name: str, caller: str) -> None:
+        """Raise ``ValueError`` if ``name`` is badly shaped or already taken.
+
+        The caller holds ``self._invoke_lock``.
+        """
+        if not CONVERSATION_NAME_PATTERN.fullmatch(name):
             raise ValueError(
-                "get_conversation: turns must be a positive integer or None; "
-                "0 is not valid (the method always returns at least one record "
-                "when the conversation is non-empty)."
+                f"{caller}: invalid conversation name {name!r} (must be "
+                "alphanumeric/underscore)."
             )
+        if name in self._conversations:
+            raise ValueError(f"{caller}: conversation {name!r} already exists.")
 
-        key = self._active_conversation if conversation_id is None else conversation_id
-        if key not in self._conversations:
-            raise AgentInvocationError(
-                f"get_conversation: unknown conversation {key!r}."
-            )
+    def get_conversation(self, conversation_id: str | None = None) -> Conversation:
+        """Return the stored conversation itself (not a snapshot).
 
-        history = self._conversations[key]
-        return list(history) if turns is None else list(history[-turns:])
+        Context is changed through the returned object
+        (``agent.get_conversation().remember(...)``), whose mutators are
+        atomic under the conversation's own lock; its preview limits are
+        assigned directly
+        (``agent.get_conversation().response_preview_limit = 500``).
+        ``conversation_id`` is a registry key, not a record identity: a
+        single ``AgentRecord`` can belong to more than one conversation's
+        list, and one conversation object can be registered in several agents.
 
-    def _find_in_conversation(
-        self, conversation_id: str, run_id: str | None
-    ) -> AgentRecord | None:
-        """Pure query for a record within a given conversation; never raises.
-
-        ``None`` resolves to that conversation's most recent record (or
-        ``None`` if it's empty); an explicit ``run_id`` resolves to the
-        matching record, or ``None`` if no record in that conversation has
-        it. Takes ``conversation_id`` explicitly rather than reading
-        ``self._active_conversation`` internally -- ``_resolve_context``
-        must be able to pass its own already-snapshotted key so a
-        concurrent ``set_active_conversation`` can never make this method's
-        search and its caller's own snapshot disagree. Used by
-        ``_resolve_context`` to resolve a ``run_id`` (or ``None``) against a
-        specific conversation's history.
-        """
-        history = self._conversations[conversation_id]
-        if run_id is None:
-            return history[-1] if history else None
-        return next(
-            (r for r in history if r.final_result.run_id == run_id), None
-        )
-
-    def _resolve_context(self, run_id: str | None) -> tuple[str, list[AgentRecord]]:
-        """Resolve this invocation's active-conversation snapshot and context turns.
-
-        Called unlocked, early in ``invoke``/``async_invoke``, before the
-        think/prepare/act loop -- the active-conversation key is snapshotted
-        here so it travels into ``_commit_emit`` unchanged even if another
-        thread calls ``set_active_conversation`` before this invocation
-        commits.
-
-        1. Snapshot ``active_key = self._active_conversation``.
-        2. If context/window is disabled, ``run_id`` is ignored entirely and
-           nothing is selected.
-        3. Otherwise resolve ``run_id`` within ``active_key`` specifically
-           (via ``_find_in_conversation(active_key, run_id)``, never the
-           live ``self._active_conversation``) -- this is what keeps
-           ``history`` and ``target`` from a concurrent
-           ``set_active_conversation`` race ever disagreeing. An
-           unresolvable explicit ``run_id`` raises ``ValueError`` (not
-           ``AgentInvocationError`` -- deliberately distinct from
-           ``get_conversation``'s unknown-lookup convention).
-        4. The returned turns always end exactly at the resolved target
-           (or are ``[]`` when there is none), sliced to ``records_window``
-           from the end.
-        """
-        active_key = self._active_conversation
-        if not (self._context_enabled and self._records_window != 0):
-            return active_key, []
-
-        history = self._conversations[active_key]
-        target = self._find_in_conversation(active_key, run_id)
-        if run_id is not None and target is None:
-            raise ValueError(
-                f"invoke: no record with run_id {run_id!r} found in the "
-                f"active conversation {active_key!r}."
-            )
-        if target is None:
-            return active_key, []
-
-        idx = history.index(target)
-        prefix = history[: idx + 1]
-        window = self._records_window
-        turns = prefix if window is None else prefix[-window:]
-        return active_key, turns
-
-    def create_conversation(self, name: str) -> bool:
-        """Create a new, empty conversation.
-
-        ``name`` must be alphanumeric-plus-underscore and must not end in
-        ``_<digits>`` (that suffix shape is reserved for auto-generated fork
-        names) -- an invalid shape raises ``ValueError``. Returns ``True`` on
-        success, ``False`` if ``name`` already exists (never auto-activates
-        either way).
+        ``conversation_id=None`` resolves to the active conversation. An
+        unknown key raises ``AgentInvocationError``.
         """
         with self._invoke_lock:
-            if not CONVERSATION_NAME_PATTERN.fullmatch(name):
-                raise ValueError(
-                    f"create_conversation: invalid name {name!r} (must be "
-                    "alphanumeric/underscore, must not end in _<digits>)."
-                )
-            if name in self._conversations:
-                return False
-            self._conversations[name] = []
-            return True
+            key = self._active_conversation if conversation_id is None else conversation_id
+            if key not in self._conversations:
+                raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
+            return self._conversations[key]
 
-    def fork_conversation(
+    def create_conversation(
         self,
-        conversation_id: str,
-        run_id: str,
-        fork_name: str | None = None,
-    ) -> str:
-        """Fork a new conversation off an existing one at a specific record.
+        name: str,
+        *,
+        response_preview_limit: int | None = None,
+        prompt_preview_limit: int | None = None,
+        context_preview_limit: int | None = None,
+        render_mode: str | None = None,
+    ) -> Conversation:
+        """Create a new, empty conversation and return the stored object.
 
-        Always performs a real, unconditional fork -- unlike the implicit
-        fork-on-invoke path, this method has no "continue in place" outcome.
-        Never changes ``self._active_conversation``.
+        ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
+        that already exists raises ``ValueError`` with a specific message.
 
-        Parameters
-        ----------
-        conversation_id:
-            Source conversation key. Unknown key raises
-            ``AgentInvocationError``.
-        run_id:
-            Fork point within ``conversation_id``. Unknown run_id raises
-            ``ValueError`` (implies ``conversation_id`` is non-empty).
-        fork_name:
-            Explicit name for the new conversation, validated the same as
-            ``create_conversation``'s ``name`` -- an invalid shape or an
-            existing collision both raise ``ValueError`` (this is an
-            explicit, deliberate name the caller chose, unlike
-            ``create_conversation``'s softer boolean-return-on-collision).
-            When omitted, auto-derived from ``conversation_id`` (its own
-            existing trailing ``_<digits>`` suffix stripped first) plus the
-            next value from one shared, ever-increasing, never-reused
-            counter.
+        1. under ``self._invoke_lock``: check the name.
+        2. start from ``self._new_conversation()``.
+        3. assign each argument that is not ``None`` onto it. The three
+           preview limits (``None`` unlimited, ``0`` hidden, else
+           ``int > 0``) and ``render_mode`` (how prior responses are formatted
+           in history; omitted -> the agent's default) are validated by
+           ``Conversation`` (``ValueError``); a failure leaves nothing
+           registered.
+        4. register and return it. Never auto-activates.
+
+        ``None`` means "not given" for every argument, so a limit cannot be
+        set back to ``None`` over a default the agent's hook already set.
         """
         with self._invoke_lock:
-            if conversation_id not in self._conversations:
-                raise AgentInvocationError(
-                    f"fork_conversation: unknown conversation {conversation_id!r}."
-                )
-            source = self._conversations[conversation_id]
-            target = next(
-                (r for r in source if r.final_result.run_id == run_id), None
-            )
-            if target is None:
-                raise ValueError(
-                    f"fork_conversation: no record with run_id {run_id!r} "
-                    f"found in conversation {conversation_id!r}."
-                )
+            self._check_new_conversation_name(name, "create_conversation")
+            conv = self._new_conversation()
+            given = {
+                "response_preview_limit": response_preview_limit,
+                "prompt_preview_limit": prompt_preview_limit,
+                "context_preview_limit": context_preview_limit,
+                "render_mode": render_mode,
+            }
+            for field, value in given.items():
+                if value is not None:
+                    setattr(conv, field, value)
+            self._conversations[name] = conv
+            return conv
 
-            if fork_name is not None:
-                if not CONVERSATION_NAME_PATTERN.fullmatch(fork_name):
-                    raise ValueError(
-                        f"fork_conversation: invalid fork_name {fork_name!r}."
-                    )
-                if fork_name in self._conversations:
-                    raise ValueError(
-                        f"fork_conversation: name {fork_name!r} already exists."
-                    )
-                resolved_name = fork_name
+    def get_record(
+        self,
+        *,
+        run_id: str | None = None,
+        conversation: str | None = None,
+        index: int | None = None,
+    ) -> AgentRecord:
+        """Single-record lookup. Valid combinations:
+
+        - ``run_id`` alone: first match scanning every conversation.
+        - ``run_id`` + ``conversation``: first match in that conversation.
+        - ``conversation`` + ``index``: ``records[index]``.
+        - ``index`` alone: index into the active conversation.
+
+        Anything else (``run_id`` + ``index``, ``conversation`` alone,
+        nothing) raises ``ValueError``. An unknown ``conversation`` raises
+        ``AgentInvocationError``; no record with the ``run_id`` raises
+        ``ValueError``; an out-of-range ``index`` raises the natural
+        ``IndexError``.
+        """
+        if run_id is not None:
+            if index is not None:
+                raise ValueError("get_record: run_id may not be combined with index.")
+            if conversation is None:
+                with self._invoke_lock:
+                    convs = list(self._conversations.values())
             else:
-                base = TRAILING_FORK_INDEX_PATTERN.sub("", conversation_id)
-                candidate = f"{base}_{self._branch_counter}"
-                self._branch_counter += 1
-                while candidate in self._conversations:
-                    candidate = f"{base}_{self._branch_counter}"
-                    self._branch_counter += 1
-                resolved_name = candidate
+                convs = [self.get_conversation(conversation)]
+            for conv in convs:
+                found = next((r for r in conv.records if r.run_id == run_id), None)
+                if found is not None:
+                    return found
+            raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
 
-            idx = source.index(target)
-            self._conversations[resolved_name] = list(source[: idx + 1])
-            return resolved_name
+        if index is None:
+            raise ValueError(
+                "get_record: must supply run_id, conversation + index, or index."
+            )
+        return self.get_conversation(conversation).records[index]
 
-    def set_active_conversation(self, key: str) -> None:
+    def import_conversation(self, conversation: Conversation, *, name: str) -> None:
+        """Register ``conversation`` (the SAME object, shared) under ``name``.
+
+        ``conversation`` is typically another agent's ``get_conversation``
+        result, so two agents (of any type) can share one history and
+        context. Never copies; to copy a range:
+        ``b.import_conversation(a.get_conversation("x").slice(2, 5), name="y")``.
+        Never activates; returns ``None``.
+
+        Not a ``Conversation`` raises ``TypeError`` (before anything is
+        registered). ``name`` is validated/collision-checked exactly like
+        ``create_conversation``'s (``ValueError``); the same object already
+        registered under another key of this agent also raises ``ValueError``.
+        """
+        if not isinstance(conversation, Conversation):
+            raise TypeError(
+                "import_conversation: expected a Conversation, "
+                f"got {type(conversation)!r}."
+            )
+
+        with self._invoke_lock:
+            self._check_new_conversation_name(name, "import_conversation")
+            if any(c is conversation for c in self._conversations.values()):
+                raise ValueError(
+                    "import_conversation: conversation is already registered here."
+                )
+            self._conversations[name] = conversation
+
+    def switch_conversation(self, key: str) -> None:
         """Switch the active conversation. Unknown key raises ``AgentInvocationError``."""
         with self._invoke_lock:
             if key not in self._conversations:
                 raise AgentInvocationError(
-                    f"set_active_conversation: unknown conversation {key!r}."
+                    f"switch_conversation: unknown conversation {key!r}."
                 )
             self._active_conversation = key
 
-    def delete_conversation(self, key: str) -> list[AgentRecord]:
-        """Remove and return a conversation's full history.
+    def remove_conversation(self, key: str) -> Conversation:
+        """Unregister ``key`` and return the popped conversation.
 
-        ``"default"`` is never actually removed -- regardless of whether
-        it is currently active, deleting it resets its list to ``[]`` in
-        place and returns the prior history; the key itself always stays
-        present. Any other conversation is refused while it is the active
-        conversation (switch active first); otherwise it is popped and
-        its history returned.
+        Other agents that share the conversation keep it. ``"default"`` is
+        never actually removed -- regardless of whether it is currently
+        active, removing it stores a fresh empty conversation built by
+        ``_new_conversation()`` under that key, leaves the active key
+        unchanged and returns the prior one. Any other key is refused while it is the active
+        conversation (switch first); otherwise it is popped and returned. An
+        unknown key raises ``AgentInvocationError``.
         """
         with self._invoke_lock:
             if key not in self._conversations:
                 raise AgentInvocationError(
-                    f"delete_conversation: unknown conversation {key!r}."
+                    f"remove_conversation: unknown conversation {key!r}."
                 )
             if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
-                self._conversations[key] = []
+                self._conversations[key] = self._new_conversation()
                 return old
             if key == self._active_conversation:
                 raise AgentInvocationError(
-                    f"delete_conversation: cannot delete the active "
-                    f"conversation {key!r}; switch active first."
+                    f"remove_conversation: cannot remove the active "
+                    f"conversation {key!r}; switch first."
                 )
             return self._conversations.pop(key)
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``invoke``.
 
-        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
-        the ``_async_initialize_task``/``async_think``/``async_prepare``/
-        ``async_act`` task-lifecycle hooks. Same lock scope as ``invoke``:
-        only ``_commit_emit`` runs under ``self._invoke_lock`` (a
-        ``threading.RLock`` — safe to hold briefly here since
-        ``_commit_emit`` performs no I/O and never awaits), letting
-        concurrent ``async_invoke`` calls against the same instance
-        genuinely overlap everywhere else. See ``invoke``'s own docstring
-        for the full reasoning and the accepted ``run_id=None`` branching
-        consequence.
+        The same lifecycle with ``await`` at ``pre_process``/``post_process``
+        and the ``async_*`` hooks. ``create_task``, ``summarize`` and
+        ``record`` are sync (pure computation, no I/O) and serve both paths.
+        Same lock scope as ``invoke``; see its docstring.
         """
         logger.info(f"[Async {self.full_name} started]")
-        started_at = datetime.now(timezone.utc)
 
-        # 1. Filter inputs.
         inputs = self.filter_inputs(inputs)
+        task = self.create_task(inputs)
+        task = await self.async_summarize(task)
+        task = await self.async_pre_process(task)
 
-        # 2. Reserved names + non-destructive run_id read.
-        reserved_names = {p.name for p in self.get_reserved_parameters()}
-        run_id = inputs.get("run_id")
-
-        # 3. Slice pre/post inputs, excluding reserved names.
-        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
-        pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
-
-        post_names = (
-            {p.name for p in self._post_invoke.parameters}
-            - {self._post_result_key}
-            - reserved_names
-        )
-        post_inputs = {k: v for k, v in inputs.items() if k in post_names}
-
-        # 4. Task prompt.
-        try:
-            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-            pre_result = await self._pre_invoke.async_invoke(pre_inputs)
-            raw_prompt = pre_result.result
-        except ToolInvocationError:
-            raise
-        except Exception as e:  # pragma: no cover
-            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
-
-        if not isinstance(raw_prompt, str):
-            raise AgentInvocationError(
-                f"pre_invoke returned a non-string result "
-                f"(type={type(raw_prompt)!r}); a prompt string is required"
-            )
-        prompt = raw_prompt
-
-        # 5. History -- resolved within the active conversation only.
-        logger.debug(f"Agent.{self.name} selecting turns")
-        active_key, turns = self._resolve_context(run_id)
-
-        # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing async logic")
-        task = await self._async_initialize_task(turns=turns, prompt=prompt, inputs=inputs)
         while not task.complete:
             task = await self.async_think(task)
             task = await self.async_prepare(task)
             task = await self.async_act(task)
 
-        # 7. Output transformation.
-        try:
-            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs[self._post_result_key] = task.generated_response
-            post_result = await self._post_invoke.async_invoke(post_inputs)
-        except ToolInvocationError:
-            raise
-        except Exception as e:  # pragma: no cover
-            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
-
-        final_response = post_result.result
-        ended_at = datetime.now(timezone.utc)
-
-        # 8-9. Record + result construction, committed to the active conversation.
-        # _commit_emit acquires self._invoke_lock itself for the whole of
-        # its own work -- no outer lock needed here.
-        agent_result = self._commit_emit(
-            task, turns, final_response, started_at, ended_at, active_key=active_key
-        )
+        result = await self.async_post_process(task)
+        self.record(task)
 
         logger.info(f"[Async {self.full_name} finished]")
-        return agent_result
+        return result
 
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the agent with a single input mapping.
 
-        Only the final commit runs under ``self._invoke_lock`` — everything
-        before it (pre_invoke, turn selection, the full task lifecycle,
-        post_invoke) is unlocked. The only shared, mutable state any of that
-        touches (``self._conversations``) is only ever *mutated* inside
-        ``_commit_emit``; reads elsewhere are stale-safe by construction
-        (append-only, immutable-once-persisted, aside from the active-key
-        snapshot ``_resolve_context`` takes up front). Narrowing the lock
-        this way lets true concurrent execution of the actual work happen
-        for both sync and async callers sharing one instance. A deliberate,
-        accepted consequence: two concurrent calls targeting the same
-        childless point may race, since nothing serializes the
-        read-tail-then-commit span as a whole anymore -- resolved not by
-        preventing the race but by ``_commit_emit``'s fresh children check
-        at commit time, which automatically upgrades whichever commits
-        second into a real fork instead of colliding.
+        Only ``record`` takes locks (``self._invoke_lock`` for the registry
+        lookup, the conversation's own lock for the commit); everything
+        before it is unlocked, so concurrent calls on one instance genuinely
+        overlap. Reads are stale-safe (records are append-only and
+        ``create_task`` pins its turn copy). Accepted consequence: two calls
+        reading the same tail both append in commit order, each with ``prev``
+        set to the record it read (so that record has two children).
 
-        Steps
-        -----
-        1. ``filter_inputs`` — collect declared keys; inject defaults.
-        2. Read reserved names (``run_id`` by default) non-destructively via
-           ``inputs.get(...)`` — ``inputs`` is never mutated.
-        3. Slice ``pre_inputs`` / ``post_inputs`` from ``inputs`` by name
-           membership against ``pre_invoke`` / ``post_invoke``'s own
-           declared parameters, excluding reserved names.
-        4. ``pre_invoke`` → prompt string (validated).
-        5. ``_resolve_context(run_id)`` selects conversation turns from the
-           active conversation, snapshotting the active-conversation key.
-        6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
-           ``task = think(task); task = prepare(task); task = act(task)``
-           until ``task.complete``.
-        7. ``post_invoke`` transforms ``task.generated_response`` into the
-           final result.
-        8-9. ``_commit_emit(task, turns, result, started_at, ended_at,
-           active_key=active_key)`` builds the completed record and
-           ``AgentResult`` together, then commits (append-or-fork) or skips
-           storage entirely per the context/window gate --
-           ``_commit_emit`` acquires ``self._invoke_lock`` itself for the
-           whole of this step; no outer lock is taken at this call site.
+        The lifecycle, spelled out -- each step is public, so this is also the
+        recipe for assembling your own::
+
+            inputs = self.filter_inputs(inputs)
+            task = self.create_task(inputs)
+            task = self.summarize(task)
+            task = self.pre_process(task)
+            while not task.complete:
+                task = self.think(task)
+                task = self.prepare(task)
+                task = self.act(task)
+            result = self.post_process(task)
+            self.record(task)
+            return result
         """
         logger.info(f"[{self.full_name} started]")
-        started_at = datetime.now(timezone.utc)
 
-        # 1. Filter inputs.
         inputs = self.filter_inputs(inputs)
+        task = self.create_task(inputs)
+        task = self.summarize(task)
+        task = self.pre_process(task)
 
-        # 2. Reserved names + non-destructive run_id read.
-        reserved_names = {p.name for p in self.get_reserved_parameters()}
-        run_id = inputs.get("run_id")
-
-        # 3. Slice pre/post inputs, excluding reserved names.
-        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
-        pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
-
-        post_names = (
-            {p.name for p in self._post_invoke.parameters}
-            - {self._post_result_key}
-            - reserved_names
-        )
-        post_inputs = {k: v for k, v in inputs.items() if k in post_names}
-
-        # 4. Task prompt.
-        try:
-            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-            pre_result = self._pre_invoke.invoke(pre_inputs)
-            raw_prompt = pre_result.result
-        except ToolInvocationError:
-            raise
-        except Exception as e:  # pragma: no cover
-            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
-
-        if not isinstance(raw_prompt, str):
-            raise AgentInvocationError(
-                f"pre_invoke returned a non-string result "
-                f"(type={type(raw_prompt)!r}); a prompt string is required"
-            )
-        prompt = raw_prompt
-
-        # 5. History -- resolved within the active conversation only.
-        logger.debug(f"Agent.{self.name} selecting turns")
-        active_key, turns = self._resolve_context(run_id)
-
-        # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing logic")
-        task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
         while not task.complete:
             task = self.think(task)
             task = self.prepare(task)
             task = self.act(task)
 
-        # 7. Output transformation.
-        try:
-            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-            post_inputs[self._post_result_key] = task.generated_response
-            post_result = self._post_invoke.invoke(post_inputs)
-        except ToolInvocationError:
-            raise
-        except Exception as e:  # pragma: no cover
-            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
-
-        final_response = post_result.result
-        ended_at = datetime.now(timezone.utc)
-
-        # 8-9. Record + result construction, committed to the active conversation.
-        # _commit_emit acquires self._invoke_lock itself for the whole of
-        # its own work -- no outer lock needed here.
-        agent_result = self._commit_emit(
-            task, turns, final_response, started_at, ended_at, active_key=active_key
-        )
+        result = self.post_process(task)
+        self.record(task)
 
         logger.info(f"[{self.full_name} finished]")
-        return agent_result
+        return result
 
     # ------------------------------------------------------------------ #
     # Serialization
@@ -1276,19 +1457,14 @@ class Agent(AtomicInvokable, ABC):
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
         d.update({
-            "system_prompts": {
-                key: {"template": cfg.template, "description": cfg.description}
-                for key, cfg in self._system_prompts.items()
-            },
-            "pre_invoke": self.pre_invoke.to_dict(),
-            "post_invoke": self.post_invoke.to_dict(),
-            "post_result_key": self.post_result_key,
+            "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
+            "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
+            "inputs_to_context": self.inputs_to_context,
+            "response_to_context": self.response_to_context,
+            "response_to_post": self.response_to_post,
+            "use_runtime_context": self._use_runtime_context,
             "llm": self._llm_engine.to_dict(),
-            "context_enabled": self.context_enabled,
+            "record_enabled": self.record_enabled,
             "records_window": self.records_window,
-            "response_preview_limit": self.response_preview_limit,
-            "conversations": {
-                key: [r.to_dict() for r in records]
-                for key, records in self._conversations.items()},
         })
         return d

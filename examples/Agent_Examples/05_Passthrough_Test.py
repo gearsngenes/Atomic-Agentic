@@ -1,4 +1,4 @@
-﻿# 05_Passthrough_Test.py
+# 05_Passthrough_Test.py
 """
 Demonstrates post-invoke parameter auto-grafting (v2.0.0a14+).
 
@@ -54,7 +54,8 @@ def package_response(
 ) -> dict[str, Any]:
     """post_invoke: structure the raw LLM result.
 
-    ``raw_answer`` receives the agent's raw generated text (the result key).
+    ``raw_answer`` receives the agent's raw generated text (via
+    ``response_to_post="raw_answer"``).
     ``output_label`` and ``include_metadata`` are auto-grafted into the agent
     schema — callers supply them as regular inputs, no extra configuration needed.
     """
@@ -81,10 +82,10 @@ def main() -> None:
         description="Demonstrates post-invoke parameter auto-grafting.",
         llm_engine=llm,
         role_prompt="You are a concise assistant.",
-        context_enabled=False,
+        record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,
-        post_result_key="raw_answer",
+        response_to_post="raw_answer",
         # No passthrough_inputs needed — output_label and include_metadata
         # are auto-grafted from package_response into the agent schema.
     )

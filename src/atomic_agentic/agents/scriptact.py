@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
-from datetime import datetime
-from typing import Any, Callable, Optional
+import keyword
+from collections.abc import Iterable
+from typing import Any, Callable, Mapping, Optional
 
 from ..mcp.MCPClientHub import MCPClientHub
 from ..a2a.A2AClientHub import A2AClientHub
@@ -16,28 +16,29 @@ from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
-from ..models.agents.records import AgentRecord, LLMRecord, ScriptActAgentRecord
+from ..models.agents.records import LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
-    EXCLUDED_PY_BUILTINS,
+    BUILTINS_PREAMBLE,
+    ALLOWED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
 )
 from ..exceptions import (
+    AgentInvocationError,
     BlackboardParseError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
 )
-from ..utils.agents import compile_batches, is_dispatched, resolve_statement_args
+from ..utils.agents import build_usage_report, check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
     parse_generation,
-    render_cache_snapshot,
     render_completed_as_python,
     render_failed_as_python,
     rewrite_builtin_calls,
@@ -53,12 +54,12 @@ class ScriptActAgent(ToolAgent):
     separate decomposition, orchestration, or synthesis call, and no
     construction-time mode knob.
 
-    Failure-triggered repair only: a generation always terminates
-    at the first of a ``return`` or a defensively-pruned ``if`` statement
-    (the grammar forbids conditionals outright; a model that writes one
-    anyway always has its generation rejected as a regen-repair issue, fed
-    back for a corrected full plan -- there is no silent-truncation
-    tolerance for it). There is no voluntary continuation mechanism of any
+    Failure-triggered repair only: a generation terminates at its first
+    ``return`` (the grammar forbids conditionals outright; a model that
+    writes one has its generation rejected and fed back for a corrected
+    full plan -- never silently truncated). The plan is requested as a
+    single fenced ``python`` block; prose around exactly one block is
+    ignored. There is no voluntary continuation mechanism of any
     kind -- a model never decides to pause; the only way a second round can
     ever start is a real resolution failure (``prepare()``) or execution
     failure (``act()``). On either: ``fail_fast=True`` raises immediately,
@@ -81,12 +82,15 @@ class ScriptActAgent(ToolAgent):
     after a real failure, not within-round mistake recovery ("how many
     second chances does one attempt get").
 
-    Cross-invocation result addressing is implemented: a prior turn's
-    result is seeded into `task.cache` and labeled in rendered history as
-    `task_result_i`, a fixed, read-only reference a later plan can use by
-    name.
+    Values live in ``task.context``: a plan may reference any context
+    variable by name (conversation, runtime and input-bound values, a prior
+    turn's result as the read-only ``task_result_i``, and every name an
+    earlier statement of this invoke bound). Each executed batch writes its
+    result names (and ``_SUB_n`` temporaries) into ``task.context``; a
+    writable name is updated in place, and only declared destinations
+    persist (see ``Agent.record``).
 
-    Tool/constant registration, shared rendering, and the
+    Tool registration, ``instructions``, shared rendering, and the
     tool_calls_limit/tool_concurrency_limit/regeneration_limit knobs are
     all inherited from ``ToolAgent`` unchanged -- this class owns only its
     own generation/execution grammar and the ``replanning_limit``/
@@ -95,37 +99,40 @@ class ScriptActAgent(ToolAgent):
     ``PlanActAgent``'s/``ReActAgent``'s own, different semantics).
     """
 
+    _TASK_CLS = ScriptActAgentTask
+    TOOL_INSTRUCTIONS = ONESHOT_PLANNER_PROMPT
+
     def __init__(
         self,
         name: str,
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         regeneration_limit: int = 5,
         tool_calls_limit: Optional[int] = None,
         replanning_limit: int = 2,
         fail_fast: bool = False,
         tool_concurrency_limit: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        constants: Optional[list[Any]] = None,
-        constant_aliases: Optional[list[Optional[str]]] = None,
-        constant_descriptions: Optional[list[Optional[str]]] = None,
-        tool_instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
-        ``super().__init__`` reaches ``ToolAgent`` (tool/constant registry
-        init, regeneration_limit/tool_calls_limit/tool_concurrency_limit
-        validation+storage, construction-time tools/constants registration
-        all happen there) -- this ``__init__`` only handles what's
-        genuinely local to this class: ``replanning_limit``, ``fail_fast``,
-        and the ``"planner"`` system prompt. ``replanning_limit`` defaults
+        ``super().__init__`` reaches ``ToolAgent`` (tool registry init,
+        ``instructions``, regeneration_limit/tool_calls_limit/
+        tool_concurrency_limit validation+storage, construction-time tools
+        registration all happen there) -- this ``__init__`` only handles what's
+        genuinely local to this class: ``replanning_limit`` and ``fail_fast``
+        (the planning prompt is the class attribute ``TOOL_INSTRUCTIONS``).
+        ``replanning_limit`` defaults
         to ``2`` -- a repairs-only budget never has to cover the free
         initial plan, so it doesn't need a large ceiling.
         ``fail_fast`` defaults to ``False`` -- repair is the normal path
@@ -137,20 +144,19 @@ class ScriptActAgent(ToolAgent):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
-            response_preview_limit=response_preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             records_window=records_window,
             tools=tools,
-            constants=constants,
-            constant_aliases=constant_aliases,
-            constant_descriptions=constant_descriptions,
-            tool_instructions=tool_instructions,
+            instructions=instructions,
         )
 
         self.replanning_limit = replanning_limit
@@ -161,7 +167,9 @@ class ScriptActAgent(ToolAgent):
             )
         self._fail_fast = fail_fast
 
-        self._system_prompts["planner"] = ONESHOT_PLANNER_PROMPT
+    def _render_actions(self) -> str:
+        """The tools frame body plus the permitted Python builtins text."""
+        return f"{super()._render_actions()}\n\n{BUILTINS_PREAMBLE}"
 
     # ------------------------------------------------------------------ #
     # Construction-time / mutable knobs
@@ -219,10 +227,11 @@ class ScriptActAgent(ToolAgent):
         family's own sentinel/real-Python-builtin collision rules. Never a
         reserved parser sentinel (``RHS_ASSIGN_ALIAS``/``RETURN_ALIAS``/
         ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``), and never a real,
-        non-excluded Python builtin name -- a builtin always resolves first
+        allowed Python builtin name -- an allowed builtin always resolves first
         (see ``utils/script.py``'s ``rewrite_builtin_calls``), so a tool
         registered under a colliding name would be permanently, silently
-        unreachable rather than raising here.
+        unreachable rather than raising here. Nor a Python keyword: a script
+        could never call it.
         """
         super()._validate_effective_tool_id(effective_id)
 
@@ -232,213 +241,126 @@ class ScriptActAgent(ToolAgent):
                 "own sentinel tool names and cannot be used as a registered "
                 "tool alias or name."
             )
-        if hasattr(builtins, effective_id) and effective_id not in EXCLUDED_PY_BUILTINS:
+        if effective_id in ALLOWED_PY_BUILTINS:
             raise ToolRegistrationError(
                 f"effective id {effective_id!r} collides with a real Python "
                 "builtin of the same name -- registering a tool under this "
                 "name would make it permanently unreachable (the builtin "
                 "always resolves first). Choose a different alias."
             )
+        if keyword.iskeyword(effective_id):
+            raise ToolRegistrationError(
+                f"effective id {effective_id!r} is a Python keyword; a "
+                "script could never call it. Choose a different alias."
+            )
+
+    def _seed_task(self, task: ScriptActAgentTask) -> None:
+        """
+        Adds the hidden ``task_result_i`` entries (``ToolAgent``), then
+        rejects any context variable a script could not use unambiguously: a
+        Python keyword (cannot be written as a name) or a registered tool id
+        (a name in call position would resolve to the tool). Builtin and
+        sentinel names are not clashes (value and call positions differ).
+        Runs inside ``create_task``, before any model call.
+        """
+        super()._seed_task(task)
+        clashes = {
+            n: ("a Python keyword" if keyword.iskeyword(n) else "a registered tool id")
+            for n in sorted(task.context)
+            if keyword.iskeyword(n) or n in self._toolbox
+        }
+        if clashes:
+            detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
+            raise AgentInvocationError(
+                f"{type(self).__name__}.{self.name}: context variable name(s) "
+                f"unusable in a script: {detail}. Rename or forget the "
+                "variable, or re-alias the tool."
+            )
 
     # ------------------------------------------------------------------ #
     # Record construction
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: ScriptActAgentTask,
-        turns: list[AgentRecord],
-    ) -> ScriptActAgentRecord:
+    def _build_record_from_task(self, task: ScriptActAgentTask) -> ScriptActAgentRecord:
         """
         Assemble a completed ``ScriptActAgentRecord`` from a finished
-        ``ScriptActAgentTask``. No agent-level global blackboard to persist
-        into (unlike the legacy v1 blackboard agent's span-tracking
-        ``update_blackboard`` append) -- each record owns its own slots
-        outright, so this is a direct field copy.
+        ``ScriptActAgentTask``. Each record owns its own slots outright, so
+        this is a direct field copy.
         """
-        prev = turns[-1] if turns else None
         return ScriptActAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
+            **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
             regenerations_used=task.regenerations_used,
             repair_rounds_used=task.repair_rounds_used,
         )
 
-    def build_result_from_record(
-        self,
-        record: ScriptActAgentRecord,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ScriptActAgentResult:
+    def build_result_from_task(self, task: ScriptActAgentTask, result: Any) -> ScriptActAgentResult:
         """
-        Construct this agent's ``ScriptActAgentResult`` envelope directly
-        from a completed ``ScriptActAgentRecord`` -- surfaces
-        ``regenerations_used``/``repair_rounds_used`` past the ephemeral
-        task, mirroring ``PlanActAgent.build_result_from_record``'s own
-        pattern for ``regenerations_used``. Also populates ``usage_report``
-        (via ``record.usage_report()``) and ``failed_call_count`` (via
-        ``len(record.failed_statements)``), both required fields inherited
-        from ``ToolAgentResult``.
+        Construct this agent's ``ScriptActAgentResult`` envelope directly from
+        a finished ``ScriptActAgentTask`` -- surfaces ``regenerations_used``/
+        ``repair_rounds_used`` past the ephemeral task. Also populates
+        ``usage_report`` (via ``build_usage_report``) and ``failed_call_count``,
+        both required fields inherited from ``ToolAgentResult``.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ScriptActAgentResult,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            usage_report=record.usage_report(),
-            failed_call_count=len(record.failed_statements),
-            regenerations_used=record.regenerations_used,
-            repair_rounds_used=record.repair_rounds_used,
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
+            repair_rounds_used=task.repair_rounds_used,
         )
-
-    # ------------------------------------------------------------------ #
-    # Rendering
-    # ------------------------------------------------------------------ #
-    def _extra_system_context(self) -> dict[str, str]:
-        """
-        Adds ``EXCLUDED_PY_BUILTINS`` on top of ``ToolAgent``'s shared
-        ``{TOOLS}``/``{CONSTANTS}`` context -- the one piece of this
-        family's system prompt that isn't generic across every ``ToolAgent``
-        subclass.
-        """
-        return {"EXCLUDED_PY_BUILTINS": ", ".join(sorted(EXCLUDED_PY_BUILTINS))}
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ScriptActAgentTask:
-        """Return a ``ScriptActAgentTask`` with the planner system prompt
-        active, its ``cache`` pre-seeded with every visible prior turn's
-        result under ``task_result_{i}`` -- unconditional over whatever
-        ``turns`` contains (empty when there's nothing to seed; already
-        gated upstream by conversation-resolution/``context_enabled``/
-        ``records_window``) -- and its ``constant_values`` pre-seeded from
-        every registered constant. Both are copied via
-        ``_copy_for_task_namespace`` exactly once here, not re-derived
-        later, so a mutation is visible for the rest of this invocation's
-        own rounds but never reaches the real constant or a future
-        invocation. No other field needs seeding -- completed/pending/
-        resolved_args/needs_repair/repair_rounds_used/tool_calls_used/
-        repair_batch_start/failed_statements all start at their dataclass
-        defaults."""
-        task = ScriptActAgentTask(
-            turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
-        )
-        for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
-                turn.generated_response
-            )
-        for spec in self._constants.values():
-            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
-        return task
-
-    def _render_current_task_message(self, task: ScriptActAgentTask) -> dict[str, str]:
-        """Bare "what is the task" user message -- reused verbatim for
-        round 1 and every repair round's opening message, deduping a
-        repeated banner across rounds. No ``===== ... =====`` markers --
-        this family's own established wording never used that styling. No
-        "translate this into a plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE
-        section already states that once; repeating it every round would
-        be redundant. Deliberately carries no ``tool_calls_limit`` text of
-        its own -- round 1 and a repair round need different wording
-        (total vs. remaining), so each of ``_render_task_messages``'s own
-        two branches appends its own variant after calling this."""
-        return {"role": "user", "content": f"CURRENT TASK:\n{task.user_prompt}"}
-
-    def _render_task_messages(self, task: ScriptActAgentTask) -> list[dict[str, str]]:
-        """Build-once contract per base ``Agent``'s documented pattern.
-        Mirrors ``ReActAgent._render_task_messages``'s own 3-part
-        organization (banner / assistant-authored state snapshot / user
-        instruction) instead of cramming everything into one user message.
-
-        Branches on ``task.needs_repair`` rather than ``task.completed`` --
-        ``needs_repair`` is the one flag reliably ``True`` for every real
-        repair round, including the edge case where a resolution/execution
-        failure hits on the very first batch of round 1
-        (``prepare()``/``_apply_batch_results`` set it directly, before
-        anything ever lands in ``completed``); checking ``completed`` alone
-        would silently drop that failure's reason and misrender it as a
-        fresh round-1 call.
-
-        Round 1 (``needs_repair`` still ``False``): the banner plus a
-        trailing imperative ("Write a plan to accomplish this task now."),
-        with a ``tool_calls_limit``-total line appended when set (``None``
-        renders nothing).
-
-        A repair round: banner, then an assistant-role state message with
-        three sections -- the completed-work snapshot (reconstructed code,
-        flat, no batch grouping, via ``render_completed_as_python``), the
-        cache snapshot (``render_cache_snapshot``), and exactly what failed
-        in the triggering batch, sliced from
-        ``task.failed_statements[task.repair_batch_start:]`` and rendered
-        via ``render_failed_as_python`` -- never the whole accumulated
-        failure history, mirroring ``ReActTask.last_call_failed``'s "show
-        what you're reacting to" precedent. Then a fixed user
-        instruction, with a ``tool_calls_limit``-*remaining* line appended
-        when set (recomputed fresh each round, since it depletes -- unlike
-        round 1's static total)."""
-        if task.task_messages:
-            return task.task_messages
-
-        banner = self._render_current_task_message(task)
-
+    def _render_steps(self, task: ScriptActAgentTask) -> str:
+        """
+        Round 1 has no steps block. A repair round shows the completed work
+        as Python source plus only the failed slice of the triggering batch
+        (``task.failed_statements[task.repair_batch_start:]``), never the
+        whole failure history. Bound values are not rendered here; they are
+        in the context block.
+        """
         if not task.needs_repair:
-            content = (
-                banner["content"]
-                + "\n\nWrite a plan to accomplish this task now."
-            )
-            if self.tool_calls_limit is not None:
-                plural = "s" if self.tool_calls_limit != 1 else ""
-                content += (
-                    f"\n\nYou may make at most {self.tool_calls_limit} "
-                    f"tool call{plural} total."
-                )
-            task.task_messages = [{"role": "user", "content": content}]
-            return task.task_messages
+            return ""
+        completed = render_completed_as_python(task.completed) or "(nothing completed yet)"
+        failed = render_failed_as_python(task.failed_statements[task.repair_batch_start:])
+        steps = f"# WORK COMPLETED SO FAR:\n{completed}"
+        if failed:
+            steps += f"\n\n# THIS BATCH FAILED:\n{failed}"
+        return steps
 
-        snapshot = render_completed_as_python(task.completed) or "(nothing completed yet)"
-        cache_snapshot = render_cache_snapshot(
-            task.completed, task.cache, self._response_preview_limit
-        )
-        cache_section = f"\n\n{cache_snapshot}" if cache_snapshot else ""
-        fresh_failures = task.failed_statements[task.repair_batch_start:]
-        failure_text = render_failed_as_python(fresh_failures)
-        failure_section = f"\n\n# THIS BATCH FAILED:\n{failure_text}" if failure_text else ""
-        state_message = {
-            "role": "assistant",
-            "content": f"# WORK COMPLETED SO FAR:\n{snapshot}{cache_section}{failure_section}",
-        }
-
-        instruction = (
+    def _render_directive(self, task: ScriptActAgentTask) -> str:
+        """
+        Branches on ``task.needs_repair`` (reliably ``True`` for every repair
+        round, including a failure on the very first batch). Round 1 states
+        the total ``tool_calls_limit``; a repair round the remaining budget,
+        recomputed fresh since it depletes.
+        """
+        limit = self.tool_calls_limit
+        if not task.needs_repair:
+            directive = "Write a plan to accomplish this task now."
+            if limit is not None:
+                plural = "s" if limit != 1 else ""
+                directive += f"\n\nYou may make at most {limit} tool call{plural} total."
+            return directive
+        directive = (
             "Continue planning the rest of this task, fixing what failed "
             "above. Use the existing work done to guide you on what the "
             "next steps should be."
         )
-        if self.tool_calls_limit is not None:
-            remaining = self.tool_calls_limit - task.tool_calls_used
-            instruction += (
-                f" Tool calls remaining: {remaining} of {self.tool_calls_limit}."
-            )
-
-        task.task_messages = [banner, state_message, {"role": "user", "content": instruction}]
-        return task.task_messages
+        if limit is not None:
+            directive += f" Tool calls remaining: {limit - task.tool_calls_used} of {limit}."
+        return directive
 
     # ------------------------------------------------------------------ #
     # Generation (think())
@@ -448,8 +370,8 @@ class ScriptActAgent(ToolAgent):
     ) -> list[list[ToolStatement]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, validate references + remaining tool-call budget, and
-        compile into batches. Returns the compiled result on success, or a
+        parse, rewrite builtins, validate references + remaining tool-call
+        budget, dry-bind registered-tool calls, and compile into batches. Returns the compiled result on success, or a
         feedback string describing every problem found on failure -- a
         ``BlackboardParseError`` from parsing is converted here, not
         propagated, so the retry loop can inject it as corrective feedback.
@@ -459,36 +381,22 @@ class ScriptActAgent(ToolAgent):
         except BlackboardParseError as e:
             return str(e)
 
-        known_tools = frozenset(self._toolbox.keys())
         # Rewrite eligible builtin calls before whole-sequence validation,
         # so a rewritten slot is validated as PY_BUILTIN_ALIAS, not as an
-        # unregistered tool; excluded-but-real builtin names are reported
-        # here with a specific message instead of validate_references'
-        # generic "unregistered tool" one.
-        builtin_issues = rewrite_builtin_calls(flat_slots)
-        # Derived from each ConstantSpec's own .name (always already
-        # K_-prefixed -- "K_i" auto-named, "K_{ALIAS}" aliased; see
-        # register_constant/register_constants), never reconstructed via a
-        # fresh f"K_{...}" here -- that would double-prefix an aliased name,
-        # whose own internal dict key is never K_-prefixed itself: .name is
-        # already exactly the identifier shown to the model via
-        # constants_context().
-        known_constants = frozenset(spec.name for spec in self._constants.values())
-        # Every key already in task.cache is safe to reference by name here:
-        # cross-invocation task_result_i entries (seeded in
-        # _initialize_task) AND, on a continuation round, every identifier
-        # bound by an earlier round's own completed slots this same
-        # invoke -- the exact names the "work completed so far" snapshot
-        # (_render_task_messages) shows the model. Not scoped to the
-        # TASK_RESULT_PREFIX any more; that was only ever correct back when
-        # every generation was a fresh, single-round invocation.
-        known_history = frozenset(task.cache.keys())
+        # unregistered tool.
+        rewrite_builtin_calls(flat_slots)
+        context_names = frozenset(task.context)
+        readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         remaining_budget = (
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
-        issues = builtin_issues + validate_references(
-            flat_slots, known_tools, known_constants, known_history, remaining_budget
+        issues = (
+            validate_references(
+                flat_slots, frozenset(self._toolbox), context_names,
+                readonly_names, remaining_budget,
+            )
+            + check_call_bindings(flat_slots, self._toolbox)
         )
 
         if issues:
@@ -510,13 +418,14 @@ class ScriptActAgent(ToolAgent):
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
         failure until success or the regeneration budget
-        (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. ``regeneration_limit``
+        (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. ``regeneration_limit``
         is always a plain ``int`` (never ``None``), so this check is a
         direct comparison -- no ``None``-guard needed, unlike
         ``tool_calls_limit`` elsewhere in this class.
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -526,15 +435,14 @@ class ScriptActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -544,6 +452,7 @@ class ScriptActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -555,6 +464,7 @@ class ScriptActAgent(ToolAgent):
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -564,15 +474,14 @@ class ScriptActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -582,6 +491,7 @@ class ScriptActAgent(ToolAgent):
                         "Produce a corrected plan."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -591,12 +501,9 @@ class ScriptActAgent(ToolAgent):
         """A clean drain with no failure and no repair needed -- the
         absence of a ``return`` is not an invitation to keep planning.
         Infers ``None`` if nothing was ever returned and marks the task
-        complete. Called from wherever ``task.pending`` actually reaches
-        empty with ``needs_repair`` still ``False``: ``prepare`` (an
-        already-empty round, or a same-round empty generation) and
-        ``_apply_batch_results`` (the last batch of a plan draining) --
-        never from ``think``, which only ever reads ``needs_repair``,
-        never decides based on it."""
+        complete. Called only from ``act`` (an empty
+        generation) and ``_apply_batch_results`` (the last batch of a plan
+        draining) -- never from ``think`` or ``prepare``."""
         if task.generated_response is NO_VAL:
             task.generated_response = None
         task.complete = True
@@ -614,20 +521,18 @@ class ScriptActAgent(ToolAgent):
         This hook has no budget awareness of any kind anymore: no ceiling
         check, no round counter of its own. ``replanning_limit`` is checked
         and ``task.repair_rounds_used`` is incremented entirely in
-        ``prepare()``/``_apply_batch_results()`` -- the same two places
+        ``_grant_repair_or_raise`` (via ``prepare()``/``_apply_batch_results()``) -- the same two places
         that decide whether a repair round is granted in the first place --
         so by the time this hook is ever re-entered, that decision has
         already been made; it just generates.
 
         ``task.needs_repair`` is cleared here, after generation, not before
-        -- ``_render_task_messages`` (invoked by ``_run_planning_retry_loop``
-        below) still needs to see it ``True`` to render this round's repair
+        -- ``_render_steps``/``_render_directive`` (reached through
+        ``render_task`` in ``_run_planning_retry_loop``) still needs to see it ``True`` to render this round's repair
         framing. Once a fresh round has actually been generated, the flag's
         job is done: whatever ``prepare()``/``_apply_batch_results`` do with
         this new content next is a normal round, not a still-pending repair
-        -- leaving it set would permanently block the natural-completion
-        checks in both of those methods (they read ``needs_repair`` to tell
-        "still mid-repair" apart from "genuinely finished") for the rest of
+        -- leaving it set would make ``act`` a permanent no-op for the rest of
         the invoke, the moment a single repair round is ever granted.
         """
         if task.pending or task.complete:
@@ -667,51 +572,27 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def prepare(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """
-        Resolve the next pending batch's args, or short-circuit completion
-        if nothing remains.
+        Resolution only: resolve the next pending batch's args against the
+        context values; never finalizes. With nothing pending,
+        ``task.resolved_args`` is reset and the task returned (``act``
+        decides what an empty plan means).
 
-        If ``task.pending`` is empty: reset ``task.resolved_args`` and
-        finalize via ``_finalize_without_continuation`` -- infers an
-        implicit ``return None`` if no executed ``return`` slot already
-        set ``task.generated_response``, and marks the task complete.
-        Covers both a genuinely empty generation and the natural
-        end-of-plan drain, so ``act()`` needs only a bare no-op guard, not
-        a second check. There is no "leave it as-is, a repair round is
-        still pending" case to special-case here despite ``task.needs_repair``
-        existing as a field: ``think()`` always clears it the moment it
-        actually regenerates (see its own docstring), and always runs
-        before this method can see an empty ``task.pending`` again after a
-        repair round was granted -- so by the time this branch is ever
-        reached, ``needs_repair`` is guaranteed already ``False``.
-
-        Otherwise: resolves every slot's args in ``task.pending[0]``,
+        Otherwise resolves every slot's args in ``task.pending[0]``,
         collecting every failure (not stopping at the first). Any collected
         failure abandons this batch and every batch still queued after it
-        (they may depend on bindings this batch was supposed to produce).
-        With ``fail_fast=True``, or once ``replanning_limit`` repair rounds
-        are already spent, this raises immediately instead of granting
-        another repair -- no silent partial-success path. Nothing here was
-        ever dispatched, so this does not consume ``tool_calls_used``.
+        (they may depend on bindings this batch was supposed to produce);
+        ``_grant_repair_or_raise`` then grants a repair round or raises, per
+        ``fail_fast``/``replanning_limit``. Nothing here was ever
+        dispatched, so this does not consume ``tool_calls_used``.
         """
         if not task.pending:
             task.resolved_args = []
-            return self._finalize_without_continuation(task)
+            return task
 
         batch = task.pending[0]
         resolved: list[dict[str, Any]] = []
         failed_slots: list[ToolStatement] = []
-        # Constants are validated as known references (validate_references'
-        # known_constants) and rendered to the model (constants_context()),
-        # but their actual runtime values live in task.constant_values --
-        # a per-invocation copy seeded once by _initialize_task, never
-        # re-derived from self._constants here (that would hand out the
-        # live, shared constant object fresh every batch, defeating the
-        # "a mutation stays visible for the rest of this invocation, never
-        # leaks to another" guarantee). Merged in here, once per batch, so
-        # a correct constant-name reference actually resolves instead of
-        # raising NameError; task.cache last so a real bound/history name would win
-        # on the (never expected) collision.
-        resolution_namespace = {**task.constant_values, **task.cache}
+        resolution_namespace = {name: var.value for name, var in task.context.items()}
         for slot in batch:
             label = slot.identifier if slot.identifier is not None else "(unassigned)"
 
@@ -756,21 +637,7 @@ class ScriptActAgent(ToolAgent):
                 failed_slots.append(slot)
 
         if failed_slots:
-            start = len(task.failed_statements)
-            task.failed_statements.extend(failed_slots)
-            if self._fail_fast or task.repair_rounds_used >= self._replanning_limit:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: batch could not be "
-                    "resolved and no repair is available "
-                    f"({'fail_fast=True' if self._fail_fast else 'repair budget exhausted'}): "
-                    f"{render_failed_as_python(failed_slots)}"
-                )
-            task.repair_rounds_used += 1
-            task.repair_batch_start = start
-            task.pending.clear()
-            task.resolved_args = []
-            task.needs_repair = True
-            return task
+            return self._grant_repair_or_raise(task, failed_slots, executing=False)
 
         task.resolved_args = resolved
         return task
@@ -815,32 +682,27 @@ class ScriptActAgent(ToolAgent):
         raw_results: list[Any],
     ) -> ScriptActAgentTask:
         """
-        Shared post-gather bookkeeping for ``act``/``async_act``: apply
-        results, update completed/cache, handle a terminal ``return`` slot,
-        pop the consumed batch -- or, if any real call in this batch
-        failed, record whichever succeeded, abandon the rest of this round,
-        and either grant a repair round or raise, per ``fail_fast``/
-        ``replanning_limit`` (same budget check as ``prepare()``'s own
-        resolution-failure branch).
+        Shared post-gather bookkeeping for ``act``/``async_act``: record
+        results, bind every result name into ``task.context``, handle a
+        terminal ``return`` slot, pop the consumed batch -- or, if any real
+        call in this batch failed, abandon the rest of this round and either
+        grant a repair round or raise (``_grant_repair_or_raise``).
 
-        Every dispatched call in ``batch`` (registered tool or approved
-        builtin, via ``is_dispatched``) was actually dispatched via
-        ``asyncio.gather`` regardless of whether any of them failed --
-        ``task.tool_calls_used`` (``ToolAgentTask``'s shared derived
-        property) reflects this automatically off ``completed``/
-        ``failed_statements`` below, with no manual counter to maintain here
-        anymore.
+        The context write happens once per batch, before the failure branch,
+        so the successes of a partly failed batch stay bound for the repair
+        round. ``task.tool_calls_used`` reflects ``completed``/
+        ``failed_statements`` automatically.
         """
         # A raised exception only ever appears here for a slot that was
         # actually dispatched (asyncio.gather(..., return_exceptions=True)
         # is the only source of a bare BaseException in raw_results) -- an
         # rhs_assign/return slot's raw_results entry is always its plain
-        # resolved value (see _gather_batch_results), which may itself
-        # legitimately BE a BaseException instance (e.g. a registered
-        # constant holding an exception object as data). Gating on
-        # is_dispatched prevents misclassifying that legitimate value
-        # as an execution failure.
+        # resolved value, which may itself legitimately BE a BaseException
+        # instance (e.g. a context variable holding an exception object).
+        # Gating on is_dispatched prevents misclassifying that value as an
+        # execution failure.
         failed_slots: list[ToolStatement] = []
+        bound: dict[str, Any] = {}
 
         for slot, value in zip(batch, raw_results):
             if is_dispatched(slot) and isinstance(value, BaseException):
@@ -849,36 +711,21 @@ class ScriptActAgent(ToolAgent):
                 continue
             task.completed.append(slot)
             # A dispatched tool call's raw_results entry is a full
-            # AtomicResult envelope (slot.result stores it verbatim,
-            # matching v1's board[idx].result precedent); rhs_assign/return
-            # slots were never dispatched, so their value is already the
-            # plain resolved Python value -- no envelope to unwrap.
+            # AtomicResult envelope (slot.result stores it verbatim);
+            # rhs_assign/return slots were never dispatched, so their value
+            # is already the plain resolved Python value.
             if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
                 slot.result = value
                 unwrapped = value.result
             else:
                 unwrapped = value
             if slot.identifier is not None:
-                task.cache[slot.identifier] = unwrapped
+                bound[slot.identifier] = unwrapped
+
+        self._write_context(task, bound, create=True)
 
         if failed_slots:
-            start = len(task.failed_statements)
-            task.failed_statements.extend(failed_slots)
-            if self._fail_fast or task.repair_rounds_used >= self._replanning_limit:
-                if len(failed_slots) == 1 and isinstance(failed_slots[0].exception, ToolInvocationError):
-                    raise failed_slots[0].exception
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: batch execution "
-                    "failed and no repair is available "
-                    f"({'fail_fast=True' if self._fail_fast else 'repair budget exhausted'}): "
-                    f"{render_failed_as_python(failed_slots)}"
-                )
-            task.repair_rounds_used += 1
-            task.repair_batch_start = start
-            task.pending.clear()
-            task.resolved_args = []
-            task.needs_repair = True
-            return task
+            return self._grant_repair_or_raise(task, failed_slots, executing=True)
 
         for slot, kwargs in zip(batch, resolved):
             if slot.tool == RETURN_ALIAS:
@@ -888,30 +735,65 @@ class ScriptActAgent(ToolAgent):
         task.pending.pop(0)
         task.resolved_args = []
 
-        # This batch just drained the plan with no failure this call, and
-        # nothing already completed it (no `return` above) -- finalize
-        # right here, the natural point `task.pending` actually reaches
-        # empty, instead of leaving it for a future `prepare()` call that
-        # `think()` would otherwise reach first on the next loop iteration
-        # and regenerate an uninvited round. `task.needs_repair` is not
-        # checked here: on this (non-failure) path it is always already
-        # `False` -- either never set this invoke, or already cleared by
-        # `think()` before this batch's content was ever generated (see
-        # `think()`'s own docstring) -- so it could never actually gate
-        # this check.
+        # The plan just drained with no failure and no `return`: finalize
+        # here, the natural point `task.pending` reaches empty, instead of
+        # letting `think()` regenerate an uninvited round on the next pass.
         if not task.pending and not task.complete:
             return self._finalize_without_continuation(task)
 
         return task
 
+    def _grant_repair_or_raise(
+        self,
+        task: ScriptActAgentTask,
+        failed_slots: list[ToolStatement],
+        *,
+        executing: bool,
+    ) -> ScriptActAgentTask:
+        """
+        Shared failure branch of ``prepare`` (resolution, ``executing=False``)
+        and ``_apply_batch_results`` (execution, ``executing=True``).
+
+        Records ``failed_slots``. With ``fail_fast`` or the repair budget
+        spent, raises: a lone execution failure that is a
+        ``ToolInvocationError`` is re-raised as-is, anything else becomes a
+        ``ToolAgentError`` naming what failed. Otherwise grants a repair
+        round: consumes budget, marks where this batch's failures start
+        (``repair_batch_start``), abandons the queued batches and sets
+        ``needs_repair`` for ``think`` to regenerate.
+        """
+        start = len(task.failed_statements)
+        task.failed_statements.extend(failed_slots)
+        if self._fail_fast or task.repair_rounds_used >= self._replanning_limit:
+            if (
+                executing
+                and len(failed_slots) == 1
+                and isinstance(failed_slots[0].exception, ToolInvocationError)
+            ):
+                raise failed_slots[0].exception
+            what = "batch execution failed" if executing else "batch could not be resolved"
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {what} and no repair is "
+                f"available ({'fail_fast=True' if self._fail_fast else 'repair budget exhausted'}): "
+                f"{render_failed_as_python(failed_slots)}"
+            )
+        task.repair_rounds_used += 1
+        task.repair_batch_start = start
+        task.pending.clear()
+        task.resolved_args = []
+        task.needs_repair = True
+        return task
+
     def act(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """
-        Execute the currently resolved batch, or no-op if ``prepare``
-        produced nothing to run this round (covers a short-circuited round
-        from ``prepare``'s empty-``pending`` guard).
+        Execute the resolved batch. A just-granted repair is a no-op
+        (``think`` regenerates next); nothing pending means an empty
+        generation, which finalizes with a ``None`` result.
         """
-        if not task.resolved_args:
+        if task.needs_repair:
             return task
+        if not task.pending:
+            return self._finalize_without_continuation(task)
 
         batch = task.pending[0]
         resolved = task.resolved_args
@@ -921,8 +803,10 @@ class ScriptActAgent(ToolAgent):
     async def async_act(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """Async mirror of ``act``; awaits ``_gather_batch_results``
         directly rather than ``run_coro_sync``-wrapping it."""
-        if not task.resolved_args:
+        if task.needs_repair:
             return task
+        if not task.pending:
+            return self._finalize_without_continuation(task)
 
         batch = task.pending[0]
         resolved = task.resolved_args

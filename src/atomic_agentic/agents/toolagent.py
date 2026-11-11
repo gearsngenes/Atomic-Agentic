@@ -1,52 +1,54 @@
 """
-ToolAgent: shared ancestor for every tool-registering, constant-registering
-Agent family.
+ToolAgent: shared ancestor for every tool-registering Agent family.
 
-Owns the surface that ``PlanActAgent``/``ReActAgent`` (formerly unified
-under the now-removed ``JsonToolAgent``) and ``ScriptActAgent`` already
-shared byte-for-byte or near-identically: tool registration (alias-based,
-``register_tool``/``register_tools``), constant registration (alias-named,
-construction-time only), shared rendering
-(``actions_context``/``constants_context``/``render_turn``), and the
-execution knobs common to both grammars (``tool_calls_limit``,
-``regeneration_limit``, ``tool_concurrency_limit``).
+Owns the surface that ``PlanActAgent``/``ReActAgent`` and ``ScriptActAgent``
+share: tool registration (alias-based, ``register_tool``/``register_tools``),
+the optional user-defined ``instructions``, the execution knobs common to every
+grammar (``tool_calls_limit``, ``regeneration_limit``,
+``tool_concurrency_limit``), and the context-native task frame. There are no
+registered constants: a value the model may reference lives in
+``task.context`` (conversation variables, runtime and input-bound values, and
+the ``task_result_i`` entries ``_seed_task`` adds), shown in the runtime
+context block like any other variable.
 
-Deliberately owns no execution engine and no lifecycle body of any kind --
-every ``_initialize_task``/``think``/``prepare``/``act`` (+ async mirror)
-hook stays ``@abstractmethod`` here, purely for base-``Agent``-compatible
-type-narrowing/documentation (no new enforcement beyond what ``Agent``'s own
-abstracts already require). Each concrete family's generation/resolution/
-dispatch logic stays fully its own, duplicated rather than shared, per this
-branch's established Stage A/B duplication posture.
+The task-message frame is concrete here (``_render_task_messages``): the
+wrapped task block, then -- only when the family has steps to show -- an
+assistant message framed as ``STEPS``, then a closing user directive. The
+family supplies only the two string hooks (``_render_steps``,
+``_render_directive``); the ``think``/``prepare``/``act`` (+ async mirror)
+hooks stay ``@abstractmethod``, since each family's generation, resolution and
+dispatch logic genuinely differs.
 
 ``fail_fast`` is deliberately NOT here: ``PlanActAgent``'s version governs
 whole-batch cascade-vs-abort, ``ReActAgent``'s governs single-call
 raise-vs-tolerate -- different granularity, coincidentally the same name and
 type, never one shared feature. Each declares its own independently.
-``ScriptActAgent`` has no concept of it at all.
+``ScriptActAgent`` declares its own (repair-round budget exhaustion).
 """
 
 from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
-from dataclasses import replace
 from typing import (
     Any,
     Callable,
     ClassVar,
     Literal,
+    Mapping,
     Optional,
 )
+from collections.abc import Iterable
 
 from .base import Agent
 from ..models.agents.records import AgentRecord
-from ..models.agents.blackboard_models import ConstantSpec
-from ..models.agents.tasks import AgentTask
+from ..models.agents.context import ContextVariable
+from ..models.agents.tasks import AgentTask, ToolAgentTask
 from ..exceptions import (
     ToolAgentError,
     ToolRegistrationError,
 )
+from ..constants.agents import INSTRUCTIONS_PRECEDENCE, TASK_RESULT_PREFIX, TOOLS_PREAMBLE
 from ..constants.core import IDENTIFIER_PATTERN
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
@@ -55,14 +57,14 @@ from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.prompts import PromptConfig
 from ..utils.agents import normalize_prompt_config
-from .prompts import TOOL_INSTRUCTIONS_BANNER
+from ..utils.rendering import frame_content
 
 
 class ToolAgent(Agent, ABC):
     """
-    Abstract base shared by every tool-registering, constant-registering
-    Agent family: tool registry, constant registry, shared rendering, and
-    execution knobs. See module docstring for the full rationale.
+    Abstract base shared by every tool-registering Agent family: tool
+    registry, optional user-defined instructions, the context-native task
+    frame, and execution knobs. See module docstring for the full rationale.
 
     What this class owns:
 
@@ -73,31 +75,51 @@ class ToolAgent(Agent, ABC):
       hook (default: reserved-name check only) a subclass with its own
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
-    - Constant registration (``register_constant``/``register_constants``,
-      construction-time only, alias-named wire names) and its own
-      accessors.
-    - Tool-usage guidance (``tool_instructions``, construction-time only,
-      read-only property) rendered as a trailing system-message section via
-      ``_render_system_message``, appended only when set.
+    - ``instructions`` (construction-time only, read-only property): standing
+      user guidance rendered after the tools frame inside a
+      ``USER-DEFINED INSTRUCTIONS`` frame, only when set.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
-    - Shared rendering: ``actions_context``/``constants_context``/
-      ``_render_docstring_block``, ``_turn_position``/``render_turn``,
-      ``_copy_for_task_namespace``, and ``_render_system_message`` (built
-      around a ``_extra_system_context()`` hook, default ``{}``).
+    - ``_seed_task``: one read-only ``task_result_i`` context entry per
+      visible prior turn. ``render_turn`` labels the history with the same
+      names.
+    - The concrete ``_render_task_messages`` frame and the shared
+      ``_render_system_message``: framed ``TOOL-CALLING INSTRUCTIONS``
+      (the family's ``TOOL_INSTRUCTIONS``), framed ``AVAILABLE TOOLS``
+      (``_render_actions()``: ``TOOLS_PREAMBLE`` then the tool list), then the
+      framed user instructions.
     - ``to_dict()`` diagnostics for the above.
 
-    What it does not own: any lifecycle hook body, any placeholder/
-    reference-resolution grammar, any retry loop, or record/result
-    construction -- every concrete family owns all of that itself.
+    What it does not own: any lifecycle hook body, any reference-resolution
+    grammar, any retry loop, or record/result construction -- every concrete
+    family owns all of that itself.
+
+    Phase contract (what each hook may do):
+
+    - ``think``: every model call (including validation/regeneration
+      retries); ends with staged work for ``prepare``; no tool effects.
+    - ``prepare``: resolution only -- bind the staged statements' arguments
+      against ``task.context[name].value``; no model call, no tool I/O.
+      A family that dispatches exactly one call per round and can resolve it
+      at generation time (``ReActAgent``) resolves inside ``think``'s
+      regeneration loop instead, so a resolution failure is regeneration
+      feedback; its ``prepare`` is a documented no-op.
+    - ``act``: effects -- dispatch tools, bind results into ``task.context``
+      via ``Agent._write_context(task, {...}, create=True)``, and set
+      ``task.generated_response`` and ``task.complete``.
+    - Every new ``result_name``/assignment binding is written to
+      ``task.context``; nothing is stored twice.
+    - Build-once: a phase's messages are built on its first ``render_task``
+      call and reused by its retries; the family clears ``task.task_messages``
+      at the end of each round (a forgotten clear shows a stale frame).
     """
 
-    TOOLS_FIELD: ClassVar[str] = "TOOLS"
-    CONSTANTS_FIELD: ClassVar[str] = "CONSTANTS"
-    TOOL_INSTRUCTIONS_KEY: ClassVar[str] = "tool_instructions"
+    #: The family's static tool-calling instructions (plain text, no fields).
+    #: A concrete family must set it; there is no default, so an omission
+    #: surfaces as an ``AttributeError`` when the system message is rendered.
+    TOOL_INSTRUCTIONS: ClassVar[str]
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
-    _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
 
     #: Effective tool ids no subclass instance may ever register, remove, or
     #: replace through the public API -- seeded only via ``_seed_reserved_tool``,
@@ -105,104 +127,73 @@ class ToolAgent(Agent, ABC):
     #: that needs reserved tools overrides this.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset()
 
-    #: Shared by ``_copy_for_task_namespace`` -- known atomic-immutable types
-    #: that never need a defensive deep copy.
-    _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
-        str, int, float, bool, complex, bytes, type(None),
-    )
-
     def __init__(
         self,
         name: str,
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
         tool_concurrency_limit: Optional[int] = None,
-        response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        constants: Optional[list[Any]] = None,
-        constant_aliases: Optional[list[Optional[str]]] = None,
-        constant_descriptions: Optional[list[Optional[str]]] = None,
-        tool_instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Parameters
         ----------
-        name, namespace, description, llm_engine, context_enabled
+        name, namespace, description, llm_engine, record_enabled
             Forwarded to ``Agent.__init__`` unchanged.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
         regeneration_limit : int
-            Bounded-attempts ceiling for regenerating a single round's
+            Bounded-attempts ceiling for regenerating one generation's
             malformed/invalid draft before raising. Always a plain ``int``,
             never ``None``. Defaults to ``5``.
         tool_concurrency_limit : int | None
             Max dispatched calls allowed in a single concurrently-executed
             batch. ``None`` means unlimited (default).
-        response_preview_limit, pre_invoke, post_invoke, post_result_key,
-        records_window
+        pre_invoke, post_invoke, inputs_to_context, response_to_context,
+            response_to_post, use_runtime_context, records_window
             Forwarded to ``Agent.__init__`` unchanged.
         tools : list | None
             Construction-time convenience: registered via ``register_tools()``
             if given.
-        constants : list[Any] | None
-            Construction-time convenience: registered via
-            ``register_constants()`` if given, alongside ``constant_aliases``/
-            ``constant_descriptions``.
-        constant_aliases, constant_descriptions
-            Positionally aligned with ``constants``. See ``register_constant``.
-        tool_instructions : str | PromptConfig | None
-            Optional standing tool-usage guidance (e.g. "always call the
-            outliner first," "alternate writer/reviewer"), rendered as a
-            trailing system-message section appended only when set -- no
-            effect on the rendered system message otherwise. A plain
+        instructions : str | PromptConfig | None
+            Optional standing user guidance (e.g. "always call the outliner
+            first"), rendered after the family prompt inside a
+            ``USER-DEFINED INSTRUCTIONS`` frame, only when set. A plain
             ``str`` is free-form prose (empty/whitespace-only normalizes to
             "not provided"); a ``PromptConfig`` is accepted directly for a
-            caller who wants discovered template fields of their own (e.g.
-            referencing ``{TOOLS}``/``{CONSTANTS}``, already in the same
-            render context). A discovered ``{name}`` field other than
-            ``{TOOLS}``/``{CONSTANTS}`` becomes a real declared parameter of
-            this agent -- validated/defaulted by the normal
-            ``invoke(inputs)`` pipeline, the same mechanism
-            ``BasicAgent.role_prompt``/``ThinkingAgent.thinking_instructions``
-            already use -- and is rendered against ``task.inputs`` merged
-            with ``{TOOLS}``/``{CONSTANTS}``/``_extra_system_context()``
-            (``task.inputs`` first, so it can never shadow those framework
-            fields). Frozen at construction -- read-only via the
-            ``tool_instructions`` property, matching
-            ``BasicAgent.role_prompt``'s own precedent; construct a new
-            agent for different instructions. Guidance only, not a
-            guarantee: a malformed draft it causes is still caught by the
-            existing generation-retry/repair loop, same as any other
-            malformed draft.
+            caller who wants template fields of their own. A discovered
+            ``{name}`` field becomes a declared parameter of this agent --
+            validated/defaulted by the normal ``invoke(inputs)`` pipeline --
+            and is rendered against ``task.inputs``. Frozen at construction --
+            read-only via the ``instructions`` property.
 
         ``fail_fast`` is intentionally not a parameter here -- each concrete
-        subclass that needs it declares and validates its own.
+        subclass that needs it declares and validates its own. A removed
+        parameter (``constants``, ``constant_aliases``,
+        ``constant_descriptions``, ``tool_instructions``) is rejected by
+        Python with ``TypeError``.
         """
-        # Normalized before super().__init__() (unlike every other
-        # ToolAgent construction-time field) so a {name} field discovered
-        # inside the template can be declared as a real extra_parameters
-        # entry -- the same precedent ThinkingAgent's role_prompt/
-        # thinking_instructions already establishes.
-        normalized_tool_instructions = normalize_prompt_config(
-            tool_instructions,
+        # Normalized before super().__init__() so a {name} field discovered
+        # inside the template can be declared as a real extra_parameters entry.
+        normalized_instructions = normalize_prompt_config(
+            instructions,
             default_template=None,
-            provided_description="Tool instructions",
-            error_label="tool_instructions",
-        )
-        tool_instructions_params = (
-            list(normalized_tool_instructions.parameters)
-            if normalized_tool_instructions is not None
-            else []
+            provided_description="Instructions",
+            error_label="instructions",
         )
 
         super().__init__(
@@ -210,18 +201,22 @@ class ToolAgent(Agent, ABC):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             records_window=records_window,
-            response_preview_limit=response_preview_limit,
-            extra_parameters=tool_instructions_params,
+            extra_parameters=(
+                list(normalized_instructions.parameters)
+                if normalized_instructions is not None
+                else []
+            ),
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
-        self._constants: dict[str, ConstantSpec] = {}
-        self._constant_counter: int = 0
 
         if type(regeneration_limit) is not int or regeneration_limit < 0:
             raise ToolAgentError(
@@ -237,13 +232,8 @@ class ToolAgent(Agent, ABC):
 
         if tools is not None:
             self.register_tools(tools)
-        if constants is not None:
-            self.register_constants(
-                constants, aliases=constant_aliases, descriptions=constant_descriptions
-            )
 
-        if normalized_tool_instructions is not None:
-            self._system_prompts[self.TOOL_INSTRUCTIONS_KEY] = normalized_tool_instructions
+        self._instructions = normalized_instructions
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -264,7 +254,7 @@ class ToolAgent(Agent, ABC):
 
     @property
     def regeneration_limit(self) -> int:
-        """Bounded-attempts ceiling for regenerating a single round's
+        """Bounded-attempts ceiling for regenerating one generation's
         malformed/invalid draft before raising -- always a plain ``int``,
         never ``None``. Read-only."""
         return self._regeneration_limit
@@ -285,18 +275,9 @@ class ToolAgent(Agent, ABC):
         self._tool_concurrency_limit = value
 
     @property
-    def tool_instructions(self) -> Optional[str]:
-        """
-        Standing tool-usage guidance rendered as a trailing system-message
-        section, or ``None`` if never set. The stored template string is
-        frozen at construction -- matches ``BasicAgent.role_prompt``'s own
-        read-only precedent; no setter -- but its *rendered* content can
-        vary per invocation if it references a declared field beyond
-        ``{TOOLS}``/``{CONSTANTS}``, resolved from ``task.inputs`` at render
-        time. Not a contradiction: the template text never changes, only
-        what it renders to.
-        """
-        config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
+    def instructions(self) -> Optional[str]:
+        """Template of the registered instructions, or None. Read-only."""
+        config = self._instructions
         return config.template if config is not None else None
 
     # ------------------------------------------------------------------ #
@@ -304,10 +285,8 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _normalize_collision_policy(name_collision_policy: str, allowed: tuple[str, ...]) -> str:
-        """Takes an explicit ``allowed`` set -- tool call sites pass
-        ``self._TOOL_COLLISION_POLICIES``, constant call sites pass
-        ``self._CONSTANT_COLLISION_POLICIES`` (constants alone support the
-        extra ``"suffix"`` mode)."""
+        """Takes an explicit ``allowed`` set; tool call sites pass
+        ``self._TOOL_COLLISION_POLICIES``."""
         policy = name_collision_policy.lower().strip()
         if policy not in allowed:
             raise ToolRegistrationError(
@@ -654,235 +633,13 @@ class ToolAgent(Agent, ABC):
         self._toolbox[name] = invokable
 
     # ------------------------------------------------------------------ #
-    # Constants Helpers
+    # Docstring rendering
     # ------------------------------------------------------------------ #
-    @property
-    def constants(self) -> dict[str, ConstantSpec]:
-        """Shallow copy of registered constants, keyed by the bare uppercase alias."""
-        return dict(self._constants)
-
-    def register_constant(
-        self,
-        constant: Any,
-        alias: Optional[str] = None,
-        description: Optional[str] = None,
-        *,
-        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
-    ) -> bool:
-        """
-        Register one named runtime constant. ``alias`` is optional: given,
-        stored under ``alias.upper()`` (wire-facing ``ConstantSpec.name`` is
-        ``f"K_{alias.upper()}"``); omitted, auto-named from
-        ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict
-        key and ``ConstantSpec.name`` are this same string, then the counter
-        increments). The counter never decrements, so a retired auto-name is
-        never reissued.
-
-        ``description``, when omitted or blank/whitespace-only, stores the
-        literal string ``"No details"`` -- never ``None``.
-
-        ``name_collision_policy`` gains a fourth value, ``"suffix"``: on
-        collision, retries ``f"{key}_0"``, ``f"{key}_1"``, ... until an
-        unused key is found, and registers under that key instead of
-        raising/skipping.
-
-        Returns whether the constant was newly registered under its
-        originally intended key (``False`` only when
-        ``name_collision_policy="skip"`` hits an existing key; ``"suffix"``
-        always returns ``True``, since it renames instead of skipping).
-        """
-        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
-
-        if alias is None:
-            key = f"K_{self._constant_counter}"
-            self._constant_counter += 1
-            name = key
-        else:
-            if not isinstance(alias, str) or not alias.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: alias must be None or a "
-                    f"non-empty string; got {alias!r}."
-                )
-            key = alias.upper()
-            name = f"K_{key}"
-
-        normalized_description = description.strip() if isinstance(description, str) else None
-        effective_description = normalized_description if normalized_description else "No details"
-
-        if key in self._constants:
-            if policy == "raise":
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: constant already registered: "
-                    f"{key!r}."
-                )
-            if policy == "skip":
-                return False
-            if policy == "suffix":
-                i = 0
-                candidate = f"{key}_{i}"
-                while candidate in self._constants:
-                    i += 1
-                    candidate = f"{key}_{i}"
-                key = candidate
-                name = f"K_{key}"
-            # "replace" falls through to the unconditional overwrite below.
-
-        self._constants[key] = ConstantSpec(name=name, value=constant, description=effective_description)
-        return True
-
-    def register_constants(
-        self,
-        constants: list[Any],
-        aliases: Optional[list[Optional[str]]] = None,
-        descriptions: Optional[list[Optional[str]]] = None,
-        *,
-        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
-    ) -> bool:
-        """
-        Register a batch of constants. ``aliases``/``descriptions`` are
-        optional and positionally aligned with ``constants`` -- an omitted
-        list, or an individual ``None`` entry, means "auto-name"/"default
-        description" for that position, exactly mirroring
-        ``register_constant``'s single-item behavior. Whole-batch length
-        validation before any mutation.
-
-        Under ``name_collision_policy="suffix"``, the existing "intra-batch
-        duplicates always raise" rule is bypassed: a colliding key (whether
-        against another entry in this same batch or against the existing
-        registry) is resolved by the same ``f"{key}_i"`` retry used by
-        ``register_constant``, rather than raising. The other three policies
-        keep the unconditional intra-batch raise.
-
-        Returns ``True`` iff every item was newly registered under its
-        originally intended key (only ``"skip"`` can make this ``False``).
-        """
-        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
-
-        if aliases is not None and len(aliases) != len(constants):
-            raise ValueError(
-                f"{type(self).__name__}.{self.name}: aliases must be the same "
-                f"length as constants; got {len(aliases)} vs {len(constants)}."
-            )
-        if descriptions is not None and len(descriptions) != len(constants):
-            raise ValueError(
-                f"{type(self).__name__}.{self.name}: descriptions must be the same "
-                f"length as constants; got {len(descriptions)} vs {len(constants)}."
-            )
-
-        candidates: dict[str, ConstantSpec] = {}
-        for index, value in enumerate(constants):
-            alias = aliases[index] if aliases is not None else None
-            raw_description = descriptions[index] if descriptions is not None else None
-            normalized_description = raw_description.strip() if isinstance(raw_description, str) else None
-            effective_description = normalized_description if normalized_description else "No details"
-
-            if alias is None:
-                key = f"K_{self._constant_counter}"
-                self._constant_counter += 1
-                name = key
-            else:
-                if not isinstance(alias, str) or not alias.strip():
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: alias must be None or "
-                        f"a non-empty string; got {alias!r}."
-                    )
-                key = alias.upper()
-                name = f"K_{key}"
-
-            # Intra-batch dedup: "suffix" resolves it below instead of
-            # raising; the other three policies keep the unconditional raise.
-            if key in candidates and policy != "suffix":
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: duplicate constant name in "
-                    f"batch: {key!r}."
-                )
-
-            # "suffix" resolves either collision source (intra-batch or
-            # pre-existing registry) uniformly, right here -- this entry is
-            # guaranteed collision-free before it ever reaches `candidates`.
-            if policy == "suffix" and (key in candidates or key in self._constants):
-                i = 0
-                candidate_key = f"{key}_{i}"
-                while candidate_key in candidates or candidate_key in self._constants:
-                    i += 1
-                    candidate_key = f"{key}_{i}"
-                key = candidate_key
-                name = f"K_{key}"
-
-            candidates[key] = ConstantSpec(name=name, value=value, description=effective_description)
-
-        # Cross-check against the existing registry per policy. "suffix"
-        # entries never trigger anything here -- already resolved above.
-        any_skipped = False
-        vetted: dict[str, ConstantSpec] = {}
-        for key, spec in candidates.items():
-            if key in self._constants and policy != "suffix":
-                if policy == "raise":
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: constant already "
-                        f"registered: {key!r}."
-                    )
-                if policy == "skip":
-                    any_skipped = True
-                    continue
-                # "replace" falls through to the unconditional overwrite below.
-            vetted[key] = spec
-
-        self._constants.update(vetted)
-        return not any_skipped
-
-    def has_constant(self, alias: str) -> bool:
-        """Return whether a constant is registered under ``alias`` (case-insensitive)."""
-        return alias.upper() in self._constants
-
-    def get_constant(self, alias: str) -> ConstantSpec:
-        """Return the registered constant for ``alias`` (case-insensitive).
-
-        Raises ``ToolAgentError`` if no constant is registered under it.
-        """
-        spec = self._constants.get(alias.upper())
-        if spec is None:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown constant {alias!r}.")
-        return spec
-
-    def remove_constant(self, alias: str) -> bool:
-        """Remove the constant registered under ``alias`` (case-insensitive).
-        Returns whether it was present."""
-        return self._constants.pop(alias.upper(), None) is not None
-
-    def update_constant_description(self, alias: str, description: str) -> None:
-        """
-        Replace only the ``description`` of an already-registered constant
-        -- ``.name``/``.value`` are never touched. Looked up the same way
-        ``get_constant`` resolves ``alias`` (``alias.upper()``; works for a
-        user-given alias or a literal auto-generated ``K_i`` key).
-        ``description`` must be a real, non-empty string once stripped --
-        there is no reset-to-default (``None``) path.
-
-        Raises ``ToolAgentError`` if no constant is registered under
-        ``alias``, or if ``description`` is not a non-empty string.
-        """
-        key = alias.upper()
-        spec = self._constants.get(key)
-        if spec is None:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown constant {alias!r}.")
-        if not isinstance(description, str) or not description.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: description must be a "
-                f"non-empty string; got {description!r}."
-            )
-        self._constants[key] = replace(spec, description=description.strip())
-
-    def clear_constants(self) -> None:
-        """Remove every registered constant."""
-        self._constants.clear()
-
     @staticmethod
     def _render_docstring_block(description: str) -> str:
         """
         Render ``description`` as a 4-space-indented triple-quoted docstring
-        block, shared by ``actions_context``/``constants_context`` so a
-        tool's and a constant's description render identically. A
+        block, used by ``actions_context``. A
         single-line description closes on the same line
         (``    \"\"\"text\"\"\"``); a multi-line description continues indented
         (blank lines left bare, matching ordinary docstring convention) with
@@ -897,142 +654,150 @@ class ToolAgent(Agent, ABC):
         )
         return f'    """{lines[0]}\n{continuation}\n    """'
 
-    def constants_context(self) -> str:
+    def render_turn(self, turn: AgentRecord, **kwargs: Any) -> list[dict[str, str]]:
         """
-        Render every registered constant for prompt injection, one block
-        per constant (a ``NAME: type`` annotation line + a 4-space-indented
-        triple-quoted docstring description, via ``_render_docstring_block``),
-        matching ``actions_context``'s own docstring-style rendering. Names
-        print exactly as stored (``K_<ALIAS>`` when aliased, or ``K_i`` when
-        auto-named) — no prefix synthesized here. Empty
-        registry renders a "no constants" message.
-        """
-        if not self._constants:
-            return "No constants registered."
+        Labels a historic turn with its ``task_result_i`` address so a model
+        can reference it by name -- base ``Agent.render_turn`` renders the raw
+        value with no such label.
 
-        rendered: list[str] = []
-        for spec in self._constants.values():
-            description = (
-                spec.description if spec.description is not None else "No description provided."
-            )
-            rendered.append(f"{spec.name}: {spec.type}\n{self._render_docstring_block(description)}")
-
-        return "\n\n".join(rendered)
-
-    def _copy_for_task_namespace(self, value: Any) -> Any:
+        1. ``index = kwargs["index"]`` (plain ``KeyError`` if missing: this is
+           framework-internal plumbing from ``summarize``, not a validated
+           boundary). It is the turn's 0-based position within *this
+           invocation's* ``task.turns``, matching ``_seed_task``.
+        2. ``messages = super().render_turn(turn, **kwargs)``
+        3. Prepend ``{_CONTEXT_NAME_PREFIX}task_result_{index}: <type> = `` to
+           the last message's content.
         """
-        Return ``value`` unchanged if it's a known atomic-immutable type
-        (nothing callable on these ever mutates in place); otherwise return
-        a deep copy. Used to seed both ``task.cache``'s ``task_result_i``
-        entries and ``task.constant_values`` exactly once per invocation,
-        so a mutating attribute/method call on either can never reach the
-        real, shared registered constant or a prior invocation's stored
-        result -- covers aliasing and nested-attribute mutation uniformly,
-        since nothing shared is ever exposed by direct reference in the
-        first place.
-        """
-        if isinstance(value, self._ATOMIC_IMMUTABLE_TYPES):
-            return value
-        return copy.deepcopy(value)
-
-    # ------------------------------------------------------------------ #
-    # Cross-invocation result addressing
-    # ------------------------------------------------------------------ #
-    def _turn_position(self, turn: AgentRecord) -> int:
-        """
-        Walk ``turn.prev`` backward to the conversation root, counting
-        hops. The root itself is position 0, its child is 1, etc. --
-        matches the turn's actual index in ``get_conversation()``'s full
-        list, computed fresh from existing structure (correct even when
-        ``task.turns`` is a ``records_window``-truncated tail, since this
-        always walks all the way to the true root regardless of window).
-        """
-        position = 0
-        node = turn
-        while node.prev is not None:
-            node = node.prev
-            position += 1
-        return position
-
-    def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
-        """
-        Labels a historic turn with its ``task_result_i`` address so a
-        model can reference it by name in a later plan -- base
-        ``Agent.render_turn`` renders the raw value with no such label.
-        """
-        messages = super().render_turn(turn)
-        i = self._turn_position(turn)
-        label = f"task_result_{i}: {type(turn.generated_response).__name__} = "
+        index = kwargs["index"]
+        messages = super().render_turn(turn, **kwargs)
+        label = (
+            f"{self._CONTEXT_NAME_PREFIX}{TASK_RESULT_PREFIX}{index}: "
+            f"{type(turn.generated_response).__name__} = "
+        )
         messages[-1]["content"] = label + messages[-1]["content"]
         return messages
 
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _extra_system_context(self) -> dict[str, str]:
+    def _render_actions(self) -> str:
         """
-        Extra render-context entries a subclass's active system prompt
-        needs beyond ``{TOOLS}``/``{CONSTANTS}``. Default: none.
-        ``ScriptActAgent`` overrides this to add ``EXCLUDED_PY_BUILTINS``.
+        The ``AVAILABLE TOOLS`` body: ``TOOLS_PREAMBLE`` then
+        ``actions_context()`` (an empty tool list drops its part). A family that
+        adds text after the tool list overrides this, calling ``super()``.
         """
-        return {}
+        parts = (TOOLS_PREAMBLE, self.actions_context())
+        return "\n\n".join(part for part in parts if part)
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """
-        Render this agent's active system prompt with tool/constant context
-        injected, then append a trailing ``tool_instructions`` section if
-        one was registered. Returns ``[]`` when ``task.system_prompt_name``
-        is ``None``. Deliberately carries no budget content —
-        ``tool_calls_limit`` is a per-invocation fact, not a standing
-        instruction, so each family surfaces it in its own task-message
-        banner instead.
-        """
-        if task.system_prompt_name is None:
-            return []
-        render_context = {
-            self.TOOLS_FIELD: self.actions_context(),
-            self.CONSTANTS_FIELD: self.constants_context(),
-            **self._extra_system_context(),
-        }
-        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        Render the system message as up to three framed sections.
 
-        # Appended post-render, never templated into the family prompts
-        # above -- zero added tokens for an agent that never set
-        # tool_instructions. Rendered against task.inputs merged with
-        # render_context (TOOLS/CONSTANTS/extra spread last) so a declared
-        # {name} field resolves from the invocation while TOOLS/CONSTANTS
-        # can never be shadowed by a caller-supplied input of the same name.
-        tool_instructions_config = self._system_prompts.get(self.TOOL_INSTRUCTIONS_KEY)
-        if tool_instructions_config is not None:
-            rendered_instructions = tool_instructions_config.render(
-                {**task.inputs, **render_context}
+        1. ``TOOL-CALLING INSTRUCTIONS``: the family's ``TOOL_INSTRUCTIONS``.
+        2. ``AVAILABLE TOOLS``: ``_render_actions()``.
+        3. With instructions set: ``INSTRUCTIONS_PRECEDENCE``, then the
+           instructions rendered against ``task.inputs`` in their
+           ``USER-DEFINED INSTRUCTIONS`` frame.
+
+        Sections are joined by a blank line. Carries no budget text: per-call
+        facts belong in the directive.
+        """
+        sections = [
+            frame_content(self.TOOL_INSTRUCTIONS, "TOOL-CALLING INSTRUCTIONS"),
+            frame_content(self._render_actions(), "AVAILABLE TOOLS"),
+        ]
+
+        config = self._instructions
+        if config is not None:
+            text = config.render(dict(task.inputs))
+            sections.append(
+                f"{INSTRUCTIONS_PRECEDENCE}\n"
+                f"{frame_content(text, 'USER-DEFINED INSTRUCTIONS')}"
             )
-            rendered += TOOL_INSTRUCTIONS_BANNER.format(instructions=rendered_instructions)
 
-        return [{"role": "system", "content": rendered}]
+        return [{"role": "system", "content": "\n\n".join(sections)}]
 
-    # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks -- stay fully abstract, no shared body
-    # ------------------------------------------------------------------ #
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """
+        Build-once per phase (the family clears ``task.task_messages`` at
+        round end).
+
+        1. If ``task.task_messages`` is set, return it as-is.
+        2. ``block = self._render_task_block(task)``; ``steps`` and
+           ``directive`` from the two family hooks.
+        3. No steps: one user message ``f"{block}\\n\\n{directive}"``. Steps:
+           user ``block``, assistant ``frame_content(steps, "STEPS")``, user
+           ``directive``.
+        4. Store on ``task.task_messages`` and return that same list.
+
+        No guard for an empty directive: it must be a non-empty string (with
+        steps an empty one would end the list on an assistant message).
+        """
+        if task.task_messages:
+            return task.task_messages
+        block = self._render_task_block(task)
+        steps = self._render_steps(task)
+        directive = self._render_directive(task)
+        if not steps:
+            messages = [{"role": "user", "content": f"{block}\n\n{directive}"}]
+        else:
+            messages = [
+                {"role": "user", "content": block},
+                {"role": "assistant", "content": frame_content(steps, "STEPS")},
+                {"role": "user", "content": directive},
+            ]
+        task.task_messages = messages
+        return messages
+
     @abstractmethod
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """
-        Build and return this invocation's task. A concrete override is
-        responsible for seeding whatever cross-invocation context this
-        family's own task model needs directly from ``turns``.
-        """
+    def _render_steps(self, task: AgentTask) -> str:
+        """Interior of the steps block: what has run so far this call
+        (completed statements, failure notes). ``""`` means nothing to show,
+        so no block. Pure function of the task."""
         ...
 
     @abstractmethod
+    def _render_directive(self, task: AgentTask) -> str:
+        """Closing instruction for this phase, including per-call facts
+        (budget line, failure/repair wording). Non-empty ``str``. Pure
+        function of the task."""
+        ...
+
+    # ------------------------------------------------------------------ #
+    # Task seeding and lifecycle hooks (abstract, no shared body)
+    # ------------------------------------------------------------------ #
+    def _seed_task(self, task: ToolAgentTask) -> None:
+        """
+        Add one read-only ``task_result_i`` entry per visible prior turn.
+
+        Runs after ``_seed_context``; ``task.context`` already holds the
+        conversation's variables, runtime and input-bound values.
+
+        1. For ``i, turn in enumerate(task.turns)`` (the enumeration
+           ``summarize`` uses, so ``i`` matches the history labels): the
+           turn's ``generated_response``, deep-copied (an uncopyable result is
+           used as-is, never an error), becomes a ``readonly`` variable named
+           ``task_result_{i}`` with ``preview_limit=0`` and no description.
+        2. Written straight into ``task.context``, not through
+           ``_write_context``: the entries stay out of ``task.changed_context``
+           and are never persisted.
+        """
+        for i, turn in enumerate(task.turns):
+            value = turn.generated_response
+            try:
+                value = copy.deepcopy(value)
+            except Exception:
+                pass
+            name = f"{TASK_RESULT_PREFIX}{i}"
+            task.context[name] = ContextVariable(
+                name=name, value=value, readonly=True, preview_limit=0
+            )
+
+    @abstractmethod
     def think(self, task: AgentTask) -> AgentTask:
-        """Make this round's real decision via the LLM. Hard-abstract —
-        every family has genuine generation work here."""
+        """Every model call of the round, including validation/regeneration
+        retries; ends with staged work for ``prepare``; no tool effects.
+        Hard-abstract -- every family has genuine generation work here."""
         ...
 
     @abstractmethod
@@ -1042,9 +807,11 @@ class ToolAgent(Agent, ABC):
 
     @abstractmethod
     def prepare(self, task: AgentTask) -> AgentTask:
-        """Turn this round's decision into something ``act`` can run, with
-        no further LLM calls. Hard-abstract — each family's resolve/cascade
-        logic differs enough that no shared body fits."""
+        """Resolution only: bind the staged statements' arguments against
+        ``task.context[name].value``; no model call, no tool I/O.
+        Hard-abstract -- each family's resolve/cascade logic differs enough
+        that no shared body fits. ``ReActAgent`` resolves inside ``think``
+        and implements this as a no-op."""
         ...
 
     @abstractmethod
@@ -1054,9 +821,10 @@ class ToolAgent(Agent, ABC):
 
     @abstractmethod
     def act(self, task: AgentTask) -> AgentTask:
-        """Execute this round's prepared work and apply results, advancing
-        ``task``. Hard-abstract — each family's dispatch shape genuinely
-        differs."""
+        """Effects: dispatch tools, bind results into ``task.context`` via
+        ``Agent._write_context(task, {...}, create=True)``, and set
+        ``task.generated_response`` and ``task.complete``. Hard-abstract --
+        each family's dispatch shape genuinely differs."""
         ...
 
     @abstractmethod
@@ -1070,7 +838,7 @@ class ToolAgent(Agent, ABC):
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.
 
-        Extends the base Agent snapshot with tool/constant/knob diagnostics.
+        Extends the base Agent snapshot with tool/knob diagnostics.
         No ``fail_fast`` key here — that lives on each concrete subclass's
         own ``to_dict()`` override instead.
         """
@@ -1079,6 +847,7 @@ class ToolAgent(Agent, ABC):
             "tool_calls_limit": self.tool_calls_limit,
             "regeneration_limit": self.regeneration_limit,
             "tool_concurrency_limit": self.tool_concurrency_limit,
+            "instructions": self.instructions,
             "tools": {
                 name: tool.to_dict()
                 for name, tool in self._toolbox.items()

@@ -1,4 +1,8 @@
-﻿from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.agents import PlanActAgent
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 
@@ -8,7 +12,7 @@ agent = PlanActAgent(
     namespace="examples",
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
-    context_enabled=True,    # True => persists conversation history across runs
+    record_enabled=True,    # True => persists conversation history across runs
 )
 
 # Simple local tools (docstrings become tool descriptions if you omit description=...)
@@ -45,7 +49,7 @@ final = agent.invoke({"prompt": task_prompt})
 
 print("\nFinal Result:\n", final.result)
 
-# Optional: inspect the executed plan (even if context_enabled=False, the view is useful for debugging)
+# Optional: inspect the executed plan (even if record_enabled=False, the view is useful for debugging)
 from pprint import pprint
 print("\nExecuted calls:\n")
-pprint(agent.get_conversation()[-1].statements)
+pprint(agent.get_conversation().records[-1].statements)

@@ -1,4 +1,4 @@
-﻿# example_doc_summarizer.py
+# example_doc_summarizer.py
 # Requires:
 #   - OPENAI_API_KEY in your environment (or .env)
 import os, time
@@ -21,7 +21,7 @@ agent = BasicAgent(
     description="Summarizes uploaded documents.",
     llm_engine=llm,
     role_prompt="You are a concise technical summarizer.",
-    context_enabled=True,   # enables history tracking
+    record_enabled=True,   # enables history tracking
 )
 
 def main():

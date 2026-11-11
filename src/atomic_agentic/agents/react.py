@@ -11,6 +11,12 @@ sibling to ``PlanActAgent``'s one-shot multi-call plan. See
 ``agents/planact.py``'s own module docstring for the shared design lineage
 this mirrors.
 
+Values live in ``task.context``: pre-existing context variables are
+referenced as ``$name``, and each successful call's ``result_name`` (or an
+auto-assigned ``__rN__``) is written there, so the next round sees the
+observation as an ordinary context entry in the runtime-context block. The
+steps block shows only the call log and the last failure, never values.
+
 Distinguishing features relative to ``PlanActAgent``:
 - ``return`` is an ordinary, really-dispatched tool call (``return_tool``,
   registered under its own bare name) -- never a synthesized,
@@ -20,14 +26,17 @@ Distinguishing features relative to ``PlanActAgent``:
   specifically: ``RETURN_TOOL_NAME`` and ``RETURN_ALIAS`` are the identical
   literal string ``"return"`` (`constants/agents.py`), so anywhere else
   ``is_dispatched`` is consulted for *accounting* purposes (see
-  ``build_result_from_record`` below), a real, successful ``return`` call
+  ``build_result_from_task`` below), a real, successful ``return`` call
   is still indistinguishable from the sentinel and gets excluded --
   correctly, per ``ToolUsageRecord.call_count``'s own "non-return
   executions" contract, but via the same string coincidence, not a
   deliberate discriminator.
 - ``think()`` owns validation AND argument resolution in one retry loop;
-  ``prepare()`` is a documented no-op -- this family's ``think()`` and
-  ``prepare()`` are logically inseparable (one call, resolved immediately).
+  ``prepare()`` is a documented no-op. Exactly one call is generated per
+  round and every value it may reference already exists at generation time,
+  so a bad resolution (an unbound reference, a value of the wrong type for
+  the target tool) is cheap regeneration feedback -- no round and no
+  tool-call budget is spent on it.
 - No batching, no gathering, no cascade machinery -- exactly one call is
   dispatched per round, and a tolerated failure (``fail_fast=False``) is
   simply information the model sees and redirects around next round.
@@ -37,13 +46,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
-from typing import Any, Callable, ClassVar, Optional
+from collections.abc import Iterable
+from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
 from .prompts import REACT_PROMPT
 from .tools import make_dict, make_sequence, return_tool
-from ..constants.agents import RETURN_TOOL_NAME, TASK_RESULT_PREFIX
+from ..constants.agents import RETURN_TOOL_NAME
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
@@ -52,13 +61,12 @@ from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import ReActTask
-from ..models.agents.records import AgentRecord, ToolAgentRecord, LLMRecord
+from ..models.agents.records import ToolAgentRecord, LLMRecord
 from ..models.results.agents import ToolAgentResult
-from ..utils.agents import resolve_statement_args
+from ..utils.agents import build_usage_report, resolve_statement_args
 from ..utils.sigils import (
     build_react_schema,
     parse_react_call,
-    render_cache_snapshot,
     render_completed_as_json,
     render_failed_as_json,
     translate_calls,
@@ -89,18 +97,26 @@ class ReActAgent(ToolAgent):
     - Higher latency: one LLM call per step, no concurrency.
     - Step quality depends on the model's ability to select the next best
       action from the rendered history alone.
+    - ``tool_calls_limit=None`` removes the only run-level stop: nothing else
+      ends a run whose model never calls ``return`` (``regeneration_limit``
+      restarts each round, so it does not bound the run). The default is 25;
+      pass ``None`` only when the model is trusted to finish.
     """
 
     # A class attribute (active before __init__ runs) — return_tool plus the
     # two composite-value-building utility tools this family's schema text
     # tells the model to use. Reserved so no caller can register a different
-    # tool under any of these ids, or remove/replace them once seeded. No
-    # get_item entry: too niche relative to make_sequence/make_dict/return,
-    # and its presence in AVAILABLE TOOLS pulls live generations toward
-    # container-shaped detours a flat call sequence doesn't need.
+    # tool under any of these ids, or remove/replace them once seeded.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
     )
+
+    # This family's $name-sigil grammar (utils/sigils.py): context entries
+    # render as "$name", history labels as "$task_result_i".
+    _CONTEXT_NAME_PREFIX: str = "$"
+
+    _TASK_CLS = ReActTask
+    TOOL_INSTRUCTIONS = REACT_PROMPT
 
     def __init__(
         self,
@@ -108,33 +124,35 @@ class ReActAgent(ToolAgent):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
+        record_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = 25,
         regeneration_limit: int = 5,
-        tool_concurrency_limit: Optional[int] = None,
         fail_fast: bool = False,
-        response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_result_key: Optional[str] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
         records_window: Optional[int] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        constants: Optional[list[Any]] = None,
-        constant_aliases: Optional[list[Optional[str]]] = None,
-        constant_descriptions: Optional[list[Optional[str]]] = None,
-        tool_instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Every parameter except ``fail_fast`` forwards verbatim to
-        ``ToolAgent.__init__`` -- no ``extra_parameters`` keyword, matching
-        that base class's own signature exactly (it accepts none).
+        ``ToolAgent.__init__`` (``instructions`` is the optional standing
+        user guidance, framed into the system message by the base class).
+        There are no constants: pre-existing values are context variables
+        (remembered on the conversation, bound from inputs, or runtime).
+        There is no ``tool_concurrency_limit`` parameter: exactly one call is
+        dispatched per round, so the base's limit is fixed at ``1``.
         ``fail_fast`` has no shared home on ``ToolAgent`` (see the
         ``fail_fast`` property below) -- validated and stored locally
         instead. Two defaults deliberately diverge from ``ToolAgent``'s own:
         ``tool_calls_limit`` defaults to ``25`` (not ``None`` -- this family
         has no second round-ceiling knob the way ``ScriptActAgent`` has
-        ``planning_rounds_limit``, so an unbounded default would have zero
+        ``replanning_limit``, so an unbounded default would have zero
         structural backstop), and ``fail_fast`` defaults to ``False`` (not
         ``True`` -- redirecting on failure is this family's entire reason
         for existing; a caller who genuinely wants one failure to be fatal
@@ -145,20 +163,19 @@ class ReActAgent(ToolAgent):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            context_enabled=context_enabled,
+            record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
-            tool_concurrency_limit=tool_concurrency_limit,
-            response_preview_limit=response_preview_limit,
+            tool_concurrency_limit=1,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
-            post_result_key=post_result_key,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
             records_window=records_window,
             tools=tools,
-            constants=constants,
-            constant_aliases=constant_aliases,
-            constant_descriptions=constant_descriptions,
-            tool_instructions=tool_instructions,
+            instructions=instructions,
         )
 
         if not isinstance(fail_fast, bool):
@@ -176,7 +193,6 @@ class ReActAgent(ToolAgent):
         self._seed_reserved_tool(return_tool, RETURN_TOOL_NAME)
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
-        self._system_prompts["reason_then_act"] = REACT_PROMPT
 
     @property
     def fail_fast(self) -> bool:
@@ -198,111 +214,60 @@ class ReActAgent(ToolAgent):
         return d
 
     # ------------------------------------------------------------------ #
-    # Shared per-invocation helpers
-    # ------------------------------------------------------------------ #
-    # _copy_for_task_namespace now inherited from ToolAgent unchanged.
-
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ReActTask:
-        """
-        Build a bare ``ReActTask``, seed its ``cache`` with every visible
-        prior turn's result under ``task_result_{i}``, and seed
-        ``constant_values`` from every registered constant. Mirrors
-        ``PlanActAgent._initialize_task`` exactly.
-        """
-        task = ReActTask(
-            turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="reason_then_act",
-        )
-        for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
-                turn.generated_response
-            )
-        for spec in self._constants.values():
-            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
-        return task
-
-    # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
-    def _render_current_task_message(self, task: ReActTask) -> dict[str, str]:
+    def _render_steps(self, task: ReActTask) -> str:
         """
-        The "what is the task" user message. Unlike a silent backstop never
-        shown to the model, this family surfaces a live *remaining* count
-        here -- recomputed fresh every round, since
-        this method is re-invoked each time ``task.task_messages`` is
-        rebuilt (every round). Mirrors ``PlanActAgent``'s own
-        ``_render_current_task_message`` (which shows a static *total*,
-        since it plans once) adapted for a figure that actually depletes
-        round over round. Enforcement itself is still structural (the
-        schema enum narrows to ``return``-only at the boundary, see
-        ``_run_step_retry_loop``) -- this text is purely informational, so
-        the model can see it coming rather than getting funneled into
-        ``return`` with no warning.
+        The call log: every call completed so far as wire-schema JSON and,
+        only when the last call failed, that one failed call with its error.
+        ``""`` on round 1 (nothing completed, no failure), so the base emits
+        no steps block. Values are not rendered here; they are in the
+        runtime-context block.
+
+        Only the single most recent failure is shown, never the accumulated
+        history: ``task.last_call_failed`` answers "is there anything to
+        react to" precisely (False the instant a later call succeeds), so
+        the render is gated on it, not on ``failed_statements`` being
+        non-empty.
         """
-        content = f"CURRENT TASK:\n{task.user_prompt}"
-        if self.tool_calls_limit is not None:
-            remaining = self.tool_calls_limit - task.tool_calls_used
-            content += f"\n\nTool calls remaining: {remaining} of {self.tool_calls_limit}."
-        return {"role": "user", "content": content}
-
-    def _render_task_messages(self, task: ReActTask) -> list[dict[str, str]]:
-        """
-        Build-once contract: returns ``task.task_messages`` as-is if
-        already non-empty (cleared by ``think()`` at the end of the prior
-        round). One synthesized snapshot per round -- banner / assistant
-        "state so far" (completed calls, cached values, and any persistent
-        failure history) / user instruction, framed differently after a
-        tolerated failure.
-        """
-        if task.task_messages:
-            return task.task_messages
-
-        banner = self._render_current_task_message(task)
-
-        completed_section = render_completed_as_json(task.completed) or "(nothing completed yet)"
-
-        cache_snapshot = render_cache_snapshot(
-            task.completed, task.cache, self._response_preview_limit
-        )
-        cache_section = f"\n\n{cache_snapshot}" if cache_snapshot else ""
-
-        # Only the single most recent failure -- never the accumulated
-        # history. Showing every past failure alongside a since-succeeded
-        # retry would leave the model unable to tell what it's actually
-        # reacting to right now; task.last_call_failed already answers
-        # "is there anything to react to" precisely (False the instant a
-        # later call succeeds), so the render must be gated on it, not on
-        # whether failed_statements is merely non-empty.
-        failed_section = ""
+        if not task.completed and not task.last_call_failed:
+            return ""
+        completed = render_completed_as_json(task.completed) or "(nothing completed yet)"
+        steps = f"# STEPS COMPLETED SO FAR:\n{completed}"
         if task.last_call_failed:
-            failed_section = (
-                f"\n\nYOUR LAST CALL FAILED:\n"
+            steps += (
+                "\n\n# YOUR LAST CALL FAILED:\n"
                 f"{render_failed_as_json([task.failed_statements[-1]])}"
             )
+        return steps
 
-        state_message = {
-            "role": "assistant",
-            "content": f"# STEPS COMPLETED SO FAR:\n{completed_section}{cache_section}{failed_section}",
-        }
-
-        base_instruction = (
+    def _render_directive(self, task: ReActTask) -> str:
+        """
+        The closing instruction: the next-call request (with failure wording
+        after a tolerated failure), then the live remaining-budget line when
+        a limit is set. Recomputed every round, since the figure depletes.
+        Enforcement itself is structural (the schema enum narrows to
+        ``return`` only at the boundary, see ``_run_step_retry_loop``); the
+        text only lets the model see it coming.
+        """
+        base = (
             "Produce the NEXT BEST single tool call for the current task, "
             "or call the return tool if the task is complete."
         )
-        instruction = (
+        directive = (
             "Your last call failed -- see YOUR LAST CALL FAILED above for "
-            f"why. Adjust your approach. {base_instruction}"
+            f"why. Adjust your approach. {base}"
             if task.last_call_failed
-            else base_instruction
+            else base
         )
-
-        task.task_messages = [banner, state_message, {"role": "user", "content": instruction}]
-        return task.task_messages
+        limit = self.tool_calls_limit
+        if limit is not None:
+            remaining = max(limit - task.tool_calls_used, 0)
+            line = f"Tool calls remaining: {remaining} of {limit}."
+            if remaining == 0:
+                line += " Only the return tool is available now."
+            directive += f"\n\n{line}"
+        return directive
 
     # ------------------------------------------------------------------ #
     # Generation (think())
@@ -314,11 +279,13 @@ class ReActAgent(ToolAgent):
         Pure-computation validate-and-resolve callback for the step retry
         loop: parse (``parse_react_call``, raw JSON -> draft), translate
         (``translate_calls``, draft -> validated ``ToolStatement`` against
-        the remaining tool-call budget), then attempt argument resolution --
-        the one failure category ``translate_calls`` structurally can't
-        catch (a resolved value's real type mismatching the target tool's
-        parameter contract). Returns ``(call, resolved_kwargs)`` on success,
-        or a feedback string describing the problem on failure.
+        the names in ``task.context``, the registered tool ids and the remaining
+        tool-call budget),
+        then attempt argument resolution against the context values -- the
+        one failure category ``translate_calls`` structurally can't catch (a
+        resolved value's real type mismatching the target tool's parameter
+        contract). Returns ``(call, resolved_kwargs)`` on success, or a
+        feedback string describing the problem on failure.
         """
         draft = parse_react_call(raw_output)
 
@@ -326,13 +293,11 @@ class ReActAgent(ToolAgent):
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
-        constant_names = frozenset(task.constant_values)
-        task_result_names = frozenset(
-            name for name in task.cache if name.startswith(TASK_RESULT_PREFIX)
-        )
-        known_names = frozenset(task.cache) | constant_names
+        context_names = frozenset(task.context)
+        readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         issues, calls = translate_calls(
-            [draft], remaining_budget, known_names, constant_names, task_result_names
+            [draft], remaining_budget, context_names, readonly_names,
+            frozenset(self._toolbox),
         )
 
         if issues:
@@ -342,10 +307,16 @@ class ReActAgent(ToolAgent):
 
         call = calls[0]
         try:
-            positional, keyword = resolve_statement_args(call, {**task.cache, **task.constant_values})
+            namespace = {n: v.value for n, v in task.context.items()}
+            positional, keyword = resolve_statement_args(call, namespace)
             tool = self.get_tool(call.tool)
             resolved = tool._args_kwargs_to_dict(*positional, **keyword)
         except Exception as e:
+            # Fed back to the model as regeneration feedback; the traceback is
+            # kept at DEBUG so a genuine framework bug is not lost.
+            logger.debug(
+                f"ReActAgent.{self.name}: could not resolve or bind step", exc_info=True
+            )
             label = call.identifier if call.identifier is not None else "(unassigned)"
             return f"{label}: could not resolve or bind argument(s): {e!r}"
 
@@ -357,12 +328,13 @@ class ReActAgent(ToolAgent):
         ``output_structure``), record the attempt, validate+resolve via
         ``_process_generation_output``, and retry with injected feedback on
         failure until success or the regeneration budget
-        (``self._regeneration_limit``, tracked via
-        ``task.regenerations_used``) is exhausted. Mirrors ``PlanActAgent``'s
+        (``self._regeneration_limit``, counted per
+        generation; ``task.regenerations_used`` keeps the run total) is exhausted. Mirrors ``PlanActAgent``'s
         own ``DEBUG``-level logging of every raw generated step (see
         ``_process_generation_output`` for the matching rejected-issues log).
         """
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -388,15 +360,14 @@ class ReActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -406,6 +377,7 @@ class ReActAgent(ToolAgent):
                         "Produce a corrected step."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -417,6 +389,7 @@ class ReActAgent(ToolAgent):
         check, feedback-message construction, and ``DEBUG``-level logging
         of every raw generated step."""
         additional_messages: list[dict[str, str]] = []
+        rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
@@ -442,15 +415,14 @@ class ReActAgent(ToolAgent):
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
             ))
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if task.regenerations_used >= self._regeneration_limit:
+                if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
-                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
+                        f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -460,6 +432,7 @@ class ReActAgent(ToolAgent):
                         "Produce a corrected step."
                     )},
                 ]
+                rejections += 1
                 task.regenerations_used += 1
                 continue
 
@@ -491,11 +464,11 @@ class ReActAgent(ToolAgent):
     def prepare(self, task: ReActTask) -> ReActTask:
         """
         Documented no-op -- all validation/resolution already happened
-        inside ``think()``'s own retry loop; nothing is deferred to this
-        hook for this family. Unlike ``PlanActAgent``, whose ``prepare()``
-        resolves a batch compiled by an earlier ``think()`` call, this
-        family's ``think()`` and ``prepare()`` are logically inseparable --
-        one call, resolved immediately.
+        inside ``think()``'s own retry loop (see the module docstring for
+        why); nothing is deferred to this hook for this family. Unlike
+        ``PlanActAgent``, whose ``prepare()`` resolves a batch compiled by an
+        earlier ``think()`` call, this family's ``think()`` and ``prepare()``
+        are logically inseparable -- one call, resolved immediately.
         """
         return task
 
@@ -535,6 +508,10 @@ class ReActAgent(ToolAgent):
         ends -- this family has no lookahead across rounds the way a
         one-shot planner does, so "forgot to name it" would otherwise never
         be repairable.
+
+        A named result is written to ``task.context`` (creating the
+        variable, or updating a writable existing one); persistence follows
+        the normal destination rule.
         """
         if isinstance(raw_result, BaseException):
             if self._fail_fast:
@@ -559,7 +536,7 @@ class ReActAgent(ToolAgent):
 
             task.completed.append(call)
             if call.identifier is not None:
-                task.cache[call.identifier] = unwrapped
+                self._write_context(task, {call.identifier: unwrapped}, create=True)
             task.last_call_failed = False
 
             if call.tool == RETURN_TOOL_NAME:
@@ -581,7 +558,7 @@ class ReActAgent(ToolAgent):
         tool = self.get_tool(call.tool)
         try:
             raw_result = tool.invoke(resolved)
-        except BaseException as e:
+        except Exception as e:
             raw_result = e
         return self._apply_call_result(task, call, raw_result)
 
@@ -592,61 +569,44 @@ class ReActAgent(ToolAgent):
         tool = self.get_tool(call.tool)
         try:
             raw_result = await tool.async_invoke(resolved)
-        except BaseException as e:
+        except Exception as e:
             raw_result = e
         return self._apply_call_result(task, call, raw_result)
 
     # ------------------------------------------------------------------ #
     # Record / result construction
     # ------------------------------------------------------------------ #
-    def _build_record_from_task(
-        self,
-        task: ReActTask,
-        turns: list[AgentRecord],
-    ) -> ToolAgentRecord:
+    def _build_record_from_task(self, task: ReActTask) -> ToolAgentRecord:
         """
         Assemble a completed ``ToolAgentRecord`` from a finished
         ``ReActTask``. Mirrors ``PlanActAgent._build_record_from_task``
         exactly -- no agent-level global blackboard to persist into.
         """
-        prev = turns[-1] if turns else None
         return ToolAgentRecord(
-            user_prompt=task.user_prompt,
-            generated_response=task.generated_response,
-            inputs=task.inputs,
-            llm_records=tuple(task.llm_records),
-            prev=prev,
+            **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
             regenerations_used=task.regenerations_used,
         )
 
-    def build_result_from_record(
-        self,
-        record: ToolAgentRecord,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> ToolAgentResult:
+    def build_result_from_task(self, task: ReActTask, result: Any) -> ToolAgentResult:
         """
-        Construct this agent's ``ToolAgentResult`` envelope directly
-        from a completed ``ToolAgentRecord``. Mirrors
-        ``PlanActAgent.build_result_from_record`` exactly.
+        Construct this agent's ``ToolAgentResult`` envelope directly from a
+        finished ``ReActTask``. Mirrors ``PlanActAgent.build_result_from_task``
+        exactly.
         """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
-
-        usage_report = record.usage_report()
+        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
+        llm_model_data = self._llm_engine.model_data
 
         return self._make_result(
             result=result,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=task.started_at,
+            ended_at=task.ended_at,
             result_cls=ToolAgentResult,
+            run_id=task.run_id,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            usage_report=usage_report,
-            failed_call_count=len(record.failed_statements),
-            regenerations_used=record.regenerations_used,
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
         )

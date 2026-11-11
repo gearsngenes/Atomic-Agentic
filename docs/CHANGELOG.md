@@ -5,6 +5,141 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a33] - 2026-11-11
+
+This release gives agents durable, conversation-owned memory. A `Conversation`
+now owns its records, its named context variables and its rendering budgets;
+the agent owns policy: what to bind into context, from where, and in what
+order to show it. Context is rendered to the model as a labeled, marker-framed
+block, the invoke lifecycle is a sequence of public steps, and one
+conversation can be shared by several agents of any type. The tool-calling
+families (`PlanActAgent`, `ReActAgent`, `ScriptActAgent`) now keep their
+result bindings and constants in that same context, and `ThinkingAgent`
+becomes an abstract base with a new concrete `ScratchpadAgent`. This is a
+breaking release across most of the agent memory surface: conversation
+management, record shape, binding parameters, tool-agent construction and
+the bundled prebuilt tools all change.
+
+### Added
+
+- `Conversation` model: owns `records`, a `context` of named variables, three
+  preview limits (`response_preview_limit`, `prompt_preview_limit`,
+  `context_preview_limit`; `None` unlimited, `0` hidden) and a history
+  `render_mode`. It has its own lock and can be shared by several agents of
+  any type.
+- `ContextVariable` (`name`, `value`, `description`, `readonly`, `render_mode`,
+  `preview_limit`): `readonly` variables are never overwritten;
+  `preview_limit` can only tighten the conversation's limit.
+- Conversation context API: `remember` (add only), `update`, `describe`
+  (both return `False` for a readonly variable), `forget`, and atomic
+  `remember_many`/`forget_many`.
+- `Agent.import_conversation(conversation, *, name)` to share a conversation
+  between agents, `Conversation.slice(start, end)` for an independent copy,
+  `Agent.switch_conversation`, `Agent.remove_conversation`, and
+  `Agent.get_record(run_id=, conversation=, index=)`.
+- Three explicit binding routes on every agent: `inputs_to_context`,
+  `response_to_context` and `response_to_post`. `use_runtime_context=True`
+  adds a `**runtime_context` parameter whose keys are written to context for
+  that call.
+- `pre_invoke` and `post_invoke` are optional. With no pre stage the prompt
+  comes from a built-in `prompt` parameter; with no post stage the generated
+  response is returned as-is.
+- Context rendering: the current prompt is always wrapped in
+  `==== USER TASK PROMPT [START] ====` markers, preceded (when the call has
+  context) by a `RUNTIME CONTEXT` block of labeled entries, with value
+  formats `s`/`r`/`a`/`j`/`p`, truncation notes, and forged markers elided
+  from prompts, values and descriptions.
+- `ScratchpadAgent`: the concrete thinking agent (the former `ThinkingAgent`
+  body), with a required construction-time `thinking_rounds` and an optional
+  `stop_early` mode where the model decides when to stop thinking.
+- `ThinkingAgentResult.thoughts_produced`.
+- `LLMEngine.model_data`: configured model identity, available without an LLM
+  call.
+- `AgentRecord.run_id`, `started_at`, `ended_at` and `agent_id` (the writing
+  agent).
+- New examples: `Agent_Examples/09_Shared_Conversation_Context.py`,
+  `Thinking_Examples/04_ScratchpadAgent_StopEarly.py`, and a single shared
+  `examples/shared_engine.py`.
+
+### Changed
+
+- breaking: `Agent.get_conversation()` returns the stored `Conversation`
+  object instead of a list of records; its `turns` argument is gone.
+- breaking: `create_conversation(name, *, ...)` returns the new
+  `Conversation` and raises `ValueError` on a bad or taken name (it used to
+  return `False` on a collision). Conversation names no longer have a
+  "must not end in `_<digits>`" rule.
+- breaking: `set_active_conversation` is now `switch_conversation`;
+  `delete_conversation` is now `remove_conversation` and returns the removed
+  `Conversation`.
+- breaking: `context_enabled` is now `record_enabled` (the write axis);
+  `records_window` stays the read axis, and the two are independent.
+- breaking: `post_result_key` is replaced by `response_to_context`,
+  `response_to_post` and `inputs_to_context`. A bound name that matches a
+  `post_invoke` parameter no longer doubles as a context name; context never
+  feeds `pre_invoke`, `post_invoke` or system-prompt placeholders.
+- breaking: `**kwargs` is rejected in `pre_invoke`/`post_invoke`, except a
+  parameter named `runtime_context`.
+- breaking: `response_preview_limit` moves from `Agent.__init__` and every
+  agent family onto the conversation
+  (`agent.get_conversation().response_preview_limit = 500`).
+- breaking: `render_turn` takes `response_preview_limit`,
+  `prompt_preview_limit` and `render_mode` from the conversation.
+- breaking: history now replays prior responses with `render_mode="s"` by
+  default, so a dict or list response appears as Python `str` syntax; a32
+  replayed it as JSON. Set `conversation.render_mode = "j"` to get JSON back
+  (`BasicAgent` does this by default when it has a `response_schema`). A cut
+  response now ends with `...[truncated: N of M chars shown]` instead of a
+  bare `...`.
+- breaking: `AgentRecord.final_result` is removed; capture the processed
+  result from `invoke()`'s return. `LLMRecord.system_prompt_name` is removed.
+- breaking: `ThinkingAgent` is an abstract base; the concrete agent is
+  `ScratchpadAgent`. `thinking_rounds` is a required construction argument
+  (no longer an invoke parameter), `thinking_llm_engine` and
+  `thinking_rounds_limit` are removed, and `ThinkingAgentResult
+  .thinking_rounds_used` is now `thoughts_produced`.
+- breaking: the tool-calling families (`PlanActAgent`, `ReActAgent`,
+  `ScriptActAgent`) no longer have a constants API (`constants`,
+  `constant_aliases`, `constant_descriptions`, `register_constant*`); put a fixed value in a readonly context variable
+  with `conversation.remember(name, value, readonly=True)`. `K_`-prefixed
+  constant names are gone, and `tool_instructions` is now `instructions`.
+  Result bindings live in the call's context, shown to the model as
+  `$name` entries; each earlier turn's result is a hidden, readonly
+  `task_result_i` entry.
+- breaking: `regeneration_limit` counts rejected attempts per generation
+  (the run total stays on `regenerations_used`), `tool_concurrency_limit` is
+  no longer a `ReActAgent` parameter, and `PlanActAgent` rejects tools
+  registered as `return` or `rhs_assign`.
+- breaking: `ScriptActAgent` allows an explicit list of Python builtins
+  instead of everything except a blocklist.
+- breaking: `Agent.to_dict()` no longer includes `conversations`.
+- `AgentRecord.children` can gain siblings from different agents on a shared
+  conversation; `prev`/`children` are provenance only, and turn selection
+  never reads them.
+- Concurrent commits to one conversation append in commit order under the
+  conversation's lock; there is no implicit fork.
+- The agent invoke lifecycle is public steps: `filter_inputs`, `create_task`,
+  `summarize`, `pre_process`, a `think`/`prepare`/`act` loop,
+  `post_process`, `record`.
+- Examples reorganized: `ThinkingAgent_*` examples renamed
+  `ScratchpadAgent_*`, the per-directory `shared_engine.py` files merged, and
+  the `record_enabled` examples renamed.
+
+### Removed
+
+- breaking: `fork_conversation` and implicit fork-on-invoke. To branch, share
+  or copy a conversation with `import_conversation` and `slice`.
+- breaking: `run_id` as an `invoke()` parameter (it remains on every result
+  and on `get_record`).
+- breaking: `build_messages`, `get_reserved_parameters`, `stringify_result`
+  and the underscore lifecycle helpers (`_initialize_task`,
+  `_resolve_context`, `_commit_emit`, `_render_historic_messages`,
+  `build_result_from_record`), with no aliases.
+- breaking: `atomic_agentic.tools.prebuilt` (`BASIC_MATH_TOOLS` and the
+  console tools). The same tools now live in `examples/prebuilt_tools.py`.
+- breaking: `AgentTask.cache` and `AgentTask.constant_values`; use
+  `task.context`.
+
 ## [2.0.0a32] - 2026-10-05
 
 This release rewrites `PlanActAgent` and `ReActAgent` from the ground up onto

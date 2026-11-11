@@ -30,12 +30,12 @@ its own tool_calls_limit/replanning_limit -- that internal budget is
 completely invisible to the Delegator, which only ever sees one call per
 question no matter how many math tools it took inside.
 
-`context_enabled=False` on both leaves is deliberate, not just default
+`record_enabled=False` on both leaves is deliberate, not just default
 statelessness: the Delegator dispatches several concurrent calls into the
 SAME leaf instance (e.g. 5 concurrent HaikuWriter calls), and each call is
 already fully self-contained -- cross-call memory would buy nothing and
 would only produce nondeterministically-interleaved history under real
-concurrency. The Delegator itself stays `context_enabled=True` so its own
+concurrency. The Delegator itself stays `record_enabled=True` so its own
 render_as_code() can be inspected afterward.
 """
 import time
@@ -44,7 +44,11 @@ from typing import Any
 
 from atomic_agentic.agents import BasicAgent, ScriptActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, STAT_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import EXPONENT_TOOLS, STAT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -73,9 +77,10 @@ haiku_writer = BasicAgent(
         "3-line haiku about it, following a 5-7-5 syllable structure. "
         "Be creative; do not just restate the topic."
     ),
-    context_enabled=False,
+    record_enabled=False,
     pre_invoke=haiku_pre,
     post_invoke=haiku_post,
+    response_to_post="poem",
 )
 
 # ──────────────────────────  MATH SPECIALIST  ───────────────────────
@@ -95,11 +100,12 @@ math_specialist = ScriptActAgent(
     namespace="examples",
     description="Solves one math question and prints the question/answer pair, while returning the final result.",
     llm_engine=sub_agent_llm,
-    context_enabled=False,
+    record_enabled=False,
     tool_calls_limit=3,
     replanning_limit=1,
     pre_invoke=math_pre,
     post_invoke=math_post,
+    response_to_post="answer",
 )
 math_specialist.register_tools(STAT_TOOLS)
 math_specialist.register_tools(EXPONENT_TOOLS)
@@ -111,7 +117,7 @@ delegator = ScriptActAgent(
     namespace="examples",
     description="Delegates each item in a batch to the appropriate specialist agent.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     replanning_limit=1,
 )
 delegator.register_tool(haiku_writer)
@@ -153,6 +159,6 @@ if __name__ == "__main__":
     elapsed = time.time() - start
     print(f"\nTotal elapsed: {elapsed:.2f}s")
 
-    record = delegator.get_conversation()[-1]
+    record = delegator.get_conversation().records[-1]
     print("\n=== EXECUTED SCRIPT ===")
     print(record.render_as_code())

@@ -1,7 +1,11 @@
-﻿import logging
+import logging
 import time
 
 from atomic_agentic.agents import PlanActAgent
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared_engine import llm_engine
 
@@ -18,7 +22,7 @@ async_tester = PlanActAgent(
     namespace="examples",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    record_enabled=False,
 )
 
 # Register the callable under an explicit alias.

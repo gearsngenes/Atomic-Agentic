@@ -1,4 +1,4 @@
-﻿from typing import Any, Mapping
+from typing import Any, Mapping
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
@@ -44,7 +44,8 @@ writer = BasicAgent(
     ),
     pre_invoke=writer_pre,
     post_invoke=writer_post,
-    context_enabled=True,
+    response_to_post="result",
+    record_enabled=True,
 )
 
 
@@ -77,7 +78,8 @@ critic = BasicAgent(
     ),
     pre_invoke=critic_pre,
     post_invoke=critic_post,
-    context_enabled=False,
+    response_to_post="result",
+    record_enabled=False,
 )
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-﻿"""06_context_enabled_planner.py
+"""06_record_enabled_planner.py
 
 Interactive PlanActAgent with context memory enabled.
 
@@ -9,22 +9,28 @@ Updated to use PlanActAgent (formerly PlannerAgent).
 import logging
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, TRIG_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
 
 my_planner = PlanActAgent(
-    name="Context_Enabled_Planner",
+    name="Record_Enabled_Planner",
     namespace="examples",
     description="Creates plans utilizing context memory",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
     regeneration_limit=3,
 )
 
 my_planner.register_tools(BASIC_MATH_TOOLS)
+my_planner.register_tools(TRIG_TOOLS)
+my_planner.register_tools(EXPONENT_TOOLS)
 
 while True:
     query = input("Enter a planning task (or 'q' or 'exit' to quit): ")
@@ -36,6 +42,6 @@ while True:
     print(f"Result: {result.result}\n")
     from pprint import pprint
     print("Executed calls:")
-    record = my_planner.get_conversation()[-1]
-    pprint(record.statements)
+    record = my_planner.get_conversation().records[-1]
+    print(record.render_as_code())
     print("-" * 40 + "\n")

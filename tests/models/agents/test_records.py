@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,10 +21,11 @@ from atomic_agentic.models.agents.records import (
     ThinkingAgentRecord,
     ToolAgentRecord,
 )
-from atomic_agentic.models.agents.blackboard_models import ToolStatement, ConstantSpec
+from atomic_agentic.models.agents.blackboard_models import ToolStatement
+from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
-from atomic_agentic.models.results.agents import AgentResult, ToolUsageRecord
+from atomic_agentic.models.results.agents import ToolUsageRecord
 
 
 def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> TokenUsage:
@@ -59,79 +60,120 @@ def make_llm_record(*, text: str = "generated text") -> LLMRecord:
     )
 
 
-def make_agent_result(*, value: Any = "final output") -> AgentResult:
-    started_at = datetime.now(timezone.utc)
-    return AgentResult(
-        result=value,
-        invoker_id="agent-1",
-        started_at=started_at,
-        ended_at=started_at + timedelta(seconds=1),
-        llm_token_usage=(make_token_usage(),),
-        llm_model_data=make_model_data(),
-    )
-
-
-class TestConstantSpec:
+class TestContextVariable:
     def test_valid_spec_normalizes_name_description_and_derives_type(self) -> None:
         value = {"items": [1, 2]}
 
-        spec = ConstantSpec(
+        spec = ContextVariable(
             name=" PAYLOAD ",
             value=value,
             description=" Runtime payload. ",
-            inline_limit=20,
         )
 
         assert spec.name == "PAYLOAD"
         assert spec.value is value
         assert spec.description == "Runtime payload."
-        assert spec.inline_limit == 20
         assert spec.type == "dict"
 
     def test_blank_description_normalizes_to_none(self) -> None:
-        spec = ConstantSpec(name="VALUE", value=1, description="   ")
+        spec = ContextVariable(name="VALUE", value=1, description="   ")
 
         assert spec.description is None
 
     def test_to_dict_includes_value_metadata_and_derived_type(self) -> None:
-        spec = ConstantSpec(
+        spec = ContextVariable(
             name="THRESHOLD",
             value=0.75,
             description="Decision threshold.",
-            inline_limit=8,
         )
 
         assert spec.to_dict() == {
             "name": "THRESHOLD",
             "value": 0.75,
             "description": "Decision threshold.",
-            "inline_limit": 8,
+            "readonly": False,
+            "render_mode": "s",
+            "preview_limit": None,
             "type": "float",
         }
+
+    def test_render_mode_defaults_to_str(self) -> None:
+        assert ContextVariable(name="V", value=1).render_mode == "s"
+
+    @pytest.mark.parametrize("mode", ["s", "r", "a", "j", "p"])
+    def test_render_mode_accepts_valid_values_and_survives_replace(
+        self, mode: str
+    ) -> None:
+        spec = ContextVariable(name="V", value=1, render_mode=mode)
+
+        assert spec.render_mode == mode
+        assert replace(spec, value=2).render_mode == mode
+        assert spec.to_dict()["render_mode"] == mode
+
+    @pytest.mark.parametrize("mode", ["x", "S", "", 1, ["s"], None])
+    def test_render_mode_rejects_invalid_values(self, mode: Any) -> None:
+        with pytest.raises(ValueError, match="render_mode"):
+            ContextVariable(name="V", value=1, render_mode=mode)
+
+    def test_preview_limit_defaults_to_none(self) -> None:
+        assert ContextVariable(name="V", value=1).preview_limit is None
+
+    @pytest.mark.parametrize("limit", [None, 0, 5])
+    def test_preview_limit_accepts_valid_values_and_survives_replace(
+        self, limit: int | None
+    ) -> None:
+        spec = ContextVariable(name="V", value=1, preview_limit=limit)
+
+        assert spec.preview_limit == limit
+        assert replace(spec, value=2).preview_limit == limit
+        assert spec.to_dict()["preview_limit"] == limit
+
+    @pytest.mark.parametrize("limit", [-1, True, False, 1.5, "5"])
+    def test_preview_limit_rejects_invalid_values(self, limit: Any) -> None:
+        with pytest.raises(ValueError, match="preview_limit"):
+            ContextVariable(name="V", value=1, preview_limit=limit)
 
     @pytest.mark.parametrize(
         "name",
         ["", " ", "1VALUE", "bad-name", "bad name", None],
     )
     def test_rejects_invalid_name(self, name: Any) -> None:
-        with pytest.raises(ValueError, match="ConstantSpec.name"):
-            ConstantSpec(name=name, value=1)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="ContextVariable.name"):
+            ContextVariable(name=name, value=1)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("description", [1, True, object()])
     def test_rejects_non_string_description(self, description: Any) -> None:
         with pytest.raises(TypeError, match="description"):
-            ConstantSpec(name="VALUE", value=1, description=description)  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("inline_limit", [0, -1, 1.5, True, "5"])
-    def test_rejects_invalid_inline_limit(self, inline_limit: Any) -> None:
-        with pytest.raises(ValueError, match="inline_limit"):
-            ConstantSpec(name="VALUE", value=1, inline_limit=inline_limit)  # type: ignore[arg-type]
+            ContextVariable(name="VALUE", value=1, description=description)  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        spec = ConstantSpec(name="VALUE", value=1)
+        spec = ContextVariable(name="VALUE", value=1)
 
         with pytest.raises(FrozenInstanceError):
             spec.name = "OTHER"  # type: ignore[misc]
+
+    def test_type_tracks_value_through_replace(self) -> None:
+        spec = ContextVariable(name="X", value=1)
+        assert spec.type == "int"
+
+        updated = replace(spec, value="now a string")
+
+        assert updated.type == "str"
+        assert spec.type == "int"
+
+    def test_readonly_defaults_false_and_rejects_non_bool(self) -> None:
+        assert ContextVariable(name="X", value=1).readonly is False
+
+        for bad in (0, 1, "yes", None):
+            with pytest.raises(TypeError, match="readonly"):
+                ContextVariable(name="X", value=1, readonly=bad)  # type: ignore[arg-type]
+
+    def test_readonly_survives_replace_and_appears_in_to_dict_and_equality(self) -> None:
+        spec = ContextVariable(name="X", value=1, readonly=True)
+
+        assert replace(spec, value=2).readonly is True
+        assert spec.to_dict()["readonly"] is True
+        assert spec != ContextVariable(name="X", value=1)
 
 
 class TestLLMRecord:
@@ -167,36 +209,12 @@ class TestLLMRecord:
         assert record.to_dict() == {
             "messages": msgs,
             "llm_result": llm_result.to_dict(),
-            "system_prompt_name": None,
         }
 
-    def test_system_prompt_name_defaults_to_none(self) -> None:
+    def test_has_no_system_prompt_name(self) -> None:
         record = make_llm_record()
-        assert record.system_prompt_name is None
-
-    def test_system_prompt_name_accepts_string(self) -> None:
-        record = LLMRecord(
-            messages=({"role": "user", "content": "hi"},),
-            llm_result=make_llm_result(),
-            system_prompt_name="role",
-        )
-        assert record.system_prompt_name == "role"
-
-    def test_system_prompt_name_rejects_non_string(self) -> None:
-        with pytest.raises(TypeError, match="system_prompt_name"):
-            LLMRecord(
-                messages=({"role": "user", "content": "hi"},),
-                llm_result=make_llm_result(),
-                system_prompt_name=123,  # type: ignore[arg-type]
-            )
-
-    def test_to_dict_includes_system_prompt_name(self) -> None:
-        record = LLMRecord(
-            messages=({"role": "user", "content": "hi"},),
-            llm_result=make_llm_result(),
-            system_prompt_name="role",
-        )
-        assert record.to_dict()["system_prompt_name"] == "role"
+        assert not hasattr(record, "system_prompt_name")
+        assert "system_prompt_name" not in record.to_dict()
 
     def test_rejects_string_as_messages(self) -> None:
         with pytest.raises(TypeError, match="messages"):
@@ -243,43 +261,59 @@ class TestAgentRecord:
         )
         assert record.user_prompt == "write a summary"
         assert record.generated_response == "raw assistant text"
-        assert record.final_result is None
+        assert isinstance(record.run_id, str) and record.run_id
 
-    def test_final_result_accepts_agent_result(self) -> None:
-        agent_result = make_agent_result()
+    def test_run_id_and_timing_auto_fill_when_omitted(self) -> None:
+        record = AgentRecord(user_prompt="run", generated_response="raw")
+        assert isinstance(record.run_id, str) and record.run_id
+        assert isinstance(record.started_at, datetime)
+        assert isinstance(record.ended_at, datetime)
+
+    def test_run_id_and_timing_accept_explicit_values(self) -> None:
+        ts = datetime.now(timezone.utc)
         record = AgentRecord(
             user_prompt="run",
             generated_response="raw",
-            final_result=agent_result,
+            run_id="abc123",
+            started_at=ts,
+            ended_at=ts,
         )
-        assert record.final_result is agent_result
+        assert record.run_id == "abc123"
+        assert record.started_at == ts
+        assert record.ended_at == ts
 
-    def test_to_dict_with_none_final_result(self) -> None:
+    def test_agent_id_defaults_to_none(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert record.agent_id is None
+
+    def test_agent_id_is_keyword_only_and_serialized(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y", agent_id="ns.a;123")
+        assert record.agent_id == "ns.a;123"
+        assert record.to_dict()["agent_id"] == "ns.a;123"
+
+    def test_llm_records_rejects_str(self) -> None:
+        with pytest.raises(TypeError, match="llm_records"):
+            AgentRecord(user_prompt="x", generated_response="y", llm_records="abc")  # type: ignore[arg-type]
+
+    def test_to_dict_has_no_final_result_key(self) -> None:
         record = AgentRecord(
             user_prompt="run",
             generated_response="raw",
         )
-        assert record.to_dict() == {
+        d = record.to_dict()
+        assert "final_result" not in d
+        assert d == {
             "user_prompt": "run",
             "inputs": {},
             "generated_response": "raw",
-            "final_result": None,
+            "run_id": record.run_id,
+            "agent_id": None,
+            "started_at": record.started_at.isoformat(),
+            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
         }
-
-    def test_to_dict_with_agent_result(self) -> None:
-        agent_result = make_agent_result(value="done")
-        record = AgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            final_result=agent_result,
-        )
-        d = record.to_dict()
-        assert d["user_prompt"] == "run"
-        assert d["generated_response"] == "raw"
-        assert d["final_result"] == agent_result.to_dict()
 
     def test_to_dict_includes_inputs_field(self) -> None:
         record = AgentRecord(
@@ -330,14 +364,6 @@ class TestAgentRecord:
         )
         assert isinstance(record.llm_records, tuple)
 
-    def test_rejects_non_llm_record_item_in_llm_records(self) -> None:
-        with pytest.raises(TypeError, match="LLMRecord"):
-            AgentRecord(
-                user_prompt="hi",
-                generated_response="there",
-                llm_records=("not a record",),
-            )
-
     def test_to_dict_includes_llm_records(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
@@ -358,69 +384,44 @@ class TestAgentRecord:
         completed = AgentRecord(
             user_prompt="first",
             generated_response="response",
-            final_result=make_agent_result(),
         )
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
         assert record.prev is completed
-
-    def test_prev_rejects_non_agent_record(self) -> None:
-        with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt="x", generated_response="y", prev="bad")  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("bad_prev", [0, "string", object(), []])
-    def test_prev_rejects_non_agent_record_parametrize(self, bad_prev: Any) -> None:
-        with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt="x", generated_response="y", prev=bad_prev)  # type: ignore[arg-type]
 
     def test_to_dict_prev_run_id_is_none_when_no_prev(self) -> None:
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.to_dict()["prev_run_id"] is None
 
-    def test_to_dict_prev_run_id_matches_prev_final_result_run_id(self) -> None:
-        agent_result = make_agent_result()
+    def test_to_dict_prev_run_id_matches_prev_run_id(self) -> None:
         prev_record = AgentRecord(
             user_prompt="first",
             generated_response="r1",
-            final_result=agent_result,
         )
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
-        assert record.to_dict()["prev_run_id"] == agent_result.run_id
+        assert record.to_dict()["prev_run_id"] == prev_record.run_id
 
     def test_children_defaults_to_empty_list(self) -> None:
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.children == []
 
     def test_children_accepts_agent_record_instances(self) -> None:
-        child = AgentRecord(
-            user_prompt="child", generated_response="r", final_result=make_agent_result()
-        )
+        child = AgentRecord(user_prompt="child", generated_response="r")
         record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
         assert record.children == [child]
 
-    def test_children_rejects_non_list_tuple(self) -> None:
-        with pytest.raises(TypeError, match="children"):
-            AgentRecord(user_prompt="x", generated_response="y", children="not a list")  # type: ignore[arg-type]
-
-    def test_children_rejects_non_agent_record_element(self) -> None:
-        with pytest.raises(TypeError, match="children"):
-            AgentRecord(user_prompt="x", generated_response="y", children=["not a record"])  # type: ignore[list-item]
-
     def test_children_not_normalized_to_tuple(self) -> None:
         # Deliberately mutable -- unlike llm_records, children is appended to
-        # in place after construction (Agent._commit_emit's fork-vs-continue
+        # in place after construction (Agent.record's children
         # bookkeeping), so it must stay a real list, not a frozen tuple.
         record = AgentRecord(user_prompt="x", generated_response="y")
         assert isinstance(record.children, list)
-        record.children.append(
-            AgentRecord(user_prompt="c", generated_response="r", final_result=make_agent_result())
-        )
+        record.children.append(AgentRecord(user_prompt="c", generated_response="r"))
         assert len(record.children) == 1
 
     def test_to_dict_child_ids_reflects_current_children(self) -> None:
-        child_result = make_agent_result()
-        child = AgentRecord(user_prompt="child", generated_response="r", final_result=child_result)
+        child = AgentRecord(user_prompt="child", generated_response="r")
         record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
-        assert record.to_dict()["child_ids"] == [child_result.run_id]
+        assert record.to_dict()["child_ids"] == [child.run_id]
 
 
 class TestToolAgentRecord:
@@ -522,6 +523,18 @@ class TestToolAgentRecord:
         assert report.total_dispatched == 1
         assert report.by_tool == (ToolUsageRecord(tool_name="add", call_count=1),)
 
+    def test_usage_report_is_build_usage_report_over_the_record_statements(self) -> None:
+        from atomic_agentic.utils.agents import build_usage_report
+
+        statements = (ToolStatement(identifier="a", tool="add"),)
+        failed = (ToolStatement(identifier="b", tool="sub", exception=ValueError("boom")),)
+        record = ToolAgentRecord(
+            user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
+        )
+
+        assert record.usage_report() == build_usage_report(statements, failed)
+        assert build_usage_report([], []).by_tool == ()
+
 
 class TestThinkingAgentRecord:
     def test_is_an_agent_record(self) -> None:
@@ -563,11 +576,16 @@ class TestThinkingAgentRecord:
             generated_response="a poem",
             thoughts=["a thought", {"k": "v"}, 3],
         )
-        assert record.to_dict() == {
+        d = record.to_dict()
+        assert "final_result" not in d
+        assert d == {
             "user_prompt": "write a poem",
             "inputs": {},
             "generated_response": "a poem",
-            "final_result": None,
+            "run_id": record.run_id,
+            "agent_id": None,
+            "started_at": record.started_at.isoformat(),
+            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],

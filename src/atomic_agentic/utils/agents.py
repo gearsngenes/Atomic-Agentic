@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import ast
-import json
-import re
-from typing import Any, Optional
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Optional
 
 
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
+    EMBEDDED_CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
@@ -18,23 +18,26 @@ from ..constants.agents import (
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
-from ..constants.core import NO_VAL
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
+from ..models.results.agents import ToolUsageRecord, ToolUsageReport
+
+if TYPE_CHECKING:
+    from ..core.Invokable import AtomicInvokable
 
 __all__ = [
     "evaluate_expr",
     "extract_identifiers",
-    "extract_json_object",
     "normalize_prompt_config",
     "reject_unsupported_forms",
-    "stringify_result",
     "strip_code_fence",
     "is_dispatched",
     "tool_identity",
+    "build_usage_report",
     "compile_batches",
     "resolve_statement_args",
+    "check_call_bindings",
 ]
 
 
@@ -50,7 +53,7 @@ def normalize_prompt_config(
     ``None``.
 
     Unifies what were three near-identical coercion functions (role prompt,
-    thinking instructions, tool instructions) into one, parameterized per
+    thinking instructions, tool-agent instructions) into one, parameterized per
     call site rather than derived from a generic label, so existing callers
     get byte-identical ``PromptConfig``/error text.
 
@@ -58,7 +61,7 @@ def normalize_prompt_config(
         - ``default_template`` is ``None`` -- returns ``None``. The one
           branch a role prompt or thinking instructions never take (an
           agent always needs *some* version of either); a caller with no
-          sensible generic fallback (e.g. tool instructions) passes
+          sensible generic fallback (e.g. tool-agent instructions) passes
           ``None`` here to get real absence back instead of boilerplate.
         - ``default_template`` is a ``str`` -- returns
           ``PromptConfig(template=default_template, description=default_description)``.
@@ -78,94 +81,6 @@ def normalize_prompt_config(
     raise TypeError(
         f"{error_label} must be str, PromptConfig, or None; got {type(value).__name__}."
     )
-
-
-def stringify_result(value: str | int | float | bool | list | dict | None) -> str:
-    """Render an agent-produced result value as LLM-facing display text --
-    a ``str`` value used as-is, any other JSON-decodable value
-    ``json.dumps``-rendered. Shared by every render path that replays a
-    structured (``response_schema``/``thinking_schema``) result back into
-    text (``Agent.render_turn``, ``ThinkingAgent._stringify_thought``), so
-    they can't drift on how a non-str value gets stringified."""
-    return value if isinstance(value, str) else json.dumps(value)
-
-
-def extract_json_object(raw_text: str, *, source_label: str) -> Any:
-    """
-    Extract the largest decodable JSON array/object from a possibly noisy string.
-
-    Shared by any caller that needs to pull structured output out of
-    free-form LLM text -- not used by ``PlanActAgent``/``ReActAgent``
-    themselves (``output_structure`` strict mode makes free-text JSON
-    extraction unnecessary for that family), but available to any other
-    caller that still needs it. Raises a plain ``TypeError`` for a
-    non-string input (an internal-contract violation, not caller-specific).
-
-    This helper is intentionally shape-neutral:
-    - It does not require the decoded value to be a list.
-    - It does not require the decoded value to be a dict.
-    - It does not validate any particular schema's fields.
-
-    Parsing steps
-    -------------
-    1. Strip a single common markdown fence wrapper if present.
-    2. Scan for candidate JSON array/object starts.
-    3. Decode with ``json.JSONDecoder().raw_decode(...)``.
-    4. Return the candidate with the largest decoded span.
-
-    Parameters
-    ----------
-    raw_text : str
-        Raw LLM output that may contain a JSON array/object surrounded by
-        prose, markdown fences, or other text.
-    source_label : str
-        Identifies the caller in error messages (e.g.
-        ``f"{type(self).__name__}.{self.name}"``).
-
-    Returns
-    -------
-    Any
-        The decoded Python value for the largest valid JSON array/object found.
-
-    Raises
-    ------
-    TypeError
-        If ``raw_text`` is not a string.
-    json.JSONDecodeError
-        If ``raw_text`` is empty or contains no decodable JSON array/object.
-    """
-    if not isinstance(raw_text, str):
-        raise TypeError(f"{source_label}: LLM returned non-string output.")
-    if not raw_text.strip():
-        raise json.JSONDecodeError("LLM returned empty output", "", 0)
-
-    text = raw_text.strip()
-
-    # Strip a single fenced block wrapper if present.
-    text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-    text = re.sub(r"\s*```\s*$", "", text).strip()
-
-    decoder = json.JSONDecoder()
-
-    best_val: Any = NO_VAL
-    best_span_len: int = -1
-
-    # Candidate starts: JSON arrays or objects.
-    for match in re.finditer(r"[\[{]", text):
-        start = match.start()
-        try:
-            val, end_rel = decoder.raw_decode(text[start:])
-        except json.JSONDecodeError:
-            continue
-
-        if end_rel > best_span_len:
-            best_span_len = end_rel
-            best_val = val
-
-    if best_val is NO_VAL:
-        raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
-
-    return best_val
 
 
 def extract_identifiers(
@@ -210,22 +125,29 @@ def extract_identifiers(
 
 def strip_code_fence(raw_text: str) -> str:
     """
-    Strip a markdown code fence wrapping generated text, if present --
-    defensive against a model wrapping otherwise-valid output in a code
-    fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line. Used by ``ScriptActAgent``'s statement parsing
-    (``utils/script.py``).
+    Extract the code from a markdown code fence around generated text, if
+    present. ``ScriptActAgent`` asks for its plan as a single fenced block;
+    this also tolerates a missing or one-sided fence and prose around the
+    block. Generic to any language tag (or none) on the opening fence line.
+    Used by ``ScriptActAgent``'s statement parsing (``utils/script.py``).
 
-    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
-    so its captured inner text is used as-is. If that doesn't match (a model
-    emitting only one side), falls back to stripping a leading and/or
-    trailing fence line independently. Either way, a fence appearing only
-    mid-text is left alone (``ast.parse`` will reject that on its own terms,
-    as a real structural problem).
+    1. A fully matched pair wrapping the whole text (``CODE_FENCE_PATTERN``)
+       -- its inner text is used as-is.
+    2. Exactly one fenced block elsewhere in the text, e.g. with a sentence
+       before or after it (``EMBEDDED_CODE_FENCE_PATTERN``) -- its inner text;
+       the prose outside is dropped. Two or more blocks are ambiguous and fall
+       through to step 3 unchanged, so ``ast.parse`` rejects them.
+    3. Otherwise a leading and/or trailing fence line is stripped
+       independently (a model emitting only one side). A fence appearing only
+       mid-text is left alone (``ast.parse`` will reject that on its own
+       terms, as a real structural problem).
     """
     full_match = CODE_FENCE_PATTERN.match(raw_text)
     if full_match:
         return full_match.group(1)
+    embedded = EMBEDDED_CODE_FENCE_PATTERN.findall(raw_text)
+    if len(embedded) == 1:
+        return embedded[0]
     text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
     text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
     return text
@@ -334,6 +256,41 @@ def tool_identity(call: ToolStatement) -> str:
     return call.tool
 
 
+def build_usage_report(
+    statements: Iterable[ToolStatement],
+    failed_statements: Iterable[ToolStatement],
+) -> ToolUsageReport:
+    """
+    Compute per-tool call-count accounting -- one ``ToolUsageRecord`` per
+    distinct real tool identity actually dispatched, ordered by first-call
+    order, ``call_count >= 1`` each (an identity with zero dispatched calls
+    never produces an entry) -- plus ``total_dispatched``/``total_failed``
+    summary counts, bundled into a single ``ToolUsageReport``.
+
+    Walks ``statements`` then ``failed_statements``, in that order, counting
+    only dispatched calls (``is_dispatched``) under their real identity
+    (``tool_identity``). Shared by ``ToolAgentRecord.usage_report()`` and
+    each ``ToolAgent`` family's ``build_result_from_task``, so a result can
+    be built from a task without a record.
+    """
+    failed_statements = tuple(failed_statements)
+    counts: dict[str, int] = {}
+    for call in (*statements, *failed_statements):
+        if is_dispatched(call):
+            identity = tool_identity(call)
+            counts[identity] = counts.get(identity, 0) + 1
+
+    by_tool = tuple(
+        ToolUsageRecord(tool_name=name, call_count=count)
+        for name, count in counts.items()
+    )
+    return ToolUsageReport(
+        by_tool=by_tool,
+        total_dispatched=sum(r.call_count for r in by_tool),
+        total_failed=sum(1 for call in failed_statements if is_dispatched(call)),
+    )
+
+
 def compile_batches(
     calls: list[ToolStatement],
     max_concurrency: Optional[int] = None,
@@ -348,7 +305,7 @@ def compile_batches(
     (``extract_identifiers(call.args) | extract_identifiers(call.kwargs)``)
     were bound by a call already sitting in that same open batch (i.e. every
     dependency is satisfiable from an earlier, already-closed batch, a
-    registered tool, or a registered constant -- reference validity itself
+    registered tool, or a context variable -- reference validity itself
     is assumed already checked upstream). Otherwise the open batch closes
     first and this call starts a new one.
 
@@ -473,3 +430,40 @@ def resolve_statement_args(
         keyword.update(unpacked)
 
     return positional, keyword
+
+
+def check_call_bindings(
+    slots: list[ToolStatement],
+    toolbox: Mapping[str, AtomicInvokable],
+) -> list[str]:
+    """
+    Dry bind: catch argument-shape mistakes at plan time. For each slot whose
+    ``tool`` is a registered tool id (sentinel, builtin and attribute-call
+    slots are skipped), bind placeholder values through the tool's
+    ``_args_kwargs_to_dict`` and report a ``TypeError`` (too many positionals,
+    unknown keyword, duplicate argument) as an issue.
+
+    A slot with a ``*`` unpack or a ``**`` unpack is skipped (arity unknown).
+    No values are evaluated and nothing is dispatched. A missing required
+    argument is not reported (binding does not check it); it still surfaces
+    at invoke time. Returns ``[]`` when every checked call binds.
+    """
+    issues: list[str] = []
+    for slot in slots:
+        if slot.tool not in toolbox:
+            continue
+        if KWARGS_UNPACK_KEY in slot.kwargs or any(
+            isinstance(arg, ast.Starred) for arg in slot.args
+        ):
+            continue
+        try:
+            toolbox[slot.tool]._args_kwargs_to_dict(
+                *([None] * len(slot.args)), **{key: None for key in slot.kwargs}
+            )
+        except TypeError as e:
+            label = slot.identifier if slot.identifier is not None else "(unassigned)"
+            issues.append(
+                f"statement producing {label} calls {slot.tool!r} with arguments "
+                f"that do not fit its signature: {e}"
+            )
+    return issues

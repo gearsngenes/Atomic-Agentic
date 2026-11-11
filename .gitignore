@@ -5,6 +5,7 @@
 # Ignore Python Example outputs and caches
 examples/output_markdowns
 examples/*/__pycache__/
+examples/__pycache__/
 output_markdowns/
 modules/__pycache__/
 test_code/
