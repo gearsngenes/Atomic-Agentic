@@ -383,7 +383,7 @@ earlier run's result: readonly; the block lists it with its value hidden, and
 the value shows in the history as `task_result_i: <type> = <value>`.
 
 # STRICT RULES
-1. Only registered tool ids, non-excluded Python builtins, and attribute/
+1. Only registered tool ids, the allowed Python builtins, and attribute/
    method access on a value you already hold (`obj.attr`, `obj.method(...)`;
    dunder names excluded) may be used (see the AVAILABLE TOOLS frame) --
    `import <module>`-style statements are illegal, so no module-qualified

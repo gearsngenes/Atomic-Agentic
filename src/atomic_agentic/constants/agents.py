@@ -205,43 +205,36 @@ PY_BUILTIN_ALIAS: reserved from real tool aliases, dispatches through a real
 Tool (agents.tools.attr_call_tool), counts toward tool-call budget
 accounting identically to a registered-tool call."""
 
-EXCLUDED_PY_BUILTINS: frozenset[str] = frozenset(
+ALLOWED_PY_BUILTINS: frozenset[str] = frozenset(
     {
-        # Code execution
-        "eval", "exec", "compile", "__build_class__",
-        # Module/scope access
-        "__import__", "globals", "locals", "vars", "dir",
-        # Attribute reflection by string
-        "getattr", "setattr", "delattr",
-        # Filesystem/stdin I/O
-        "open", "input",
-        # Process/interpreter control
-        "exit", "quit", "breakpoint",
-        # Interactive/blocking, site banners
-        "help", "copyright", "credits", "license",
-        # Return an awaitable -- the one case where "no approved builtin is
-        # async" wouldn't hold if these were permitted
-        "anext", "aiter",
+        "abs", "all", "any", "ascii", "bin", "bool", "bytes", "callable",
+        "chr", "complex", "dict", "divmod", "enumerate", "filter", "float",
+        "format", "frozenset", "hash", "hex", "int", "isinstance",
+        "issubclass", "iter", "len", "list", "map", "max", "min", "next",
+        "oct", "ord", "pow", "print", "range", "repr", "reversed", "round",
+        "set", "slice", "sorted", "str", "sum", "tuple", "type", "zip",
     }
 )
-"""Builtins excluded from ScriptActAgent's py_builtin dispatch. Checked by both
-utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
-agents/tools.py's _call_py_builtin (runtime enforcement -- the authoritative
-gate; the parse-time check exists so an excluded name gets a specific
-regen-repair message instead of falling through to the generic
-"unregistered tool" one)."""
+"""The only builtins ScriptActAgent's py_builtin dispatch will call -- an
+explicit allowlist of value-in/value-out functions, never a blocklist over
+``dir(builtins)`` (which also holds ``__loader__``, ``__spec__`` and the like).
+Checked by utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
+agents/tools.py's call_python_builtin (runtime enforcement -- the authoritative
+gate; the parse-time check exists so a real-but-disallowed builtin name gets a
+specific regen-repair message instead of the generic "unregistered tool" one).
+``type`` is single-argument only (enforced at dispatch)."""
 
 _BUILTINS_PREAMBLE_TEMPLATE = (
-    "Together with the tools above, every standard Python builtin is also "
-    "callable the same way (`len(x)`, `str(5)`, `sorted(items)`), except: "
-    "@@EXCLUDED_PY_BUILTINS@@. These tools and builtins are the only things you "
-    "can call; anything else does not exist."
+    "Together with the tools above, these Python builtins are callable the "
+    "same way (`len(x)`, `str(5)`, `sorted(items)`): @@ALLOWED_PY_BUILTINS@@. "
+    "These tools and builtins are the only things you can call; anything "
+    "else does not exist."
 )
 BUILTINS_PREAMBLE = _BUILTINS_PREAMBLE_TEMPLATE.replace(
-    "@@EXCLUDED_PY_BUILTINS@@", ", ".join(sorted(EXCLUDED_PY_BUILTINS))
+    "@@ALLOWED_PY_BUILTINS@@", ", ".join(sorted(ALLOWED_PY_BUILTINS))
 )
 """Closing text of ScriptAct's ``AVAILABLE TOOLS`` frame, after the tool list: the
-permitted Python builtins (all but ``EXCLUDED_PY_BUILTINS``)."""
+permitted Python builtins (exactly ``ALLOWED_PY_BUILTINS``)."""
 
 # Reserved ToolStatement.kwargs key marking a `**expr` unpack in a real call.
 # "**" is never a valid Python identifier, so it can never collide with a
@@ -438,6 +431,7 @@ __all__ = [
     "FRAME_SUBJECTS",
     "CONTEXT_PREAMBLE",
     "TOOLS_PREAMBLE",
+    "ALLOWED_PY_BUILTINS",
     "BUILTINS_PREAMBLE",
     "INSTRUCTIONS_PRECEDENCE",
     "THINKING_DIRECTIVE",
@@ -454,7 +448,6 @@ __all__ = [
     "TASK_RESULT_PREFIX",
     "PY_BUILTIN_ALIAS",
     "ATTR_CALL_ALIAS",
-    "EXCLUDED_PY_BUILTINS",
     "KWARGS_UNPACK_KEY",
     "CODE_FENCE_PATTERN",
     "EMBEDDED_CODE_FENCE_PATTERN",

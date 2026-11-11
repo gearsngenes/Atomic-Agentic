@@ -7,7 +7,7 @@ from typing import Any, Optional
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     DUNDER_ATTRIBUTE_PATTERN,
-    EXCLUDED_PY_BUILTINS,
+    ALLOWED_PY_BUILTINS,
     KWARGS_UNPACK_KEY,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
@@ -526,16 +526,16 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     return flat_slots
 
 
-def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
+def rewrite_builtin_calls(slots: list[ToolStatement]) -> None:
     """
     Rewrite eligible builtin-call slots in place to dispatch through the
     ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
     Run once, over the full flat slot list, between ``parse_generation()``
     and ``validate_references()``.
 
-    A slot is eligible when its ``tool`` isn't already a sentinel and names
-    a real Python builtin. A registered tool can no longer share a name
-    with a real, non-excluded builtin at all (enforced at registration time
+    A slot is eligible when its ``tool`` isn't already a sentinel and is in
+    ``ALLOWED_PY_BUILTINS``. A registered tool can no longer share a name
+    with an allowed builtin at all (enforced at registration time
     by ``ScriptActAgent._validate_effective_tool_id``), so there is no precedence
     rule to apply here -- a name reaching this function is either a
     registered tool (never a builtin) or not, mutually exclusive by
@@ -543,32 +543,13 @@ def rewrite_builtin_calls(slots: list[ToolStatement]) -> list[str]:
     new leading positional arg and its ``tool`` replaced with
     ``PY_BUILTIN_ALIAS``.
 
-    A name that resolves to a real but excluded builtin is left unrewritten
-    and reported as its own issue, distinct from
-    ``validate_references``'s generic "unregistered tool" message that an
-    unrecognized name (a real typo/hallucination) still falls through to.
-
-    Returns the list of excluded-builtin issues found (``[]`` if none).
+    Any other name (including a real but disallowed builtin) is left
+    untouched; ``validate_references`` reports it.
     """
-    issues: list[str] = []
     for slot in slots:
-        if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
-            continue
-        if not hasattr(builtins, slot.tool):
-            continue
-
-        label = slot.identifier if slot.identifier is not None else "(unassigned)"
-        if slot.tool in EXCLUDED_PY_BUILTINS:
-            issues.append(
-                f"statement producing {label} calls python builtin "
-                f"{slot.tool!r}, which is excluded and cannot be used."
-            )
-            continue
-
-        slot.args = (slot.tool, *slot.args)
-        slot.tool = PY_BUILTIN_ALIAS
-
-    return issues
+        if slot.tool in ALLOWED_PY_BUILTINS:
+            slot.args = (slot.tool, *slot.args)
+            slot.tool = PY_BUILTIN_ALIAS
 
 
 def validate_references(
@@ -584,9 +565,8 @@ def validate_references(
 
     For each slot: its own ``tool`` must be a registered tool id unless
     it's the ``rhs_assign``/``return``/``py_builtin``/``attr_call``
-    sentinel, or a real but excluded builtin name (``rewrite_builtin_calls``
-    already reported that case with a specific message -- this generic
-    check must not double-report it); every still-unresolved
+    sentinel (a real but disallowed builtin name gets its own specific
+    message instead of the generic "unregistered tool" one); every still-unresolved
     (``ast.expr``-typed) dependency in its ``args`` must already be bound
     by an earlier slot in this same walk or be a name in ``context_names``
     (every variable in ``task.context``: conversation, runtime, input-bound,
@@ -617,9 +597,14 @@ def validate_references(
         if (
             slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS)
             and slot.tool not in known_tools
-            and slot.tool not in EXCLUDED_PY_BUILTINS
         ):
-            issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
+            if hasattr(builtins, slot.tool):
+                issues.append(
+                    f"statement producing {label} calls python builtin "
+                    f"{slot.tool!r}, which is not an allowed builtin."
+                )
+            else:
+                issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
 
         for name in (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs)):
             if name in known_tools:

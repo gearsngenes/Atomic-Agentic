@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from typing import Any
 
 import pytest
@@ -284,7 +285,7 @@ class TestPromptContextRendering:
         assert rendered.startswith("plus(")
         assert "def add" not in rendered
 
-    def test_system_message_includes_excluded_builtins(self) -> None:
+    def test_system_message_includes_allowed_builtins(self) -> None:
         agent = _make_agent(_engine())
 
         messages = agent.render_task(_new_task(agent))
@@ -292,7 +293,7 @@ class TestPromptContextRendering:
         system_msg = next(m["content"] for m in messages if m["role"] == "system")
         assert "==== AVAILABLE TOOLS [START] ====" in system_msg
         assert system_msg.index(agent.actions_context()) < system_msg.index(BUILTINS_PREAMBLE)
-        assert "eval" in BUILTINS_PREAMBLE and BUILTINS_PREAMBLE in system_msg
+        assert "len" in BUILTINS_PREAMBLE and BUILTINS_PREAMBLE in system_msg
 
     def test_instructions_are_framed_in_the_system_message(self) -> None:
         agent = _make_agent(_engine(), instructions="Always say please.")
@@ -975,9 +976,32 @@ class TestDispatch:
                 {"obj": [1, 2], "method_name": "__class__", "args": (), "kwargs": {}}
             )
 
-    def test_excluded_builtin_name_raises_at_dispatch_level(self) -> None:
+    @pytest.mark.parametrize("name", ["eval", "__loader__", "__spec__", "__import__", "getattr", "object"])
+    def test_disallowed_builtin_name_raises_at_dispatch_level(self, name: str) -> None:
         with pytest.raises(ToolInvocationError, match="not available here"):
-            builtin_call_tool.invoke({"name": "eval", "args": (), "kwargs": {}})
+            builtin_call_tool.invoke({"name": name, "args": (), "kwargs": {}})
+
+    def test_every_underscore_builtin_is_rejected_at_dispatch(self) -> None:
+        for name in (n for n in dir(builtins) if n.startswith("_")):
+            with pytest.raises(ToolInvocationError, match="not available here"):
+                builtin_call_tool.invoke({"name": name, "args": (), "kwargs": {}})
+
+    def test_type_is_single_argument_only(self) -> None:
+        assert builtin_call_tool.invoke({"name": "type", "args": (1,), "kwargs": {}}).result is int
+        with pytest.raises(ToolInvocationError):
+            builtin_call_tool.invoke({"name": "type", "args": ("X", (), {}), "kwargs": {}})
+
+    def test_loader_escape_script_is_rejected_with_a_repair_message(self) -> None:
+        script = (
+            "l = __loader__()\n"
+            "m = l.load_module('nt')\n"
+            "out = m.system('echo hi')\n"
+            "return out"
+        )
+        engine = _engine(*([script] * 10))
+        agent = make_script_agent(engine)
+        with pytest.raises(Exception, match="not an allowed builtin"):
+            agent.invoke({"prompt": "go"})
 
     def test_dispatch_breakdown_counts_all_categories(self) -> None:
         engine = _engine(

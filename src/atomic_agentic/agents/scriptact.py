@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import keyword
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
@@ -24,7 +23,7 @@ from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     BUILTINS_PREAMBLE,
-    EXCLUDED_PY_BUILTINS,
+    ALLOWED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -228,7 +227,7 @@ class ScriptActAgent(ToolAgent):
         family's own sentinel/real-Python-builtin collision rules. Never a
         reserved parser sentinel (``RHS_ASSIGN_ALIAS``/``RETURN_ALIAS``/
         ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``), and never a real,
-        non-excluded Python builtin name -- a builtin always resolves first
+        allowed Python builtin name -- an allowed builtin always resolves first
         (see ``utils/script.py``'s ``rewrite_builtin_calls``), so a tool
         registered under a colliding name would be permanently, silently
         unreachable rather than raising here. Nor a Python keyword: a script
@@ -242,7 +241,7 @@ class ScriptActAgent(ToolAgent):
                 "own sentinel tool names and cannot be used as a registered "
                 "tool alias or name."
             )
-        if hasattr(builtins, effective_id) and effective_id not in EXCLUDED_PY_BUILTINS:
+        if effective_id in ALLOWED_PY_BUILTINS:
             raise ToolRegistrationError(
                 f"effective id {effective_id!r} collides with a real Python "
                 "builtin of the same name -- registering a tool under this "
@@ -384,10 +383,8 @@ class ScriptActAgent(ToolAgent):
 
         # Rewrite eligible builtin calls before whole-sequence validation,
         # so a rewritten slot is validated as PY_BUILTIN_ALIAS, not as an
-        # unregistered tool; excluded-but-real builtin names are reported
-        # here with a specific message instead of validate_references'
-        # generic "unregistered tool" one.
-        builtin_issues = rewrite_builtin_calls(flat_slots)
+        # unregistered tool.
+        rewrite_builtin_calls(flat_slots)
         context_names = frozenset(task.context)
         readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         remaining_budget = (
@@ -395,8 +392,7 @@ class ScriptActAgent(ToolAgent):
             else self._tool_calls_limit - task.tool_calls_used
         )
         issues = (
-            builtin_issues
-            + validate_references(
+            validate_references(
                 flat_slots, frozenset(self._toolbox), context_names,
                 readonly_names, remaining_budget,
             )

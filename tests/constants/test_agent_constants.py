@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import ast
+import builtins
 
 import atomic_agentic.constants.agents as agent_constants
 
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
+    BUILTINS_PREAMBLE,
     CODE_FENCE_PATTERN,
     EMBEDDED_CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
-    EXCLUDED_PY_BUILTINS,
+    ALLOWED_PY_BUILTINS,
     FRAME_SUBJECTS,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
@@ -43,14 +45,27 @@ class TestScriptAgentSentinelLiterals:
         assert not KWARGS_UNPACK_KEY.isidentifier()
 
 
-class TestExcludedPyBuiltins:
+class TestAllowedPyBuiltins:
     def test_is_a_non_empty_frozenset(self) -> None:
-        assert isinstance(EXCLUDED_PY_BUILTINS, frozenset)
-        assert EXCLUDED_PY_BUILTINS
+        assert isinstance(ALLOWED_PY_BUILTINS, frozenset)
+        assert ALLOWED_PY_BUILTINS
 
-    def test_contains_known_dangerous_builtins(self) -> None:
-        for name in ("eval", "exec", "open", "__import__"):
-            assert name in EXCLUDED_PY_BUILTINS
+    def test_every_name_is_a_real_builtin(self) -> None:
+        for name in ALLOWED_PY_BUILTINS:
+            assert hasattr(builtins, name), name
+
+    def test_excludes_dangerous_and_underscore_builtins(self) -> None:
+        for name in ("eval", "exec", "open", "getattr", "object", "super"):
+            assert name not in ALLOWED_PY_BUILTINS
+        assert not [n for n in ALLOWED_PY_BUILTINS if n.startswith("_")]
+        for name in dir(builtins):
+            if name.startswith("_"):
+                assert name not in ALLOWED_PY_BUILTINS
+
+    def test_preamble_lists_exactly_the_allowlist(self) -> None:
+        for name in ALLOWED_PY_BUILTINS:
+            assert name in BUILTINS_PREAMBLE
+        assert "eval" not in BUILTINS_PREAMBLE
 
 
 class TestDunderAttributePattern:

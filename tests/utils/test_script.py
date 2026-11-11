@@ -444,37 +444,42 @@ class TestRewriteBuiltinCalls:
     def test_eligible_builtin_is_rewritten(self) -> None:
         slot = ToolStatement(identifier="y", tool="len", args=(_name("x"),))
 
-        issues = rewrite_builtin_calls([slot])
+        rewrite_builtin_calls([slot])
 
-        assert issues == []
         assert slot.tool == PY_BUILTIN_ALIAS
         assert slot.args[0] == "len"
         assert isinstance(slot.args[1], ast.Name) and slot.args[1].id == "x"
 
-    def test_excluded_builtin_is_left_unrewritten_and_reported(self) -> None:
-        slot = ToolStatement(identifier="y", tool="eval", args=(_name("x"),))
+    @pytest.mark.parametrize("tool", ["eval", "__loader__", "object"])
+    def test_disallowed_builtin_is_left_unrewritten(self, tool: str) -> None:
+        slot = ToolStatement(identifier="y", tool=tool, args=(_name("x"),))
 
-        issues = rewrite_builtin_calls([slot])
+        rewrite_builtin_calls([slot])
 
-        assert slot.tool == "eval"
+        assert slot.tool == tool
+
+    @pytest.mark.parametrize("tool", ["eval", "__loader__"])
+    def test_validate_references_reports_disallowed_builtin(self, tool: str) -> None:
+        slot = ToolStatement(identifier="y", tool=tool)
+
+        issues = validate_references([slot], frozenset(), frozenset(), frozenset(), None)
+
         assert len(issues) == 1
-        assert "eval" in issues[0]
+        assert "not an allowed builtin" in issues[0]
 
     def test_non_builtin_tool_name_is_untouched(self) -> None:
         slot = ToolStatement(identifier="y", tool="my_registered_tool")
 
-        issues = rewrite_builtin_calls([slot])
+        rewrite_builtin_calls([slot])
 
-        assert issues == []
         assert slot.tool == "my_registered_tool"
 
     def test_rhs_assign_and_return_slots_are_skipped_unconditionally(self) -> None:
         rhs_slot = ToolStatement(identifier="y", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
         return_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)})
 
-        issues = rewrite_builtin_calls([rhs_slot, return_slot])
+        rewrite_builtin_calls([rhs_slot, return_slot])
 
-        assert issues == []
         assert rhs_slot.tool == RHS_ASSIGN_ALIAS
         assert return_slot.tool == RETURN_ALIAS
 
@@ -483,12 +488,11 @@ class TestRewriteBuiltinCalls:
         excluded = ToolStatement(identifier="b", tool="exec", args=(_name("x"),))
         untouched = ToolStatement(identifier="c", tool="my_tool")
 
-        issues = rewrite_builtin_calls([eligible, excluded, untouched])
+        rewrite_builtin_calls([eligible, excluded, untouched])
 
         assert eligible.tool == PY_BUILTIN_ALIAS
         assert excluded.tool == "exec"
         assert untouched.tool == "my_tool"
-        assert len(issues) == 1
 
 
 class TestResolveStatementArgs:
