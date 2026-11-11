@@ -5,6 +5,7 @@ import builtins
 from typing import Any, Optional
 
 from ..constants.agents import (
+    ALLOWED_ATTR_METHODS,
     ATTR_CALL_ALIAS,
     DUNDER_ATTRIBUTE_PATTERN,
     ALLOWED_PY_BUILTINS,
@@ -160,6 +161,11 @@ def _build_call_slot(
         if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
             raise BlackboardParseError(
                 f"dunder attribute access is not permitted: "
+                f"{ast.unparse(call_node.func)!r}."
+            )
+        if not any(method_name in methods for methods in ALLOWED_ATTR_METHODS.values()):
+            raise BlackboardParseError(
+                f"method {method_name!r} is not an allowed method call: "
                 f"{ast.unparse(call_node.func)!r}."
             )
         obj_expr = _hoist_calls(

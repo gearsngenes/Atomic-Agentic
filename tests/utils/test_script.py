@@ -162,22 +162,22 @@ class TestParseStatementToSlotsCallShapes:
 
 class TestParseStatementToSlotsAttributeCalls:
     def test_attribute_call_shape(self) -> None:
-        slot = parse_statement_to_slots("y = obj.method(1)")[0]
+        slot = parse_statement_to_slots("y = obj.get(1)")[0]
 
         assert slot.tool == ATTR_CALL_ALIAS
         obj_expr, method_name, *rest = slot.args
         assert isinstance(obj_expr, ast.Name) and obj_expr.id == "obj"
-        assert method_name == "method"
+        assert method_name == "get"
         assert [a.value for a in rest] == [1]
 
     def test_attribute_call_keyword_argument_stored_plainly(self) -> None:
-        slot = parse_statement_to_slots("y = obj.method(x=1)")[0]
+        slot = parse_statement_to_slots("y = obj.get(x=1)")[0]
 
         assert slot.tool == ATTR_CALL_ALIAS
         assert slot.kwargs["x"].value == 1
 
     def test_call_free_object_chain_passes_through_unchanged(self) -> None:
-        slots = parse_statement_to_slots("y = obj.attr.method(1)")
+        slots = parse_statement_to_slots("y = obj.attr.get(1)")
 
         assert len(slots) == 1
         final = slots[0]
@@ -186,7 +186,7 @@ class TestParseStatementToSlotsAttributeCalls:
         assert ast.unparse(obj_expr) == "obj.attr"
 
     def test_embedded_call_in_object_position_is_hoisted(self) -> None:
-        slots = parse_statement_to_slots("y = obj.method1().attr.method2(1)")
+        slots = parse_statement_to_slots("y = obj.strip().attr.get(1)")
 
         assert len(slots) == 2
         hoisted, final = slots
@@ -195,6 +195,11 @@ class TestParseStatementToSlotsAttributeCalls:
         assert final.tool == ATTR_CALL_ALIAS
         obj_expr = final.args[0]
         assert ast.unparse(obj_expr) == "_SUB_0.attr"
+
+    @pytest.mark.parametrize("method", ["format", "format_map", "ljust", "encode", "no_such_method"])
+    def test_method_in_no_permitted_class_raises_at_parse_time(self, method: str) -> None:
+        with pytest.raises(BlackboardParseError, match="not an allowed method call"):
+            parse_statement_to_slots(f"y = obj.{method}(1)")
 
     def test_dunder_method_call_raises_via_build_call_slot(self) -> None:
         with pytest.raises(BlackboardParseError, match="dunder"):
@@ -220,7 +225,7 @@ class TestParseStatementToSlotsAttributeCalls:
     def test_dependency_bearing_object_expression_is_not_dry_evaluated(self) -> None:
         # The dry-eval check only fires when extract_identifiers(obj_expr)
         # is empty -- a plain dependency-bearing object expression parses fine.
-        slot = parse_statement_to_slots("y = obj.method(1)")[0]
+        slot = parse_statement_to_slots("y = obj.get(1)")[0]
 
         assert slot.tool == ATTR_CALL_ALIAS
 

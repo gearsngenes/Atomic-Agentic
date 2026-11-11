@@ -106,10 +106,7 @@ class ReActAgent(ToolAgent):
     # A class attribute (active before __init__ runs) — return_tool plus the
     # two composite-value-building utility tools this family's schema text
     # tells the model to use. Reserved so no caller can register a different
-    # tool under any of these ids, or remove/replace them once seeded. No
-    # get_item entry: too niche relative to make_sequence/make_dict/return,
-    # and its presence in AVAILABLE TOOLS pulls live generations toward
-    # container-shaped detours a flat call sequence doesn't need.
+    # tool under any of these ids, or remove/replace them once seeded.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
     )

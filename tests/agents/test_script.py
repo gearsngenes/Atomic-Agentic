@@ -10,6 +10,7 @@ from atomic_agentic.constants.agents import BUILTINS_PREAMBLE
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.tools import attr_call_tool, builtin_call_tool
 from atomic_agentic.constants.agents import (
+    ALLOWED_ATTR_METHODS,
     ATTR_CALL_ALIAS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
@@ -958,9 +959,12 @@ class TestDispatch:
 
         assert agent.invoke({"prompt": "get a"}).result == 1
 
-    def test_attribute_call_dispatches_when_the_method_has_a_keyword_named_obj(self) -> None:
+    def test_attribute_call_dispatches_when_the_method_has_a_keyword_named_obj(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The real target method's own kwarg is literally named `obj`, which
         # would collide with attr_call_tool's own parameter if splatted.
+        monkeypatch.setitem(ALLOWED_ATTR_METHODS, _Node, frozenset({"attach"}))
         agent = make_script_agent(_engine("return node.attach(obj=5)"))
         agent.get_conversation().remember("node", _Node())
 
@@ -975,6 +979,71 @@ class TestDispatch:
             attr_call_tool.invoke(
                 {"obj": [1, 2], "method_name": "__class__", "args": (), "kwargs": {}}
             )
+
+    @staticmethod
+    def _attr(obj: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+        return attr_call_tool.invoke(
+            {"obj": obj, "method_name": method, "args": args, "kwargs": kwargs}
+        ).result
+
+    @pytest.mark.parametrize(
+        "obj, method, args, expected",
+        [
+            ("  hi ", "strip", (), "hi"),
+            ({"a": 1}, "get", ("a",), 1),
+            ([1, 2], "count", (1,), 1),
+            ((1, 1), "count", (1,), 2),
+            ({1, 2}, "union", ({3},), {1, 2, 3}),
+            (True, "bit_length", (), 1),
+            (5, "bit_length", (), 3),
+        ],
+    )
+    def test_permitted_methods_dispatch(self, obj: Any, method: str, args: tuple, expected: Any) -> None:
+        assert self._attr(obj, method, *args) == expected
+
+    def test_mutators_are_permitted(self) -> None:
+        items: list[int] = [1]
+        self._attr(items, "append", 2)
+        self._attr(items, "extend", [3])
+        assert items == [1, 2, 3]
+        assert self._attr(items, "pop") == 3
+        d: dict[str, int] = {}
+        self._attr(d, "update", {"a": 1})
+        s: set[int] = set()
+        self._attr(s, "add", 1)
+        assert d == {"a": 1} and s == {1}
+
+    @pytest.mark.parametrize(
+        "obj, method",
+        [
+            ("{0}", "format"),
+            ("{a}", "format_map"),
+            ("x", "ljust"),
+            ([], "__class__"),
+            ({}, "fromkeys_missing"),
+            (object(), "strip"),
+            (len, "strip"),
+        ],
+    )
+    def test_unpermitted_methods_raise(self, obj: Any, method: str) -> None:
+        with pytest.raises(ToolInvocationError, match="not available here"):
+            self._attr(obj, method)
+
+    def test_str_subclass_is_permitted_and_its_override_is_not_invoked(self) -> None:
+        class Loud(str):
+            def strip(self, *a: Any) -> str:
+                return "OVERRIDDEN"
+
+        assert self._attr(Loud(" x "), "strip") == "x"
+
+    def test_callable_argument_is_rejected_for_methods_and_builtins(self) -> None:
+        bound = "{0.__globals__}".format
+        with pytest.raises(ToolInvocationError, match="callable arguments"):
+            builtin_call_tool.invoke({"name": "map", "args": (bound, [len]), "kwargs": {}})
+        with pytest.raises(ToolInvocationError, match="callable arguments"):
+            self._attr([2, 1], "sort", key=bound)
+        with pytest.raises(ToolInvocationError, match="callable arguments"):
+            builtin_call_tool.invoke({"name": "sorted", "args": ([1],), "kwargs": {"key": bound}})
 
     @pytest.mark.parametrize("name", ["eval", "__loader__", "__spec__", "__import__", "getattr", "object"])
     def test_disallowed_builtin_name_raises_at_dispatch_level(self, name: str) -> None:
@@ -1000,7 +1069,30 @@ class TestDispatch:
         )
         engine = _engine(*([script] * 10))
         agent = make_script_agent(engine)
-        with pytest.raises(Exception, match="not an allowed builtin"):
+        with pytest.raises(Exception, match="not an allowed"):
+            agent.invoke({"prompt": "go"})
+
+    @pytest.mark.parametrize(
+        "script, expected",
+        [
+            ("m = map(s.format, items)\nreturn list(m)", "callable arguments"),
+            ("r = sorted(items, key=s.format)\nreturn r", "callable arguments"),
+            ("t = type(x)\nm = t.mro()\nreturn m", "not an allowed method call"),
+            ("r = s.format(x)\nreturn r", "not an allowed method call"),
+            ("r = f\"{x.__class__}\"\nreturn r", "dunder attribute access"),
+            ("r = getattr(x, 'y')\nreturn r", "not an allowed builtin"),
+            ("r = vars(x)\nreturn r", "not an allowed builtin"),
+            ("r = globals()\nreturn r", "not an allowed builtin"),
+            ("r = x.__class__.__bases__\nreturn r", "dunder attribute access"),
+            ("r = open('f')\nreturn r", "not an allowed builtin"),
+        ],
+    )
+    def test_adversarial_corpus_is_rejected(self, script: str, expected: str) -> None:
+        agent = make_script_agent(_engine(*([script] * 10)))
+        agent.get_conversation().remember("s", "{0.__globals__}")
+        agent.get_conversation().remember("x", 1)
+        agent.get_conversation().remember("items", [add])
+        with pytest.raises(Exception, match=expected):
             agent.invoke({"prompt": "go"})
 
     def test_dispatch_breakdown_counts_all_categories(self) -> None:

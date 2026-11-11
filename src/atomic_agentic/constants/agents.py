@@ -277,6 +277,45 @@ EMBEDDED_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(
 # `{"__builtins__": {}}` eval lockout alone does not defend against.
 DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
 
+# Method calls (`obj.method(...)`) a ScriptAct script may make, keyed by the
+# builtin class they belong to. agents.tools._call_attr_method resolves the
+# receiver's most specific class in this table (walking its MRO, so a
+# subclass resolves to its nearest table class) and calls the method off
+# that class itself, never off the instance. ``format``/``format_map`` are deliberately absent from
+# ``str`` (format-field syntax can traverse attributes inside the template
+# string); padding methods (``center``/``ljust``/``rjust``/``zfill``) are
+# absent until unbounded-size evaluation is capped.
+_INT_METHODS: frozenset[str] = frozenset({"bit_length", "to_bytes"})
+
+ALLOWED_ATTR_METHODS: dict[type, frozenset[str]] = {
+    str: frozenset({
+        "capitalize", "casefold", "count", "endswith", "find", "index",
+        "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "islower",
+        "isnumeric", "isspace", "istitle", "isupper", "join", "lower",
+        "lstrip", "partition", "removeprefix", "removesuffix", "replace",
+        "rfind", "rindex", "rpartition", "rsplit", "rstrip", "split",
+        "splitlines", "startswith", "strip", "swapcase", "title", "upper",
+    }),
+    bytes: frozenset({"decode", "hex"}),
+    int: _INT_METHODS,
+    bool: _INT_METHODS,
+    float: frozenset({"is_integer"}),
+    list: frozenset({
+        "append", "copy", "count", "extend", "index", "insert", "pop",
+        "remove", "reverse", "sort",
+    }),
+    tuple: frozenset({"count", "index"}),
+    dict: frozenset({"copy", "get", "items", "keys", "pop", "setdefault", "update", "values"}),
+    set: frozenset({
+        "add", "copy", "difference", "discard", "intersection", "issubset",
+        "issuperset", "remove", "symmetric_difference", "union", "update",
+    }),
+    frozenset: frozenset({
+        "copy", "difference", "intersection", "issubset", "issuperset",
+        "symmetric_difference", "union",
+    }),
+}
+
 # Expression node types utils/agents.py's reject_unsupported_forms rejects
 # unconditionally (see its own docstring) -- each introduces a binding (or
 # a generator scope) that neither that function nor extract_identifiers
@@ -454,6 +493,7 @@ __all__ = [
     "LEADING_CODE_FENCE_PATTERN",
     "TRAILING_CODE_FENCE_PATTERN",
     "DUNDER_ATTRIBUTE_PATTERN",
+    "ALLOWED_ATTR_METHODS",
     "UNSUPPORTED_EXPR_LABELS",
     "RETURN_VALUE_FIELD",
     # Canonical return tool

@@ -145,10 +145,7 @@ class PlanActAgent(ToolAgent):
     # composite-value-building utility tools this family's schema text
     # tells the model to use. No return_tool entry -- PlanActAgent never
     # registers a real return tool (its return value comes from the
-    # synthesized RETURN_ALIAS call instead). No get_item entry: too niche
-    # relative to make_sequence/make_dict/return, and its presence in
-    # AVAILABLE TOOLS pulls live generations toward container-shaped
-    # detours a flat call sequence doesn't need.
+    # synthesized RETURN_ALIAS call instead).
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
         {"make_sequence", "make_dict"}
     )
