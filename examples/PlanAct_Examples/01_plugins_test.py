@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent

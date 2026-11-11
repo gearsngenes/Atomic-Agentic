@@ -175,6 +175,7 @@ def translate_calls(
     tool_calls_limit: Optional[int],
     context_names: frozenset[str],
     readonly_names: frozenset[str],
+    tool_names: frozenset[str],
 ) -> tuple[list[str], list[ToolStatement]]:
     """
     Does both validation and ast-translation in one walk, since both need
@@ -182,7 +183,8 @@ def translate_calls(
 
     ``context_names`` is the full reference-*resolution* seed -- every
     variable in the task's context. ``readonly_names`` is the subset of
-    those that cannot be reassigned.
+    those that cannot be reassigned. ``tool_names`` is every registered tool
+    id, which a ``result_name`` may not take.
 
     1. ``available = set(context_names)``. ``issues = []``. ``statements = []``.
     2. For each draft, in order:
@@ -192,7 +194,7 @@ def translate_calls(
        b. If normalized identifier is not ``None``, check in order (first
           match wins): ``IDENTIFIER_PATTERN`` legality; the reserved
           ``task_result_`` prefix; membership in ``readonly_names``;
-          dunder-shape (``__...__``). A name in ``context_names`` that is
+          membership in ``tool_names``; dunder-shape (``__...__``). A name in ``context_names`` that is
           not readonly passes (it updates that variable).
        c. If the draft repeated a keyword name, append an issue.
        d. Translate every arg/kwarg value (see "Value translation" below),
@@ -327,6 +329,11 @@ def translate_calls(
                 issues.append(
                     f"result_name {normalized_identifier!r} is a read-only context "
                     "variable and cannot be reassigned."
+                )
+            elif normalized_identifier in tool_names:
+                issues.append(
+                    f"result_name {normalized_identifier!r} is a registered tool id "
+                    "and cannot be used as a result name."
                 )
             elif normalized_identifier.startswith("__") and normalized_identifier.endswith("__"):
                 issues.append(

@@ -1,4 +1,4 @@
-﻿from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.agents import PlanActAgent
 
 import sys
 from pathlib import Path

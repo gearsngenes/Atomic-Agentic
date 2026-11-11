@@ -206,11 +206,7 @@ class BasicAgent(Agent):
         return task
 
     async def async_act(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``act``.
-
-        Awaits the engine's native async path directly rather than relying
-        on ``Agent``'s inherited ``asyncio.to_thread``-wrapping default.
-        """
+        """Async mirror of ``act``, awaiting the engine's native async path."""
         messages = self.render_task(task)
         engine_result = await self._llm_engine.async_invoke({
             "messages": messages,

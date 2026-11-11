@@ -277,16 +277,17 @@ EMBEDDED_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(
 # `{"__builtins__": {}}` eval lockout alone does not defend against.
 DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
 
+_INT_METHODS: frozenset[str] = frozenset({"bit_length", "to_bytes"})
+
 # Method calls (`obj.method(...)`) a ScriptAct script may make, keyed by the
 # builtin class they belong to. agents.tools._call_attr_method resolves the
 # receiver's most specific class in this table (walking its MRO, so a
 # subclass resolves to its nearest table class) and calls the method off
-# that class itself, never off the instance. ``format``/``format_map`` are deliberately absent from
-# ``str`` (format-field syntax can traverse attributes inside the template
-# string); padding methods (``center``/``ljust``/``rjust``/``zfill``) are
-# absent until unbounded-size evaluation is capped.
-_INT_METHODS: frozenset[str] = frozenset({"bit_length", "to_bytes"})
-
+# that class itself, never off the instance. ``format``/``format_map`` are
+# deliberately absent from ``str`` (format-field syntax can traverse
+# attributes inside the template string); padding methods
+# (``center``/``ljust``/``rjust``/``zfill``) are absent until unbounded-size
+# evaluation is capped.
 ALLOWED_ATTR_METHODS: dict[type, frozenset[str]] = {
     str: frozenset({
         "capitalize", "casefold", "count", "endswith", "find", "index",
@@ -315,6 +316,14 @@ ALLOWED_ATTR_METHODS: dict[type, frozenset[str]] = {
         "symmetric_difference", "union",
     }),
 }
+
+# Method names in the table above that change their receiver in place.
+# utils/script.py's validate_references rejects one called on a read-only
+# context variable (or a name aliasing one).
+MUTATING_ATTR_METHODS: frozenset[str] = frozenset({
+    "add", "append", "discard", "extend", "insert", "pop", "remove",
+    "reverse", "setdefault", "sort", "update",
+})
 
 # Expression node types utils/agents.py's reject_unsupported_forms rejects
 # unconditionally (see its own docstring) -- each introduces a binding (or
@@ -494,6 +503,7 @@ __all__ = [
     "TRAILING_CODE_FENCE_PATTERN",
     "DUNDER_ATTRIBUTE_PATTERN",
     "ALLOWED_ATTR_METHODS",
+    "MUTATING_ATTR_METHODS",
     "UNSUPPORTED_EXPR_LABELS",
     "RETURN_VALUE_FIELD",
     # Canonical return tool

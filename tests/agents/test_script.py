@@ -929,10 +929,10 @@ class TestMutationByReference:
 
         assert agent.invoke({"prompt": "mutate"}).result == [1, 2, 3, 99]
 
-    def test_task_result_mutation_does_not_persist_across_invocations(self) -> None:
+    def test_mutating_a_copy_of_a_task_result_leaves_it_unchanged(self) -> None:
         engine = _engine(
             "return [1, 2, 3]",
-            "x = task_result_0.append(99)\nreturn task_result_0",
+            "c = list(task_result_0)\nx = c.append(99)\nreturn c",
             "return task_result_0",
         )
         agent = make_script_agent(engine, record_enabled=True)
@@ -969,6 +969,22 @@ class TestDispatch:
         agent.get_conversation().remember("node", _Node())
 
         assert agent.invoke({"prompt": "attach"}).result == 5
+
+    def test_mutator_on_a_readonly_variable_is_rejected_with_feedback(self) -> None:
+        script = "items.append(99)\nreturn items"
+        agent = make_script_agent(_engine(*([script] * 10)))
+        agent.get_conversation().remember("items", [1], readonly=True)
+
+        with pytest.raises(Exception, match="mutating method 'append'"):
+            agent.invoke({"prompt": "go"})
+        assert agent.get_conversation().context["items"].value == [1]
+
+    def test_copying_a_readonly_variable_then_mutating_the_copy_works(self) -> None:
+        agent = make_script_agent(_engine("c = list(items)\nc.append(99)\nreturn c"))
+        agent.get_conversation().remember("items", [1], readonly=True)
+
+        assert agent.invoke({"prompt": "go"}).result == [1, 99]
+        assert agent.get_conversation().context["items"].value == [1]
 
     def test_builtin_call_with_keyword_arguments_dispatches_correctly(self) -> None:
         engine = _engine("return sorted([3, 1, 2], reverse=True)")

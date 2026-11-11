@@ -281,7 +281,8 @@ class PlanActAgent(ToolAgent):
 
         1. ``parse_generation``: raw JSON -> drafts.
         2. ``translate_calls`` against the names in ``task.context`` (and its
-           readonly subset) and the tool-call budget -> ``ToolStatement``s.
+           readonly subset), the registered tool ids (never a valid
+           ``result_name``) and the tool-call budget -> ``ToolStatement``s.
         3. ``check_call_bindings``: dry-bind each registered-tool call.
         4. Any issues from 2-3 are returned as one numbered feedback string;
            otherwise the calls are compiled into dependency batches.
@@ -291,7 +292,8 @@ class PlanActAgent(ToolAgent):
         context_names = frozenset(task.context)
         readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         issues, calls = translate_calls(
-            drafts, self._tool_calls_limit, context_names, readonly_names
+            drafts, self._tool_calls_limit, context_names, readonly_names,
+            frozenset(self._toolbox),
         )
         issues += check_call_bindings(calls, self._toolbox)
 

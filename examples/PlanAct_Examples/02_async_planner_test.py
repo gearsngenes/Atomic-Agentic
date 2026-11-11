@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import time
 
 from atomic_agentic.agents import PlanActAgent

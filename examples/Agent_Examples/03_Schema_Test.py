@@ -1,4 +1,4 @@
-﻿"""
+"""
 Example: Custom pre-invoke Tool with its own schema (Lesson Plan Composer)
 
 This script shows how to define a custom pre-invoke Tool that expects a specific

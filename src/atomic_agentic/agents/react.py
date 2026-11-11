@@ -152,7 +152,7 @@ class ReActAgent(ToolAgent):
         instead. Two defaults deliberately diverge from ``ToolAgent``'s own:
         ``tool_calls_limit`` defaults to ``25`` (not ``None`` -- this family
         has no second round-ceiling knob the way ``ScriptActAgent`` has
-        ``planning_rounds_limit``, so an unbounded default would have zero
+        ``replanning_limit``, so an unbounded default would have zero
         structural backstop), and ``fail_fast`` defaults to ``False`` (not
         ``True`` -- redirecting on failure is this family's entire reason
         for existing; a caller who genuinely wants one failure to be fatal
@@ -279,7 +279,8 @@ class ReActAgent(ToolAgent):
         Pure-computation validate-and-resolve callback for the step retry
         loop: parse (``parse_react_call``, raw JSON -> draft), translate
         (``translate_calls``, draft -> validated ``ToolStatement`` against
-        the names in ``task.context`` and the remaining tool-call budget),
+        the names in ``task.context``, the registered tool ids and the remaining
+        tool-call budget),
         then attempt argument resolution against the context values -- the
         one failure category ``translate_calls`` structurally can't catch (a
         resolved value's real type mismatching the target tool's parameter
@@ -295,7 +296,8 @@ class ReActAgent(ToolAgent):
         context_names = frozenset(task.context)
         readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         issues, calls = translate_calls(
-            [draft], remaining_budget, context_names, readonly_names
+            [draft], remaining_budget, context_names, readonly_names,
+            frozenset(self._toolbox),
         )
 
         if issues:

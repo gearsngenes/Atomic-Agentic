@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from ..constants.agents import (
     ALLOWED_ATTR_METHODS,
+    MUTATING_ATTR_METHODS,
     ATTR_CALL_ALIAS,
     DUNDER_ATTRIBUTE_PATTERN,
     ALLOWED_PY_BUILTINS,
@@ -580,7 +581,9 @@ def validate_references(
     tool id. An assignment target (``slot.identifier`` not ``None``) that
     names a read-only context variable (``readonly_names``) or a registered
     tool id is rejected; a writable context name is allowed (it updates the
-    variable). Comprehensive, not fail-fast: every unresolvable reference
+    variable). A mutating method call (``MUTATING_ATTR_METHODS``) on a
+    read-only variable, or on a name assigned from one (directly or via
+    ``get``/``pop``/``setdefault``), is also rejected. Comprehensive, not fail-fast: every unresolvable reference
     across the whole sequence is collected and returned, never just the
     first.
 
@@ -596,6 +599,9 @@ def validate_references(
     """
     bound: set[str] = set()
     issues: list[str] = []
+    # Names a mutating method call must not touch: the read-only context
+    # variables plus any name that aliases one (see the end of the loop).
+    protected: set[str] = set(readonly_names)
 
     for slot in slots:
         label = slot.identifier if slot.identifier is not None else "(unassigned)"
@@ -628,6 +634,14 @@ def validate_references(
                     f"statement producing {label} references undefined name {name!r}."
                 )
 
+        if slot.tool == ATTR_CALL_ALIAS and slot.args[1] in MUTATING_ATTR_METHODS:
+            for name in sorted(protected & set(extract_identifiers(slot.args[0]))):
+                issues.append(
+                    f"statement producing {label} calls mutating method "
+                    f"{slot.args[1]!r} on {name!r}, a read-only context variable "
+                    "(or a name bound to one); copy it first, e.g. list(x)."
+                )
+
         if slot.identifier is not None:
             if slot.identifier in readonly_names:
                 issues.append(
@@ -637,6 +651,20 @@ def validate_references(
                 issues.append(
                     f"statement assigns to {slot.identifier!r}, a registered tool id."
                 )
+            # An assignment, or a get/pop/setdefault, from a protected name
+            # may hand back the very same object, so the new name is
+            # protected too. Methods that return a new object (copy, split,
+            # keys, ...) and builtin calls are not propagated.
+            if slot.tool == RHS_ASSIGN_ALIAS:
+                source = slot.kwargs["val"]
+            elif slot.tool == ATTR_CALL_ALIAS and slot.args[1] in ("get", "pop", "setdefault"):
+                source = slot.args[0]
+            else:
+                source = None
+            if source is not None and protected & set(extract_identifiers(source)):
+                protected.add(slot.identifier)
+            elif slot.identifier not in readonly_names:
+                protected.discard(slot.identifier)
             bound.add(slot.identifier)
 
     real_call_count = sum(1 for slot in slots if is_dispatched(slot))

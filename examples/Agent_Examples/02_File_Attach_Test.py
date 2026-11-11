@@ -1,4 +1,4 @@
-﻿# example_doc_summarizer.py
+# example_doc_summarizer.py
 # Requires:
 #   - OPENAI_API_KEY in your environment (or .env)
 import os, time

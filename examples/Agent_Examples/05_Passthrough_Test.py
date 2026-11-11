@@ -1,4 +1,4 @@
-﻿# 05_Passthrough_Test.py
+# 05_Passthrough_Test.py
 """
 Demonstrates post-invoke parameter auto-grafting (v2.0.0a14+).
 

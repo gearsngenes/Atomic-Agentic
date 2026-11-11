@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 
@@ -39,7 +39,7 @@ def main() -> None:
         host="localhost",
         port=7000,
     )
-    host.run_server(debug=True)
+    host.run_server()
 
 
 if __name__ == "__main__":

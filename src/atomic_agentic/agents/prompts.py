@@ -45,7 +45,7 @@ Type.namespace.name form. Each plan entry calls one tool, then optionally
 binds its result via "result_name": a plain identifier (letters, digits,
 underscore, not starting with a digit) that never starts with
 "task_result_", is never shaped like "__name__", and is never the name of a
-readonly context variable. A writable context variable's name updates it.
+readonly context variable or of a tool. A writable context variable's name updates it.
 
 Each argument is either positional ("name": null, in the tool's own call
 order) or keyword ("name": "<param>", the exact parameter name from the
@@ -125,8 +125,8 @@ following REFERENCING VALUES. null is a legitimate answer when the task
 genuinely has nothing to hand back -- not a signal to come back later.
 
 # PLAN REPAIR
-A plan is rejected before anything runs if it uses an invalid or reserved
-"result_name", repeats a keyword argument name, passes arguments that don't
+A plan is rejected before anything runs if it uses an invalid, reserved or
+tool-named "result_name", repeats a keyword argument name, passes arguments that don't
 fit a tool's signature, or has an unbound whole-match "$name". You'll see
 exactly what you wrote and why. Repair it by writing one complete
 corrected plan from scratch -- never a patch or partial diff.
@@ -234,7 +234,7 @@ a dotted Type.namespace.name form. It then optionally binds its result via
 "result_name": a plain identifier (letters, digits, underscore, not
 starting with a digit) that never starts with "task_result_", is never
 shaped like "__name__", and is never the name of a readonly context
-variable. A writable context variable's name updates it.
+variable or of a tool. A writable context variable's name updates it.
 
 Each argument object is either positional ("name": null, in the tool's
 own call order) or keyword ("name": "<param>", the exact parameter name
@@ -319,7 +319,7 @@ finish with it.
 
 # IF YOUR CALL CAN'T BE USED
 Your call is rejected before it runs if it uses an invalid, readonly or
-reserved ("task_result_..." or "__name__"-shaped) "result_name", repeats a
+reserved ("task_result_..." or "__name__"-shaped) or tool-named "result_name", repeats a
 keyword argument name, has an unbound whole-match "$name", passes
 arguments that don't fit the tool's signature, or resolves to a value of
 the wrong type for its parameter. You'll see exactly what you wrote and
@@ -398,7 +398,9 @@ the value shows in the history as `task_result_i: <type> = <value>`.
 3. Use pre-existing declared names (see RUNTIME CONTEXT) and earlier results
    instead of hand-writing an equivalent value.
 4. Never assign to `_SUB_*` names (auto-generated nested-call bindings), nor
-   to a readonly context variable or `task_result_*` (see RUNTIME CONTEXT).
+   to a readonly context variable or `task_result_*` (see RUNTIME CONTEXT),
+   and never call a mutating method (`append`, `update`, `sort`, ...) on one
+   or on a name assigned from one -- copy it first, e.g. `list(x)`.
 5. At most one `return`, only as the true last statement you write.
 6. A bare quoted string (prefer triple-quoted) is a reasoning note --
    inert, never bound or dispatched. Write as many as help you think,

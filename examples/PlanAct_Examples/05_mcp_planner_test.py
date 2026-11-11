@@ -1,4 +1,4 @@
-﻿"""05_mcp_planner_test.py
+"""05_mcp_planner_test.py
 
 PlanActAgent planning against a local MCP server.
 

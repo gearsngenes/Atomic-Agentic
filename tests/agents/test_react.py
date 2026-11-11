@@ -654,6 +654,13 @@ class TestReActContextBinding:
         with pytest.raises(ToolAgentError, match="regeneration budget exhausted"):
             agent.invoke({"prompt": "run"})
 
+    def test_result_name_equal_to_a_tool_id_is_rejected(self) -> None:
+        bad = rstep(call="add", arguments=[arg("x", 1), arg("y", 2)], result_name="add")
+        agent = make_react_agent([bad], tool_calls_limit=1, regeneration_limit=0)
+
+        with pytest.raises(ToolAgentError, match="registered tool id"):
+            agent.invoke({"prompt": "run"})
+
     def test_repeated_keyword_name_is_regenerated(self) -> None:
         bad = rstep(call="add", arguments=[arg("x", 1), arg("x", 2), arg("y", 3)])
         good = rstep(call="return", arguments=[arg("val", 1)])

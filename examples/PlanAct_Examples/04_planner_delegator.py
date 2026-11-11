@@ -1,4 +1,4 @@
-﻿"""04_planner_delegator.py
+"""04_planner_delegator.py
 
 Three planning agents demonstrating delegation:
 

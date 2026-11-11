@@ -201,3 +201,18 @@ class TestThinkingRoundsParamRemoved:
     def test_constant_is_gone(self) -> None:
         assert not hasattr(agent_constants, "THINKING_ROUNDS_PARAM")
         assert "THINKING_ROUNDS_PARAM" not in agent_constants.__all__
+
+
+class TestAttrMethodTable:
+    def test_mutators_are_all_permitted_methods(self) -> None:
+        from atomic_agentic.constants.agents import ALLOWED_ATTR_METHODS, MUTATING_ATTR_METHODS
+
+        permitted = frozenset().union(*ALLOWED_ATTR_METHODS.values())
+        assert MUTATING_ATTR_METHODS <= permitted
+
+    def test_no_table_entry_has_a_dunder_or_format_method(self) -> None:
+        from atomic_agentic.constants.agents import ALLOWED_ATTR_METHODS
+
+        for methods in ALLOWED_ATTR_METHODS.values():
+            assert not any(m.startswith("_") for m in methods)
+        assert not {"format", "format_map"} & ALLOWED_ATTR_METHODS[str]

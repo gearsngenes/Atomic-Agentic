@@ -783,3 +783,47 @@ class TestRenderCompletedAsPython:
 
         unrendered = render_completed_as_python([a, b], show_batches=False)
         assert "# Batch" not in unrendered
+
+
+class TestValidateReferencesMutatorsOnReadonly:
+    @staticmethod
+    def _issues(script: str, readonly: frozenset[str] = frozenset({"ro"})) -> list[str]:
+        slots = []
+        for line in script.splitlines():
+            slots.extend(parse_statement_to_slots(line, start_index=len(slots)))
+        return validate_references(
+            slots, frozenset(), frozenset({"ro", "rw"}) | readonly, readonly, None
+        )
+
+    def test_direct_mutator_on_a_readonly_name_is_flagged(self) -> None:
+        issues = self._issues("ro.append(1)")
+
+        assert any("mutating method 'append'" in i and "'ro'" in i for i in issues)
+
+    def test_mutator_on_an_attribute_chain_of_a_readonly_name_is_flagged(self) -> None:
+        assert any("mutating method" in i for i in self._issues("ro.items.append(1)"))
+
+    def test_non_mutating_methods_and_writable_names_pass(self) -> None:
+        issues = self._issues("a = ro.get(1)\nb = ro.copy()\nrw.append(1)")
+
+        assert all("mutating" not in i for i in issues)
+
+    def test_alias_by_assignment_is_protected(self) -> None:
+        issues = self._issues("a = ro\na.append(1)")
+
+        assert any("mutating method 'append'" in i and "'a'" in i for i in issues)
+
+    def test_reassigning_an_alias_to_a_new_value_clears_protection(self) -> None:
+        issues = self._issues("a = ro\na = [1]\na.append(2)")
+
+        assert all("mutating" not in i for i in issues)
+
+    def test_alias_by_get_is_protected(self) -> None:
+        issues = self._issues("v = ro.get(0)\nv.append(1)")
+
+        assert any("mutating method" in i and "'v'" in i for i in issues)
+
+    def test_copy_and_new_builtin_objects_are_not_protected(self) -> None:
+        for setup in ("c = ro.copy()", "c = list(ro)", "c = ro.split(',')"):
+            issues = self._issues(setup + "\nc.append(1)")
+            assert all("mutating" not in i for i in issues), setup

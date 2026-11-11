@@ -387,8 +387,8 @@ class Agent(AtomicInvokable, ABC):
         self._llm_engine: LLMEngine = llm_engine
         self._record_enabled: bool = record_enabled
 
-        if records_window is not None and (not type(records_window) is int or records_window < 0):
-            raise AgentError("records_window must be an int >= 0 or be 'None'.")
+        if records_window is not None and (type(records_window) is not int or records_window < 0):
+            raise ValueError("records_window must be an int >= 0 or be 'None'.")
         self._records_window: Optional[int] = records_window
 
         self._conversations: dict[str, Conversation] = {

@@ -1277,7 +1277,7 @@ class TestAgentValidation:
             agent.records_window = -1
 
     def test_constructor_rejects_negative_records_window(self) -> None:
-        with pytest.raises(AgentError, match="records_window"):
+        with pytest.raises(ValueError, match="records_window"):
             make_agent(records_window=-1)
 
     def test_llm_engine_setter_rejects_non_llm_engine(self) -> None:

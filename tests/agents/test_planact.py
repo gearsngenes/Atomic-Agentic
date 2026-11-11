@@ -318,6 +318,20 @@ class TestPlanActContextBinding:
         assert agent.get_conversation().records[-1].regenerations_used == 1
         assert agent.get_conversation().context["limit"].value == 10
 
+    def test_result_name_equal_to_a_tool_id_is_rejected_as_feedback(self) -> None:
+        bad = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "add"}],
+            return_value=None,
+        )
+        good = scripted(
+            plan=[{"call": "add", "arguments": [arg("x", 1), arg("y", 2)], "result_name": "a"}],
+            return_value="$a",
+        )
+        agent = make_planact_agent([bad, good], record_enabled=True, regeneration_limit=1)
+
+        assert agent.invoke({"prompt": "run"}).result == 3
+        assert agent.get_conversation().records[-1].regenerations_used == 1
+
     def test_repeated_keyword_name_is_rejected_as_feedback(self) -> None:
         bad = scripted(
             plan=[{

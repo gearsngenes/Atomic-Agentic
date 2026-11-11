@@ -28,8 +28,10 @@ def _draft(
     )
 
 
-def _translate(drafts, *, limit=None, context=(), readonly=()):
-    return translate_calls(drafts, limit, frozenset(context), frozenset(readonly))
+def _translate(drafts, *, limit=None, context=(), readonly=(), tools=()):
+    return translate_calls(
+        drafts, limit, frozenset(context), frozenset(readonly), frozenset(tools)
+    )
 
 
 class TestTranslateCallsReferences:
@@ -168,3 +170,15 @@ class TestParseRecordsDuplicateKeywords:
 
         assert draft.duplicate_kwargs == ("x",)
         assert draft.kwargs == {"x": 2}
+
+
+class TestTranslateCallsToolNamedResult:
+    def test_result_name_equal_to_a_tool_id_is_rejected(self) -> None:
+        issues, _ = _translate([_draft(identifier="add")], tools={"add"})
+
+        assert any("registered tool id" in issue for issue in issues)
+
+    def test_other_result_names_pass(self) -> None:
+        issues, _ = _translate([_draft(identifier="total")], tools={"add"})
+
+        assert issues == []
