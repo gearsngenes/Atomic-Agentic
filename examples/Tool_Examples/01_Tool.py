@@ -1,54 +1,61 @@
 """
 Beginner-friendly demo: using Tool to wrap simple Python functions.
-
-Adjust the import path to your project layout if needed:
-from atomic_agentic.Tools import Tool, ToolInvocationError
 """
+from typing import Annotated
 from atomic_agentic.tools import Tool
-from atomic_agentic.core.Exceptions import ToolInvocationError
+from atomic_agentic.exceptions import ToolInvocationError
+from atomic_agentic.constants.core import NO_VAL
 import logging
-import json
 
 logging.basicConfig(level = logging.INFO)
 
-# --- 1) Define plain Python functions (the Tool wraps these) ---
+# --- 1) Define plain Python functions with Annotated parameter descriptions ---
 
-def add(a: int, b: int = 0) -> int:
-    """Add two integers (b defaults to 0)."""
+def add(
+    a: Annotated[int, "First integer to add"],
+    b: Annotated[int, "Second integer to add"] = 0,
+) -> int:
+    """Add two integers."""
     return a + b
 
-def greet(name: str, *, excited: bool = False) -> str:
-    """Keyword-only example: 'excited' must be passed by name."""
+def greet(
+    name: Annotated[str, "Name of the person to greet"],
+    *,
+    excited: Annotated[bool, "If True, appends '!!!' instead of '.'"] = False,
+) -> str:
+    """Greet a person by name."""
     base = f"Hello, {name}"
     return base + "!!!" if excited else base + "."
 
-def summarize(text: str, max_chars: int = 60) -> str:
-    """Return a short summary clamped to max_chars."""
+def summarize(
+    text: Annotated[str, "Text to summarize"],
+    max_chars: Annotated[int, "Maximum character count for the output"] = 60,
+) -> str:
+    """Return a summary clamped to max_chars characters."""
     s = text.strip()
     return s if len(s) <= max_chars else s[: max_chars - 1] + "…"
 
 
-# --- 2) Wrap them as Tools (description should describe the FUNCTION, not dict plumbing) ---
+# --- 2) Wrap as Tools (descriptions are now concise — param docs live on the params) ---
 
 t_add = Tool(
     add,
     name="add",
-    description="Add two integers. Args: a:int (required), b:int=0. Returns: int.",
+    description="Add two integers.",
     namespace="local",
-    filter_extraneous_inputs=False,
 )
 
 t_greet = Tool(
     greet,
     name="greet",
-    description="Greet a person. Args: name:str (required), excited:bool=False (keyword-only). Returns: str.",
+    description="Greet a person by name.",
     namespace="local",
 )
 
 t_sum = Tool(
     summarize,
     name="summarize",
-    description="Summarize text. Args: text:str (required), max_chars:int (required). Returns: str.",
+    description="Summarize text clamped to a character limit.",
     namespace="local",
 )
 
@@ -58,18 +65,19 @@ t_sum = Tool(
 def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", tool.signature)
+    print("signature:", tool.fullname_signature)
     print("parameters:")
     for param in tool.parameters:
-        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
-        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
+        default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"
+        desc_str = f"  # {param.description}" if param.description else ""
+        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}{desc_str}")
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")
     print("inputs:", inputs)
     try:
         result = tool.invoke(inputs)
-        print("OK:", result)
+        print("OK:", result.result)
     except (ToolInvocationError, TypeError, ValueError) as e:
         print("ERR:", e)
 
@@ -94,4 +102,4 @@ if __name__ == "__main__":
 
     # Common mistakes (to see helpful errors)
     run_case("greet: missing required 'name'", t_greet, {"excited": True})
-    run_case("add: unknown key error", t_add, {"a": 1, "b": 2, "extra": 99})
+    run_case("add: unknown key silently filtered", t_add, {"a": 1, "b": 2, "extra": 99})  # -> 3

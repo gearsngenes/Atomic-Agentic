@@ -1,1180 +1,554 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
-from types import MethodType
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
-from atomic_agentic.tools.base import Tool
+from atomic_agentic.exceptions import ExecutionError, WorkflowError
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict, Workflow
-from atomic_agentic.workflows.basic import BasicFlow
-from atomic_agentic.workflows.metadata import OutputTopology, WorkflowRunMetadata
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results.workflows import ParallelFlowResult
+from atomic_agentic.tools.base import Tool
+from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.parallel import ParallelFlow
 
 
-def make_param(
-    name: str,
-    index: int,
-    *,
-    default: Any = NO_VAL,
-    kind: str = ParamSpec.POSITIONAL_OR_KEYWORD,
-) -> ParamSpec:
+def make_value_param(*, description: str | None = None) -> ParamSpec:
     return ParamSpec(
-        name=name,
-        index=index,
-        kind=kind,
-        type="Any",
-        default=default,
+        name="value",
+        index=0,
+        kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+        type="int",
+        description=description,
     )
 
 
-def value_param() -> ParamSpec:
-    return make_param("value", 0)
+class EchoWorkflow(Workflow):
+    """_run(inputs) -> ({**inputs, "tag": self._tag}, {}) — branches are
+    distinguished by their configured tag."""
+
+    def __init__(
+        self,
+        *,
+        tag: str,
+        name: str | None = None,
+        namespace: str = "tests",
+        description: str = "Echo workflow.",
+        param_description: str | None = None,
+    ) -> None:
+        super().__init__(
+            name=name if name is not None else f"echo_workflow_{tag}",
+            namespace=namespace,
+            description=description,
+            parameters=[make_value_param(description=param_description)],
+            return_type="dict[str, Any]",
+        )
+        self._tag = tag
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {**inputs, "tag": self._tag}, {}
 
 
-def return_value(value: Any) -> Any:
-    """Return the provided value."""
-    return value
+def make_branch(tag: str, **kwargs: Any) -> EchoWorkflow:
+    return EchoWorkflow(tag=tag, **kwargs)
 
 
-def make_raw_tool() -> Tool:
-    return Tool(
-        function=return_value,
-        name="return_value",
+def make_three_branch_flow(**kwargs: Any) -> ParallelFlow:
+    return ParallelFlow(
+        name="parallel_flow",
         namespace="tests",
-        description="Return the provided value.",
+        description="Parallel test flow.",
+        branches=[make_branch("a"), make_branch("b"), make_branch("c")],
+        **kwargs,
     )
 
 
-def make_structured_component(
-    function: Any,
-    *,
-    name: str,
-    output_schema: list[str],
-    filter_extraneous_inputs: bool = True,
-) -> StructuredInvokable:
+class TypedParamWorkflow(Workflow):
+    """A single-param branch whose param type is configurable, for collision tests."""
+
+    def __init__(self, *, param_type: str, tag: str) -> None:
+        super().__init__(
+            name=f"typed_{tag}",
+            namespace="tests",
+            description="Typed-param branch.",
+            parameters=[
+                ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=param_type)
+            ],
+            return_type="dict[str, Any]",
+        )
+        self._tag = tag
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"tag": self._tag}, {}
+
+
+class VariadicWorkflow(Workflow):
+    """A single-param branch declaring an independently-named *args param."""
+
+    def __init__(self, *, param_name: str, tag: str) -> None:
+        super().__init__(
+            name=f"variadic_{tag}",
+            namespace="tests",
+            description="Variadic-param branch.",
+            parameters=[
+                ParamSpec(
+                    name=param_name,
+                    index=0,
+                    kind=ParamSpec.VAR_POSITIONAL,
+                    type="int",
+                )
+            ],
+            return_type="dict[str, Any]",
+        )
+        self._tag = tag
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"tag": self._tag}, {}
+
+
+class TestParallelFlowConstruction:
+    def test_branches_must_be_non_empty_list_or_tuple(self) -> None:
+        with pytest.raises(ValueError, match="branches must not be empty"):
+            ParallelFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches=[],
+            )
+
+        with pytest.raises(TypeError, match="branches must be"):
+            ParallelFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches="not-a-list",  # type: ignore[arg-type]
+            )
+
+    def test_branches_stored_exactly_as_configured_no_wrapping(self) -> None:
+        b0, b1 = make_branch("a"), make_branch("b")
+
+        flow = ParallelFlow(
+            name="parallel_flow",
+            namespace="tests",
+            description="Parallel test flow.",
+            branches=[b0, b1],
+        )
+
+        assert flow.branches == (b0, b1)
+        assert flow.branches[0] is b0
+        assert flow.branches[1] is b1
+
+    def test_branch_type_validated_at_construction(self) -> None:
+        with pytest.raises(TypeError, match="position 1"):
+            ParallelFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches=[make_branch("a"), object()],  # type: ignore[list-item]
+            )
+
+    def test_parameters_derived_by_folding_branch_parameters(self) -> None:
+        b0 = make_branch("a")
+        b1 = make_branch("b")
+
+        flow = ParallelFlow(
+            name="parallel_flow",
+            namespace="tests",
+            description="Parallel test flow.",
+            branches=[b0, b1],
+        )
+
+        assert list(flow.parameters) == list(b0.parameters)
+
+    def test_colliding_incompatible_parameter_raises_workflow_error(self) -> None:
+        with pytest.raises(WorkflowError, match="no compatible reconciliation"):
+            ParallelFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches=[
+                    TypedParamWorkflow(param_type="int", tag="a"),
+                    TypedParamWorkflow(param_type="str", tag="b"),
+                ],
+            )
+
+    def test_independently_named_variadic_conflict_raises_workflow_error(self) -> None:
+        # Caught by the shared parameter-order validator (SchemaError, a
+        # WorkflowError subclass) -- two independently-named same-kind
+        # variadics survive N-way reconciliation as two distinct names, then
+        # collide structurally on re-validation in insert_by_category.
+        with pytest.raises(WorkflowError, match="Only one VAR_POSITIONAL parameter is allowed"):
+            ParallelFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches=[
+                    VariadicWorkflow(param_name="args_a", tag="a"),
+                    VariadicWorkflow(param_name="args_b", tag="b"),
+                ],
+            )
+
+    def test_compatible_but_not_identical_overlap_warns_and_keeps_earlier(self) -> None:
+        earlier = make_branch("a", param_description="earlier description")
+        later = make_branch("b", param_description="later description")
+
+        with pytest.warns(UserWarning, match="compatible across"):
+            flow = ParallelFlow(
+                name="parallel_flow",
+                namespace="tests",
+                description="Parallel test flow.",
+                branches=[earlier, later],
+            )
+
+        assert flow.parameters[0].description == "earlier description"
+
+    def test_type_witness_set_broader_than_any_single_branch_declaration(self) -> None:
+        # Old left-to-right fold: branch 0's own "dict[str, int]"
+        # declaration would win and be kept verbatim once branch 1's bare
+        # "dict" is judged compatible-and-discarded, silently masking
+        # branch 1's own bridging contribution. True N-way reconciliation
+        # instead computes the full compatible-type witness set across all
+        # three branches at once -- broader than any single branch's own
+        # declared type.
+        with pytest.warns(UserWarning, match="compatible across"):
+            flow = ParallelFlow(
+                name="parallel_flow",
+                namespace="tests",
+                description="Parallel test flow.",
+                branches=[
+                    TypedParamWorkflow(param_type="dict[str, int]", tag="a"),
+                    TypedParamWorkflow(param_type="dict", tag="b"),
+                    TypedParamWorkflow(param_type="dict[str, int]", tag="c"),
+                ],
+            )
+
+        shared_param = next(p for p in flow.parameters if p.name == "x")
+        assert shared_param.type == ("dict", "dict[str, int]")
+
+    def test_result_mode_defaults_to_list(self) -> None:
+        flow = make_three_branch_flow()
+
+        assert flow.result_mode == ParallelFlow.LIST
+
+    def test_result_mode_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValueError, match="result_mode"):
+            make_three_branch_flow(result_mode="weird")
+
+    def test_scalar_allows_at_most_one_selected_branch(self) -> None:
+        with pytest.raises(ValueError, match="at most one selected branch"):
+            make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[0, 1])
+
+    def test_scalar_allows_zero_selected_branches(self) -> None:
+        flow = make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[])
+
+        assert flow.selected_indices == ()
+
+    def test_selected_branches_none_and_empty_both_mean_nothing_selected(self) -> None:
+        flow_none = make_three_branch_flow(selected_branches=None)
+        flow_empty = make_three_branch_flow(selected_branches=[])
+
+        assert flow_none.selected_indices == ()
+        assert flow_empty.selected_indices == ()
+
+    def test_selected_branches_rejects_non_int_items(self) -> None:
+        with pytest.raises(TypeError, match="selected_branches items must be int"):
+            make_three_branch_flow(selected_branches=["0"])  # type: ignore[list-item]
+
+        with pytest.raises(TypeError, match="selected_branches items must be int"):
+            make_three_branch_flow(selected_branches=[True])
+
+    def test_selected_branches_rejects_negative_and_out_of_range(self) -> None:
+        """No negative-index wraparound support."""
+        with pytest.raises(IndexError, match="out of range"):
+            make_three_branch_flow(selected_branches=[-1])
+
+        with pytest.raises(IndexError, match="out of range"):
+            make_three_branch_flow(selected_branches=[5])
+
+    def test_selected_branches_rejects_duplicates(self) -> None:
+        with pytest.raises(ValueError, match="same branch twice"):
+            make_three_branch_flow(selected_branches=[0, 0])
+
+    def test_dict_requires_result_keys_matching_selection_length(self) -> None:
+        with pytest.raises(ValueError, match=r"result_keys must match"):
+            make_three_branch_flow(
+                result_mode=ParallelFlow.DICT,
+                selected_branches=[0, 1],
+                result_keys=["a"],
+            )
+
+    def test_dict_result_keys_must_be_unique_valid_identifiers(self) -> None:
+        with pytest.raises(ValueError, match="must be unique"):
+            make_three_branch_flow(
+                result_mode=ParallelFlow.DICT,
+                selected_branches=[0, 1, 2],
+                result_keys=["a", "a", "b"],
+            )
+
+        with pytest.raises(ValueError, match="valid parameter-style name"):
+            make_three_branch_flow(
+                result_mode=ParallelFlow.DICT,
+                selected_branches=[0, 1, 2],
+                result_keys=["1bad", "ok", "ok2"],
+            )
+
+    def test_result_keys_forbidden_for_non_dict_modes(self) -> None:
+        with pytest.raises(ValueError, match="result_keys must be None"):
+            make_three_branch_flow(result_mode=ParallelFlow.LIST, result_keys=["a", "b", "c"])
+
+    def test_include_trace_defaults_to_true_and_is_mutable(self) -> None:
+        flow = make_three_branch_flow()
+
+        assert flow.include_trace is True
+        flow.include_trace = False
+        assert flow.include_trace is False
+
+
+def make_structured_branch(name: str, output_schema: list[str]) -> StructuredInvokable:
+    def return_value(value: Any) -> Any:
+        """Return the provided value."""
+        return value
+
     tool = Tool(
-        function=function,
+        function=return_value,
         name=name,
         namespace="tests",
-        description=f"Test tool {name}.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
+        description=f"Return the provided value ({name}).",
     )
     return StructuredInvokable(
         component=tool,
         output_schema=output_schema,
         name=f"structured_{name}",
-        description=f"Structured test component {name}.",
-        ignore_unhandled=True,
+        description=f"Structured {name}.",
     )
 
 
-def make_branch_component(
-    *,
-    name: str,
-    output_key: str,
-    transform: Callable[[Any], Any] | None = None,
-    calls: list[dict[str, Any]] | None = None,
-) -> StructuredInvokable:
-    transform_fn = transform or (lambda value: value)
-
-    def branch(value: Any) -> dict[str, Any]:
-        if calls is not None:
-            calls.append({"value": value})
-        return {output_key: transform_fn(value)}
-
-    return make_structured_component(
-        branch,
-        name=name,
-        output_schema=[output_key],
-    )
-
-
-def make_two_branch_flow(
-    *,
-    branches: list[Workflow | StructuredInvokable] | None = None,
-    parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
-    output_names: list[str] | None = None,
-    output_indices: list[int] | None = None,
-    output_range: tuple[int, int] | None = None,
-    input_shape: str = ParallelFlow.BROADCAST,
-    filter_extraneous_inputs: bool | None = None,
-) -> ParallelFlow:
-    resolved_branches = branches or [
-        make_branch_component(name="left_branch", output_key="left", transform=lambda value: value + 1),
-        make_branch_component(name="right_branch", output_key="right", transform=lambda value: value * 2),
-    ]
-    resolved_output_names = output_names or [
-        f"branch_{index}" for index in range(len(resolved_branches))
-    ]
-
-    return ParallelFlow(
-        name="parallel_flow",
-        description="Parallel test flow.",
-        branches=resolved_branches,
-        input_shape=input_shape,
-        parameters=parameters if parameters is not None else ["value"],
-        output_shape=ParallelFlow.NESTED,
-        output_indices=output_indices,
-        output_range=output_range,
-        output_names=resolved_output_names,
-        filter_extraneous_inputs=filter_extraneous_inputs,
-    )
-
-
-def make_flattened_flow(
-    *,
-    branches: list[Workflow | StructuredInvokable] | None = None,
-    duplicate_key_policy: str = ParallelFlow.RAISE,
-    output_indices: list[int] | None = None,
-) -> ParallelFlow:
-    resolved_branches = branches or [
-        make_branch_component(name="a_branch", output_key="a", transform=lambda value: value + 1),
-        make_branch_component(name="b_branch", output_key="b", transform=lambda value: value * 2),
-    ]
-    flow = make_two_branch_flow(
-        branches=resolved_branches,
-        output_names=[f"branch_{index}" for index in range(len(resolved_branches))],
-    )
-    flow.duplicate_key_policy = duplicate_key_policy
-    flow.configure_output(
-        output_indices=output_indices,
-        output_shape=ParallelFlow.FLATTENED,
-        output_names=None,
-        duplicate_key_policy=duplicate_key_policy,
-    )
-    return flow
-
-
-class EchoWorkflow(Workflow[WorkflowRunMetadata]):
-    def __init__(
-        self,
-        *,
-        name: str = "echo_workflow",
-        description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
-    ) -> None:
-        super().__init__(
-            name=name,
-            description=description,
-            parameters=[value_param()],
-            filter_extraneous_inputs=filter_extraneous_inputs,
-        )
-        self.run_inputs: list[dict[str, Any]] = []
-        self.async_run_inputs: list[dict[str, Any]] = []
-
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
-
-
-def raising_branch(value: Any) -> dict[str, Any]:
-    """Raise during branch execution."""
-    raise RuntimeError("branch failed")
-
-
-class TestParallelFlowConstruction:
-    def test_constructor_rejects_non_list_branches(self) -> None:
-        with pytest.raises(TypeError, match="branches must be"):
-            ParallelFlow(
-                name="bad_flow",
-                description="Bad flow.",
-                branches=(EchoWorkflow(),),  # type: ignore[arg-type]
-                parameters=["value"],
-                output_names=["only"],
-            )
-
-    def test_constructor_rejects_empty_branches(self) -> None:
-        with pytest.raises(ValueError, match="branches must not be empty"):
-            ParallelFlow(
-                name="bad_flow",
-                description="Bad flow.",
-                branches=[],
-                parameters=["value"],
-                output_names=[],
-            )
-
-    def test_constructor_rejects_raw_tool_branch(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or StructuredInvokable"):
-            ParallelFlow(
-                name="bad_flow",
-                description="Bad flow.",
-                branches=[make_raw_tool()],  # type: ignore[list-item]
-                parameters=["value"],
-                output_names=["only"],
-            )
-
-    def test_constructor_preserves_workflow_branches(self) -> None:
-        left = EchoWorkflow(name="left_workflow")
-        right = EchoWorkflow(name="right_workflow")
-
-        flow = make_two_branch_flow(
-            branches=[left, right],
-            output_names=["left", "right"],
-        )
-
-        assert flow.branches == (left, right)
-        assert flow.branches[0] is left
-        assert flow.branches[1] is right
-
-    def test_constructor_wraps_structured_branches_in_basic_flow(self) -> None:
-        left = make_branch_component(name="left_branch", output_key="left")
-        right = make_branch_component(name="right_branch", output_key="right")
-
-        flow = make_two_branch_flow(
-            branches=[left, right],
-            output_names=["left", "right"],
-        )
-
-        assert all(isinstance(branch, BasicFlow) for branch in flow.branches)
-        assert flow.branches[0].component is left  # type: ignore[attr-defined]
-        assert flow.branches[1].component is right  # type: ignore[attr-defined]
-
-    def test_constructor_rejects_invalid_input_shape(self) -> None:
-        with pytest.raises(ValueError, match="input_shape"):
-            make_two_branch_flow(input_shape="weird")
-
-    def test_broadcast_without_parameters_uses_first_branch_parameter_fallback(self) -> None:
-        branches = [
-            make_branch_component(name="left_branch", output_key="left"),
-            make_branch_component(name="right_branch", output_key="right"),
-        ]
+class TestParallelFlowExtraDescription:
+    def test_scalar_output_surfaces_selected_branch_extra_description(self) -> None:
+        structured = make_structured_branch("value_branch", ["value"])
 
         flow = ParallelFlow(
             name="parallel_flow",
+            namespace="tests",
             description="Parallel test flow.",
-            branches=branches,
-            output_names=["left", "right"],
+            branches=[structured, make_branch("b")],
+            result_mode=ParallelFlow.SCALAR,
+            selected_branches=[0],
         )
 
-        assert [param.name for param in flow.parameters] == ["value"]
-        assert flow.to_dict()["parameters_fallback_used"] is True
+        assert flow._extra_description() == "Output schema: [value]"
+        assert flow.description == "Parallel test flow.\nOutput schema: [value]"
 
-    def test_broadcast_with_explicit_parameters_uses_given_parameters(self) -> None:
-        flow = make_two_branch_flow(parameters=["value"])
+    def test_scalar_with_no_selection_states_none(self) -> None:
+        flow = make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[])
 
-        assert [param.name for param in flow.parameters] == ["value"]
-        assert flow.to_dict()["parameters_fallback_used"] is False
+        assert flow._extra_description() == "Returns None (no branch selected)."
 
-    def test_nested_requires_explicit_parameters(self) -> None:
-        branches = [
-            make_branch_component(name="left_branch", output_key="left"),
-            make_branch_component(name="right_branch", output_key="right"),
-        ]
-
-        with pytest.raises(ValueError, match="parameters are required"):
-            ParallelFlow(
-                name="parallel_flow",
-                description="Parallel test flow.",
-                branches=branches,
-                input_shape=ParallelFlow.NESTED,
-                parameters=None,
-                output_names=["left", "right"],
-            )
-
-    def test_nested_requires_parameter_count_equal_branch_count(self) -> None:
-        with pytest.raises(ValueError, match=r"len\(parameters\)"):
-            make_two_branch_flow(
-                input_shape=ParallelFlow.NESTED,
-                parameters=["only_one_payload"],
-            )
-
-    @pytest.mark.parametrize(
-        "parameters",
-        [
-            [
-                make_param("left_payload", 0, kind=ParamSpec.VAR_POSITIONAL),
-                make_param("right_payload", 1, kind=ParamSpec.KEYWORD_ONLY),
-            ],
-            [
-                make_param("left_payload", 0),
-                make_param("right_payload", 1, kind=ParamSpec.VAR_KEYWORD),
-            ],
-        ],
-    )
-    def test_nested_rejects_variadic_parameters(
-        self,
-        parameters: list[ParamSpec],
-    ) -> None:
-        with pytest.raises(ValueError, match="does not permit"):
-            make_two_branch_flow(
-                input_shape=ParallelFlow.NESTED,
-                parameters=parameters,
-            )
-
-    def test_constructor_inherits_first_branch_filter_flag_by_default(self) -> None:
-        left = EchoWorkflow(name="left_workflow", filter_extraneous_inputs=False)
-        right = EchoWorkflow(name="right_workflow", filter_extraneous_inputs=True)
-
-        flow = make_two_branch_flow(
-            branches=[left, right],
-            output_names=["left", "right"],
-            parameters=["value"],
+    def test_dict_output_lists_keys_and_branch_return_types(self) -> None:
+        flow = make_three_branch_flow(
+            result_mode=ParallelFlow.DICT,
+            selected_branches=[0, 1, 2],
+            result_keys=["first", "second", "third"],
         )
 
-        assert flow.filter_extraneous_inputs is False
-
-    def test_constructor_allows_filter_flag_override(self) -> None:
-        left = EchoWorkflow(name="left_workflow", filter_extraneous_inputs=False)
-        right = EchoWorkflow(name="right_workflow", filter_extraneous_inputs=True)
-
-        flow = make_two_branch_flow(
-            branches=[left, right],
-            output_names=["left", "right"],
-            parameters=["value"],
-            filter_extraneous_inputs=True,
+        assert flow._extra_description() == (
+            "Returns a dict of 3 keys: first (dict[str, Any]), "
+            "second (dict[str, Any]), third (dict[str, Any])"
         )
 
-        assert flow.filter_extraneous_inputs is True
+    def test_list_output_states_branch_count_and_omits_branch_content(self) -> None:
+        structured = make_structured_branch("value_branch", ["value"])
 
-
-class TestParallelFlowOutputConfiguration:
-    def test_nested_output_requires_output_names(self) -> None:
-        with pytest.raises(ValueError, match="output_names are required"):
-            ParallelFlow(
-                name="parallel_flow",
-                description="Parallel test flow.",
-                branches=[make_branch_component(name="left_branch", output_key="left")],
-                parameters=["value"],
-                output_shape=ParallelFlow.NESTED,
-                output_names=None,
-            )
-
-    def test_nested_output_names_must_be_list(self) -> None:
-        with pytest.raises(TypeError, match="output_names"):
-            ParallelFlow(
-                name="parallel_flow",
-                description="Parallel test flow.",
-                branches=[make_branch_component(name="left_branch", output_key="left")],
-                parameters=["value"],
-                output_shape=ParallelFlow.NESTED,
-                output_names=("left",),  # type: ignore[arg-type]
-            )
-
-    def test_nested_output_names_length_must_match_projected_outputs(self) -> None:
-        with pytest.raises(ValueError, match=r"len\(output_names\)"):
-            make_two_branch_flow(output_names=["only_one_name"])
-
-    @pytest.mark.parametrize("bad_name", ["", "   "])
-    def test_nested_output_names_must_be_non_empty_strings(self, bad_name: str) -> None:
-        with pytest.raises(ValueError, match="non-empty string"):
-            make_two_branch_flow(output_names=[bad_name, "right"])
-
-    @pytest.mark.parametrize("bad_name", ["bad-name", "1bad"])
-    def test_nested_output_names_must_be_identifier_style(self, bad_name: str) -> None:
-        with pytest.raises(ValueError, match="valid parameter-style name"):
-            make_two_branch_flow(output_names=[bad_name, "right"])
-
-    def test_nested_output_names_must_be_unique(self) -> None:
-        with pytest.raises(ValueError, match="unique"):
-            make_two_branch_flow(output_names=["same", "same"])
-
-    def test_output_indices_select_subset_in_order(self) -> None:
-        branches = [
-            make_branch_component(name="first_branch", output_key="first"),
-            make_branch_component(name="second_branch", output_key="second"),
-            make_branch_component(name="third_branch", output_key="third"),
-        ]
-
-        flow = make_two_branch_flow(
-            branches=branches,
-            output_indices=[2, 0],
-            output_names=["third", "first"],
-        )
-
-        assert flow.output_indices == [2, 0]
-        assert flow.output_names == ["third", "first"]
-
-    def test_output_indices_resolve_negative_indices(self) -> None:
-        branches = [
-            make_branch_component(name="first_branch", output_key="first"),
-            make_branch_component(name="second_branch", output_key="second"),
-            make_branch_component(name="third_branch", output_key="third"),
-        ]
-
-        flow = make_two_branch_flow(
-            branches=branches,
-            output_indices=[-1, 0],
-            output_names=["third", "first"],
-        )
-
-        assert flow.output_indices == [2, 0]
-
-    def test_output_indices_reject_duplicates(self) -> None:
-        with pytest.raises(ValueError, match="duplicates"):
-            make_two_branch_flow(output_indices=[0, 0], output_names=["a", "b"])
-
-    def test_output_indices_reject_out_of_range(self) -> None:
-        with pytest.raises(IndexError, match="out of range"):
-            make_two_branch_flow(output_indices=[2], output_names=["missing"])
-
-    def test_output_indices_reject_non_int_items(self) -> None:
-        with pytest.raises(TypeError, match="items must be int"):
-            make_two_branch_flow(output_indices=[0, "1"], output_names=["left", "right"])  # type: ignore[list-item]
-
-    def test_output_range_selects_slice(self) -> None:
-        branches = [
-            make_branch_component(name="first_branch", output_key="first"),
-            make_branch_component(name="second_branch", output_key="second"),
-            make_branch_component(name="third_branch", output_key="third"),
-        ]
-
-        flow = make_two_branch_flow(
-            branches=branches,
-            output_range=(1, 3),
-            output_names=["second", "third"],
-        )
-
-        assert flow.output_indices == [1, 2]
-
-    def test_output_indices_and_range_are_mutually_exclusive(self) -> None:
-        with pytest.raises(ValueError, match="either output_indices or output_range"):
-            make_two_branch_flow(
-                output_indices=[0],
-                output_range=(0, 1),
-                output_names=["left"],
-            )
-
-    def test_flattened_output_rejects_output_names(self) -> None:
-        flow = make_two_branch_flow()
-
-        with pytest.raises(ValueError, match="output_names must be None"):
-            flow.configure_output(
-                output_shape=ParallelFlow.FLATTENED,
-                output_names=["bad"],
-                duplicate_key_policy=ParallelFlow.RAISE,
-            )
-
-    @pytest.mark.parametrize(
-        "policy",
-        [ParallelFlow.RAISE, ParallelFlow.SKIP, ParallelFlow.UPDATE],
-    )
-    def test_duplicate_key_policy_accepts_valid_values(self, policy: str) -> None:
-        flow = make_two_branch_flow()
-
-        flow.duplicate_key_policy = policy
-
-        assert flow.duplicate_key_policy == policy
-
-    def test_duplicate_key_policy_rejects_invalid_value(self) -> None:
-        flow = make_two_branch_flow()
-
-        with pytest.raises(ValueError, match="duplicate_key_policy"):
-            flow.duplicate_key_policy = "overwrite"
-
-    def test_flattened_output_can_be_configured_at_construction(self) -> None:
         flow = ParallelFlow(
             name="parallel_flow",
+            namespace="tests",
             description="Parallel test flow.",
-            branches=[
-                make_branch_component(name="a_branch", output_key="a"),
-                make_branch_component(name="b_branch", output_key="b"),
-            ],
-            parameters=["value"],
-            output_shape=ParallelFlow.FLATTENED,
-            output_names=None,
-            duplicate_key_policy=ParallelFlow.RAISE,
+            branches=[structured, make_branch("b"), make_branch("c")],
+            selected_branches=[0, 1, 2],
         )
 
-        assert flow.output_shape == ParallelFlow.FLATTENED
-        assert flow.output_indices == [0, 1]
-        assert flow.output_names is None
-        assert flow.duplicate_key_policy == ParallelFlow.RAISE
+        assert flow._extra_description() == "Returns a list of 3 branch outputs."
 
 
-class TestParallelFlowBroadcastInvoke:
-    def test_broadcast_invokes_every_branch_with_same_outer_inputs(self) -> None:
-        left_calls: list[dict[str, Any]] = []
-        right_calls: list[dict[str, Any]] = []
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                    calls=left_calls,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            output_names=["left", "right"],
-        )
+class TestParallelFlowSyncInvoke:
+    def test_all_branches_invoked_with_same_broadcast_inputs(self) -> None:
+        flow = make_three_branch_flow(selected_branches=[0, 1, 2])
 
-        result = flow.invoke({"value": 3, "extra": "ignored"})
+        result = flow.invoke({"value": 1})
 
-        assert result == {"left": {"left": 4}, "right": {"right": 6}}
-        assert left_calls == [{"value": 3}]
-        assert right_calls == [{"value": 3}]
-
-    def test_broadcast_nested_output_returns_named_branch_results(self) -> None:
-        flow = make_two_branch_flow(output_names=["left_result", "right_result"])
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {
-            "left_result": {"left": 4},
-            "right_result": {"right": 6},
-        }
-
-    def test_broadcast_output_indices_project_subset_but_all_branches_execute(self) -> None:
-        left_calls: list[dict[str, Any]] = []
-        right_calls: list[dict[str, Any]] = []
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                    calls=left_calls,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            output_indices=[1],
-            output_names=["right_only"],
-        )
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {"right_only": {"right": 6}}
-        assert left_calls == [{"value": 3}]
-        assert right_calls == [{"value": 3}]
-        assert [len(branch.checkpoints) for branch in flow.branches] == [1, 1]
-
-    def test_broadcast_metadata_records_all_branch_records(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.kind == "parallel"
-        assert len(metadata.branch_records) == 2
-
-    def test_broadcast_metadata_output_count_matches_projected_count(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.output_count == 1
-
-    def test_broadcast_output_topology_records_nested_projection(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        topology = flow.get_checkpoint(result.run_id).metadata.output_topology  # type: ignore[union-attr]
-
-        assert topology.topology == OutputTopology.NESTED
-        assert topology.indices == (1,)
-        assert topology.names == ("right_only",)
-        assert topology.duplicate_key_policy is None
-
-
-class TestParallelFlowNestedInvoke:
-    def test_nested_invokes_each_branch_with_its_named_payload(self) -> None:
-        left_calls: list[dict[str, Any]] = []
-        right_calls: list[dict[str, Any]] = []
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                    calls=left_calls,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        result = flow.invoke(
-            {
-                "left_payload": {"value": 3},
-                "right_payload": {"value": 4},
-            }
-        )
-
-        assert result == {
-            "left_result": {"left": 4},
-            "right_result": {"right": 8},
-        }
-        assert left_calls == [{"value": 3}]
-        assert right_calls == [{"value": 4}]
-
-    def test_nested_missing_required_payload_raises_validation_error_in_run(self) -> None:
-        flow = make_two_branch_flow(
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        with pytest.raises(ValidationError, match="missing nested payload"):
-            flow._run({"left_payload": {"value": 3}})
-
-    def test_nested_missing_required_payload_public_invoke_wraps_execution_error(self) -> None:
-        flow = make_two_branch_flow(
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"left_payload": {"value": 3}})
-
-    def test_nested_non_mapping_payload_raises_validation_error_in_run(self) -> None:
-        flow = make_two_branch_flow(
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        with pytest.raises(ValidationError, match="must be a mapping"):
-            flow._run(
-                {
-                    "left_payload": {"value": 3},
-                    "right_payload": "not a mapping",
-                }
-            )
-
-    def test_nested_default_payload_is_used_when_parameter_has_default(self) -> None:
-        right_calls: list[dict[str, Any]] = []
-        parameters = [
-            make_param("left_payload", 0),
-            make_param("right_payload", 1, default={"value": 10}),
-        ]
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            input_shape=ParallelFlow.NESTED,
-            parameters=parameters,
-            output_names=["left_result", "right_result"],
-        )
-
-        result = flow.invoke({"left_payload": {"value": 3}})
-
-        assert result["right_result"] == {"right": 20}
-        assert right_calls == [{"value": 10}]
-
-    def test_nested_parent_checkpoint_records_outer_nested_inputs(self) -> None:
-        flow = make_two_branch_flow(
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        result = flow.invoke(
-            {
-                "left_payload": {"value": 3},
-                "right_payload": {"value": 4},
-                "extra": "ignored",
-            }
-        )
-        checkpoint = flow.get_checkpoint(result.run_id)
-
-        assert checkpoint is not None
-        assert checkpoint.inputs == {
-            "left_payload": {"value": 3},
-            "right_payload": {"value": 4},
-        }
-
-
-class TestParallelFlowFlattenedOutput:
-    def test_flattened_output_merges_distinct_branch_keys(self) -> None:
-        flow = make_flattened_flow()
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {"a": 4, "b": 6}
-
-    def test_flattened_output_respects_output_indices(self) -> None:
-        branches = [
-            make_branch_component(name="a_branch", output_key="a", transform=lambda value: value + 1),
-            make_branch_component(name="b_branch", output_key="b", transform=lambda value: value * 2),
-            make_branch_component(name="c_branch", output_key="c", transform=lambda value: value - 1),
-        ]
-        flow = make_flattened_flow(branches=branches, output_indices=[2, 0])
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {"c": 2, "a": 4}
-
-    def test_flattened_duplicate_policy_raise_rejects_duplicate_keys(self) -> None:
-        flow = make_flattened_flow(
-            branches=[
-                make_branch_component(name="first_x_branch", output_key="x", transform=lambda value: 1),
-                make_branch_component(name="second_x_branch", output_key="x", transform=lambda value: 2),
-            ],
-            duplicate_key_policy=ParallelFlow.RAISE,
-        )
-
-        with pytest.raises(ValidationError, match="duplicate flattened output key"):
-            flow._run({"value": 3})
-
-    def test_flattened_duplicate_policy_skip_keeps_first_value(self) -> None:
-        flow = make_flattened_flow(
-            branches=[
-                make_branch_component(name="first_x_branch", output_key="x", transform=lambda value: 1),
-                make_branch_component(name="second_x_branch", output_key="x", transform=lambda value: 2),
-            ],
-            duplicate_key_policy=ParallelFlow.SKIP,
-        )
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {"x": 1}
-
-    def test_flattened_duplicate_policy_update_keeps_later_value(self) -> None:
-        flow = make_flattened_flow(
-            branches=[
-                make_branch_component(name="first_x_branch", output_key="x", transform=lambda value: 1),
-                make_branch_component(name="second_x_branch", output_key="x", transform=lambda value: 2),
-            ],
-            duplicate_key_policy=ParallelFlow.UPDATE,
-        )
-
-        result = flow.invoke({"value": 3})
-
-        assert result == {"x": 2}
-
-    def test_flattened_metadata_output_topology_records_duplicate_policy(self) -> None:
-        flow = make_flattened_flow(duplicate_key_policy=ParallelFlow.SKIP)
-
-        result = flow.invoke({"value": 3})
-        topology = flow.get_checkpoint(result.run_id).metadata.output_topology  # type: ignore[union-attr]
-
-        assert topology.topology == OutputTopology.FLATTENED
-        assert topology.indices == (0, 1)
-        assert topology.names is None
-        assert topology.duplicate_key_policy == ParallelFlow.SKIP
-
-
-class TestParallelFlowMetadata:
-    def test_metadata_kind_is_parallel(self) -> None:
-        flow = make_two_branch_flow()
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.kind == "parallel"
-
-    def test_metadata_records_one_branch_record_per_branch(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert len(metadata.branch_records) == len(flow.branches)
-
-    def test_branch_records_match_child_branches(self) -> None:
-        flow = make_two_branch_flow()
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        for index, record in enumerate(metadata.branch_records):
-            branch = flow.branches[index]
-            assert record.slot == index
-            assert record.instance_id == branch.instance_id
-            assert record.full_name == branch.full_name
-            assert record.run_id == branch.latest_run
-
-    def test_metadata_output_count_matches_projection_count(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.output_count == 1
-
-    def test_metadata_output_topology_matches_current_configuration(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = flow.invoke({"value": 3})
-        topology = flow.get_checkpoint(result.run_id).metadata.output_topology  # type: ignore[union-attr]
-
-        assert topology == OutputTopology(
-            topology=OutputTopology.NESTED,
-            indices=(1,),
-            names=("right_only",),
-            duplicate_key_policy=None,
-        )
-
-
-class TestParallelFlowRetrieval:
-    def test_get_branch_records_returns_none_for_unknown_run(self) -> None:
-        flow = make_two_branch_flow()
-
-        assert flow.get_branch_records("unknown") is None
-
-    def test_get_branch_records_returns_metadata_records(self) -> None:
-        flow = make_two_branch_flow()
-
-        result = flow.invoke({"value": 3})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert flow.get_branch_records(result.run_id) == metadata.branch_records
-
-    def test_get_branch_results_returns_all_child_results(self) -> None:
-        flow = make_two_branch_flow()
-
-        result = flow.invoke({"value": 3})
-
-        assert flow.get_branch_results(result.run_id) == [
-            {"left": 4},
-            {"right": 6},
+        assert result.trace is not None
+        assert [r.result for r in result.trace] == [
+            {"value": 1, "tag": "a"},
+            {"value": 1, "tag": "b"},
+            {"value": 1, "tag": "c"},
         ]
 
-    def test_get_branch_result_returns_one_child_result(self) -> None:
-        flow = make_two_branch_flow()
+    def test_all_branches_always_execute_regardless_of_selection(self) -> None:
+        flow = make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[])
 
-        result = flow.invoke({"value": 3})
+        result = flow.invoke({"value": 1})
 
-        assert flow.get_branch_result(result.run_id, 0) == {"left": 4}
-        assert flow.get_branch_result(result.run_id, 1) == {"right": 6}
+        assert result.result is None
+        assert len(result.trace) == 3
 
-    def test_get_branch_result_supports_negative_index(self) -> None:
-        flow = make_two_branch_flow()
+    def test_result_mode_scalar_returns_single_branch_payload(self) -> None:
+        flow = make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[1])
 
-        result = flow.invoke({"value": 3})
+        result = flow.invoke({"value": 1})
 
-        assert flow.get_branch_result(result.run_id, -1) == {"right": 6}
+        assert result.result == {"value": 1, "tag": "b"}
 
-    def test_get_branch_result_returns_none_for_unknown_parent_run(self) -> None:
-        flow = make_two_branch_flow()
+    def test_result_mode_list_returns_ordered_list_of_payloads(self) -> None:
+        flow = make_three_branch_flow(selected_branches=[0, 1, 2])
 
-        assert flow.get_branch_result("unknown", 0) is None
+        result = flow.invoke({"value": 1})
 
-    def test_get_branch_result_rejects_non_int_index(self) -> None:
-        flow = make_two_branch_flow()
+        assert result.result == [
+            {"value": 1, "tag": "a"},
+            {"value": 1, "tag": "b"},
+            {"value": 1, "tag": "c"},
+        ]
 
-        with pytest.raises(TypeError, match="branch_index must be an int"):
-            flow.get_branch_result("unknown", "0")  # type: ignore[arg-type]
+    def test_result_mode_tuple_returns_ordered_tuple_of_payloads(self) -> None:
+        flow = make_three_branch_flow(result_mode=ParallelFlow.TUPLE, selected_branches=[0, 1, 2])
 
-    def test_get_branch_result_rejects_out_of_range_index(self) -> None:
-        flow = make_two_branch_flow()
+        result = flow.invoke({"value": 1})
 
-        with pytest.raises(IndexError, match="out of range"):
-            flow.get_branch_result("unknown", 2)
+        assert result.result == (
+            {"value": 1, "tag": "a"},
+            {"value": 1, "tag": "b"},
+            {"value": 1, "tag": "c"},
+        )
 
-    def test_get_branch_results_returns_none_for_missing_child_checkpoint(self) -> None:
-        flow = make_two_branch_flow()
+    def test_result_mode_set_returns_set_of_payloads(self) -> None:
+        # Use payloads reducible to hashable values for the SET case.
+        class TaggedScalar(EchoWorkflow):
+            def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+                return self._tag, {}
 
-        result = flow.invoke({"value": 3})
-        flow.branches[0].clear_memory()
+        flow = ParallelFlow(
+            name="parallel_flow",
+            namespace="tests",
+            description="Parallel test flow.",
+            branches=[TaggedScalar(tag="a"), TaggedScalar(tag="b"), TaggedScalar(tag="c")],
+            result_mode=ParallelFlow.SET,
+            selected_branches=[0, 1, 2],
+        )
 
-        assert flow.get_branch_results(result.run_id) == [None, {"right": 6}]
+        result = flow.invoke({"value": 1})
+
+        assert result.result == {"a", "b", "c"}
+
+    def test_result_mode_dict_returns_named_mapping_of_payloads(self) -> None:
+        flow = make_three_branch_flow(
+            result_mode=ParallelFlow.DICT,
+            selected_branches=[0, 2],
+            result_keys=["first", "third"],
+        )
+
+        result = flow.invoke({"value": 1})
+
+        assert result.result == {
+            "first": {"value": 1, "tag": "a"},
+            "third": {"value": 1, "tag": "c"},
+        }
+
+    def test_parallel_flow_result_fields(self) -> None:
+        flow = make_three_branch_flow(selected_branches=[2, 0])
+
+        result = flow.invoke({"value": 1})
+
+        assert isinstance(result, ParallelFlowResult)
+        assert len(result.trace) == 3
+        assert result.result_mode == ParallelFlow.LIST
+        assert result.selected_indices == (2, 0)
+        assert result.result_keys == (2, 0)
+
+    def test_result_keys_mirrors_selected_indices_for_non_dict_modes(self) -> None:
+        flow = make_three_branch_flow(selected_branches=[1, 2])
+
+        assert flow.result_keys == flow.selected_indices == (1, 2)
 
 
 class TestParallelFlowAsyncInvoke:
-    def test_async_broadcast_invokes_all_branches(self) -> None:
-        left_calls: list[dict[str, Any]] = []
-        right_calls: list[dict[str, Any]] = []
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                    calls=left_calls,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            output_names=["left", "right"],
+    def test_async_invoke_list_output(self) -> None:
+        flow = make_three_branch_flow(selected_branches=[0, 1, 2])
+
+        result = asyncio.run(flow.async_invoke({"value": 1}))
+
+        assert isinstance(result, ParallelFlowResult)
+        assert result.result == [
+            {"value": 1, "tag": "a"},
+            {"value": 1, "tag": "b"},
+            {"value": 1, "tag": "c"},
+        ]
+        assert len(result.trace) == 3
+
+    def test_async_invoke_dict_output(self) -> None:
+        flow = make_three_branch_flow(
+            result_mode=ParallelFlow.DICT,
+            selected_branches=[0, 2],
+            result_keys=["first", "third"],
         )
 
-        result = asyncio.run(flow.async_invoke({"value": 3}))
+        result = asyncio.run(flow.async_invoke({"value": 1}))
 
-        assert result == {"left": {"left": 4}, "right": {"right": 6}}
-        assert left_calls == [{"value": 3}]
-        assert right_calls == [{"value": 3}]
-
-    def test_async_nested_routes_payloads_to_correct_branches(self) -> None:
-        left_calls: list[dict[str, Any]] = []
-        right_calls: list[dict[str, Any]] = []
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(
-                    name="left_branch",
-                    output_key="left",
-                    transform=lambda value: value + 1,
-                    calls=left_calls,
-                ),
-                make_branch_component(
-                    name="right_branch",
-                    output_key="right",
-                    transform=lambda value: value * 2,
-                    calls=right_calls,
-                ),
-            ],
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left_result", "right_result"],
-        )
-
-        result = asyncio.run(
-            flow.async_invoke(
-                {
-                    "left_payload": {"value": 3},
-                    "right_payload": {"value": 4},
-                }
-            )
-        )
-
-        assert result == {
-            "left_result": {"left": 4},
-            "right_result": {"right": 8},
+        assert result.result == {
+            "first": {"value": 1, "tag": "a"},
+            "third": {"value": 1, "tag": "c"},
         }
-        assert left_calls == [{"value": 3}]
-        assert right_calls == [{"value": 4}]
-
-    def test_async_metadata_records_all_branches(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        result = asyncio.run(flow.async_invoke({"value": 3}))
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.kind == "parallel"
-        assert len(metadata.branch_records) == 2
-        assert metadata.output_count == 1
-
-    def test_async_flattened_output_matches_sync_shape(self) -> None:
-        flow = make_flattened_flow(duplicate_key_policy=ParallelFlow.UPDATE)
-
-        result = asyncio.run(flow.async_invoke({"value": 3}))
-
-        assert result == {"a": 4, "b": 6}
-
-    def test_async_branch_failure_public_invoke_wraps_execution_error(self) -> None:
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(name="good_branch", output_key="good"),
-                make_structured_component(
-                    raising_branch,
-                    name="raising_branch",
-                    output_schema=["never"],
-                ),
-            ],
-            output_names=["good", "bad"],
-        )
-
-        with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 3}))
 
 
 class TestParallelFlowValidationAndErrors:
-    def test_run_raises_validation_error_if_branch_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_branch_invoke_failure_wrapped_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        flow = make_two_branch_flow()
+        flow = make_three_branch_flow()
 
-        monkeypatch.setattr(flow.branches[1], "invoke", lambda inputs: {"bad": True})
+        async def raise_async_invoke(inputs: Mapping[str, Any]) -> Any:
+            raise RuntimeError("boom")
 
-        with pytest.raises(ValidationError, match="expected FlowResultDict"):
-            flow._run({"value": 3})
+        monkeypatch.setattr(flow.branches[1], "async_invoke", raise_async_invoke)
 
-    def test_public_invoke_wraps_bad_branch_result_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 1})
+
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "branch 1" in str(exc_info.value.__cause__)
+        assert "failed during invoke" in str(exc_info.value.__cause__)
+
+    def test_async_branch_invoke_failure_wrapped_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        flow = make_two_branch_flow()
+        flow = make_three_branch_flow()
 
-        monkeypatch.setattr(flow.branches[1], "invoke", lambda inputs: {"bad": True})
+        async def raise_async_invoke(inputs: Mapping[str, Any]) -> Any:
+            raise RuntimeError("boom")
 
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 3})
+        monkeypatch.setattr(flow.branches[1], "async_invoke", raise_async_invoke)
 
-    def test_run_raises_runtime_error_if_branch_invocation_raises(self) -> None:
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(name="good_branch", output_key="good"),
-                make_structured_component(
-                    raising_branch,
-                    name="raising_branch",
-                    output_schema=["never"],
-                ),
-            ],
-            output_names=["good", "bad"],
-        )
+        with pytest.raises(ExecutionError, match="_async_run failed") as exc_info:
+            asyncio.run(flow.async_invoke({"value": 1}))
 
-        with pytest.raises(RuntimeError, match="branch 1"):
-            flow._run({"value": 3})
-
-    def test_public_invoke_wraps_branch_runtime_failure_as_execution_error(self) -> None:
-        flow = make_two_branch_flow(
-            branches=[
-                make_branch_component(name="good_branch", output_key="good"),
-                make_structured_component(
-                    raising_branch,
-                    name="raising_branch",
-                    output_schema=["never"],
-                ),
-            ],
-            output_names=["good", "bad"],
-        )
-
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 3})
-
-    def test_async_run_raises_validation_error_if_branch_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_two_branch_flow()
-
-        async def bad_async_invoke(self: Workflow[Any], inputs: Mapping[str, Any]) -> dict[str, bool]:
-            return {"bad": True}
-
-        monkeypatch.setattr(
-            flow.branches[1],
-            "async_invoke",
-            MethodType(bad_async_invoke, flow.branches[1]),
-        )
-
-        with pytest.raises(ValidationError, match="expected FlowResultDict"):
-            asyncio.run(flow._async_run({"value": 3}))
-
-    def test_public_async_invoke_wraps_bad_branch_result_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_two_branch_flow()
-
-        async def bad_async_invoke(self: Workflow[Any], inputs: Mapping[str, Any]) -> dict[str, bool]:
-            return {"bad": True}
-
-        monkeypatch.setattr(
-            flow.branches[1],
-            "async_invoke",
-            MethodType(bad_async_invoke, flow.branches[1]),
-        )
-
-        with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 3}))
-
-    def test_flattened_duplicate_key_raise_public_invoke_wraps_execution_error(self) -> None:
-        flow = make_flattened_flow(
-            branches=[
-                make_branch_component(name="first_x_branch", output_key="x", transform=lambda value: 1),
-                make_branch_component(name="second_x_branch", output_key="x", transform=lambda value: 2),
-            ],
-            duplicate_key_policy=ParallelFlow.RAISE,
-        )
-
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 3})
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 class TestParallelFlowSerialization:
-    def test_to_dict_includes_branch_count_and_branch_snapshots(self) -> None:
-        flow = make_two_branch_flow()
-
-        data = flow.to_dict()
-
-        assert data["type"] == "ParallelFlow"
-        assert data["branch_count"] == 2
-        assert len(data["branches"]) == 2
-
-    def test_to_dict_includes_input_shape(self) -> None:
-        flow = make_two_branch_flow(
-            input_shape=ParallelFlow.NESTED,
-            parameters=["left_payload", "right_payload"],
-            output_names=["left", "right"],
+    def test_to_dict_includes_branches_result_mode_and_indices(self) -> None:
+        flow = make_three_branch_flow(
+            result_mode=ParallelFlow.DICT,
+            selected_branches=[0, 2],
+            result_keys=["first", "third"],
         )
 
+        flow.invoke({"value": 1})
         data = flow.to_dict()
 
-        assert data["input_shape"] == ParallelFlow.NESTED
-
-    def test_to_dict_includes_parameters_fallback_used(self) -> None:
-        branches = [
-            make_branch_component(name="left_branch", output_key="left"),
-            make_branch_component(name="right_branch", output_key="right"),
-        ]
-        flow = ParallelFlow(
-            name="parallel_flow",
-            description="Parallel test flow.",
-            branches=branches,
-            output_names=["left", "right"],
-        )
-
-        data = flow.to_dict()
-
-        assert data["parameters_fallback_used"] is True
-
-    def test_to_dict_includes_output_shape_indices_names_and_duplicate_policy(self) -> None:
-        flow = make_two_branch_flow(output_indices=[1], output_names=["right_only"])
-
-        data = flow.to_dict()
-
-        assert data["output_shape"] == ParallelFlow.NESTED
-        assert data["output_indices"] == [1]
-        assert data["output_names"] == ["right_only"]
-        assert data["duplicate_key_policy"] == ParallelFlow.RAISE
-
-    def test_to_dict_reflects_reconfigured_output(self) -> None:
-        flow = make_flattened_flow(duplicate_key_policy=ParallelFlow.SKIP)
-
-        data = flow.to_dict()
-
-        assert data["output_shape"] == ParallelFlow.FLATTENED
-        assert data["output_indices"] == [0, 1]
-        assert data["output_names"] is None
-        assert data["duplicate_key_policy"] == ParallelFlow.SKIP
-
-    def test_to_dict_after_run_includes_base_checkpoint_summary(self) -> None:
-        flow = make_two_branch_flow()
-
-        result = flow.invoke({"value": 3})
-        data = flow.to_dict()
-
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]
-        assert data["branch_count"] == 2
+        assert data["branch_count"] == 3
+        assert data["result_mode"] == flow.result_mode
+        assert data["selected_indices"] == [0, 2]
+        assert data["result_keys"] == ["first", "third"]
+        assert "checkpoints" not in data
+        assert "output_type" not in data

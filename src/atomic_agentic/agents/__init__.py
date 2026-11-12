@@ -1,7 +1,18 @@
 from .base import Agent
-from .tool_agents import ReActAgent, PlanActAgent
+from .basic import BasicAgent
+from .toolagent import ToolAgent
+from .planact import PlanActAgent
+from .react import ReActAgent
+from .thinking import ThinkingAgent
+from .scratchpad import ScratchpadAgent
+from .scriptact import ScriptActAgent
 
 __all__ = ["Agent",
+           "BasicAgent",
+           "ToolAgent",
            "ReActAgent",
            "PlanActAgent",
+           "ThinkingAgent",
+           "ScratchpadAgent",
+           "ScriptActAgent",
            ]

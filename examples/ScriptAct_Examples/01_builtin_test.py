@@ -1,0 +1,68 @@
+"""01_builtin_test.py
+
+Basic decomposition test -- originally mirrored PlanAct_Examples/
+01_prebuilt_tools_test.py (registering EXPONENT_TOOLS/BASIC_MATH_TOOLS/
+CONSOLE_TOOLS), renamed and repurposed once Python builtin calls landed
+(Pass 5.5): no tool lists are registered at all now -- only a readonly PI
+context variable.
+The whole three-part math task below is solvable via bare arithmetic
+(power/sqrt via `**`) plus builtins (`print`) alone, testing that the
+builtin-support grammar path genuinely replaces what those tool lists used
+to provide for basic math, not just supplements them.
+
+After the run, prints the reconstructed source via
+ScriptActAgentRecord.render_as_code() -- showing exactly what the agent
+executed, not just its final answer.
+"""
+import logging
+import math
+
+from atomic_agentic.agents import ScriptActAgent
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shared_engine import llm_engine
+
+logging.basicConfig(level=logging.INFO)
+
+print("Testing prebuilt tools with ScriptActAgent's one-shot decomposition")
+
+# ──────────────────────────  SET-UP  ───────────────────────────
+agent = ScriptActAgent(
+    name="Test_ScriptActAgent",
+    namespace="examples",
+    description="Testing the prebuilt tool lists with one-shot planning + execution.",
+    llm_engine=llm_engine,
+    record_enabled=True,
+    replanning_limit=2,
+)
+
+# No tool lists registered -- the task below is solvable via bare
+# arithmetic and Python builtins alone (see module docstring).
+
+# pi as a readonly context variable: the model sees it in its context block and
+# can use it by name, but a script cannot reassign it.
+agent.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True
+)
+
+# ──────────────────────────  TASK  ─────────────────────────────
+task_prompt = """
+Answer ONLY these questions and call 'print' on their results as
+'<question #>) <question>: <answer>' format:
+1) Compute the area of a circle with a radius of 5.
+2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
+3) Compute the volume of a cylinder with radius of 2 and height of 10.
+"""
+
+print("\n⇢ Executing math demo …")
+result = agent.invoke({"prompt": task_prompt})
+
+print("\n=== FINAL AGENT RESULT ===")
+print(result.result)
+
+record = agent.get_conversation().records[-1]
+print("\n=== EXECUTED SCRIPT ===")
+print(record.render_as_code())

@@ -1,0 +1,741 @@
+from __future__ import annotations
+
+import ast
+import builtins
+from typing import Any, Optional
+
+from ..constants.agents import (
+    ALLOWED_ATTR_METHODS,
+    MUTATING_ATTR_METHODS,
+    ATTR_CALL_ALIAS,
+    DUNDER_ATTRIBUTE_PATTERN,
+    ALLOWED_PY_BUILTINS,
+    KWARGS_UNPACK_KEY,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+    SUB_NAME_PREFIX,
+    TASK_RESULT_PREFIX,
+)
+from ..exceptions import BlackboardParseError
+from ..models.agents.blackboard_models import ToolStatement
+from .agents import (
+    evaluate_expr,
+    extract_identifiers,
+    is_dispatched,
+    reject_unsupported_forms,
+    strip_code_fence,
+)
+
+__all__ = [
+    "parse_statement_to_slots",
+    "parse_generation",
+    "rewrite_builtin_calls",
+    "validate_references",
+    "render_completed_as_python",
+    "render_failed_as_python",
+]
+# compile_batches, is_dispatched, and resolve_statement_args live in
+# utils/agents.py, shared with agents/planact.py and agents/react.py --
+# agents/scriptact.py imports them from there.
+
+
+def _process_call_args(
+    call_node: ast.Call,
+    *,
+    counter: list[int],
+    start_index: int,
+    hoisted: list[ToolStatement],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """
+    Build one call's final ``(args, kwargs)`` pair: hoists any nested call
+    found in each positional or keyword value (appending synthesized slots
+    to ``hoisted``), then validates each resulting dependency-free argument
+    via a dry-run evaluation (raising early on a guaranteed-bad constant
+    expression) without folding it -- the original expression form is
+    always what gets stored. Shared by both the top-level call (case A)
+    and every recursively hoisted call.
+
+    A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) is
+    never eagerly folded, regardless of whether its own inner expr has
+    dependencies -- its Starred-ness must survive to resolve time
+    (``resolve_statement_args``), and an already-folded plain value has no way
+    to carry that tag. It still gets the same dependency-free dry-run
+    validation as every other argument category, applied to its inner
+    expr before it's wrapped back in ``ast.Starred``. A keyword entry whose
+    ``kw.arg is None`` (a ``**expr`` unpack) is stored under
+    ``KWARGS_UNPACK_KEY`` -- at most one per call; a second one raises
+    immediately.
+    """
+    args: list[Any] = []
+    for arg_node in call_node.args:
+        if isinstance(arg_node, ast.Starred):
+            inner = _hoist_calls(
+                arg_node.value, counter=counter, start_index=start_index, hoisted=hoisted
+            )
+            deps = extract_identifiers(inner)
+            if not deps:
+                try:
+                    evaluate_expr(inner, {})
+                except Exception as e:
+                    raise BlackboardParseError(
+                        "* unpack is a constant expression that failed to "
+                        f"evaluate: {e!r}"
+                    ) from e
+            args.append(ast.Starred(value=inner, ctx=ast.Load()))
+            continue
+
+        processed = _hoist_calls(
+            arg_node, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        deps = extract_identifiers(processed)
+        if not deps:
+            try:
+                evaluate_expr(processed, {})
+            except Exception as e:
+                raise BlackboardParseError(
+                    "positional argument is a constant expression that "
+                    f"failed to evaluate: {e!r}"
+                ) from e
+        args.append(processed)
+
+    kwargs: dict[str, Any] = {}
+    seen_unpack = False
+    for kw in call_node.keywords:
+        processed_value = _hoist_calls(
+            kw.value, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        if kw.arg is None:
+            if seen_unpack:
+                raise BlackboardParseError(
+                    "at most one ** unpack is supported per call."
+                )
+            seen_unpack = True
+            key = KWARGS_UNPACK_KEY
+        else:
+            key = kw.arg
+
+        deps = extract_identifiers(processed_value)
+        if not deps:
+            try:
+                evaluate_expr(processed_value, {})
+            except Exception as e:
+                raise BlackboardParseError(
+                    f"argument {key!r} is a constant expression that failed "
+                    f"to evaluate: {e!r}"
+                ) from e
+        kwargs[key] = processed_value
+
+    return tuple(args), kwargs
+
+
+def _build_call_slot(
+    call_node: ast.Call,
+    *,
+    identifier: Optional[str],
+    counter: list[int],
+    start_index: int,
+    hoisted: list[ToolStatement],
+) -> ToolStatement:
+    """
+    Build one ``ToolStatement`` for ``call_node``, branching on whether its
+    ``func`` is a plain dotted-name chain (a registered tool/builtin id) or
+    an ``ast.Attribute`` (a method call on some object). Shared by the
+    top-level bare-unassigned-call and assignment (``name = call(...)``)
+    statement shapes in ``parse_statement_to_slots``, and by
+    ``_hoist_calls``'s own nested-call hoisting -- the one place this
+    branch lives, so all three call sites can never drift out of sync.
+
+    For an attribute/method call: the method name (``call_node.func.attr``)
+    is checked against ``DUNDER_ATTRIBUTE_PATTERN`` here -- the one
+    position ``_hoist_calls``'s own rejection scan never sees, since it
+    only ever walks ``call_node.func.value``, not ``call_node.func``
+    itself. The object sub-expression (``call_node.func.value``) is run
+    through ``_hoist_calls`` exactly like any other operand: a call-free
+    chain (``x.y.z``) passes through unchanged (no new binding created),
+    an embedded call (``x.y.method1()`` inside
+    ``x.y.method1().z.method2()``) gets hoisted into its own prior slot
+    first, recursively, to any depth.
+    """
+    if isinstance(call_node.func, ast.Attribute):
+        method_name = call_node.func.attr
+        if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
+            raise BlackboardParseError(
+                f"dunder attribute access is not permitted: "
+                f"{ast.unparse(call_node.func)!r}."
+            )
+        if not any(method_name in methods for methods in ALLOWED_ATTR_METHODS.values()):
+            raise BlackboardParseError(
+                f"method {method_name!r} is not an allowed method call: "
+                f"{ast.unparse(call_node.func)!r}."
+            )
+        obj_expr = _hoist_calls(
+            call_node.func.value, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        # Same dependency-free dry-run validation every other argument
+        # category gets in _process_call_args -- without this, a guaranteed-
+        # bad constant object expression (e.g. `(1/0).to_bytes(...)`) isn't
+        # caught here at parse time; it instead surfaces later as an opaque
+        # resolution failure in prepare().
+        obj_deps = extract_identifiers(obj_expr)
+        if not obj_deps:
+            try:
+                evaluate_expr(obj_expr, {})
+            except Exception as e:
+                raise BlackboardParseError(
+                    "attribute/method call's object expression is a constant "
+                    f"expression that failed to evaluate: {e!r}"
+                ) from e
+        positional, keyword = _process_call_args(
+            call_node, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        return ToolStatement(
+            identifier=identifier,
+            tool=ATTR_CALL_ALIAS,
+            args=(obj_expr, method_name, *positional),
+            kwargs=keyword,
+        )
+
+    # call_node.func never itself reaches _hoist_calls in this branch (it's
+    # used verbatim, via ast.unparse, as the tool id -- never hoisted or
+    # rewritten) -- without this explicit call, a lambda/comprehension/
+    # ternary-with-call/await/dunder-attribute used directly as a call's
+    # own callee (e.g. `(lambda x: x)(1)`) would silently produce a
+    # nonsense tool id instead of a clean rejection here.
+    reject_unsupported_forms(call_node.func)
+    tool_name = ast.unparse(call_node.func)
+    positional, keyword = _process_call_args(
+        call_node, counter=counter, start_index=start_index, hoisted=hoisted
+    )
+    return ToolStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
+
+
+def _reject_await(node: ast.expr) -> None:
+    """
+    Raise the one dedicated `await`-no-longer-supported parse error. Shared
+    by `_hoist_calls`'s rejection scan (an `await` nested anywhere, or used
+    as a bare/rhs-assign top-level expression that still routes through
+    `_hoist_calls`) and `parse_statement_to_slots`'s top-level bare-call
+    shape (the sole position that never reaches `_hoist_calls`, since it
+    reads the statement's own `Expr.value` directly rather than one of a
+    call's own argument expressions). Keeps wording identical across both
+    sites rather than risking drift between two independent raises.
+    """
+    raise BlackboardParseError(
+        "'await' is not supported: "
+        f"{ast.unparse(node)!r} -- write the call as an ordinary "
+        "statement; execution order is inferred automatically from data "
+        "dependencies."
+    )
+
+
+def _hoist_calls(
+    node: ast.expr,
+    *,
+    counter: list[int],
+    start_index: int,
+    hoisted: list[ToolStatement],
+) -> ast.expr:
+    """
+    Post-order rewrite: replaces every ``Call`` node found anywhere within
+    ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
+    value, an f-string's embedded expression, a container literal element,
+    ...) with a ``Name`` reference to a newly synthesized, hoisted
+    ``ToolStatement``, appended to ``hoisted`` in discovery order.
+
+    ``ast.NodeTransformer.generic_visit`` recurses into a call's own
+    children before ``visit_Call`` builds that call's own hoisted slot, so
+    doubly/triply-nested calls flatten correctly bottom-up.
+
+    Rejects (before any hoisting) every form ``reject_unsupported_forms``
+    covers -- a ternary whose either branch contains a ``Call``, an
+    ``ast.Await`` anywhere, a comprehension/lambda anywhere, and a dunder
+    attribute access anywhere (including inside a to-be-hoisted call's own
+    object expression; closes the classic attribute-chaining sandbox-escape
+    class, ``().__class__.__bases__[0].__subclasses__()``-style, which the
+    ``{"__builtins__": {}}`` eval lockout elsewhere in this module does not
+    defend against on its own). A method-call's own method name
+    (``call_node.func.attr``) sits outside this scan (it's never itself
+    walked as a standalone ``ast.Attribute`` node here) and is checked
+    separately, in ``_build_call_slot``.
+    """
+    reject_unsupported_forms(node)
+
+    def _hoist_one_call(call_node: ast.Call) -> ast.Name:
+        """Build one hoisted slot for `call_node` (appended to `hoisted`,
+        via `_build_call_slot` -- handles both a plain tool/builtin id and
+        an attribute/method call) and return a `Name` reference to it."""
+        index = counter[0] + start_index
+        counter[0] += 1
+        hoisted_identifier = f"{SUB_NAME_PREFIX}{index}"
+
+        hoisted.append(
+            _build_call_slot(
+                call_node,
+                identifier=hoisted_identifier,
+                counter=counter,
+                start_index=start_index,
+                hoisted=hoisted,
+            )
+        )
+
+        replacement = ast.Name(id=hoisted_identifier, ctx=ast.Load())
+        return ast.copy_location(replacement, call_node)
+
+    class _CallHoister(ast.NodeTransformer):
+        def visit_Call(self, call_node: ast.Call) -> ast.Name:
+            # Only recurse into keyword values here, not `func` -- a plain
+            # tool/builtin call's own callable is always a dotted-name
+            # chain, never itself a nested call. An attribute/method call's
+            # func.value CAN contain a nested call, but that's hoisted
+            # explicitly inside _build_call_slot (a fresh _hoist_calls
+            # entry), not via this transformer's own traversal.
+            for kw in call_node.keywords:
+                kw.value = self.visit(kw.value)
+            return _hoist_one_call(call_node)
+
+    return _CallHoister().visit(node)
+
+
+def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[ToolStatement]:
+    """
+    Parse one raw generated statement string into an ordered list of
+    ``ToolStatement`` objects: any auto-hoisted slots first (in
+    discovery/post-order), the statement's own slot last.
+
+    Three top-level statement shapes are accepted: an assignment (case A/B
+    below), a bare (unassigned) call, and a ``return`` statement. The
+    latter two produce a slot with
+    ``identifier=None``: nothing can ever reference either by name, so no
+    synthesized name is needed the way hoisting needs one.
+
+    ``start_index`` lets a future whole-block caller avoid ``_SUB_N``
+    collisions across multiple calls within the same subtask -- pass the
+    running count of hoisted slots already emitted so far for this block;
+    this function is otherwise pure/stateless.
+
+    Raises ``BlackboardParseError`` for every rejection category (always via
+    ``raise ... from e`` where an underlying exception exists) -- never
+    silently repaired, never returned as an issues list.
+    """
+    try:
+        tree = ast.parse(statement, mode="exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(str(e)) from e
+
+    if len(tree.body) != 1:
+        raise BlackboardParseError(f"expected exactly one statement; got {len(tree.body)}.")
+
+    stmt = tree.body[0]
+
+    # Terminal case: a bare `return <expr>` (or bare `return`, treated as
+    # `return None`). No Python-grammar obstacle to a module-level Return
+    # node here -- the "return outside function" check only fires at
+    # compile()-to-bytecode time, which this pipeline never does to a whole
+    # statement (only to bare expressions, via evaluate_expr).
+    if isinstance(stmt, ast.Return):
+        hoisted: list[ToolStatement] = []
+        counter = [0]
+        return_value = stmt.value if stmt.value is not None else ast.Constant(value=None)
+        processed = _hoist_calls(
+            return_value, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        deps = extract_identifiers(processed)
+        if not deps:
+            try:
+                evaluate_expr(processed, {})
+            except Exception as e:
+                raise BlackboardParseError(
+                    f"return expression is a constant that failed to evaluate: {e!r}"
+                ) from e
+        val: Any = processed
+        final_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
+        return [*hoisted, final_slot]
+
+    # A bare top-level `await ...` never reaches `_hoist_calls` (this
+    # branch reads `stmt.value` directly, not one of a call's own argument
+    # expressions) -- rejected explicitly here via the same shared helper.
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await):
+        _reject_await(stmt.value)
+
+    # Bare (unassigned) call -- void-style tool calls the model doesn't
+    # need a name for, still logged as a real slot for budget/history.
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        bare_rhs = stmt.value
+        hoisted = []
+        counter = [0]
+        final_slot = _build_call_slot(
+            bare_rhs, identifier=None, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        return [*hoisted, final_slot]
+
+    # isinstance, not a looser check -- ast.AugAssign ("x += 1") is a
+    # distinct node type and never satisfies this, rejecting it for free.
+    if not isinstance(stmt, ast.Assign):
+        raise BlackboardParseError(
+            "expected an assignment, a bare tool call, or a return "
+            f"statement; got {type(stmt).__name__}."
+        )
+
+    if len(stmt.targets) != 1:
+        raise BlackboardParseError("chained assignment (multiple targets) is not supported.")
+
+    target = stmt.targets[0]
+    if not isinstance(target, ast.Name):
+        raise BlackboardParseError(
+            "the assignment target must be a single bare identifier; got "
+            f"{type(target).__name__}."
+        )
+
+    identifier = target.id
+    if identifier.startswith(SUB_NAME_PREFIX):
+        raise BlackboardParseError(
+            f"identifier {identifier!r} uses the reserved hoisted-name prefix "
+            f"{SUB_NAME_PREFIX!r}."
+        )
+    if identifier.startswith(TASK_RESULT_PREFIX):
+        raise BlackboardParseError(
+            f"identifier {identifier!r} uses the reserved task-result-"
+            f"addressing prefix {TASK_RESULT_PREFIX!r}; task_result_N names "
+            "are fixed, read-only references to prior invocations and "
+            "cannot be assigned to."
+        )
+
+    rhs = stmt.value
+    hoisted: list[ToolStatement] = []
+    counter = [0]
+
+    if isinstance(rhs, ast.Call):
+        # Case A: bare top-level call -- delegate the plain-tool-vs-
+        # attribute-call branch to _build_call_slot (shared with the
+        # bare-unassigned-call shape above and _hoist_calls's own
+        # nested-call hoisting).
+        final_slot = _build_call_slot(
+            rhs, identifier=identifier, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        return [*hoisted, final_slot]
+
+    # Case B: rhs_assign. An `ast.Await` here (e.g. `x = await f()`) is
+    # no longer specially unwrapped -- it flows into `_hoist_calls`
+    # below exactly like any other node, which rejects it via its own
+    # rejection scan (`ast.walk` yields `rhs` itself before its
+    # children, same precedent already established for a bare
+    # comprehension/lambda RHS).
+    tool = RHS_ASSIGN_ALIAS
+    # Ternary-with-calls rejection lives inside _hoist_calls itself now
+    # (the common choke point every call path funnels through) --
+    # nothing extra needed here.
+    processed = _hoist_calls(rhs, counter=counter, start_index=start_index, hoisted=hoisted)
+    deps = extract_identifiers(processed)
+    if not deps:
+        try:
+            evaluate_expr(processed, {})
+        except Exception as e:
+            raise BlackboardParseError(
+                f"expression is a constant that failed to evaluate: {e!r}"
+            ) from e
+    val: Any = processed
+    args, kwargs = (), {"val": val}
+
+    final_slot = ToolStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
+    return [*hoisted, final_slot]
+
+
+def parse_generation(raw_text: str) -> list[ToolStatement]:
+    """
+    Parse one whole generation (a fresh plan, or a repair-triggered
+    continuation -- both use this same grammar; there is no separate
+    "continuation mode") into a flat slot sequence.
+
+    The entire generation is parsed statement by statement, with two special
+    any-position cases: a bare string-literal statement (a reasoning note --
+    inert, never stored or dispatched, legal anywhere), and an ``ast.If``
+    node, which always produces an error -- conditionals are permanently
+    forbidden in this grammar.
+
+    A ``return`` terminates immediately (whatever follows it is never
+    parsed or compiled) -- a later real call must never land in the same
+    batch as the return and execute anyway, and a second ``return`` must
+    never silently overwrite the first.
+
+    Per-statement errors are collected, not fail-fast: one
+    ``BlackboardParseError`` carries every error, one per line, as
+    ``line N: ...`` (line numbers relative to the code after fence removal).
+    A genuine ``ast.parse`` syntax error is fatal and reported alone. When no
+    statement error was found, the consumed statements are compiled inside a
+    function body as a final gate, catching what the statement-level checks
+    cannot (a duplicate keyword argument, assignment to ``__debug__``);
+    skipping the gate otherwise keeps a statement-level message from being
+    shadowed by the compiler's wording.
+
+    Falling off the end of the generation with neither a ``return`` nor an
+    error simply means the plan is done as written -- the caller
+    (``ScriptActAgent._finalize_without_continuation``) infers ``None`` if
+    nothing was ever returned.
+    """
+    text = strip_code_fence(raw_text)
+
+    flat_slots: list[ToolStatement] = []
+    hoist_index = 0
+
+    if not text.strip():
+        return flat_slots
+
+    try:
+        tree = ast.parse(text, mode="exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(str(e)) from e
+
+    errors: list[str] = []
+    consumed: list[ast.stmt] = []
+
+    for node in tree.body:
+        consumed.append(node)
+
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+
+        if isinstance(node, ast.If):
+            errors.append(
+                f"line {node.lineno}: conditional statements are not permitted "
+                "in this grammar -- compute both branches' own work directly, "
+                "or restructure without a conditional."
+            )
+            continue
+
+        try:
+            slots = parse_statement_to_slots(ast.unparse(node), start_index=hoist_index)
+        except BlackboardParseError as e:
+            errors.append(f"line {node.lineno}: {e}")
+            continue
+
+        flat_slots.extend(slots)
+        hoist_index += len(slots)
+
+        if slots and slots[-1].tool == RETURN_ALIAS:
+            break
+
+    if not errors:
+        shell = ast.parse("def _script():\n    pass")
+        shell.body[0].body = consumed
+        try:
+            compile(shell, "<generation>", "exec")
+        except SyntaxError as e:
+            errors.append(f"line {e.lineno}: {e.msg}")
+
+    if errors:
+        raise BlackboardParseError("\n".join(errors))
+
+    return flat_slots
+
+
+def rewrite_builtin_calls(slots: list[ToolStatement]) -> None:
+    """
+    Rewrite eligible builtin-call slots in place to dispatch through the
+    ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
+    Run once, over the full flat slot list, between ``parse_generation()``
+    and ``validate_references()``.
+
+    A slot is eligible when its ``tool`` isn't already a sentinel and is in
+    ``ALLOWED_PY_BUILTINS``. A registered tool can no longer share a name
+    with an allowed builtin at all (enforced at registration time
+    by ``ScriptActAgent._validate_effective_tool_id``), so there is no precedence
+    rule to apply here -- a name reaching this function is either a
+    registered tool (never a builtin) or not, mutually exclusive by
+    construction. An eligible slot gets its builtin name spliced in as a
+    new leading positional arg and its ``tool`` replaced with
+    ``PY_BUILTIN_ALIAS``.
+
+    Any other name (including a real but disallowed builtin) is left
+    untouched; ``validate_references`` reports it.
+    """
+    for slot in slots:
+        if slot.tool in ALLOWED_PY_BUILTINS:
+            slot.args = (slot.tool, *slot.args)
+            slot.tool = PY_BUILTIN_ALIAS
+
+
+def validate_references(
+    slots: list[ToolStatement],
+    known_tools: frozenset[str],
+    context_names: frozenset[str],
+    readonly_names: frozenset[str],
+    tool_calls_limit: Optional[int],
+) -> list[str]:
+    """
+    Walk ``slots`` in order, tracking every previously-bound identifier;
+    also check the whole plan's dispatched-call count against a budget.
+
+    For each slot: its own ``tool`` must be a registered tool id unless
+    it's the ``rhs_assign``/``return``/``py_builtin``/``attr_call``
+    sentinel (a real but disallowed builtin name gets its own specific
+    message instead of the generic "unregistered tool" one); every still-unresolved
+    (``ast.expr``-typed) dependency in its ``args`` must already be bound
+    by an earlier slot in this same walk or be a name in ``context_names``
+    (every variable in ``task.context``: conversation, runtime, input-bound,
+    earlier-round bindings, ``task_result_N``), and must not be a registered
+    tool id. An assignment target (``slot.identifier`` not ``None``) that
+    names a read-only context variable (``readonly_names``) or a registered
+    tool id is rejected; a writable context name is allowed (it updates the
+    variable). A mutating method call (``MUTATING_ATTR_METHODS``) on a
+    read-only variable, or on a name assigned from one (directly or via
+    ``get``/``pop``/``setdefault``), is also rejected. Comprehensive, not fail-fast: every unresolvable reference
+    across the whole sequence is collected and returned, never just the
+    first.
+
+    Separately, independent of the per-slot walk: if ``tool_calls_limit``
+    is not ``None`` and the count of dispatched slots (registered tool
+    calls and approved-builtin calls combined, via ``is_dispatched``;
+    ``rhs_assign``/``return`` excluded, hoisted calls included) exceeds it,
+    that's also collected as an issue -- one regen-repair round can report
+    both a bad reference and an excess call count together.
+
+    Returns ``[]`` if every reference resolves and the plan is within
+    budget.
+    """
+    bound: set[str] = set()
+    issues: list[str] = []
+    # Names a mutating method call must not touch: the read-only context
+    # variables plus any name that aliases one (see the end of the loop).
+    protected: set[str] = set(readonly_names)
+
+    for slot in slots:
+        label = slot.identifier if slot.identifier is not None else "(unassigned)"
+
+        if (
+            slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS)
+            and slot.tool not in known_tools
+        ):
+            if hasattr(builtins, slot.tool):
+                issues.append(
+                    f"statement producing {label} calls python builtin "
+                    f"{slot.tool!r}, which is not an allowed builtin."
+                )
+            else:
+                issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
+
+        for name in (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs)):
+            if name in known_tools:
+                # A registered tool id is never a resolvable value -- only
+                # reachable here since attr_call made a bare tool name into
+                # a legal object expression (`sometool.attr()`).
+                issues.append(
+                    f"statement producing {label} references {name!r}, a "
+                    "registered tool id, as a value -- a tool cannot be used "
+                    "as an argument or as the object of an attribute/method "
+                    "call; call it directly instead."
+                )
+            elif name not in bound and name not in context_names:
+                issues.append(
+                    f"statement producing {label} references undefined name {name!r}."
+                )
+
+        if slot.tool == ATTR_CALL_ALIAS and slot.args[1] in MUTATING_ATTR_METHODS:
+            for name in sorted(protected & set(extract_identifiers(slot.args[0]))):
+                issues.append(
+                    f"statement producing {label} calls mutating method "
+                    f"{slot.args[1]!r} on {name!r}, a read-only context variable "
+                    "(or a name bound to one); copy it first, e.g. list(x)."
+                )
+
+        if slot.identifier is not None:
+            if slot.identifier in readonly_names:
+                issues.append(
+                    f"statement assigns to {slot.identifier!r}, a read-only context variable."
+                )
+            elif slot.identifier in known_tools:
+                issues.append(
+                    f"statement assigns to {slot.identifier!r}, a registered tool id."
+                )
+            # An assignment, or a get/pop/setdefault, from a protected name
+            # may hand back the very same object, so the new name is
+            # protected too. Methods that return a new object (copy, split,
+            # keys, ...) and builtin calls are not propagated.
+            if slot.tool == RHS_ASSIGN_ALIAS:
+                source = slot.kwargs["val"]
+            elif slot.tool == ATTR_CALL_ALIAS and slot.args[1] in ("get", "pop", "setdefault"):
+                source = slot.args[0]
+            else:
+                source = None
+            if source is not None and protected & set(extract_identifiers(source)):
+                protected.add(slot.identifier)
+            elif slot.identifier not in readonly_names:
+                protected.discard(slot.identifier)
+            bound.add(slot.identifier)
+
+    real_call_count = sum(1 for slot in slots if is_dispatched(slot))
+    if tool_calls_limit is not None and real_call_count > tool_calls_limit:
+        issues.append(
+            f"the plan calls {real_call_count} tool(s)/builtin(s), "
+            f"exceeding the configured limit of {tool_calls_limit}."
+        )
+
+    return issues
+
+
+def render_completed_as_python(
+    completed: list[ToolStatement],
+    show_batches: bool = False,
+) -> str:
+    """
+    Reconstruct a Python-source-formatted snapshot of already-completed
+    slots: one line per slot, in commit order, mirroring the statement
+    that originally produced it.
+
+    ``show_batches`` (default ``False``) controls whether output is
+    grouped under a ``# Batch N:`` header per concurrently-dispatched
+    batch. Model-facing callers (``ScriptActAgent``'s own continuation-message
+    building) must leave this ``False`` -- ``# Batch N:`` headers appearing
+    in text shown to the model were found, empirically, to get echoed and
+    fabricated back into later generations. The grouped form remains
+    available, opt-in, for standalone human inspection
+    (``ScriptActAgentRecord.render_as_code``), where there is no such risk.
+    Consecutive slots sharing the same ``.batch_index`` are already
+    contiguous in ``completed`` (a batch drains fully before the next one
+    starts), so grouping only needs to detect index changes, not sort.
+
+    No per-slot result preview or ``await`` echo -- both judged noise
+    cluttering the reconstructed code itself. A caller needing actual
+    resolved values reads them from the context block instead of having
+    them interleaved per line. A ``return`` slot is never expected here
+    (it always ends the invoke, so no continuation is ever rendered
+    afterward) but is handled defensively rather than crashing. Returns
+    the joined lines, or ``""`` for an empty ``completed``.
+    """
+    lines: list[str] = []
+    current_index: Optional[int] = None
+    for slot in completed:
+        if show_batches and slot.batch_index != current_index:
+            if current_index is not None:
+                lines.append("")
+            lines.append(f"# Batch {slot.batch_index}:")
+            current_index = slot.batch_index
+
+        lines.append(slot.to_code())
+
+    return "\n".join(lines)
+
+
+def render_failed_as_python(failed: list[ToolStatement]) -> str:
+    """
+    Mirrors ``utils/sigils.py``'s ``render_failed_as_json`` shape exactly,
+    translated to this grammar's own source-line vocabulary: one line per
+    failed slot (via ``ToolStatement.to_code()``), each suffixed with its
+    own exception text. No batch-header grouping -- these are always all
+    from the one batch that most recently triggered a repair round, by
+    construction of the caller (``ScriptActAgent.prepare``/
+    ``_apply_batch_results``, which slice ``task.failed_statements`` down
+    to just that batch before ever calling this).
+
+    Returns ``""`` for an empty ``failed`` list, matching
+    ``render_completed_as_python``'s own empty-input contract.
+    """
+    if not failed:
+        return ""
+    return "\n".join(
+        f"{slot.to_code()}  # FAILED: {slot.exception!r}" for slot in failed
+    )

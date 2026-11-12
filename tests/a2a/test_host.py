@@ -1,22 +1,35 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
-from atomic_agentic.a2a.constants import (
+from atomic_agentic.constants.python_a2a import (
     PYA2A_RESULT_KEY,
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results.atomic import AtomicResult
 
 
 class EchoInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        return self.filter_inputs(inputs)
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        filtered = self.filter_inputs(inputs)
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(filtered, started_at, ended_at)
+
+
+class ScalarInvokable(AtomicInvokable):
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        value = inputs.get("value")
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(value, started_at, ended_at)
 
 
 def make_param(name: str, index: int) -> ParamSpec:
@@ -28,11 +41,54 @@ def make_param(name: str, index: int) -> ParamSpec:
     )
 
 
-def make_invokable(name: str = "echo") -> EchoInvokable:
+def make_invokable(name: str = "echo", namespace: str = "tests") -> EchoInvokable:
     return EchoInvokable(
         name=name,
+        namespace=namespace,
         description="Echo invokable.",
         parameters=[make_param("value", 0)],
+        return_type="dict[str, Any]",
+    )
+
+
+def make_scalar_invokable(name: str = "scalar") -> ScalarInvokable:
+    return ScalarInvokable(
+        name=name,
+        namespace="tests",
+        description="Scalar invokable.",
+        parameters=[make_param("value", 0)],
+        return_type="int",
+    )
+
+
+class DescribedInvokable(AtomicInvokable):
+    """Has a described parameter and non-empty extra content - proves the
+    host payload stops double-baking bullets and now carries extra_description."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        filtered = self.filter_inputs(inputs)
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(filtered, started_at, ended_at)
+
+    def _extra_description(self) -> str:
+        return "Output schema: [value]"
+
+
+def make_described_invokable(name: str = "described") -> DescribedInvokable:
+    return DescribedInvokable(
+        name=name,
+        namespace="tests",
+        description="Described invokable.",
+        parameters=[
+            ParamSpec(
+                name="value",
+                index=0,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="Any",
+                description="The value to echo back.",
+            )
+        ],
         return_type="dict[str, Any]",
     )
 
@@ -92,7 +148,7 @@ class TestPyA2AtomicHostConstruction:
         with pytest.raises(ValueError):
             PyA2AtomicHost([make_invokable("echo")], **kwargs)
 
-    def test_invokables_must_be_list(self) -> None:
+    def test_invokables_must_be_list_or_mapping(self) -> None:
         with pytest.raises(TypeError, match="invokables"):
             PyA2AtomicHost(
                 (make_invokable("echo"),),  # type: ignore[arg-type]
@@ -112,6 +168,59 @@ class TestPyA2AtomicHostConstruction:
         with pytest.raises(ValueError, match="Duplicate"):
             PyA2AtomicHost(
                 [make_invokable("echo"), make_invokable("echo")],
+                name="test_host",
+                description="Test host.",
+            )
+
+    def test_dict_form_construction(self) -> None:
+        host = PyA2AtomicHost(
+            {"a": make_invokable("echo1"), "b": make_invokable("echo2")},
+            name="test_host",
+            description="Test host.",
+        )
+
+        assert host.invokable_names == ["a", "b"]
+
+    def test_dict_form_same_underlying_name_different_keys_succeeds(self) -> None:
+        host = PyA2AtomicHost(
+            {
+                "a": make_invokable("echo", namespace="ns_a"),
+                "b": make_invokable("echo", namespace="ns_b"),
+            },
+            name="test_host",
+            description="Test host.",
+        )
+
+        assert host.invokable_names == ["a", "b"]
+
+    def test_dict_form_invalid_identifier_key_raises(self) -> None:
+        with pytest.raises(ValueError):
+            PyA2AtomicHost(
+                {"not a valid id": make_invokable("echo")},
+                name="test_host",
+                description="Test host.",
+            )
+
+    def test_dict_form_reserved_key_raises(self) -> None:
+        with pytest.raises(ValueError):
+            PyA2AtomicHost(
+                {LIST_INVOKABLES_FUNCTION: make_invokable("echo")},
+                name="test_host",
+                description="Test host.",
+            )
+
+    def test_dict_form_non_invokable_value_raises(self) -> None:
+        with pytest.raises(TypeError, match="AtomicInvokable"):
+            PyA2AtomicHost(
+                {"a": "not_invokable"},  # type: ignore[dict-item]
+                name="test_host",
+                description="Test host.",
+            )
+
+    def test_list_form_reserved_default_name_raises(self) -> None:
+        with pytest.raises(ValueError):
+            PyA2AtomicHost(
+                [make_invokable(GET_INVOKABLE_METADATA_FUNCTION)],
                 name="test_host",
                 description="Test host.",
             )
@@ -165,6 +274,58 @@ class TestPyA2AtomicHostRegistry:
         with pytest.raises(ValueError, match="name"):
             host.remove("   ")
 
+    def test_register_with_explicit_remote_name(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+
+        assert host.register(make_invokable("echo"), remote_name="alt") == "alt"
+        assert host.invokable_names == ["alt"]
+
+    def test_register_same_underlying_name_different_remote_name_succeeds(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+
+        host.register(make_invokable("echo", namespace="ns_a"))
+        host.register(make_invokable("echo", namespace="ns_b"), remote_name="alt")
+
+        assert host.invokable_names == ["echo", "alt"]
+
+    def test_register_rejects_invalid_remote_name_identifier(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+
+        with pytest.raises(ValueError):
+            host.register(make_invokable("echo"), remote_name="not valid")
+
+    def test_register_rejects_reserved_remote_name(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+
+        with pytest.raises(ValueError):
+            host.register(make_invokable("echo"), remote_name=LIST_INVOKABLES_FUNCTION)
+
+    def test_register_rejects_blank_explicit_remote_name(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+
+        with pytest.raises(ValueError):
+            host.register(make_invokable("echo"), remote_name="   ")
+
 
 class TestPyA2AtomicHostPayloads:
     def test_list_invokables_payload(self) -> None:
@@ -193,6 +354,18 @@ class TestPyA2AtomicHostPayloads:
         assert metadata["return_type"] == "dict[str, Any]"
         assert metadata["invokable_type"] == "EchoInvokable"
 
+    def test_get_invokable_metadata_payload_uses_remote_name_not_intrinsic_name(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+        host.register(make_invokable("echo"), remote_name="alt")
+
+        metadata = host._get_invokable_metadata_payload("alt")
+
+        assert metadata["name"] == "alt"
+
     def test_get_unknown_invokable_metadata_raises(self) -> None:
         host = PyA2AtomicHost(
             [],
@@ -212,6 +385,15 @@ class TestPyA2AtomicHostPayloads:
 
         assert host._invoke_registered_invokable("echo", {"value": 123}) == {"value": 123}
 
+    def test_invoke_registered_invokable_unwraps_non_dict_result(self) -> None:
+        host = PyA2AtomicHost(
+            [make_scalar_invokable("scalar")],
+            name="test_host",
+            description="Test host.",
+        )
+
+        assert host._invoke_registered_invokable("scalar", {"value": 42}) == 42
+
     def test_invoke_unknown_registered_invokable_raises(self) -> None:
         host = PyA2AtomicHost(
             [],
@@ -221,6 +403,45 @@ class TestPyA2AtomicHostPayloads:
 
         with pytest.raises(KeyError, match="Unknown invokable"):
             host._invoke_registered_invokable("missing", {})
+
+
+class TestPyA2AtomicHostDescriptionPropagation:
+    def test_metadata_payload_sends_raw_description_not_rendered(self) -> None:
+        invokable = make_described_invokable("described")
+        host = PyA2AtomicHost(
+            [invokable],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("described")
+
+        assert metadata["description"] == invokable._description
+        assert metadata["description"] != invokable.description
+        assert "- value:" not in metadata["description"]
+
+    def test_metadata_payload_carries_extra_description(self) -> None:
+        invokable = make_described_invokable("described")
+        host = PyA2AtomicHost(
+            [invokable],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("described")
+
+        assert metadata["extra_description"] == "Output schema: [value]"
+
+    def test_metadata_payload_extra_description_empty_by_default(self) -> None:
+        host = PyA2AtomicHost(
+            [make_invokable("echo")],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("echo")
+
+        assert metadata["extra_description"] == ""
 
 
 class TestPyA2AtomicHostMessageHandling:
@@ -299,6 +520,25 @@ class TestPyA2AtomicHostMessageHandling:
 
         assert response.content.type == "function_response"
         assert response.content.response[PYA2A_RESULT_KEY] == {"value": 123}
+
+    def test_handle_get_invokable_metadata_reports_remote_name(self) -> None:
+        host = PyA2AtomicHost(
+            [],
+            name="test_host",
+            description="Test host.",
+        )
+        host.register(make_invokable("echo"), remote_name="alt")
+        message = make_message(
+            make_function_call_content(
+                GET_INVOKABLE_METADATA_FUNCTION,
+                [make_param_content("name", "alt")],
+            )
+        )
+
+        response = host.handle_message(message)
+
+        assert response.content.type == "function_response"
+        assert response.content.response["name"] == "alt"
 
     def test_handle_unknown_invokable_returns_error_payload(self) -> None:
         host = PyA2AtomicHost(

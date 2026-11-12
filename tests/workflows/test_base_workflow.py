@@ -6,275 +6,257 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
-from atomic_agentic.workflows.base import FlowResultDict, Workflow
-from atomic_agentic.workflows.metadata import WorkflowRunMetadata
+from atomic_agentic.exceptions import ExecutionError
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.workflows.base import Workflow
+from atomic_agentic.models.results.workflows import WorkflowResult
 
 
-def value_param() -> ParamSpec:
+def make_value_param() -> ParamSpec:
     return ParamSpec(
         name="value",
         index=0,
         kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-        type="Any",
-        default=NO_VAL,
+        type="int",
     )
 
 
-class EchoWorkflow(Workflow[WorkflowRunMetadata]):
+class EchoWorkflow(Workflow):
+    """Minimal Workflow: echoes ``inputs["value"]`` back as the payload."""
+
     def __init__(
         self,
         *,
         name: str = "echo_workflow",
+        namespace: str = "tests",
         description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
+        parameters: list[ParamSpec] | None = None,
+        return_type: str = "dict[str, Any]",
+        include_trace: bool = True,
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
-            parameters=[value_param()],
-            filter_extraneous_inputs=filter_extraneous_inputs,
+            parameters=parameters if parameters is not None else [make_value_param()],
+            return_type=return_type,
+            include_trace=include_trace,
         )
-        self.run_inputs: list[dict[str, Any]] = []
-        self.async_run_inputs: list[dict[str, Any]] = []
 
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {}
 
 
 class NativeAsyncEchoWorkflow(EchoWorkflow):
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
+    """EchoWorkflow with a directly-defined ``async def _async_run``."""
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {}
 
 
-class ConfigurableWorkflow(Workflow[WorkflowRunMetadata]):
+class TraceEmittingWorkflow(Workflow):
+    """Workflow whose ``_run``/``_async_run`` explicitly populate ``trace``."""
+
+    def __init__(self, *, name: str = "trace_workflow", namespace: str = "tests") -> None:
+        super().__init__(
+            name=name,
+            namespace=namespace,
+            description="Trace-emitting workflow.",
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
+        )
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {"trace": ("child-a", "child-b")}
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {"trace": ("child-a", "child-b")}
+
+
+class ConfigurableWorkflow(Workflow):
+    """Workflow whose run hooks return a configured result or raise."""
+
     def __init__(
         self,
+        name: str,
+        namespace: str = "tests",
+        description: str = "Configurable workflow.",
+        parameters: list[ParamSpec] | None = None,
+        return_type: str = "Any",
         *,
-        metadata: Any = None,
         result: Any = None,
         run_error: Exception | None = None,
         async_error: Exception | None = None,
     ) -> None:
         super().__init__(
-            name="configurable_workflow",
-            description="Configurable workflow.",
-            parameters=[value_param()],
-            filter_extraneous_inputs=True,
+            name=name,
+            namespace=namespace,
+            description=description,
+            parameters=parameters if parameters is not None else [make_value_param()],
+            return_type=return_type,
         )
-        self.metadata = (
-            WorkflowRunMetadata(kind="configurable")
-            if metadata is None
-            else metadata
+        self._result = result
+        self._run_error = run_error
+        self._async_error = async_error
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        if self._run_error is not None:
+            raise self._run_error
+        return self._result, {}
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        if self._async_error is not None:
+            raise self._async_error
+        return self._result, {}
+
+
+class TestWorkflowNamespace:
+    def test_workflow_namespace_default(self) -> None:
+        workflow = EchoWorkflow()
+        assert workflow.namespace == "tests"
+
+    def test_workflow_namespace_explicit(self) -> None:
+        workflow = ConfigurableWorkflow(
+            name="wf",
+            namespace="wf_ns",
         )
-        self.result = {"value": "ok"} if result is None else result
-        self.run_error = run_error
-        self.async_error = async_error
-
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[Any, Any]:
-        if self.run_error is not None:
-            raise self.run_error
-        return self.metadata, self.result
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[Any, Any]:
-        if self.async_error is not None:
-            raise self.async_error
-        return self.metadata, self.result
-
-
-class TestFlowResultDict:
-    def test_copy_preserves_items_and_run_id(self) -> None:
-        result = FlowResultDict({"value": 1}, run_id="run_1")
-
-        copied = result.copy()
-
-        assert copied == {"value": 1}
-        assert copied.run_id == "run_1"
-        assert copied is not result
-
-    def test_run_id_is_not_mapping_item(self) -> None:
-        result = FlowResultDict({"value": 1}, run_id="run_1")
-
-        assert "run_id" not in result
-        assert result.run_id == "run_1"
+        assert workflow.namespace == "wf_ns"
 
 
 class TestWorkflowConstruction:
-    def test_initializes_as_atomic_invokable_with_workflow_return_type(self) -> None:
+    def test_initializes_name_description_parameters_return_type(self) -> None:
+        params = [make_value_param()]
+        workflow = EchoWorkflow(
+            name="my_workflow",
+            description="A workflow.",
+            parameters=params,
+            return_type="dict[str, Any]",
+        )
+
+        assert workflow.name == "my_workflow"
+        assert workflow.description == "A workflow."
+        assert workflow.parameters == params
+        assert workflow.return_type == "dict[str, Any]"
+
+    def test_include_trace_defaults_to_true(self) -> None:
         workflow = EchoWorkflow()
 
-        assert workflow.name == "echo_workflow"
-        assert workflow.description == "Echo workflow."
-        assert workflow.return_type == "FlowResultDict[str, Any]"
-        assert [param.name for param in workflow.parameters] == ["value"]
+        assert workflow.include_trace is True
 
-    def test_checkpoints_initially_empty_and_latest_run_none(self) -> None:
+
+class TestWorkflowIncludeTrace:
+    def test_include_trace_settable_post_construction(self) -> None:
         workflow = EchoWorkflow()
 
-        assert workflow.checkpoints == []
-        assert workflow.latest_run is None
+        workflow.include_trace = False
+
+        assert workflow.include_trace is False
+
+    def test_include_trace_setter_rejects_non_bool(self) -> None:
+        workflow = EchoWorkflow()
+
+        with pytest.raises(TypeError, match="include_trace must be a bool"):
+            workflow.include_trace = "yes"  # type: ignore[assignment]
+
+    def test_include_trace_accepted_at_construction(self) -> None:
+        workflow = EchoWorkflow(include_trace=False)
+
+        assert workflow.include_trace is False
 
 
 class TestWorkflowSyncInvoke:
-    def test_invoke_returns_flow_result_dict_with_generated_run_id(self) -> None:
+    def test_invoke_returns_workflow_result(self) -> None:
         workflow = EchoWorkflow()
 
         result = workflow.invoke({"value": 123})
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"value": 123}
+        assert isinstance(result, WorkflowResult)
+        assert result.result == {"value": 123}
         assert isinstance(result.run_id, str)
-        assert result.run_id
+        assert result.started_at <= result.ended_at
+        assert result.elapsed_s >= 0
 
-    def test_invoke_filters_inputs_before_run(self) -> None:
-        workflow = EchoWorkflow(filter_extraneous_inputs=True)
+    def test_invoke_filters_extraneous_inputs(self) -> None:
+        workflow = EchoWorkflow()
 
         result = workflow.invoke({"value": 123, "extra": "ignored"})
 
-        assert result == {"value": 123}
-        assert workflow.run_inputs == [{"value": 123}]
+        assert result.result == {"value": 123}
 
-    def test_invoke_records_checkpoint_matching_result(self) -> None:
+    def test_trace_defaults_to_none_when_run_omits_it(self) -> None:
         workflow = EchoWorkflow()
 
-        result = workflow.invoke({"value": 123})
-        checkpoint = workflow.checkpoints[0]
+        result = workflow.invoke({"value": 1})
 
-        assert checkpoint.run_id == result.run_id
-        assert checkpoint.inputs == {"value": 123}
-        assert checkpoint.result == {"value": 123}
-        assert checkpoint.metadata.kind == "echo"
-        assert checkpoint.started_at <= checkpoint.ended_at
-        assert checkpoint.elapsed_s >= 0
+        assert result.trace is None
 
-    def test_latest_run_and_get_checkpoint_update_after_invoke(self) -> None:
-        workflow = EchoWorkflow()
+    def test_trace_populated_when_run_hook_supplies_it(self) -> None:
+        workflow = TraceEmittingWorkflow()
 
-        result = workflow.invoke({"value": 123})
+        result = workflow.invoke({"value": 1})
 
-        assert workflow.latest_run == result.run_id
-        assert workflow.get_checkpoint(result.run_id) is workflow.checkpoints[0]
-        assert workflow.get_checkpoint("missing") is None
-
-    def test_multiple_invokes_produce_multiple_distinct_run_ids(self) -> None:
-        workflow = EchoWorkflow()
-
-        first = workflow.invoke({"value": 1})
-        second = workflow.invoke({"value": 2})
-
-        assert first.run_id != second.run_id
-        assert [checkpoint.run_id for checkpoint in workflow.checkpoints] == [
-            first.run_id,
-            second.run_id,
-        ]
-        assert workflow.latest_run == second.run_id
-
-
-class TestWorkflowMemoryAndSerialization:
-    def test_checkpoints_property_returns_shallow_copy(self) -> None:
-        workflow = EchoWorkflow()
-        workflow.invoke({"value": 1})
-
-        snapshot = workflow.checkpoints
-        snapshot.clear()
-
-        assert len(snapshot) == 0
-        assert len(workflow.checkpoints) == 1
-
-    def test_clear_memory_clears_checkpoints_and_latest_run(self) -> None:
-        workflow = EchoWorkflow()
-        workflow.invoke({"value": 1})
-
-        workflow.clear_memory()
-
-        assert workflow.checkpoints == []
-        assert workflow.latest_run is None
-
-    def test_to_dict_includes_checkpoint_count_and_runs(self) -> None:
-        workflow = EchoWorkflow()
-
-        first = workflow.invoke({"value": 1})
-        second = workflow.invoke({"value": 2})
-        data = workflow.to_dict()
-
-        assert data["type"] == "EchoWorkflow"
-        assert data["checkpoint_count"] == 2
-        assert data["runs"] == [first.run_id, second.run_id]
-        assert "checkpoints" not in data
+        assert result.trace == ("child-a", "child-b")
 
 
 class TestWorkflowAsyncInvoke:
-    def test_async_invoke_returns_flow_result_dict_and_records_checkpoint(self) -> None:
+    def test_async_invoke_with_native_async_run(self) -> None:
         workflow = NativeAsyncEchoWorkflow()
 
-        result = asyncio.run(workflow.async_invoke({"value": 123}))
+        result = asyncio.run(workflow.async_invoke({"value": 1}))
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"value": 123}
-        assert workflow.async_run_inputs == [{"value": 123}]
-        assert len(workflow.checkpoints) == 1
-        assert workflow.checkpoints[0].run_id == result.run_id
-        assert workflow.checkpoints[0].metadata.kind == "async_echo"
+        assert isinstance(result, WorkflowResult)
+        assert result.result == {"value": 1}
 
-    def test_default_async_run_dispatches_to_sync_run(self) -> None:
+    def test_async_invoke_default_dispatches_sync_run_via_thread(self) -> None:
         workflow = EchoWorkflow()
 
-        result = asyncio.run(workflow.async_invoke({"value": 123}))
+        result = asyncio.run(workflow.async_invoke({"value": 1}))
 
-        assert result == {"value": 123}
-        assert workflow.run_inputs == [{"value": 123}]
-        assert len(workflow.checkpoints) == 1
+        assert isinstance(result, WorkflowResult)
+        assert result.result == {"value": 1}
+
+    def test_async_trace_populated_when_async_run_hook_supplies_it(self) -> None:
+        workflow = TraceEmittingWorkflow()
+
+        result = asyncio.run(workflow.async_invoke({"value": 1}))
+
+        assert result.trace == ("child-a", "child-b")
 
 
 class TestWorkflowValidationAndErrors:
-    def test_run_exception_is_wrapped_as_execution_error(self) -> None:
-        workflow = ConfigurableWorkflow(run_error=RuntimeError("boom"))
+    def test_invoke_wraps_run_exception_as_execution_error(self) -> None:
+        workflow = ConfigurableWorkflow(
+            name="configurable_workflow",
+            description="Configurable workflow.",
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
+            run_error=RuntimeError("boom"),
+        )
 
         with pytest.raises(ExecutionError, match="_run failed"):
             workflow.invoke({"value": 1})
 
-    def test_async_run_exception_is_wrapped_as_execution_error(self) -> None:
-        workflow = ConfigurableWorkflow(async_error=RuntimeError("async boom"))
+    def test_async_invoke_wraps_async_run_exception_as_execution_error(self) -> None:
+        workflow = ConfigurableWorkflow(
+            name="configurable_workflow",
+            description="Configurable workflow.",
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
+            async_error=RuntimeError("boom"),
+        )
 
         with pytest.raises(ExecutionError, match="_async_run failed"):
             asyncio.run(workflow.async_invoke({"value": 1}))
 
-    def test_invalid_metadata_returned_by_run_raises_validation_error(self) -> None:
-        workflow = ConfigurableWorkflow(metadata={"kind": "bad"})
 
-        with pytest.raises(ValidationError, match="invalid metadata type"):
-            workflow.invoke({"value": 1})
+class TestWorkflowSerialization:
+    def test_to_dict_includes_include_trace_and_type(self) -> None:
+        workflow = EchoWorkflow(include_trace=False)
 
-    def test_non_mapping_result_returned_by_run_raises_validation_error(self) -> None:
-        workflow = ConfigurableWorkflow(result=["not", "mapping"])
+        data = workflow.to_dict()
 
-        with pytest.raises(ValidationError, match="non-mapping result"):
-            workflow.invoke({"value": 1})
-
-    def test_invalid_metadata_returned_by_async_run_raises_validation_error(self) -> None:
-        workflow = ConfigurableWorkflow(metadata={"kind": "bad"})
-
-        with pytest.raises(ValidationError, match="invalid metadata type"):
-            asyncio.run(workflow.async_invoke({"value": 1}))
-
-    def test_non_mapping_result_returned_by_async_run_raises_validation_error(self) -> None:
-        workflow = ConfigurableWorkflow(result=["not", "mapping"])
-
-        with pytest.raises(ValidationError, match="non-mapping result"):
-            asyncio.run(workflow.async_invoke({"value": 1}))
+        assert data["include_trace"] is False
+        assert data["type"] == "EchoWorkflow"
+        assert "checkpoints" not in data
+        assert "checkpoint_count" not in data
+        assert "runs" not in data

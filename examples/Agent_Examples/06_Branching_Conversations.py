@@ -1,0 +1,295 @@
+# 06_Branching_Conversations.py
+"""
+Demonstrates conversation branching via the explicit conversation-
+management API.
+
+The scenario uses grounded, verifiable facts so the agent's context isolation
+is unambiguous — it cannot invent the right answer if the fact was never in
+its chain, so missing context produces a clear, observable "I don't know."
+
+Conversation tree
+-----------------
+
+    T0 (root)  ──────────────────────────┐
+        │                                │
+    T_A1  reveal dog name                │
+        │                                │
+    T_A2  "what do you know             T_B1  "what's my dog's
+          about my dog?"                        name?" (sliced at T0)
+          → agent recalls Biscuit               → agent: "you haven't
+                                                  told me"
+
+Key concepts shown
+------------------
+- ``Conversation.slice(start, end)`` + ``Agent.import_conversation(conv, *, name)``
+  copy a conversation up through any prior turn, not just the tail, and
+  register the copy under a name. ``import_conversation`` registers the
+  object it is given as-is (shared, never copied), so the slice is what makes
+  the branch independent.
+- ``Agent.switch_conversation(name)``   switch which conversation
+  subsequent calls read from and write to. Importing never changes the active
+  conversation by itself -- the caller switches explicitly.
+- A record's ``children`` list is shared across every conversation it
+  belongs to: T0 already has a child (T_A1) in "default", and continuing
+  from T0 in the sliced branch adds a second child (T_B1). That is
+  provenance only -- the slice is a real conversation of its own, and the
+  new turn is appended to it in place (there is no implicit forking).
+- ``Agent.get_conversation(conversation_id)``   (the stored Conversation) each conversation is its own
+  stored list under ``Agent.conversation_names``; reading one back is a
+  plain dict lookup, not a reconstruction walk.
+
+Conversation storage (v2.0.0, agent-memory-refactor)
+--------------------------------------------------------------
+Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
+a ``dict[str, Conversation]`` -- the agent's active conversation
+("default" here) keeps growing in place for T0/T_A1/T_A2. There is no
+implicit, invoke-time forking mechanism -- every branch starts from an
+explicit ``slice`` + ``import_conversation`` and is continued in place.
+
+Post-invoke parameters are no longer declared via ``passthrough_inputs``.
+Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
+is auto-grafted into the agent schema as KEYWORD_ONLY — callers pass it
+as a regular input.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import textwrap
+from dotenv import load_dotenv
+
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
+
+load_dotenv()
+sys.stdout.reconfigure(encoding="utf-8")  # the demo prints non-ASCII; Windows consoles default to cp1252
+
+_W = 66  # display column width
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks
+# ---------------------------------------------------------------------------
+
+def build_message(message: str, style: str = "friendly") -> str:
+    """Pre-invoke: inject a style directive before the user's message."""
+    directives = {
+        "friendly": "Respond warmly and conversationally.",
+        "formal":   "Respond in a professional, formal tone.",
+        "concise":  "Respond in one sentence only. Be direct.",
+    }
+    directive = directives.get(style, "Respond naturally.")
+    return f"[{directive}]\n\n{message}"
+
+
+def package_reply(result: str, style: str = "friendly") -> dict:
+    """Post-invoke: wrap the raw LLM response with lightweight metadata.
+
+    ``style`` is auto-grafted from this function's signature into the agent
+    schema — no ``passthrough_inputs`` configuration needed.
+    """
+    return {
+        "reply":      result.strip(),
+        "style":      style,
+        "char_count": len(result.strip()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Display helper
+# ---------------------------------------------------------------------------
+
+def print_chain(chain: list, label: str, results_by_run_id: dict) -> None:
+    """Pretty-print a conversation chain from get_conversation().records.
+
+    ``results_by_run_id`` supplies each turn's processed payload — no
+    longer recoverable from the record itself (AgentRecord only retains
+    identity/timing/raw generated_response, not the post-invoke result), so
+    the caller passes each turn's already-known AgentResult, captured at
+    call time, keyed by run_id.
+    """
+    print(f"\n{'━' * _W}")
+    print(f"  {label}")
+    print(f"  {len(chain)} turn(s) in chain")
+    print(f"{'━' * _W}")
+
+    for i, record in enumerate(chain):
+        run_short  = record.run_id[:8]
+        prev_short = (
+            f"{record.prev.run_id[:8]}..."
+            if record.prev else "None  ← chain root"
+        )
+        payload = results_by_run_id[record.run_id].result
+
+        print(f"\n  [Turn {i + 1}]  run: {run_short}...   parent: {prev_short}")
+        print(f"  style: {payload['style']}  ·  {payload['char_count']} chars")
+
+        flat_msg = " ".join(record.user_prompt.split())
+        msg_lines = textwrap.wrap(flat_msg, width=_W - 13)
+        if msg_lines:
+            print(f"\n  you     : {msg_lines[0]}")
+            for line in msg_lines[1:]:
+                print(f"            {line}")
+
+        reply_lines = textwrap.wrap(payload["reply"], width=_W - 13)
+        if reply_lines:
+            print(f"\n  agent   : {reply_lines[0]}")
+            for line in reply_lines[1:]:
+                print(f"            {line}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    engine = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
+
+    agent = BasicAgent(
+        name="branching_demo_agent",
+        namespace="examples",
+        description="Conversational agent for branching context demonstration.",
+        llm_engine=engine,
+        role_prompt=(
+            "You are a helpful assistant in a conversation with the user. "
+            "You only know what has been said in this conversation. "
+            "When asked about something that has not been mentioned, "
+            "say clearly that you don't have that information — "
+            "never guess or invent details."
+        ),
+        record_enabled=True,
+        records_window=None,
+        pre_invoke=build_message,
+        post_invoke=package_reply,
+        response_to_post="result",
+        # 'style' is auto-grafted from package_reply into the agent schema.
+        # No passthrough_inputs declaration needed.
+    )
+
+    # ------------------------------------------------------------------ #
+    # T0 — root: establish the user
+    # ------------------------------------------------------------------ #
+    print(f"\n{'═' * _W}")
+    print("  T0  ·  Root  —  common starting point for all branches")
+    print(f"{'═' * _W}")
+
+    results_by_run_id: dict = {}
+
+    r0 = agent(
+        message="Hi, I'm Sam. Nice to meet you.",
+        style="friendly",
+        return_atomic_result_object = True
+    )
+    run_0 = r0.run_id
+    results_by_run_id[run_0] = r0
+    print(f"  run  : {run_0[:8]}...   parent: None")
+    print(f"  reply: {r0.result['reply']}")
+
+    # ------------------------------------------------------------------ #
+    # Branch A — T_A1: reveal a fact the agent must remember
+    # ------------------------------------------------------------------ #
+    print(f"\n{'═' * _W}")
+    print("  T_A1  ·  Branch A  —  revealing a fact")
+    print(f"{'═' * _W}")
+
+    r_a1 = agent(
+        message="I have a golden retriever named Biscuit. She loves fetch.",
+        style="friendly",
+        return_atomic_result_object = True
+    )
+    run_a1 = r_a1.run_id
+    results_by_run_id[run_a1] = r_a1
+    print(f"  run  : {run_a1[:8]}...   parent: {run_0[:8]}...")
+    print(f"  reply: {r_a1.result['reply']}")
+
+    # ------------------------------------------------------------------ #
+    # Branch A — T_A2: test recall of the fact
+    # ------------------------------------------------------------------ #
+    print(f"\n{'═' * _W}")
+    print("  T_A2  ·  Branch A  —  recalling the fact  (agent should know)")
+    print(f"{'═' * _W}")
+
+    r_a2 = agent(
+        message="What do you know about my dog?",
+        style="friendly",
+        return_atomic_result_object = True
+    )
+    run_a2 = r_a2.run_id
+    results_by_run_id[run_a2] = r_a2
+    print(f"  run  : {run_a2[:8]}...   parent: {run_a1[:8]}...")
+    print(f"  reply: {r_a2.result['reply']}")
+
+    # ------------------------------------------------------------------ #
+    # Branch B — T_B1: slice from T0, ask the same recall question
+    #
+    # This branch's context is T0 only. T_A1 and T_A2 never happened here.
+    # The agent cannot know Biscuit's name.
+    # ------------------------------------------------------------------ #
+    print(f"\n{'═' * _W}")
+    print("  T_B1  ·  Branch B  —  sliced from T0  (slice(0, 1))")
+    print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
+    print(f"{'═' * _W}")
+
+    # Slice "default" up through T0, register the slice, switch into it, and
+    # continue there -- the new turn is appended to the slice in place.
+    branch_b_name = "branch_b"
+    agent.import_conversation(agent.get_conversation("default").slice(0, 1), name=branch_b_name)
+    agent.switch_conversation(branch_b_name)
+
+    r_b1 = agent(
+        message="What's my dog's name?",
+        style="friendly",
+        return_atomic_result_object = True
+    )
+    run_b1 = r_b1.run_id
+    results_by_run_id[run_b1] = r_b1
+    print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_name!r}")
+    print(f"  reply: {r_b1.result['reply']}")
+
+    agent.switch_conversation("default")
+
+    # ------------------------------------------------------------------ #
+    # Display each conversation's stored chain
+    # ------------------------------------------------------------------ #
+    print(f"\n\n{'═' * _W}")
+    print(f"  CONVERSATIONS  ({len(agent.conversation_names)} total: {agent.conversation_names})")
+    print(f"{'═' * _W}")
+
+    print_chain(
+        agent.get_conversation().records,  # active ("default"): T0 -> T_A1 -> T_A2
+        "Branch A  ·  root → fact revealed → fact recalled  (active conversation)",
+        results_by_run_id,
+    )
+    print_chain(
+        agent.get_conversation(branch_b_name).records,
+        "Branch B  ·  root → same question, no prior fact  (sliced at T0)",
+        results_by_run_id,
+    )
+
+    # ------------------------------------------------------------------ #
+    # Every conversation, in full — nothing is stored in a flat list anymore
+    # ------------------------------------------------------------------ #
+    print(f"\n{'═' * _W}")
+    print("  ALL CONVERSATIONS")
+    print(f"{'═' * _W}")
+    labels = {
+        run_0:  "T0     root",
+        run_a1: "T_A1   branch A — fact revealed",
+        run_a2: "T_A2   branch A — fact recalled",
+        run_b1: "T_B1   branch B — parallel slice from T0",
+    }
+    for name in agent.conversation_names:
+        history = agent.get_conversation(name).records
+        print(f"\n  conversation {name!r}  ({len(history)} record(s))")
+        for i, record in enumerate(history):
+            rid    = record.run_id
+            parent = (
+                f"{record.prev.run_id[:8]}..."
+                if record.prev else "None"
+            )
+            print(f"    [{i}]  {rid[:8]}...  parent: {parent:<18}  {labels.get(rid, '')}")
+    print(f"{'═' * _W}\n")
+
+
+if __name__ == "__main__":
+    main()

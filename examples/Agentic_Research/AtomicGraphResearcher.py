@@ -4,7 +4,7 @@ Atomic Agentic + LangGraph Integration Researcher Example
 
 from __future__ import annotations
 
-from typing import Any, Mapping, TypedDict
+from typing import Any, TypedDict
 
 from dotenv import load_dotenv
 
@@ -33,6 +33,12 @@ class ResearchState(TypedDict, total=False):
     approved: bool
     iteration: int
 
+def wrapper(invokable) -> Any:
+    def wrapped(state: ResearchState) -> Any:
+        result = invokable.invoke(state).result
+        return result
+    return wrapped
+
 # ---------------------------------------------------------------------
 # 2) Define the graph structure
 # ---------------------------------------------------------------------
@@ -41,11 +47,12 @@ def build_graph():
     graph = StateGraph(ResearchState)
 
     # add nodes (Atomic Tools & Agents)
-    graph.add_node("research", research_tool.invoke)
-    graph.add_node("writer", writer.invoke)
-    graph.add_node("critic", critic.invoke)
-    graph.add_node("judge", judge.invoke)
-    graph.add_node("iterate", iterator_tool.invoke)
+    # .result unwraps the AtomicResult envelope so LangGraph receives a plain dict
+    graph.add_node("research", wrapper(research_tool))
+    graph.add_node("writer", wrapper(writer))
+    graph.add_node("critic", wrapper(critic))
+    graph.add_node("judge", wrapper(judge))
+    graph.add_node("iterate", wrapper(iterator_tool))
 
     # add edges (define flow)
     graph.set_entry_point("research")

@@ -1,0 +1,302 @@
+"""
+ScratchpadAgent: user-authored, fixed-count thinking strategy.
+
+``ScratchpadAgent`` is the one concrete ``ThinkingAgent`` shipped in this
+release. Each thinking round is one LLM call producing one free-text thought;
+after the rounds the agent replies as a ``BasicAgent`` would. With ``stop_early`` the model may end
+thinking before the cap by returning ``more_thinking_required: false``.
+"""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Iterable
+from typing import Any, Callable, Mapping, Optional
+
+from .thinking import ThinkingAgent
+from ..constants.agents import (
+    STOP_EARLY_PROMPT_SECTION,
+    STOP_EARLY_SCHEMA_TEMPLATE,
+)
+from ..exceptions import AgentError, AgentInvocationError
+from ..llm.base import LLMEngine
+from ..models.agents.prompts import PromptConfig
+from ..models.agents.records import LLMRecord
+from ..models.agents.tasks import ScratchpadTask
+from ..models.parameters import ParamSpec
+from ..utils.agents import normalize_prompt_config
+from ..utils.rendering import frame_content
+from ..utils.parameters import (
+    apply_parameter_reports,
+    build_parameter_reports,
+    insert_by_category,
+)
+
+
+class ScratchpadAgent(ThinkingAgent):
+    """
+    N rounds of notes, then the reply.
+
+    Two phases: thinking (the author's ``thinking_instructions`` as the system
+    message) then reply (the role prompt). The thinker does not
+    see the role prompt; an author who wants the persona there writes it into
+    ``thinking_instructions``, ideally through a placeholder shared with
+    ``role_prompt``. ``thinking_instructions`` placeholders join the agent's
+    signature, reconciled with ``role_prompt``'s (role wins on a
+    compatible-but-not-identical overlap; a true collision raises).
+
+    ``thinking_rounds`` is the exact number of thinking calls, or the cap when
+    ``stop_early`` is on. ``stop_early`` makes every thinking call return
+    ``{thought, more_thinking_required}`` (a string thought and a boolean);
+    thinking ends at the first ``more_thinking_required: false`` or at the cap,
+    and round 1 always runs when ``thinking_rounds >= 1``.
+
+    ``stop_early`` is fixed at construction. ``thinking_rounds`` is a behavioral
+    knob and may be reassigned (validated like the constructor argument); a call
+    already running reads the new value at its next ``_thinking_done`` check.
+    """
+
+    _TASK_CLS = ScratchpadTask
+
+    DEFAULT_THINKING_PROMPT: str = (
+        "You are a thinking assistant that produces various thoughts, "
+        "questions, and task-enhancement clarifications to describe or "
+        "enhance a user task prompt"
+    )
+
+    def __init__(
+        self,
+        name: str,
+        namespace: str,
+        description: str,
+        llm_engine: LLMEngine,
+        role_prompt: str | PromptConfig | None = None,
+        thinking_instructions: str | PromptConfig | None = None,
+        record_enabled: bool = True,
+        *,
+        pre_invoke: Optional[Callable | Any] = None,
+        post_invoke: Optional[Callable | Any] = None,
+        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
+        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        use_runtime_context: bool = False,
+        records_window: Optional[int] = None,
+        response_schema: dict[str, Any] | None = None,
+        thinking_rounds: int,
+        stop_early: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        thinking_instructions : str | PromptConfig | None
+            The thinking phase's entire system message (framed by markers and
+            followed by a format section when ``stop_early`` is on). Defaults
+            to ``DEFAULT_THINKING_PROMPT`` when omitted or blank. Its
+            ``{placeholder}``s become agent inputs.
+        thinking_rounds : int
+            Required. Exact thinking-call count, or the cap under
+            ``stop_early``; ``0`` skips thinking.
+        stop_early : bool
+            Let the model end thinking before the cap.
+
+        State is set before ``super().__init__`` because
+        ``_merge_prompt_parameters``, called inside it, reads
+        ``self._thinking_config``.
+        """
+        # 1. Validate construction knobs (thinking_rounds through its setter).
+        if type(stop_early) is not bool:
+            raise AgentError(
+                f"{type(self).__name__}.stop_early must be a bool, got "
+                f"{type(stop_early).__name__}."
+            )
+        self.thinking_rounds = thinking_rounds
+
+        # 2. Store the thinking state the merge hook and hooks read.
+        self._thinking_config = normalize_prompt_config(
+            thinking_instructions,
+            default_template=self.DEFAULT_THINKING_PROMPT,
+            provided_description="Thinking instructions",
+            default_description="Default thinking instructions.",
+            error_label="thinking_instructions",
+        )
+        self._stop_early = stop_early
+        # Built once; the wrapper is the only structured thinking output.
+        self._thinking_output = (
+            copy.deepcopy(STOP_EARLY_SCHEMA_TEMPLATE) if stop_early else None
+        )
+
+        # 3. Construct through BasicAgent.
+        super().__init__(
+            name=name,
+            namespace=namespace,
+            description=description,
+            llm_engine=llm_engine,
+            role_prompt=role_prompt,
+            record_enabled=record_enabled,
+            pre_invoke=pre_invoke,
+            post_invoke=post_invoke,
+            inputs_to_context=inputs_to_context,
+            response_to_context=response_to_context,
+            response_to_post=response_to_post,
+            use_runtime_context=use_runtime_context,
+            records_window=records_window,
+            response_schema=response_schema,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Properties (read-only)
+    # ------------------------------------------------------------------ #
+    @property
+    def thinking_rounds(self) -> int:
+        """Exact thinking-call count, or the cap under ``stop_early``. Mutable."""
+        return self._thinking_rounds
+
+    @thinking_rounds.setter
+    def thinking_rounds(self, value: int) -> None:
+        if type(value) is not int or value < 0:
+            raise AgentError(
+                f"{type(self).__name__}.thinking_rounds must be a concrete int "
+                f">= 0, got {value!r}."
+            )
+        self._thinking_rounds = value
+
+    @property
+    def stop_early(self) -> bool:
+        """Whether the model may end thinking before ``thinking_rounds``."""
+        return self._stop_early
+
+    # ------------------------------------------------------------------ #
+    # Signature seam
+    # ------------------------------------------------------------------ #
+    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
+        """
+        Reconcile the role prompt's placeholders with the thinking prompt's.
+
+        1. build reports with the role prompt as the priority source
+        2. raise on a true collision, warn on a compatible-but-not-identical
+           overlap (role wins)
+        3. return the reconciled parameters in signature order
+
+        Known limit: the overlap warning's ``stacklevel`` (and ``Agent``'s own
+        overlap warning) assume a direct ``ScratchpadAgent(...)`` call; through a
+        user subclass they point one frame short.
+        """
+        reports = build_parameter_reports(
+            [role_params, list(self._thinking_config.parameters)]
+        )
+        # stacklevel 5: apply_parameter_reports <- here <- BasicAgent.__init__
+        # <- ScratchpadAgent.__init__ <- the code constructing the agent.
+        constructed = apply_parameter_reports(
+            reports,
+            ("role_prompt", "thinking_instructions"),
+            error_cls=AgentError,
+            stacklevel=5,
+        )
+        return insert_by_category([], constructed)
+
+    # ------------------------------------------------------------------ #
+    # Strategy hooks
+    # ------------------------------------------------------------------ #
+    def _thinking_done(self, task: ScratchpadTask) -> bool:
+        """The round count is reached, or the model has ended thinking."""
+        return len(task.thoughts) >= self._thinking_rounds or not task.more_thinking_required
+
+    def _generate_thoughts(self, task: ScratchpadTask) -> None:
+        """
+        One thinking round.
+
+        1. render, call the engine, record the call; the output structure is
+           ``None`` (free text), or the ``stop_early`` wrapper
+        2. under ``stop_early``, check the reply is ``{thought: str,
+           more_thinking_required: bool}`` (``AgentInvocationError`` if not),
+           unwrap it and set ``task.more_thinking_required``
+        3. append the stripped thought
+        """
+        messages = self.render_task(task)
+        engine_result = self._llm_engine.invoke({
+            "messages": messages,
+            "output_structure": self._thinking_output,
+        })
+        task.llm_records.append(LLMRecord(
+            messages=list(task.task_messages),
+            llm_result=engine_result,
+        ))
+
+        thought = engine_result.result
+        if self._stop_early:
+            if not (
+                isinstance(thought, Mapping)
+                and isinstance(thought.get("thought"), str)
+                and isinstance(thought.get("more_thinking_required"), bool)
+            ):
+                raise AgentInvocationError(
+                    f"{self.full_name}: a stop_early thinking reply must be an object "
+                    "with a string 'thought' and a boolean 'more_thinking_required', "
+                    f"got {thought!r}."
+                )
+            task.more_thinking_required = thought["more_thinking_required"]
+            thought = thought["thought"]
+        task.thoughts.append(thought.strip())
+
+    async def _agenerate_thoughts(self, task: ScratchpadTask) -> None:
+        """Async twin of ``_generate_thoughts`` (awaits ``async_invoke``)."""
+        messages = self.render_task(task)
+        engine_result = await self._llm_engine.async_invoke({
+            "messages": messages,
+            "output_structure": self._thinking_output,
+        })
+        task.llm_records.append(LLMRecord(
+            messages=list(task.task_messages),
+            llm_result=engine_result,
+        ))
+
+        thought = engine_result.result
+        if self._stop_early:
+            if not (
+                isinstance(thought, Mapping)
+                and isinstance(thought.get("thought"), str)
+                and isinstance(thought.get("more_thinking_required"), bool)
+            ):
+                raise AgentInvocationError(
+                    f"{self.full_name}: a stop_early thinking reply must be an object "
+                    "with a string 'thought' and a boolean 'more_thinking_required', "
+                    f"got {thought!r}."
+                )
+            task.more_thinking_required = thought["more_thinking_required"]
+            thought = thought["thought"]
+        task.thoughts.append(thought.strip())
+
+    # ------------------------------------------------------------------ #
+    # Rendering
+    # ------------------------------------------------------------------ #
+    def _render_system_message(self, task: ScratchpadTask) -> list[dict[str, str]]:
+        """
+        1. thinking finished: the inherited (role) message
+        2. otherwise the thinking instructions rendered against ``task.inputs``
+        3. with ``stop_early``: those between the instruction markers, followed
+           by the early-stop format section
+
+        ``stop_early`` is fixed at construction, so the agent attribute is read
+        directly; nothing is snapshotted on the task.
+        """
+        if task.thinking_complete:
+            return super()._render_system_message(task)
+        content = self._thinking_config.render(task.inputs)
+        if self._stop_early:
+            content = (
+                frame_content(content, "USER-DEFINED THINKING INSTRUCTIONS")
+                + "\n\n"
+                + STOP_EARLY_PROMPT_SECTION
+            )
+        return [{"role": "system", "content": content}]
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> dict:
+        """Diagnostic snapshot including this agent's thinking knobs."""
+        d = super().to_dict()
+        d["thinking_instructions"] = self._thinking_config.template
+        d["thinking_rounds"] = self._thinking_rounds
+        d["stop_early"] = self._stop_early
+        return d

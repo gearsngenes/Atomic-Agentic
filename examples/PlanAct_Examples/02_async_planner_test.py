@@ -1,41 +1,41 @@
 import logging
 import time
-from dotenv import load_dotenv
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
-load_dotenv()
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
-
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
 
 def testDelayPrint() -> None:
-    print("Called Print, now waiting 10 seconds...")
-    time.sleep(10)
+    print("Called Print, now waiting 3 seconds...")
+    time.sleep(3)
 
 
 async_tester = PlanActAgent(
     name="Async_Delay_Tester",
+    namespace="examples",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    record_enabled=False,
 )
 
-# Register the callable (capture the fully-qualified tool id)
-async_tester.register(
+# Register the callable under an explicit alias.
+async_tester.register_tool(
     testDelayPrint,
-    name="DelayPrint",
-    description="delay for 10 seconds.",
-    namespace="local",
+    alias="DelayPrint",
+    description="delay for 3 seconds.",
 )
 
 if __name__ == "__main__":
-    sequentially = True
-    prompt = (
-        f"Call 'DelayPrint' EXACTLY FIVE TIMES, but call them {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"}.\n"
-    )
+    choice = input("Run steps sequentially? (y/n): ").strip().lower()
+    async_tester.tool_concurrency_limit = 1 if choice == "y" else None
+    prompt = "Call 'DelayPrint' exactly five times"
 
     start = time.time()
     async_tester.invoke({"prompt": prompt})

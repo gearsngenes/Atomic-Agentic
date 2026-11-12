@@ -1,46 +1,63 @@
+"""01_tool_orchestrator_test.py
+
+ReActAgent iteratively orchestrating math + console tools to solve a
+multi-step arithmetic task: one tool call generated, resolved, and
+dispatched per round, reacting to each result before deciding the next.
+
+Analogous to PlanAct_Examples/00_plan_test.py, but no upfront plan is ever
+written -- each round's single best next call is decided fresh against
+everything completed so far this run.
+"""
 import logging
 import math
 
-from dotenv import load_dotenv
-
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Plugins import CONSOLE_TOOLS, MATH_TOOLS  # lists of Tool objects
 
-load_dotenv()  # take environment variables from .env file (if exists)
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
+
+from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
 
-# 1) LLM engine (model/key via env)
-llm = OpenAIEngine(model="gpt-4o-mini")
-
-# 2) ReAct-style Orchestrator (iterative tool-use)
 orchestrator = ReActAgent(
     name="MathOrchestrator",
+    namespace="examples",
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
-    llm_engine=llm,
-    history_window=20,    # send-window (turns) to the model
+    llm_engine=llm_engine,
+    records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
-    context_enabled=True,
+    record_enabled=True,
+    
 )
 
-# 3) Register tool lists
-orchestrator.batch_register(MATH_TOOLS)
-orchestrator.batch_register(CONSOLE_TOOLS)
+orchestrator.register_tools(BASIC_MATH_TOOLS)
+orchestrator.register_tools(CONSOLE_TOOLS)
+orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below needs both
 
-# 4) Register the pi constant
-orchestrator.register_constant("PI", math.pi, "Mathematical constant `PI`")
+# A fixed value the model may reference as $PI: a readonly context variable
+# on the agent's conversation.
+orchestrator.get_conversation().remember(
+    "PI", math.pi, "The mathematical constant pi.", readonly=True,
+)
 
-# 4) Task (schema-first: mapping with 'prompt')
 task = """
-Complete the following problem:
-1. Compute the volume of a cylinder with a radius of 2 and a height of 10 [V(r, h) = pi * r^2 * h].
-2. Then print the result in the format "The volume of the cylinder is: <result>".
-Return None.
+Solve EACH question and print its result:
+1) The area of a circle with a radius of 5 (pi * r^2).
+2) The hypotenuse length of a triangle with legs a=3, b=4
+3) The volume of a cylinder with radius of 2 and height of 10 (pi * r^2 * h).
+
+Print each question-answer pair after solving it in the format:
+"<question>: <calculated_answer>\n"
+
+Stop once you've answered each question. Return None.
 """
 
 final_result = orchestrator.invoke({"prompt": task})
 
-print(f"\nFinal Result: {final_result}")
-from pprint import pprint
-pprint(orchestrator.blackboard)
+print(f"\nFinal Result: {final_result.result}")
+
+print("\nExecuted calls:\n")
+print(orchestrator.get_conversation().records[-1].render_as_code())

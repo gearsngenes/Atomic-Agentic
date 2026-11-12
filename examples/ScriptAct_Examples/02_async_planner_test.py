@@ -1,0 +1,70 @@
+"""02_async_planner_test.py
+
+Mirrors PlanAct_Examples/02_async_planner_test.py, rebuilt on ScriptActAgent.
+
+PlanAct's JSON plan marks ordering with a numeric "await" step index;
+ScriptActAgent has no model-facing concurrency signal at all anymore -- five
+*bare* calls with no data dependencies between them always batch together
+and dispatch concurrently (each sync callable runs via asyncio.to_thread
+under the hood) unless the *developer* caps it. `tool_concurrency_limit`
+is that cap: `None` (the default) leaves the dependency-inferred batching
+alone; `1` forces every dispatched call into its own batch, i.e. strictly
+sequential, matching CodeAct/`CodeAgent`'s own fully-sequential posture.
+
+After the run, prints the reconstructed source via
+ScriptActAgentRecord.render_as_code() -- its `# Batch N:` grouping is the
+visible proof of what actually happened, replacing the old "did the model
+write await" inspection (there's nothing left for the model to write or
+omit here). This is the one deliberate deviation from the PlanAct original,
+which uses `record_enabled=False` and never inspects history (a JSON plan
+isn't as directly inspectable); ScriptActAgent's render_as_code() is worth the
+extra `record_enabled=True` here.
+"""
+import logging
+import time
+
+from atomic_agentic.agents import ScriptActAgent
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shared_engine import llm_engine
+
+logging.basicConfig(level=logging.INFO)
+
+
+def testDelayPrint() -> None:
+    print("Called Print, now waiting 2 seconds...")
+    time.sleep(2)
+
+
+async_tester = ScriptActAgent(
+    name="Async_Delay_Tester",
+    namespace="examples",
+    description="Tests the ability to run independent statements concurrently.",
+    llm_engine=llm_engine,
+    record_enabled=True,
+    replanning_limit=1,
+)
+
+async_tester.register_tool(
+    testDelayPrint,
+    alias="DelayPrint",
+    description="Delay for 5 seconds.",
+)
+
+if __name__ == "__main__":
+    choice = input("Run steps sequentially? (y/n): ").strip().lower()
+    async_tester.tool_concurrency_limit = 1 if choice == "y" else None
+    prompt = "Call 'DelayPrint' EXACTLY FIVE TIMES."
+
+    start = time.time()
+    async_tester.invoke({"prompt": prompt})
+    end = time.time()
+
+    print("Time taken:", end - start, "seconds")
+
+    record = async_tester.get_conversation().records[-1]
+    print("\n=== EXECUTED SCRIPT (grouped by concurrent batch) ===")
+    print(record.render_as_code())

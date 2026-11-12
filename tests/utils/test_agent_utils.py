@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import ast
+
+from atomic_agentic.constants.agents import (
+    ATTR_CALL_ALIAS,
+    KWARGS_UNPACK_KEY,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+)
+from atomic_agentic.models.agents.blackboard_models import ToolStatement
+from atomic_agentic.tools import Tool
+from atomic_agentic.utils.agents import check_call_bindings
+
+
+def _name(identifier: str) -> ast.Name:
+    return ast.Name(id=identifier, ctx=ast.Load())
+
+
+def _const(value: object) -> ast.Constant:
+    return ast.Constant(value=value)
+
+
+def _add(a: int, b: int = 0) -> int:
+    return a + b
+
+
+_TOOLBOX = {"add": Tool(function=_add, name="add", namespace="tests", description="Adds.")}
+
+
+class TestCheckCallBindings:
+    def test_clean_call_returns_empty(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1),), kwargs={"b": _const(2)})
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_too_many_positionals(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1), _const(2), _const(3)))
+
+        issues = check_call_bindings([slot], _TOOLBOX)
+
+        assert len(issues) == 1
+        assert "'add'" in issues[0] and "do not fit its signature" in issues[0]
+        assert issues[0].startswith("statement producing y ")
+
+    def test_unknown_keyword(self) -> None:
+        slot = ToolStatement(identifier=None, tool="add", kwargs={"zzz": _const(1)})
+
+        issues = check_call_bindings([slot], _TOOLBOX)
+
+        assert len(issues) == 1
+        assert "(unassigned)" in issues[0]
+
+    def test_duplicate_argument_via_position_and_keyword(self) -> None:
+        slot = ToolStatement(identifier="y", tool="add", args=(_const(1),), kwargs={"a": _const(2)})
+
+        assert len(check_call_bindings([slot], _TOOLBOX)) == 1
+
+    def test_star_unpack_is_skipped(self) -> None:
+        starred = ast.Starred(value=_name("xs"), ctx=ast.Load())
+        slot = ToolStatement(
+            identifier="y", tool="add", args=(starred, _const(1), _const(2), _const(3)),
+        )
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_kwargs_unpack_is_skipped(self) -> None:
+        slot = ToolStatement(
+            identifier="y", tool="add",
+            args=(_const(1), _const(2), _const(3)), kwargs={KWARGS_UNPACK_KEY: _name("kw")},
+        )
+
+        assert check_call_bindings([slot], _TOOLBOX) == []
+
+    def test_builtin_attr_and_sentinel_slots_are_skipped(self) -> None:
+        slots = [
+            ToolStatement(identifier="a", tool=PY_BUILTIN_ALIAS, args=("len", _const(1), _const(2))),
+            ToolStatement(identifier="b", tool=ATTR_CALL_ALIAS, args=(_name("x"), "m", _const(1))),
+            ToolStatement(identifier="c", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
+            ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)}),
+            ToolStatement(identifier="d", tool="not_registered", args=(_const(1),)),
+        ]
+
+        assert check_call_bindings(slots, _TOOLBOX) == []

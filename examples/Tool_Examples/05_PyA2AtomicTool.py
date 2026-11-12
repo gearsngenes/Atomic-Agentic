@@ -4,9 +4,9 @@ import argparse
 import json
 from typing import Any, Mapping
 
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.core.sentinels import NO_VAL
-from atomic_agentic.tools.a2a import PyA2AtomicTool
+from atomic_agentic.a2a import PyA2AtomicClient
+from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.tools import PyA2AtomicTool
 
 
 DEFAULT_TARGETS: dict[str, dict[str, Any]] = {
@@ -69,7 +69,7 @@ def show_plan(tool: PyA2AtomicTool) -> None:
     print("remote_name :", tool.remote_name)
     print("namespace   :", tool.namespace)
     print("description :", tool.description)
-    print("signature   :", tool.signature)
+    print("signature   :", tool.fullname_signature)
     print("return_type :", tool.return_type)
     print("parameters  :")
     for param in tool.parameters:
@@ -144,8 +144,8 @@ def main() -> None:
     print("\n=== INVOKE ===")
     print("inputs:", json.dumps(inputs, indent=2))
     result = tool.invoke(inputs)
-    print("result:", _jsonable(result))
-    print("type  :", type(result).__name__)
+    print("result:", _jsonable(result.result))
+    print("type  :", type(result.result).__name__)
 
 
 if __name__ == "__main__":

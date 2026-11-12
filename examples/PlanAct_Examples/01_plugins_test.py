@@ -1,31 +1,36 @@
-from dotenv import load_dotenv
 import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.Plugins import MATH_TOOLS, CONSOLE_TOOLS
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
-load_dotenv()
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from prebuilt_tools import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
+
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
 print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
+    namespace="examples",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
-    context_enabled=True,
+    record_enabled=True,
 )
 
 # Register tool lists
-agent.batch_register(MATH_TOOLS)
-agent.batch_register(CONSOLE_TOOLS)
+agent.register_tools(EXPONENT_TOOLS)
+agent.register_tools(BASIC_MATH_TOOLS)
+agent.register_tools(CONSOLE_TOOLS)
 
-# Register the pi constant
-agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
+# pi as a readonly context variable: the model sees it in its context block and
+# can reference it as "$PI", but a plan cannot reassign it.
+agent.get_conversation().remember("PI", math.pi, "The mathematical constant pi.", readonly=True)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -37,8 +42,10 @@ Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN O
 """
 
 print("\n⇢ Executing math demo …")
-agent.invoke({"prompt": task_prompt})
+result = agent.invoke({"prompt": task_prompt})
 from pprint import pprint
-print("BLACKBOARD AFTER MATH DEMO:")
-pprint(agent.blackboard)
+print("\n=== FINAL AGENT RESULT ===")
+pprint(result)
+print("EXECUTED CALLS AFTER MATH DEMO:")
+print(agent.get_conversation().records[-1].render_as_code())
 agent.clear_memory()

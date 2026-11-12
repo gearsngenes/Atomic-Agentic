@@ -4,9 +4,9 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.a2a import PyA2AtomicHost
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 
@@ -16,8 +16,9 @@ def main() -> None:
 
     llm = OpenAIEngine(model="gpt-4o-mini")
 
-    trivia_agent = Agent(
+    trivia_agent = BasicAgent(
         name="TriviaAgent",
+        namespace="trivia_host",
         description="A concise trivia agent that returns one interesting fact about the user's topic.",
         llm_engine=llm,
         role_prompt=(
@@ -25,7 +26,7 @@ def main() -> None:
             "When given a prompt or topic, return one accurate and interesting trivia fact "
             "in 2-4 sentences."
         ),
-        context_enabled=False,
+        record_enabled=False,
     )
 
     host = PyA2AtomicHost(
@@ -36,7 +37,7 @@ def main() -> None:
         host="localhost",
         port=6000,
     )
-    host.run_server(debug=True)
+    host.run_server()
 
 
 if __name__ == "__main__":

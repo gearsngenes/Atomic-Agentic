@@ -3,18 +3,19 @@ from __future__ import annotations
 import asyncio
 from collections import namedtuple
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import PackagingError
+from atomic_agentic.exceptions import PackagingError
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.models.results import AtomicResult, StructuredResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import (
     StructuredInvokable,
-    StructuredResultDict,
 )
 
 
@@ -25,6 +26,7 @@ def make_param(
     kind: str = ParamSpec.POSITIONAL_OR_KEYWORD,
     type_: str = "Any",
     default: Any = NO_VAL,
+    description: str | None = None,
 ) -> ParamSpec:
     return ParamSpec(
         name=name,
@@ -32,6 +34,7 @@ def make_param(
         kind=kind,
         type=type_,
         default=default,
+        description=description,
     )
 
 
@@ -66,7 +69,6 @@ def dummy_component() -> Tool:
         name="echo_value",
         namespace="tests",
         description="Echo test value.",
-        filter_extraneous_inputs=True,
     )
 
 
@@ -89,37 +91,47 @@ class RecordingInvokable(AtomicInvokable):
         *,
         raw_result: Any,
         name: str = "recording_invokable",
+        namespace: str = "tests",
         description: str = "Recording invokable.",
-        filter_extraneous_inputs: bool = True,
         raise_sync: Exception | None = None,
         raise_async: Exception | None = None,
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[
                 make_param("value", 0, type_="Any"),
             ],
             return_type="Any",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
         self.raw_result = raw_result
         self.raise_sync = raise_sync
         self.raise_async = raise_async
         self.calls: list[dict[str, Any]] = []
         self.async_calls: list[dict[str, Any]] = []
+        self.results: list[AtomicResult] = []
+        self.async_results: list[AtomicResult] = []
 
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         self.calls.append(dict(inputs))
         if self.raise_sync is not None:
             raise self.raise_sync
-        return self.raw_result
+        started_at = datetime.now(timezone.utc)
+        ended_at = datetime.now(timezone.utc)
+        result = self.make_result(result=self.raw_result, started_at=started_at, ended_at=ended_at)
+        self.results.append(result)
+        return result
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         self.async_calls.append(dict(inputs))
         if self.raise_async is not None:
             raise self.raise_async
-        return self.raw_result
+        started_at = datetime.now(timezone.utc)
+        ended_at = datetime.now(timezone.utc)
+        result = self.make_result(result=self.raw_result, started_at=started_at, ended_at=ended_at)
+        self.async_results.append(result)
+        return result
 
 
 class ModelDumpObject:
@@ -143,35 +155,17 @@ class UnsupportedObject:
     __slots__ = ()
 
 
-class TestStructuredResultDict:
-    def test_copy_preserves_mapping_items_and_raw_result(self) -> None:
-        result = StructuredResultDict({"a": 1}, raw_result={"raw": True})
-
-        copied = result.copy()
-
-        assert copied == {"a": 1}
-        assert copied.raw_result == {"raw": True}
-        assert copied is not result
-
-    def test_raw_result_is_not_mapping_item(self) -> None:
-        result = StructuredResultDict({"a": 1}, raw_result={"raw": True})
-
-        assert "raw_result" not in result
-        assert result.raw_result == {"raw": True}
-
-
 class TestStructuredInvokableConstruction:
     def test_requires_atomic_invokable_component(self) -> None:
         with pytest.raises(TypeError, match="AtomicInvokable"):
             StructuredInvokable(component=object())  # type: ignore[arg-type]
 
-    def test_inherits_component_identity_parameters_and_filter_flag(self) -> None:
+    def test_inherits_component_identity_and_parameters(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
             namespace="tests",
             description="Return a mapping.",
-            filter_extraneous_inputs=False,
         )
 
         wrapper = StructuredInvokable(component=component, output_schema=["a"])
@@ -180,16 +174,14 @@ class TestStructuredInvokableConstruction:
         assert wrapper.name == component.name
         assert "Return a mapping." in wrapper.description
         assert wrapper.parameters == component.parameters
-        assert wrapper.filter_extraneous_inputs is False
-        assert wrapper.return_type == "StructuredResultDict[str, Any]"
+        assert wrapper.return_type == "dict[str, Any]"
 
-    def test_explicit_identity_and_filter_override_component(self) -> None:
+    def test_explicit_identity_overrides_component(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
             namespace="tests",
             description="Return a mapping.",
-            filter_extraneous_inputs=False,
         )
 
         wrapper = StructuredInvokable(
@@ -197,12 +189,10 @@ class TestStructuredInvokableConstruction:
             name="structured_mapping",
             description="Structured mapping.",
             output_schema=["a"],
-            filter_extraneous_inputs=True,
         )
 
         assert wrapper.name == "structured_mapping"
         assert "Structured mapping." in wrapper.description
-        assert wrapper.filter_extraneous_inputs is True
 
     def test_output_schema_normalizes_string_list_and_properties(self) -> None:
         wrapper = structured(output_schema=["a", "b"])
@@ -281,13 +271,13 @@ class TestStructuredInvokablePolicyValidation:
     def test_description_rejects_non_string(self) -> None:
         wrapper = structured(output_schema=["a"])
 
-        with pytest.raises(TypeError, match="description"):
+        with pytest.raises(ValueError, match="description"):
             wrapper.description = 123  # type: ignore[assignment]
 
     def test_description_rejects_empty_string(self) -> None:
         wrapper = structured(output_schema=["a"])
 
-        with pytest.raises(ValueError, match="description cannot be empty"):
+        with pytest.raises(ValueError, match="description"):
             wrapper.description = "   "
 
     @pytest.mark.parametrize("mode", ["raise", "RAISE", "drop", "DROP", "fill", "FILL"])
@@ -295,23 +285,17 @@ class TestStructuredInvokablePolicyValidation:
         self,
         mode: str,
     ) -> None:
-        wrapper = structured(output_schema=["a"])
-
-        wrapper.absent_value_mode = mode
+        wrapper = structured(output_schema=["a"], absent_value_mode=mode)
 
         assert wrapper.absent_value_mode == mode.upper()
 
     def test_absent_value_mode_rejects_invalid_string(self) -> None:
-        wrapper = structured(output_schema=["a"])
-
         with pytest.raises(ValueError, match="absent_value_mode"):
-            wrapper.absent_value_mode = "ignore"
+            structured(output_schema=["a"], absent_value_mode="ignore")
 
     def test_absent_value_mode_rejects_non_string(self) -> None:
-        wrapper = structured(output_schema=["a"])
-
         with pytest.raises(TypeError, match="absent_value_mode"):
-            wrapper.absent_value_mode = 123  # type: ignore[assignment]
+            structured(output_schema=["a"], absent_value_mode=123)  # type: ignore[arg-type]
 
 
 class TestStructuredInvokableMappingPackaging:
@@ -650,7 +634,7 @@ class TestStructuredInvokableMissingValues:
 
 
 class TestStructuredInvokableInvoke:
-    def test_invoke_returns_structured_result_and_preserves_raw_result(self) -> None:
+    def test_invoke_returns_structured_result_with_packaged_payload(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
@@ -661,9 +645,11 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({"value": 10})
 
-        assert isinstance(result, StructuredResultDict)
-        assert result == {"a": 10, "b": 2}
-        assert result.raw_result == {"a": 10, "b": 2}
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"a": 10, "b": 2}
+        assert result.unpackaged_result == {"a": 10, "b": 2}
+        assert result.missing_keys == ()
+        assert result.invoker_id == wrapper.instance_id
 
     def test_invoke_applies_missing_value_handling(self) -> None:
         component = Tool(
@@ -682,8 +668,10 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({})
 
-        assert result == {"a": "filled", "b": 2}
-        assert result.raw_result == {"a": None, "b": 2}
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"a": "filled", "b": 2}
+        assert result.unpackaged_result == {"a": None, "b": 2}
+        assert result.missing_keys == ("a",)
 
     def test_invoke_filters_inputs_before_calling_component(self) -> None:
         component = RecordingInvokable(raw_result={"value": 123})
@@ -691,7 +679,10 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({"value": 123, "extra": "ignored"})
 
-        assert result == {"value": 123}
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"value": 123}
+        assert result.unpackaged_result == {"value": 123}
+        assert result.component_run_id == component.results[-1].run_id
         assert component.calls == [{"value": 123}]
 
     def test_async_invoke_mirrors_sync_contract(self) -> None:
@@ -700,9 +691,10 @@ class TestStructuredInvokableInvoke:
 
         result = asyncio.run(wrapper.async_invoke({"value": 123, "extra": "ignored"}))
 
-        assert isinstance(result, StructuredResultDict)
-        assert result == {"value": 123}
-        assert result.raw_result == {"value": 123}
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"value": 123}
+        assert result.unpackaged_result == {"value": 123}
+        assert result.component_run_id == component.async_results[-1].run_id
         assert component.async_calls == [{"value": 123}]
 
     def test_component_sync_exception_propagates(self) -> None:
@@ -724,3 +716,98 @@ class TestStructuredInvokableInvoke:
 
         with pytest.raises(RuntimeError, match="async component failed"):
             asyncio.run(wrapper.async_invoke({"value": 1}))
+
+
+class TestStructuredInvokableNamespace:
+    def test_inherits_namespace_from_component(self) -> None:
+        component = Tool(
+            function=lambda value: value,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        si = StructuredInvokable(component=component)
+        assert si.namespace == "comp_ns"
+
+    def test_explicit_namespace_overrides_component(self) -> None:
+        component = Tool(
+            function=lambda value: value,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        si = StructuredInvokable(component=component, namespace="si_ns")
+        assert si.namespace == "si_ns"
+
+
+class _DescribedInvokable(AtomicInvokable):
+    """Minimal concrete invokable for testing described-param propagation in SI."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {}
+
+
+class _ExtraDescriptionComponent(AtomicInvokable):
+    """Concrete invokable with a non-empty _extra_description(), for testing SI's component-chaining."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {}
+
+    def _extra_description(self) -> str:
+        return "inner extra"
+
+
+class TestStructuredInvokableChainsComponentExtraDescription:
+    def test_chains_into_wrapped_components_own_extra_description(self) -> None:
+        component = _ExtraDescriptionComponent(
+            name="inner", namespace="tests", description="Inner desc.",
+            parameters=[], return_type="Any",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper.description == "Inner desc.\ninner extra\nOutput schema: [result]"
+
+
+class TestStructuredInvokableDescriptionGetter:
+    def test_no_described_params_output_schema_appends_cleanly(self) -> None:
+        component = Tool(
+            function=echo_value,
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper.description == "Base desc.\nOutput schema: [result]"
+
+    def test_described_params_appear_before_output_schema(self) -> None:
+        described_param = make_param("x", 0, description="the x value")
+        component = _DescribedInvokable(
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+            parameters=[described_param],
+            return_type="Any",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        desc = wrapper.description
+        assert "- x: the x value" in desc
+        assert desc.index("- x: the x value") < desc.index("Output schema:")
+
+    def test_init_copies_raw_description_not_getter(self) -> None:
+        described_param = make_param("x", 0, description="the x value")
+        component = _DescribedInvokable(
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+            parameters=[described_param],
+            return_type="Any",
+        )
+        assert component.description != component._description
+
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper._description == component._description
+        assert "- x: the x value" in wrapper.description
+        assert wrapper.description.count("- x: the x value") == 1

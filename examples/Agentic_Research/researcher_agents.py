@@ -1,8 +1,8 @@
 from typing import Any, Mapping
 from dotenv import load_dotenv
 
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 
@@ -32,8 +32,9 @@ def writer_pre(*, query: str = "", sources: list[str] | None = None, revision_no
 def writer_post(*, result: Any) -> Mapping[str, str]:
     return {"draft": str(result).strip()}
 
-writer = Agent(
+writer = BasicAgent(
     name="report_writer",
+    namespace="research",
     description="Drafts and revises an APA-style research report.",
     llm_engine=llm,
     role_prompt=(
@@ -43,8 +44,8 @@ writer = Agent(
     ),
     pre_invoke=writer_pre,
     post_invoke=writer_post,
-    filter_extraneous_inputs=True,
-    context_enabled=True,
+    response_to_post="result",
+    record_enabled=True,
 )
 
 
@@ -60,8 +61,9 @@ def critic_pre(*, draft: str) -> str:
 def critic_post(*, result: str) -> Mapping[str, str]:
     return {"revision_notes": str(result).strip()}
 
-critic = Agent(
+critic = BasicAgent(
     name="report_critic",
+    namespace="research",
     description="Reviews the report draft and returns revision notes or <<APPROVED>>.",
     llm_engine=llm,
     role_prompt=(
@@ -76,8 +78,8 @@ critic = Agent(
     ),
     pre_invoke=critic_pre,
     post_invoke=critic_post,
-    filter_extraneous_inputs=True,
-    context_enabled=False,
+    response_to_post="result",
+    record_enabled=False,
 )
 
 if __name__ == "__main__":
@@ -87,5 +89,5 @@ if __name__ == "__main__":
         "Source 1: CRISPR has shown promise in treating genetic diseases (Smith et al., 2020). [URL]",
         "Source 2: Ethical concerns around CRISPR include potential off-target effects and germline editing (Doe, 2021). [URL]",
     ]
-    draft = writer.invoke({"query": query, "sources": sources})
+    draft = writer.invoke({"query": query, "sources": sources}).result
     print("Draft:\n", draft["draft"])

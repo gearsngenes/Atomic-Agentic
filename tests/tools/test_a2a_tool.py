@@ -7,10 +7,12 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.core.Exceptions import ToolDefinitionError, ToolInvocationError
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.tools.a2a import PyA2AtomicTool
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
+from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.exceptions import RemoteInvocationError, ToolDefinitionError, ToolInvocationError
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results.tools import PyA2AtomicToolResult
+from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 
 def param_dict(
     name: str,
@@ -36,6 +38,7 @@ def remote_metadata(
     description: str = "Remote echo invokable.",
     return_type: str = "dict[str, Any]",
     parameters: list[Mapping[str, Any]] | None = None,
+    extra_description: str = "",
 ) -> dict[str, Any]:
     return {
         "name": "echo",
@@ -49,8 +52,8 @@ def remote_metadata(
             ]
         ),
         "return_type": return_type,
-        "filter_extraneous_inputs": True,
         "invokable_type": "EchoInvokable",
+        "extra_description": extra_description,
     }
 
 
@@ -66,6 +69,7 @@ class FakePyA2AtomicClient(PyA2AtomicClient):
         agent_description: str = "Remote agent card description.",
         metadata: Mapping[str, Any] | None = None,
         result: Any | None = None,
+        raw_payload: dict[str, Any] | None = None,
         call_error: Exception | None = None,
     ) -> None:
         self._url = url
@@ -76,6 +80,7 @@ class FakePyA2AtomicClient(PyA2AtomicClient):
         )
         self.metadata: dict[str, Any] = dict(metadata or remote_metadata())
         self.result = result if result is not None else {"ok": True}
+        self.raw_payload = raw_payload
         self.call_error = call_error
         self.metadata_calls: list[str] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -100,11 +105,13 @@ class FakePyA2AtomicClient(PyA2AtomicClient):
         self.metadata_calls.append(remote_name)
         return dict(self.metadata)
 
-    def call_invokable(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+    def call_invokable(self, remote_name: str, inputs: Mapping[str, Any]) -> dict[str, Any]:
         self.calls.append((remote_name, dict(inputs)))
         if self.call_error is not None:
             raise self.call_error
-        return self.result
+        if self.raw_payload is not None:
+            return dict(self.raw_payload)
+        return {"__py_a2a_result__": self.result}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,26 +207,13 @@ class TestPyA2AtomicToolConstruction:
         with pytest.raises(TypeError, match="PyA2AtomicClient"):
             PyA2AtomicTool(remote_name="echo", client=object())  # type: ignore[arg-type]
 
-    def test_client_plus_raw_transport_settings_raises(self) -> None:
-        with pytest.raises(ValueError, match="either client or raw transport"):
-            PyA2AtomicTool(
-                remote_name="echo",
-                client=FakePyA2AtomicClient(),
-                url="http://example.test",
-            )
-
-    def test_url_required_when_client_not_provided(self) -> None:
-        with pytest.raises(ValueError, match="url is required"):
-            PyA2AtomicTool(remote_name="echo")
-
-
 class TestPyA2AtomicToolSignatureAndMetadata:
     def test_parameters_and_return_type_come_from_remote_metadata(self) -> None:
         tool = make_tool()
 
         assert [(p.name, p.kind, p.type, p.default) for p in tool.parameters] == [
-            ("value", ParamSpec.POSITIONAL_OR_KEYWORD, "Any", NO_VAL),
-            ("tag", ParamSpec.POSITIONAL_OR_KEYWORD, "str", "default"),
+            ("value", ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",), NO_VAL),
+            ("tag", ParamSpec.POSITIONAL_OR_KEYWORD, ("str",), "default"),
         ]
         assert tool.return_type == "dict[str, Any]"
 
@@ -231,41 +225,27 @@ class TestPyA2AtomicToolSignatureAndMetadata:
 
         assert tool.remote_metadata["description"] == "Remote echo invokable."
 
-    def test_invalid_remote_parameters_type_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
+class TestPyA2AtomicToolExtraDescription:
+    def test_extra_description_empty_by_default(self) -> None:
+        tool = make_tool()
+
+        assert tool._extra_description() == ""
+
+    def test_surfaces_remote_extra_description_verbatim(self) -> None:
+        client = FakePyA2AtomicClient(
+            metadata=remote_metadata(extra_description="Output schema: [result]")
+        )
         tool = make_tool(client=client)
 
-        client.metadata = {
-            **remote_metadata(),
-            "parameters": "bad",
-        }
+        assert tool._extra_description() == "Output schema: [result]"
 
-        with pytest.raises(ToolDefinitionError, match="'parameters' must be a list"):
-            tool.refresh()
-
-    def test_invalid_remote_parameter_item_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
+    def test_extra_description_defaults_to_empty_when_key_missing_from_legacy_host(self) -> None:
+        legacy_metadata = remote_metadata()
+        del legacy_metadata["extra_description"]
+        client = FakePyA2AtomicClient(metadata=legacy_metadata)
         tool = make_tool(client=client)
 
-        client.metadata = {
-            **remote_metadata(),
-            "parameters": ["bad"],
-        }
-
-        with pytest.raises(ToolDefinitionError, match="parameters\\[0\\]"):
-            tool.refresh()
-
-    def test_invalid_remote_return_type_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(client=client)
-
-        client.metadata = {
-            **remote_metadata(),
-            "return_type": 123,
-        }
-
-        with pytest.raises(ToolDefinitionError, match="'return_type' must be a str"):
-            tool.refresh()
+        assert tool._extra_description() == ""
 
 
 class TestPyA2AtomicToolInvocation:
@@ -275,8 +255,8 @@ class TestPyA2AtomicToolInvocation:
 
         result = tool.invoke({"value": 123})
 
-        assert result == {"value": 123}
-        assert client.calls == [("echo", {"value": 123})]
+        assert result.result == {"value": 123}
+        assert client.calls == [("echo", {"value": 123, "tag": "default"})]
 
     def test_to_arg_kwarg_returns_empty_args_and_copy_of_kwargs(self) -> None:
         tool = make_tool()
@@ -294,14 +274,21 @@ class TestPyA2AtomicToolInvocation:
         with pytest.raises(ToolInvocationError, match="do not accept positional"):
             tool.execute((1,), {})
 
+    def test_execute_wraps_client_exception(self) -> None:
+        client = FakePyA2AtomicClient(call_error=RuntimeError("remote boom"))
+        tool = make_tool(client=client)
+
+        with pytest.raises(ToolInvocationError, match="invocation failed"):
+            tool.invoke({"value": "hello"})
+
     def test_async_execute_forwards_to_client_in_thread(self) -> None:
         client = FakePyA2AtomicClient(result={"async": True})
         tool = make_tool(client=client)
 
         result = asyncio.run(tool.async_invoke({"value": "hello"}))
 
-        assert result == {"async": True}
-        assert client.calls == [("echo", {"value": "hello"})]
+        assert result.result == {"async": True}
+        assert client.calls == [("echo", {"value": "hello", "tag": "default"})]
 
     def test_async_execute_rejects_positional_args(self) -> None:
         tool = make_tool()
@@ -317,51 +304,134 @@ class TestPyA2AtomicToolInvocation:
             asyncio.run(tool.async_invoke({"value": "hello"}))
 
 
-class TestPyA2AtomicToolRefreshAndSerialization:
-    def test_headers_setter_updates_client_headers_and_refreshes_metadata(self) -> None:
-        client = FakePyA2AtomicClient()
+class TestPyA2AtomicToolMakeResult:
+    def test_invoke_returns_pya2a_tool_result(self) -> None:
+        client = FakePyA2AtomicClient(result={"ok": True})
         tool = make_tool(client=client)
 
-        client.metadata = {
-            **remote_metadata(return_type="str"),
-            "parameters": [param_dict("value", 0, type_="str")],
-        }
+        result = tool.invoke({"value": 1})
 
-        tool.headers = {"Authorization": "Bearer token"}
+        assert isinstance(result, PyA2AtomicToolResult)
 
-        assert client.headers == {"Authorization": "Bearer token"}
-        assert tool.return_type == "str"
-        assert [(p.name, p.type) for p in tool.parameters] == [("value", "str")]
-
-    def test_refresh_with_headers_updates_client_headers(self) -> None:
-        client = FakePyA2AtomicClient()
+    def test_result_carries_url_from_client(self) -> None:
+        client = FakePyA2AtomicClient(url="http://myhost.test/a2a")
         tool = make_tool(client=client)
 
-        tool.refresh(headers={"X-Test": "yes"})
+        result = tool.invoke({"value": 1})
 
-        assert client.headers == {"X-Test": "yes"}
+        assert result.url == "http://myhost.test/a2a"
 
-    def test_refresh_rebuilds_schema_but_keeps_local_identity_and_description(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(
-            client=client,
-            name="local_echo",
-            namespace="a2a_tools",
-            description="Original local description.",
+    def test_result_carries_remote_name(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"value": 1})
+
+        assert result.remote_name == "echo"
+
+    def test_result_carries_invokable_type_from_metadata(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"value": 1})
+
+        assert result.invokable_type == "EchoInvokable"
+
+    def test_to_dict_includes_transport_fields(self) -> None:
+        client = FakePyA2AtomicClient(url="http://myhost.test/a2a")
+        tool = make_tool(client=client)
+
+        data = tool.invoke({"value": 1}).to_dict()
+
+        assert data["url"] == "http://myhost.test/a2a"
+        assert data["remote_name"] == "echo"
+        assert data["invokable_type"] == "EchoInvokable"
+
+    def test_async_invoke_also_returns_pya2a_tool_result(self) -> None:
+        client = FakePyA2AtomicClient(result={"async": True})
+        tool = make_tool(client=client)
+
+        result = asyncio.run(tool.async_invoke({"value": "hello"}))
+
+        assert isinstance(result, PyA2AtomicToolResult)
+        assert result.remote_name == "echo"
+        assert result.invokable_type == "EchoInvokable"
+
+
+class TestPyA2AtomicToolErrorHandling:
+    def test_error_payload_raises_remote_invocation_error(self) -> None:
+        client = FakePyA2AtomicClient(
+            raw_payload={"error": "boom", "error_type": "ToolInvocationError", "function_name": "echo"}
         )
+        tool = make_tool(client=client)
 
-        client.metadata = {
-            **remote_metadata(description="Fresh remote description.", return_type="str"),
-            "parameters": [param_dict("value", 0, type_="str")],
-        }
+        with pytest.raises(RemoteInvocationError):
+            tool.invoke({"value": 1})
 
-        tool.refresh()
+    def test_error_payload_carries_error_type(self) -> None:
+        client = FakePyA2AtomicClient(
+            raw_payload={"error": "something failed", "error_type": "AgentError", "function_name": "echo"}
+        )
+        tool = make_tool(client=client)
 
-        assert tool.name == "local_echo"
-        assert tool.namespace == "a2a_tools"
-        assert tool.description == "Original local description."
-        assert tool.return_type == "str"
-        assert [(p.name, p.type) for p in tool.parameters] == [("value", "str")]
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            tool.invoke({"value": 1})
+
+        assert exc_info.value.error_type == "AgentError"
+
+    def test_error_payload_carries_function_name(self) -> None:
+        client = FakePyA2AtomicClient(
+            raw_payload={"error": "something failed", "error_type": "AgentError", "function_name": "echo"}
+        )
+        tool = make_tool(client=client)
+
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            tool.invoke({"value": 1})
+
+        assert exc_info.value.function_name == "echo"
+
+    def test_missing_error_type_falls_back_to_remote_error(self) -> None:
+        client = FakePyA2AtomicClient(raw_payload={"error": "unknown failure"})
+        tool = make_tool(client=client)
+
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            tool.invoke({"value": 1})
+
+        assert exc_info.value.error_type == "RemoteError"
+
+    def test_invalid_error_type_falls_back_to_remote_error(self) -> None:
+        client = FakePyA2AtomicClient(raw_payload={"error": "bad type", "error_type": 42})
+        tool = make_tool(client=client)
+
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            tool.invoke({"value": 1})
+
+        assert exc_info.value.error_type == "RemoteError"
+
+    def test_missing_result_key_raises_tool_invocation_error(self) -> None:
+        client = FakePyA2AtomicClient(raw_payload={"some_other_key": "data"})
+        tool = make_tool(client=client)
+
+        with pytest.raises(ToolInvocationError, match="missing required result key"):
+            tool.invoke({"value": 1})
+
+    def test_async_error_payload_raises_remote_invocation_error(self) -> None:
+        client = FakePyA2AtomicClient(
+            raw_payload={"error": "async boom", "error_type": "RuntimeError", "function_name": "echo"}
+        )
+        tool = make_tool(client=client)
+
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            asyncio.run(tool.async_invoke({"value": 1}))
+
+        assert exc_info.value.error_type == "RuntimeError"
+
+
+class TestPyA2AtomicToolHeadersAndSerialization:
+    def test_headers_has_no_setter(self) -> None:
+        client = FakePyA2AtomicClient()
+        tool = make_tool(client=client)
+
+        with pytest.raises(AttributeError):
+            tool.headers = {"Authorization": "Bearer token"}  # type: ignore[misc]
 
     def test_url_headers_and_agent_card_proxy_through_client(self) -> None:
         client = FakePyA2AtomicClient(

@@ -1,6 +1,6 @@
 from atomic_agentic import Command
 from atomic_agentic.tools import Tool
-
+from pprint import pprint
 
 def multiply(*, a: int, b: int) -> int:
     """Multiply two integers."""
@@ -12,7 +12,6 @@ multiply_tool = Tool(
     name="multiply",
     namespace="example",
     description="Multiply two integers.",
-    filter_extraneous_inputs=False,
 )
 
 multiply_6_by_7 = Command(
@@ -22,21 +21,20 @@ multiply_6_by_7 = Command(
     description="Command that multiplies 6 by 7.",
 )
 
-print(multiply_6_by_7.signature)
+print(multiply_6_by_7.fullname_signature)
 # Command.multiply_6_by_7() -> int
 
 print(multiply_6_by_7.parameters)
 # []
 
 result = multiply_6_by_7.invoke({})
-print(result)
+pprint(result.result)
 # 42
 
 result = multiply_6_by_7()
-print(result)
+pprint(result)
 # 42
 
-try:
-    multiply_6_by_7.invoke({"a": 100})
-except TypeError as exc:
-    print(f"Rejected runtime inputs: {exc}")
+result = multiply_6_by_7.invoke({"a": 100})
+pprint(result.result)
+# 42 - runtime inputs are silently ignored, never merged into fixed_inputs

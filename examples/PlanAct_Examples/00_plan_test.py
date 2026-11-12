@@ -1,20 +1,18 @@
-import os
-from dotenv import load_dotenv
-
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
-load_dotenv()
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# LLM engine
-llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
+from shared_engine import llm_engine
 
 # PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
 agent = PlanActAgent(
     name="Test_PlanAct",
+    namespace="examples",
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
-    context_enabled=True,    # True => persists blackboard across runs
+    record_enabled=True,    # True => persists conversation history across runs
 )
 
 # Simple local tools (docstrings become tool descriptions if you omit description=...)
@@ -36,23 +34,22 @@ def tool_3(t2_result: str) -> str:
     return t2_result + "\n3) Result from tool_3"
 
 
-# Register tools (callables are wrapped into Tool instances via toolify)
-t1_full = agent.register(tool_1, namespace="local")
-t2_full = agent.register(tool_2, namespace="local")
-t3_full = agent.register(tool_3, namespace="local")
+# Register tools (callables are toolified under agent.name as namespace;
+# each is reachable by its own bare name -- tool_1/tool_2/tool_3 -- since no
+# alias is given).
+agent.register_tools([tool_1, tool_2, tool_3])
 
 seed = 32
 
-# Use the fully-qualified tool ids to make the example deterministic.
 task_prompt = (
-    f"Call the tools 1, 2, and 3 in sequential order, with the initial seed = {seed}"
+    f"Call the tools tool_1, tool_2, and tool_3 in sequential order, with the initial seed = {seed}"
 )
 
 final = agent.invoke({"prompt": task_prompt})
 
-print("\nFinal Result:\n", final)
+print("\nFinal Result:\n", final.result)
 
-# Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
+# Optional: inspect the executed plan (even if record_enabled=False, the view is useful for debugging)
 from pprint import pprint
-print("\nBlackboard:\n")
-pprint(agent.blackboard)
+print("\nExecuted calls:\n")
+pprint(agent.get_conversation().records[-1].statements)

@@ -2,127 +2,107 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, NamedTuple
 
-from ..core.Invokable import StructuredInvokable
-from .sequential import SequentialFlow
-from ..core.Exceptions import ValidationError
+from ..constants.core import NO_VAL
+from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..core.sentinels import NO_VAL
-from .base import FlowResultDict, Workflow
-from .basic import BasicFlow
-from .metadata import IterationRecord, IterativeFlowRunMetadata
+from ..models.results.workflows import IterativeFlowResult
+from .base import Workflow
 
 logger = logging.getLogger(__name__)
 
-
-def _always_false() -> bool:
-    """Fallback iterative judge implementation."""
-    return False
+__all__ = ["IterativeFlow"]
 
 
-def create_fallback_judge_tool():
-    """Create a shared fallback judge tool that always returns False."""
-    from ..tools import Tool
-    return Tool(
-        function=_always_false,
-        name="always_false_judge",
-        namespace="workflow",
-        description="Fallback iterative judge that always returns False.",
-    )
-
-
-
-class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
-    """Repeat a fixed sequential body up to ``max_iterations``.
-
-    Overview
-    --------
-    ``IterativeFlow`` is a composite workflow that repeatedly invokes a
-    normalized sequential body. After each completed body run, a normalized
-    judge inspects one selected body-step result and decides whether the loop
-    should stop early.
+class IterativeFlow(Workflow):
+    """Repeat a body of steps up to ``max_iterations``, with checker-gated
+    early exit.
 
     Construction contract
-    ---------------------
-    - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
-    - The body is always normalized inline into a private ``SequentialFlow``.
-    - The normalized loop body topology is fixed at construction.
-    - The normalized loop body is exposed read-only via :attr:`loop_body`.
-    - ``judge`` accepts any ``AtomicInvokable`` or ``None`` at construction.
-    - Internally, the judge is always a normalized ``BasicFlow`` whose wrapped
-      component is a fresh ``StructuredInvokable`` exposing a single output key
-      named ``"judge_decision"``.
-    - Passing ``None`` installs a shared fallback always-false structured judge.
-    - ``return_index`` is proxied onto the loop body and controls which body
-      step result becomes the body workflow's outer result.
-    - ``handoff_index`` controls which body step result becomes the next
-      iteration's input.
-    - ``evaluate_index`` controls which body step result is passed to the judge.
+    ----------------------
+    - ``body_steps`` must be a non-empty ``list[AtomicInvokable]``.
+      ``IterativeFlow`` owns step-by-step execution directly -- there is no
+      nested ``SequentialFlow`` loop body.
+    - ``checkers`` is an optional bulk list of plain ``(judge,
+      approval_value) | None`` tuples (list position = body-step index) for
+      construction-time convenience; each non-``None`` entry is unpacked and
+      fed through :meth:`add_checker` (the single validated entry point --
+      no duplicated validation logic). A list shorter than ``body_steps``
+      has its missing tail positions implicitly treated as ``None``; a
+      longer one raises. ``Checker`` (a ``NamedTuple``) is this class's own
+      internal storage shape only -- external configuration never
+      constructs or names it, keeping the public surface plain-tuple-based.
+      Checkers are the one fixed-topology exception on this class:
+      :meth:`add_checker`/:meth:`remove_checker`/:meth:`update_checker`
+      remain callable post-construction, since checkers never affect
+      declared ``parameters``/``return_type`` (see ``01-overview.md`` SS4's
+      "Fixed topology" carve-out).
+    - ``result_setting_indices`` is a ``list[int]``, defaulting to ``[]``.
+      Each element is resolved via ``_resolve_body_step_index`` (negative
+      wraparound + range check). Fixed at construction -- it feeds
+      ``return_type``.
+    - ``handoff_index`` defaults to the last body step (same resolution
+      helper). Fixed at construction.
+    - ``fallback_value`` defaults to ``NO_VAL``. If ``result_setting_indices``
+      resolves to empty *and* ``fallback_value`` is ``NO_VAL``, construction
+      raises immediately -- that combination is guaranteed to fail on the
+      very first invocation.
+    - ``include_trace`` defaults to ``True``, forwarded to the base
+      ``Workflow``.
 
-    Judge contract
-    --------------
-    At runtime, the normalized judge path must yield a mapping-shaped result
-    containing the single key ``"judge_decision"`` whose value must be a
-    ``bool``. If it does not, invocation raises ``ValidationError``.
-
-    Loop semantics
-    --------------
-    - Iteration 0 receives the outer workflow inputs.
-    - The loop body executes *all* configured body steps on every iteration.
-    - The loop body's ``return_index`` determines the outer body result.
-    - ``handoff_index`` determines which body step result becomes the next
-      iteration's inputs.
-    - ``evaluate_index`` determines which body step result is passed to the judge.
-    - The loop stops early only when the judge decision is ``True``.
-    - Otherwise it continues until ``max_iterations`` is exhausted.
+    Runtime contract
+    -----------------
+    Every iteration executes ``body_steps`` in order. At each step:
+    result-setting positions update a running "current answer"; the
+    handoff position's result is captured (used only if the loop
+    continues); a configured checker's judge is invoked on that step's
+    result (which must be mapping-shaped) and a match stops the loop
+    immediately, mid-body. Absent an early exit, all steps run every
+    iteration and the loop continues until ``max_iterations``. The final
+    "current answer" is the result; if none was ever set, ``fallback_value``
+    is used, or the run raises if no fallback was configured either.
 
     Mutability notes
     ----------------
-    - The loop body topology is fixed after construction.
-    - The judge is fixed after construction.
-    - This class does not re-expose any loop-body step mutation API.
-    - Only selection policy is mutable post-construction:
-      ``return_index``, ``handoff_index``, ``evaluate_index``, and ``max_iterations``.
+    - ``body_steps``, ``result_setting_indices``, ``handoff_index`` are
+      fixed after construction.
+    - ``checkers`` and ``max_iterations`` remain mutable post-construction.
 
-    Metadata
-    --------
-    Per-run metadata contains:
-
-    - ``iterations_completed``:
-      Number of completed body iterations.
-    - ``max_iterations``:
-      Maximum number of iterations permitted for this run.
-    - ``judge_approved_early``:
-      ``True`` if the loop stopped early because the judge approved a body
-      iteration; ``False`` if the iteration bound was exhausted.
-    - ``return_step_index``:
-      Resolved absolute body-step index selected for the body return value.
-    - ``handoff_step_index``:
-      Resolved absolute body-step index selected for next-iteration inputs.
-    - ``evaluate_step_index``:
-      Resolved absolute body-step index selected for judge evaluation.
-    - ``iteration_records``:
-      ``tuple[IterationRecord, ...]`` where each record contains:
-        - ``iteration``: zero-based iteration number
-        - ``body_run_id``: loop-body workflow run id for that iteration
-        - ``judge_run_id``: judge workflow run id for that iteration
-        - ``judge_decision``: boolean decision for that iteration
+    Result
+    ------
+    See ``IterativeFlowResult`` for per-run fields (``exited_early``,
+    ``iterations_completed``, ``triggering_step``, ``result_setting_indices``,
+    ``handoff_index``, ``max_iterations``).
     """
-    JUDGE_DECISION = "judge_decision"
+
+    class Checker(NamedTuple):
+        """One early-exit gate: a judge invokable plus the approval value
+        that stops the loop when matched.
+
+        Never constructed by anything outside ``IterativeFlow`` -- position
+        in the ``checkers`` list/``self._checkers`` (list index) is the
+        body-step index this gate fires at, so there is no separate index
+        field to carry.
+        """
+
+        judge: AtomicInvokable
+        approval_value: Any
 
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
-        body_steps: list[Workflow | StructuredInvokable],
-        judge: AtomicInvokable | None = None,
+        body_steps: list[AtomicInvokable],
         max_iterations: int = 1,
         *,
-        return_index: int = -1,
-        handoff_index: int = -1,
-        evaluate_index: int = -1,
-        filter_extraneous_inputs: Optional[bool] = None,
+        checkers: list[tuple[AtomicInvokable, Any] | None] | None = None,
+        result_setting_indices: list[int] | None = None,
+        handoff_index: int | None = None,
+        fallback_value: Any = NO_VAL,
+        include_trace: bool = True,
     ) -> None:
         """Initialize the iterative workflow.
 
@@ -133,133 +113,143 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         description:
             Human-readable workflow description.
         body_steps:
-            Non-empty list of workflow-shaped or structured steps that will be
-            normalized into the private sequential loop body.
-        judge:
-            Optional judge invokable. Passing ``None`` installs the shared
-            fallback always-false judge, causing the loop to continue until
-            ``max_iterations`` is exhausted unless another failure occurs.
+            Non-empty list of steps executed, in order, every iteration.
         max_iterations:
             Maximum number of body iterations to execute per run. Must be > 0.
-        return_index:
-            Loop-body return selection. This is proxied onto ``loop_body``.
+        checkers:
+            Optional bulk-construction list of plain ``(judge,
+            approval_value) | None`` tuples, one slot per body-step
+            position. Shorter-than-``body_steps`` lists implicitly pad
+            their missing tail with ``None``; longer ones raise. Each
+            non-``None`` entry is registered via :meth:`add_checker`.
+        result_setting_indices:
+            Body-step positions whose results update the running "current
+            answer". Defaults to ``[]``.
         handoff_index:
-            Body-step selection whose result becomes the next iteration inputs.
-        evaluate_index:
-            Body-step selection whose result is passed to the judge.
-        filter_extraneous_inputs:
-            Optional outer workflow input-filter flag. When omitted, inherits
-            from the normalized loop body.
+            Body-step position whose result feeds the next iteration's
+            inputs. Defaults to the last body step.
+        fallback_value:
+            Value returned when no result-setting step is ever reached.
+            Required (must not be ``NO_VAL``) when ``result_setting_indices``
+            resolves to empty.
+        include_trace:
+            Whether results populate ``trace``. Forwarded to the base
+            ``Workflow``.
         """
         if not isinstance(body_steps, list):
             raise TypeError(
-                f"body_steps must be a list[Workflow | StructuredInvokable], got {type(body_steps)!r}"
+                f"body_steps must be a list[AtomicInvokable], got {type(body_steps)!r}"
             )
         if not body_steps:
             raise ValueError("body_steps must not be empty")
 
         for index, step in enumerate(body_steps):
-            if not isinstance(step, (Workflow, StructuredInvokable)):
+            if not isinstance(step, AtomicInvokable):
                 raise TypeError(
-                    "body_steps items must be Workflow or StructuredInvokable, "
+                    "body_steps items must be AtomicInvokable, "
                     f"got {type(step)!r} at index {index}"
                 )
+        self._body_steps: tuple[AtomicInvokable, ...] = tuple(body_steps)
 
-        self._loop_body = SequentialFlow(
-            name=f"{name}_loop_body",
-            description=f"Normalized body for iterative workflow {name}",
-            steps=body_steps,
-            return_index=return_index,
-        )
+        if not isinstance(max_iterations, int):
+            raise TypeError(f"max_iterations must be an int, got {type(max_iterations)!r}")
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be > 0")
+        self._max_iterations = max_iterations
 
-        self.handoff_index = handoff_index
-        self.evaluate_index = evaluate_index
-        self.max_iterations = max_iterations
+        # Checkers are validated and stored entirely through add_checker --
+        # bulk construction just replays the same single validated path.
+        # Position in the list is the body-step index; the list is always
+        # pre-sized to len(body_steps), with unfilled tail positions
+        # implicitly None.
+        self._checkers: list[IterativeFlow.Checker | None] = [None] * len(self._body_steps)
+        resolved_checkers = checkers if checkers is not None else []
+        if len(resolved_checkers) > len(self._body_steps):
+            raise IndexError(
+                f"checkers has {len(resolved_checkers)} entries but only "
+                f"{len(self._body_steps)} body step(s) are configured"
+            )
+        for index, entry in enumerate(resolved_checkers):
+            if entry is not None:
+                judge, approval_value = entry
+                self.add_checker(index, judge, approval_value)
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else self._loop_body.filter_extraneous_inputs
-        )
+        num_steps = len(self._body_steps)
+        resolved_result_setting_indices = []
+        for index in result_setting_indices or []:
+            if not isinstance(index, int):
+                raise TypeError(
+                    f"result_setting_indices items must be int, got {type(index)!r}"
+                )
+            resolved_result_setting_indices.append(
+                self._resolve_body_step_index(index, num_steps)
+            )
+        self._result_setting_indices: tuple[int, ...] = tuple(resolved_result_setting_indices)
+
+        self._handoff_index: int = self._resolve_body_step_index(handoff_index, num_steps)
+
+        if not self._result_setting_indices and fallback_value is NO_VAL:
+            raise ValueError(
+                f"{name}: result_setting_indices is empty and fallback_value is NO_VAL; "
+                "this configuration would always fail at runtime -- provide a "
+                "fallback_value or at least one result-setting index"
+            )
+        self._fallback_value = fallback_value
+
+        parameters = self._body_steps[0].parameters
+
+        if self._result_setting_indices:
+            selected_types = [
+                self._body_steps[i].return_type for i in self._result_setting_indices
+            ]
+            unique_types = list(dict.fromkeys(selected_types))
+            resolved_return_type = (
+                unique_types[0] if len(unique_types) == 1 else " | ".join(unique_types)
+            )
+        else:
+            resolved_return_type = type(self._fallback_value).__name__
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
-            parameters=self._loop_body.parameters,
-            filter_extraneous_inputs=resolved_filter,
-        )
-        resolved_judge = judge if judge is not None else create_fallback_judge_tool()
-
-        if not isinstance(resolved_judge, AtomicInvokable):
-            raise TypeError(
-                f"judge must be an AtomicInvokable or None, got {type(resolved_judge)!r}"
-            )
-
-        structured_judge = StructuredInvokable(
-            component=resolved_judge,
-            output_schema=[IterativeFlow.JUDGE_DECISION],
-            map_single_fields=True,
-            map_extras=True,
-            ignore_unhandled=True,
-            absent_value_mode=StructuredInvokable.RAISE,
-            none_is_absent=True,
-            coerce_to_collection=True,
-        )
-
-        self._judge = BasicFlow(
-            component=structured_judge,
-            name=f"{name}_judge",
-            description=f"Normalized judge for iterative workflow {name}",
+            parameters=parameters,
+            return_type=resolved_return_type,
+            include_trace=include_trace,
         )
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def loop_body(self) -> SequentialFlow:
-        """The fixed normalized sequential loop body."""
-        return self._loop_body
+    def body_steps(self) -> tuple[AtomicInvokable, ...]:
+        """Fixed configured body-step tuple."""
+        return self._body_steps
 
     @property
-    def judge(self) -> BasicFlow:
-        """The fixed normalized judge wrapper."""
-        return self._judge
+    def checkers(self) -> list[tuple[AtomicInvokable, Any] | None]:
+        """Snapshot of currently configured checkers, one slot per
+        body-step position (``None`` where nothing is registered), each
+        occupied slot a plain ``(judge, approval_value)`` tuple -- not
+        ``IterativeFlow.Checker`` itself, which is internal storage shape
+        only. A fresh copy -- mutating the returned list does not affect
+        the flow's own state."""
+        return [None if checker is None else tuple(checker) for checker in self._checkers]
 
     @property
-    def return_index(self) -> int:
-        """Proxy onto the loop body's configured return index."""
-        return self._loop_body.return_index
-
-    @return_index.setter
-    def return_index(self, value: int) -> None:
-        """Update the loop body's configured return index."""
-        self._loop_body.return_index = value
+    def result_setting_indices(self) -> tuple[int, ...]:
+        """Fixed body-step positions that update the running current answer."""
+        return self._result_setting_indices
 
     @property
     def handoff_index(self) -> int:
-        """Configured body-step index whose result becomes next-iteration input."""
+        """Fixed body-step position whose result feeds the next iteration."""
         return self._handoff_index
 
-    @handoff_index.setter
-    def handoff_index(self, value: int) -> None:
-        """Validate and store the configured handoff step index."""
-        if not isinstance(value, int):
-            raise TypeError(f"handoff_index must be an int, got {type(value)!r}")
-        self._loop_body._resolve_step_index(value)
-        self._handoff_index = value
-
     @property
-    def evaluate_index(self) -> int:
-        """Configured body-step index whose result is passed to the judge."""
-        return self._evaluate_index
-
-    @evaluate_index.setter
-    def evaluate_index(self, value: int) -> None:
-        """Validate and store the configured evaluation step index."""
-        if not isinstance(value, int):
-            raise TypeError(f"evaluate_index must be an int, got {type(value)!r}")
-        self._loop_body._resolve_step_index(value)
-        self._evaluate_index = value
+    def fallback_value(self) -> Any:
+        """Fixed value returned when no result-setting step is ever reached."""
+        return self._fallback_value
 
     @property
     def max_iterations(self) -> int:
@@ -275,228 +265,301 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
             raise ValueError("max_iterations must be > 0")
         self._max_iterations = value
 
+    def _extra_description(self) -> str:
+        """Chain the result-setting steps' own extra descriptions, then the
+        fixed iteration-bound note (always present)."""
+        parts = []
+        for i, step in enumerate(self._body_steps):
+            if i in self._result_setting_indices:
+                extra = step._extra_description()
+                if extra:
+                    parts.append(extra)
+        parts.append(f"Runs up to {self._max_iterations} iteration(s).")
+        return "\n".join(parts)
+
     # ------------------------------------------------------------------ #
-    # Helpers
+    # Internal helpers
     # ------------------------------------------------------------------ #
-    def _extract_judge_decision(
-        self,
-        judge_result: FlowResultDict,
-    ) -> bool:
-        """Extract and validate the boolean decision from a judge result."""
-        decision = judge_result.get(IterativeFlow.JUDGE_DECISION, NO_VAL)
-        if decision is NO_VAL:
-            raise ValidationError(
-                f"{self.full_name}: judge result did not contain 'judge_decision'"
+    @staticmethod
+    def _resolve_body_step_index(index: int | None, num_steps: int) -> int:
+        """Resolve a configured body-step index, defaulting ``None`` to the last step."""
+        if index is None:
+            return num_steps - 1
+        if not isinstance(index, int):
+            raise TypeError(f"step index must be an int or None, got {type(index)!r}")
+        resolved = index if index >= 0 else num_steps + index
+        if not (0 <= resolved < num_steps):
+            raise IndexError(
+                f"step index {index} out of range for {num_steps} configured step(s)"
             )
-        if not isinstance(decision, bool):
-            raise ValidationError(
-                f"{self.full_name}: judge_decision must be bool, got {type(decision)!r}"
-            )
+        return resolved
 
-        return decision
+    # ------------------------------------------------------------------ #
+    # Checker mutation API (post-construction, unlike everything else)
+    # ------------------------------------------------------------------ #
+    def add_checker(self, index: int, judge: AtomicInvokable, approval_value: Any) -> None:
+        """Register a new checker at ``index``.
 
-    def _require_body_step_result(
-        self,
-        body_run_id: str,
-        step_index: int,
-        *,
-        purpose: str,
-    ) -> dict[str, Any]:
-        """Strictly resolve one body step result for live orchestration use.
-
-        Unlike the public retrieval helpers, this raises instead of returning
-        ``None`` when the referenced child checkpoint cannot be resolved.
+        Raises ``TypeError`` if ``index``/``judge`` are the wrong type,
+        ``IndexError`` if ``index`` is out of range (no negative-index
+        wraparound -- the index you add is the index you get back), and
+        ``ValueError`` if ``index`` already has a checker.
         """
-        result = self._loop_body.get_step_result(body_run_id, step_index)
-        if result is None:
-            raise ValidationError(
-                f"{self.full_name}: could not resolve {purpose} body step result "
-                f"for body run_id {body_run_id!r} and step index {step_index}"
+        if not isinstance(index, int):
+            raise TypeError(f"checker index must be an int, got {type(index)!r}")
+        if not (0 <= index < len(self._body_steps)):
+            raise IndexError(
+                f"checker index {index} out of range for "
+                f"{len(self._body_steps)} configured body step(s)"
             )
+        if not isinstance(judge, AtomicInvokable):
+            raise TypeError(f"checker judge must be AtomicInvokable, got {type(judge)!r}")
+        if self._checkers[index] is not None:
+            raise ValueError(f"a checker is already registered at index {index}")
+        self._checkers[index] = IterativeFlow.Checker(judge=judge, approval_value=approval_value)
 
-        if not isinstance(result, Mapping):
-            raise ValidationError(
-                f"{self.full_name}: {purpose} body step result must be mapping-shaped, "
-                f"got {type(result)!r}"
+    def remove_checker(self, index: int) -> None:
+        """Remove the checker registered at ``index``.
+
+        Raises ``TypeError`` if ``index`` isn't an int, ``IndexError`` if
+        out of range (no negative-index wraparound), and ``ValueError`` if
+        no checker is registered there.
+        """
+        if not isinstance(index, int):
+            raise TypeError(f"checker index must be an int, got {type(index)!r}")
+        if not (0 <= index < len(self._body_steps)):
+            raise IndexError(
+                f"checker index {index} out of range for "
+                f"{len(self._body_steps)} configured body step(s)"
             )
+        if self._checkers[index] is None:
+            raise ValueError(f"no checker is registered at index {index}")
+        self._checkers[index] = None
 
-        return dict(result)
+    def update_checker(self, index: int, approval_value: Any) -> None:
+        """Replace the ``approval_value`` of the checker registered at
+        ``index`` in place; ``judge`` is left untouched.
+
+        Raises ``TypeError`` if ``index`` isn't an int, ``IndexError`` if
+        out of range (no negative-index wraparound), and ``ValueError`` if
+        no checker is registered there.
+        """
+        if not isinstance(index, int):
+            raise TypeError(f"checker index must be an int, got {type(index)!r}")
+        if not (0 <= index < len(self._body_steps)):
+            raise IndexError(
+                f"checker index {index} out of range for "
+                f"{len(self._body_steps)} configured body step(s)"
+            )
+        current = self._checkers[index]
+        if current is None:
+            raise ValueError(f"no checker is registered at index {index}")
+        self._checkers[index] = IterativeFlow.Checker(
+            judge=current.judge, approval_value=approval_value
+        )
+
+    # ------------------------------------------------------------------ #
+    # Result construction
+    # ------------------------------------------------------------------ #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> IterativeFlowResult:
+        """Construct an IterativeFlowResult envelope for this workflow's invocation.
+
+        No fixed-topology constant is injected here -- everything (including
+        the mutable checkers/max_iterations, snapshotted at call time)
+        already arrives via ``result_kwargs`` from ``_run``/``_async_run``.
+        """
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=IterativeFlowResult,
+            **result_kwargs,
+        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Synchronously execute the iterative loop."""
-        resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
-        resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
-        resolved_evaluate_step = self._loop_body._resolve_step_index(self.evaluate_index)
-
-        current_inputs: Mapping[str, Any] = inputs
-        final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[IterationRecord] = []
-        iterations_completed = 0
-        judge_approved_early = False
-
-        for iteration in range(self.max_iterations):
-            logger.info("%s: iteration %d", self.full_name, iteration)
-            body_result = self._loop_body.invoke(current_inputs)
-
-            if not isinstance(body_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: body returned {type(body_result)!r}, expected FlowResultDict"
-                )
-
-            body_run_id = body_result.run_id
-
-            handoff_result = self._require_body_step_result(
-                body_run_id,
-                resolved_handoff_step,
-                purpose="handoff",
-            )
-            evaluate_result = self._require_body_step_result(
-                body_run_id,
-                resolved_evaluate_step,
-                purpose="evaluate",
-            )
-
-            logger.info("%s: invoking judge for iteration %d", self.full_name, iteration)
-            judge_result = self._judge.invoke(evaluate_result)
-
-            if not isinstance(judge_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: judge returned {type(judge_result)!r}, expected FlowResultDict"
-                )
-
-            judge_decision = self._extract_judge_decision(judge_result)
-
-            iteration_records.append(
-                IterationRecord(
-                    iteration=iteration,
-                    body_run_id=body_run_id,
-                    judge_run_id=judge_result.run_id,
-                    judge_decision=judge_decision,
-                )
-            )
-            iterations_completed += 1
-
-            final_result = body_result
-            current_inputs = handoff_result
-
-            if judge_decision is True:
-                judge_approved_early = True
-                break
-
-        metadata = IterativeFlowRunMetadata(
-            iterations_completed=iterations_completed,
-            max_iterations=self._max_iterations,
-            judge_approved_early=judge_approved_early,
-            return_step_index=resolved_return_step,
-            handoff_step_index=resolved_handoff_step,
-            evaluate_step_index=resolved_evaluate_step,
-            iteration_records=tuple(iteration_records),
-        )
-        return metadata, final_result
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
-        """Asynchronously execute the iterative loop."""
-        resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
-        resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
-        resolved_evaluate_step = self._loop_body._resolve_step_index(self.evaluate_index)
-
-        current_inputs: Mapping[str, Any] = inputs
-        final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[IterationRecord] = []
-        iterations_completed = 0
-        judge_approved_early = False
+        current_value: Any = self._fallback_value
+        running_inputs: Mapping[str, Any] = inputs
+        exited_early = False
+        triggering_step: int | None = None
+        trace_entries = []
 
         for iteration in range(self._max_iterations):
-            logger.info(
-                "[Async %s]: invoking body iteration %d",
-                self.full_name,
-                iteration,
-            )
-            body_result = await self._loop_body.async_invoke(current_inputs)
+            logger.info("%s: iteration %d", self.full_name, iteration)
+            handoff_candidate: Any = NO_VAL
 
-            if not isinstance(body_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: async body returned {type(body_result)!r}, expected FlowResultDict"
-                )
+            for step_index, step in enumerate(self._body_steps):
+                result = step.invoke(running_inputs)
+                trace_entries.append(result)
 
-            body_run_id = body_result.run_id
+                if step_index in self._result_setting_indices:
+                    current_value = result.result
 
-            handoff_result = self._require_body_step_result(
-                body_run_id,
-                resolved_handoff_step,
-                purpose="handoff",
-            )
-            evaluate_result = self._require_body_step_result(
-                body_run_id,
-                resolved_evaluate_step,
-                purpose="evaluate",
-            )
+                if step_index == self._handoff_index:
+                    handoff_candidate = result.result
 
-            logger.info(
-                "[Async %s]: invoking judge for iteration %d",
-                self.full_name,
-                iteration,
-            )
-            judge_result = await self._judge.async_invoke(evaluate_result)
+                checker = self._checkers[step_index]
+                if checker is not None:
+                    if not isinstance(result.result, Mapping):
+                        raise ValidationError(
+                            f"{self.full_name}: checker at step {step_index} requires a "
+                            f"mapping-shaped result, got {type(result.result)!r}"
+                        )
+                    logger.info(
+                        "%s: invoking checker at step %d", self.full_name, step_index
+                    )
+                    judge_result = checker.judge.invoke(result.result)
+                    trace_entries.append(judge_result)
+                    if judge_result.result == checker.approval_value:
+                        exited_early = True
+                        triggering_step = step_index
+                        break
 
-            if not isinstance(judge_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: async judge returned {type(judge_result)!r}, expected FlowResultDict"
-                )
+                if step_index < len(self._body_steps) - 1:
+                    if not isinstance(result.result, Mapping):
+                        raise ValidationError(
+                            f"{self.full_name}: step {step_index} ({step.full_name}) must "
+                            f"produce a mapping-shaped result to chain to the next step, "
+                            f"got {type(result.result)!r}"
+                        )
+                    running_inputs = result.result
 
-            judge_decision = self._extract_judge_decision(judge_result)
-
-            iteration_records.append(
-                IterationRecord(
-                    iteration=iteration,
-                    body_run_id=body_run_id,
-                    judge_run_id=judge_result.run_id,
-                    judge_decision=judge_decision,
-                )
-            )
-            iterations_completed += 1
-
-            final_result = body_result
-            current_inputs = handoff_result
-
-            if judge_decision is True:
-                judge_approved_early = True
+            if exited_early:
                 break
 
-        metadata = IterativeFlowRunMetadata(
-            iterations_completed=iterations_completed,
-            max_iterations=self._max_iterations,
-            judge_approved_early=judge_approved_early,
-            return_step_index=resolved_return_step,
-            handoff_step_index=resolved_handoff_step,
-            evaluate_step_index=resolved_evaluate_step,
-            iteration_records=tuple(iteration_records),
-        )
-        return metadata, final_result
+            if iteration < self._max_iterations - 1:
+                if not isinstance(handoff_candidate, Mapping):
+                    raise ValidationError(
+                        f"{self.full_name}: handoff step {self._handoff_index} requires a "
+                        f"mapping-shaped result for the next iteration, "
+                        f"got {type(handoff_candidate)!r}"
+                    )
+                running_inputs = handoff_candidate
+
+        if current_value is NO_VAL:
+            raise ValidationError(
+                f"{self.full_name}: no result-setting step was ever reached and no "
+                "fallback_value was configured"
+            )
+
+        return current_value, {
+            "trace": tuple(trace_entries) if self.include_trace else None,
+            "exited_early": exited_early,
+            "iterations_completed": iteration + 1,
+            "triggering_step": triggering_step,
+            "result_setting_indices": self._result_setting_indices,
+            "handoff_index": self._handoff_index,
+            "max_iterations": self._max_iterations,
+        }
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        """Asynchronously execute the iterative loop."""
+        current_value: Any = self._fallback_value
+        running_inputs: Mapping[str, Any] = inputs
+        exited_early = False
+        triggering_step: int | None = None
+        trace_entries = []
+
+        for iteration in range(self._max_iterations):
+            logger.info("[Async %s]: iteration %d", self.full_name, iteration)
+            handoff_candidate: Any = NO_VAL
+
+            for step_index, step in enumerate(self._body_steps):
+                result = await step.async_invoke(running_inputs)
+                trace_entries.append(result)
+
+                if step_index in self._result_setting_indices:
+                    current_value = result.result
+
+                if step_index == self._handoff_index:
+                    handoff_candidate = result.result
+
+                checker = self._checkers[step_index]
+                if checker is not None:
+                    if not isinstance(result.result, Mapping):
+                        raise ValidationError(
+                            f"{self.full_name}: checker at step {step_index} requires a "
+                            f"mapping-shaped result, got {type(result.result)!r}"
+                        )
+                    logger.info(
+                        "[Async %s]: invoking checker at step %d", self.full_name, step_index
+                    )
+                    judge_result = await checker.judge.async_invoke(result.result)
+                    trace_entries.append(judge_result)
+                    if judge_result.result == checker.approval_value:
+                        exited_early = True
+                        triggering_step = step_index
+                        break
+
+                if step_index < len(self._body_steps) - 1:
+                    if not isinstance(result.result, Mapping):
+                        raise ValidationError(
+                            f"{self.full_name}: async step {step_index} ({step.full_name}) "
+                            f"must produce a mapping-shaped result to chain to the next "
+                            f"step, got {type(result.result)!r}"
+                        )
+                    running_inputs = result.result
+
+            if exited_early:
+                break
+
+            if iteration < self._max_iterations - 1:
+                if not isinstance(handoff_candidate, Mapping):
+                    raise ValidationError(
+                        f"{self.full_name}: handoff step {self._handoff_index} requires a "
+                        f"mapping-shaped result for the next iteration, "
+                        f"got {type(handoff_candidate)!r}"
+                    )
+                running_inputs = handoff_candidate
+
+        if current_value is NO_VAL:
+            raise ValidationError(
+                f"{self.full_name}: no result-setting step was ever reached and no "
+                "fallback_value was configured"
+            )
+
+        return current_value, {
+            "trace": tuple(trace_entries) if self.include_trace else None,
+            "exited_early": exited_early,
+            "iterations_completed": iteration + 1,
+            "triggering_step": triggering_step,
+            "result_setting_indices": self._result_setting_indices,
+            "handoff_index": self._handoff_index,
+            "max_iterations": self._max_iterations,
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the iterative workflow and its selection policies."""
+        """Serialize the iterative workflow and its fixed/current configuration."""
         data = super().to_dict()
         data.update(
             {
-                "loop_body": self.loop_body.to_dict(),
-                "judge": self._judge.to_dict(),
-                "max_iterations": self._max_iterations,
-                "return_index": self.return_index,
+                "body_steps": [step.to_dict() for step in self._body_steps],
+                "step_count": len(self._body_steps),
+                "checkers": [
+                    {
+                        "index": index,
+                        "judge": checker.judge.to_dict(),
+                        "approval_value": checker.approval_value,
+                    }
+                    for index, checker in enumerate(self._checkers)
+                    if checker is not None
+                ],
+                "result_setting_indices": list(self._result_setting_indices),
                 "handoff_index": self._handoff_index,
-                "evaluate_index": self._evaluate_index,
+                "fallback_value": self._fallback_value,
+                "max_iterations": self._max_iterations,
             }
         )
         return data

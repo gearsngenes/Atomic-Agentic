@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import os
+import pprint
+from typing import Any
+from dotenv import load_dotenv
+
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
+
+load_dotenv()  # Load environment variables from .env file
+
+def summarize_result(*, result: str) -> dict[str, Any]:
+    """
+    Non-default post-invoke hook.
+
+    Only the raw LLM text (``generated_response``) persists on the
+    record — this structured dict is the live ``invoke()`` return value's
+    ``.result`` only; it is not recoverable from history afterward.
+    """
+    return {
+        "text": result.strip(),
+        "char_count": len(result),
+        "post_processed": True,
+    }
+
+
+def main() -> None:
+    engine = OpenAIEngine("gpt-4o-mini")
+
+    agent = BasicAgent(
+        name="basic_turn_demo_agent",
+        namespace="examples",
+        description="Basic Agent demo showing canonical turn history and rendering.",
+        llm_engine=engine,
+        role_prompt="You are concise. Answer in one short sentence.",
+        record_enabled=True,
+        records_window=None,
+        post_invoke=summarize_result,
+        response_to_post="result",
+    )
+    # Preview limits live on the conversation, not the agent.
+    agent.get_conversation().response_preview_limit = 300
+
+    result = agent.invoke(
+        {
+            "prompt": "Give me a one-sentence definition of agent memory."
+        }
+    )
+
+    print("\n=== Final invoke() result after post_invoke ===")
+    pprint.pp(result.result)
+
+    print("\n=== Canonical turn history: agent.get_conversation() ===")
+    for i, turn in enumerate(agent.get_conversation().records):
+        print(f"\nTurn {i}")
+        print("prompt:")
+        pprint.pp(turn.user_prompt)
+        print("raw_response:")
+        pprint.pp(turn.generated_response)
+        print("run_id:")
+        pprint.pp(turn.run_id)
+
+    print("\n=== Rendered turn ===")
+    pprint.pp(agent.render_turn(agent.get_conversation().records[0]))
+
+    print("\n=== Messages that would be sent on the next invoke ===")
+    task = agent.create_task({"prompt": "Now explain why turn-native memory is useful."})
+    agent.summarize(task)
+    agent.pre_process(task)
+    pprint.pp(agent.render_task(task))
+
+
+if __name__ == "__main__":
+    main()

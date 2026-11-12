@@ -74,7 +74,6 @@ research_tool = Tool(
     function=tavily_research,
     name="tavily_research",
     description="Run Tavily search+extract for a query and return sources[].",
-    filter_extraneous_inputs=True,
 )
 
 # ------------------------------------------------------
@@ -87,7 +86,6 @@ iterator_tool = Tool(
     function=increment_iteration,
     name="increment_iteration",
     description="Increment the iteration count by 1.",
-    filter_extraneous_inputs=True,
 )
 
 # ------------------------------------------------------
@@ -101,13 +99,12 @@ judge = Tool(
     function=judge_approved,
     name="approval_judge",
     description=f"Return True iff critic feedback contains <<APPROVED>>.",
-    filter_extraneous_inputs=True,
 )
 
 
 if __name__ == "__main__":
     # Example Tool usage
     query = "What are the main benefits and risks of CRISPR gene editing in medicine?"
-    result = research_tool.invoke({"query": query})
+    result = research_tool.invoke({"query": query}).result
     import json
     print("Result:", json.dumps(result, indent=2))

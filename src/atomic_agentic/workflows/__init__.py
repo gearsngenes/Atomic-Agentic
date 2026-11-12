@@ -1,16 +1,16 @@
-from .base import(
-    Workflow,
-)
-from .basic import BasicFlow
+from .base import Workflow
 from .sequential import SequentialFlow
-from .iterative import IterativeFlow
 from .parallel import ParallelFlow
 from .routing import RoutingFlow
+from .iterative import IterativeFlow
+from .graph import GraphFlow
+from ..models.workflows import StatePolicySpec
 
 __all__ = ["Workflow",
-           "BasicFlow",
            "SequentialFlow",
-           "IterativeFlow",
            "ParallelFlow",
            "RoutingFlow",
+           "IterativeFlow",
+           "GraphFlow",
+           "StatePolicySpec",
            ]

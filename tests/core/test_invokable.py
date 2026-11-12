@@ -8,8 +8,8 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.constants.core import NO_VAL
 
 
 class EchoInvokable(AtomicInvokable):
@@ -26,6 +26,7 @@ def make_param(
     *,
     type_: str = "Any",
     default: Any = NO_VAL,
+    description: str | None = None,
 ) -> ParamSpec:
     return ParamSpec(
         name=name,
@@ -33,6 +34,7 @@ def make_param(
         kind=kind,
         type=type_,
         default=default,
+        description=description,
     )
 
 
@@ -40,16 +42,16 @@ def make_invokable(
     parameters: list[ParamSpec] | None = None,
     *,
     name: str = "echo",
+    namespace: str = "tests",
     description: str = "Echo test invokable.",
     return_type: str = "dict[str, Any]",
-    filter_extraneous_inputs: bool = True,
 ) -> EchoInvokable:
     return EchoInvokable(
         name=name,
+        namespace=namespace,
         description=description,
         parameters=parameters if parameters is not None else [make_param("x", 0)],
         return_type=return_type,
-        filter_extraneous_inputs=filter_extraneous_inputs,
     )
 
 
@@ -60,7 +62,6 @@ class TestAtomicInvokableConstruction:
         assert invokable.name == "echo"
         assert invokable.description == "Echo test invokable."
         assert invokable.return_type == "dict[str, Any]"
-        assert invokable.filter_extraneous_inputs is True
 
     @pytest.mark.parametrize("bad_name", ["", "   ", "bad-name", "123bad"])
     def test_invalid_name_raises(self, bad_name: str) -> None:
@@ -76,6 +77,7 @@ class TestAtomicInvokableConstruction:
         with pytest.raises(TypeError):
             EchoInvokable(
                 name="echo",
+                namespace="tests",
                 description="Echo test invokable.",
                 parameters=("x",),  # type: ignore[arg-type]
                 return_type="dict[str, Any]",
@@ -130,21 +132,51 @@ class TestAtomicInvokableIdentity:
     def test_full_name_uses_base_class_name_and_name(self) -> None:
         invokable = make_invokable(name="sample")
 
-        assert invokable.full_name == "EchoInvokable.sample"
+        assert invokable.full_name == "EchoInvokable.tests.sample"
 
-    def test_name_mutation_updates_full_name(self) -> None:
-        invokable = make_invokable(name="before")
+class TestAtomicInvokableNamespace:
+    def test_namespace_is_required(self) -> None:
+        with pytest.raises(TypeError):
+            EchoInvokable(
+                name="echo",
+                description="Echo test invokable.",
+                parameters=[make_param("x", 0)],
+                return_type="str",
+            )
 
-        invokable.name = "after"
+    def test_namespace_explicit(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="my_group",
+            parameters=[], return_type="str",
+        )
+        assert invokable.namespace == "my_group"
 
-        assert invokable.name == "after"
-        assert invokable.full_name == "EchoInvokable.after"
+    def test_namespace_in_full_name(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="grp",
+            parameters=[], return_type="str",
+        )
+        assert invokable.full_name == "EchoInvokable.grp.foo"
 
-    def test_invalid_name_mutation_raises(self) -> None:
-        invokable = make_invokable()
+    def test_namespace_in_to_dict(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="grp",
+            parameters=[], return_type="str",
+        )
+        assert invokable.to_dict()["namespace"] == "grp"
 
+    @pytest.mark.parametrize("bad_ns", ["bad namespace", "1bad", ""])
+    def test_namespace_invalid_raises(self, bad_ns: str) -> None:
         with pytest.raises(ValueError):
-            invokable.name = "bad-name"
+            EchoInvokable(
+                name="foo", description="d", namespace=bad_ns,
+                parameters=[], return_type="str",
+            )
+
+    def test_namespace_is_read_only(self) -> None:
+        invokable = make_invokable()
+        with pytest.raises(AttributeError):
+            invokable.namespace = "other"  # type: ignore[misc]
 
 
 class TestAtomicInvokableParameterContract:
@@ -184,13 +216,96 @@ class TestAtomicInvokableParameterContract:
             make_param("extras", 2, ParamSpec.VAR_KEYWORD),
         ])
 
-        signature = invokable.signature
+        signature = invokable.fullname_signature
 
-        assert "EchoInvokable.echo" in signature
+        assert "EchoInvokable.tests.echo" in signature
         assert "x: int" in signature
         assert "*args: Any" in signature
         assert "**extras: Any" in signature
         assert "-> dict[str, Any]" in signature
+
+
+class TestAtomicInvokableSignatureRendering:
+    """Covers the `/`/`*` marker logic shared verbatim by `signature` and
+    `fullname_signature` -- parametrized across both properties so a future
+    dedup of their duplicated bodies stays covered either way."""
+
+    @staticmethod
+    def _render(invokable: EchoInvokable, prop: str) -> str:
+        return getattr(invokable, prop)
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_bare_slash_after_positional_only_run(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("b", 1, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("c", 2, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, b: int, /, c: int" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_bare_star_before_keyword_only_run(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+            make_param("b", 1, ParamSpec.KEYWORD_ONLY, type_="int"),
+            make_param("c", 2, ParamSpec.KEYWORD_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, *, b: int, c: int" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_var_positional_suppresses_bare_star(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL, type_="int"),
+            make_param("b", 2, ParamSpec.KEYWORD_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        # A bare "*" would be redundant right after "*args" -- must not appear.
+        assert "*args: int, b: int" in rendered
+        assert "*args: int, *, b: int" not in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_all_positional_only_still_emits_closing_slash(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("b", 1, ParamSpec.POSITIONAL_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, b: int, /)" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_default_value_rendered_regardless_of_kind(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int", default=1),
+            make_param("b", 1, ParamSpec.KEYWORD_ONLY, type_="int", default=2),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int = 1" in rendered
+        assert "b: int = 2" in rendered
+
+    def test_signature_omits_class_and_namespace_prefix(self) -> None:
+        invokable = make_invokable(name="echo", namespace="tests")
+
+        assert invokable.signature.startswith("echo(")
+        assert "EchoInvokable" not in invokable.signature
+        assert "tests" not in invokable.signature
+
+    def test_fullname_signature_includes_class_and_namespace_prefix(self) -> None:
+        invokable = make_invokable(name="echo", namespace="tests")
+
+        assert invokable.fullname_signature.startswith("EchoInvokable.tests.echo(")
 
 
 class TestAtomicInvokableFiltering:
@@ -218,15 +333,6 @@ class TestAtomicInvokableFiltering:
         result = invokable.invoke({"x": 1, "unused": 2})
 
         assert result == {"x": 1}
-
-    def test_extraneous_inputs_raise_when_filtering_disabled_without_varkwargs(self) -> None:
-        invokable = make_invokable(
-            parameters=[make_param("x", 0)],
-            filter_extraneous_inputs=False,
-        )
-
-        with pytest.raises(TypeError, match="unexpected input key"):
-            invokable.invoke({"x": 1, "unused": 2})
 
     def test_extraneous_inputs_merge_into_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
@@ -298,33 +404,38 @@ class TestAtomicInvokableFiltering:
 
         assert result == {"extras": {"x": 1}}
 
+    def test_absent_param_with_default_is_injected(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("y", 1, default=42),
+        ])
 
-class TestAtomicInvokableFilterFlag:
-    @pytest.mark.parametrize("value", [True, False])
-    def test_filter_extraneous_inputs_accepts_bool_at_construction(self, value: bool) -> None:
-        invokable = make_invokable(filter_extraneous_inputs=value)
+        result = invokable.invoke({"x": 1})
 
-        assert invokable.filter_extraneous_inputs is value
+        assert result == {"x": 1, "y": 42}
 
-    @pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-    def test_filter_extraneous_inputs_rejects_non_bool_at_construction(self, value: object) -> None:
-        with pytest.raises(TypeError):
-            make_invokable(filter_extraneous_inputs=value)  # type: ignore[arg-type]
+    def test_present_param_is_not_overwritten_by_default(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0, default=99),
+        ])
 
-    @pytest.mark.parametrize("value", [True, False])
-    def test_filter_extraneous_inputs_accepts_bool_assignment(self, value: bool) -> None:
-        invokable = make_invokable()
+        result = invokable.invoke({"x": 7})
 
-        invokable.filter_extraneous_inputs = value
+        assert result == {"x": 7}
 
-        assert invokable.filter_extraneous_inputs is value
+    def test_varargs_params_are_not_default_injected(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL),
+            make_param("extras", 2, ParamSpec.VAR_KEYWORD),
+        ])
 
-    @pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-    def test_filter_extraneous_inputs_rejects_non_bool_assignment(self, value: object) -> None:
-        invokable = make_invokable()
+        result = invokable.invoke({"x": 1})
 
-        with pytest.raises(TypeError):
-            invokable.filter_extraneous_inputs = value  # type: ignore[assignment]
+        # VAR_POSITIONAL is absent (no injection, no empty list).
+        # VAR_KEYWORD gets an empty dict from the existing varkwarg merge logic,
+        # not from default injection — our loop skips both variadic kinds.
+        assert result == {"x": 1, "extras": {}}
 
 
 class TestAtomicInvokableCallBinding:
@@ -519,13 +630,12 @@ class TestAtomicInvokableSerialization:
         assert data["name"] == "echo"
         assert data["description"] == "Echo test invokable."
         assert data["return_type"] == "dict[str, Any]"
-        assert data["filter_extraneous_inputs"] is True
         assert data["parameters"] == [
             {
                 "name": "x",
                 "index": 0,
                 "kind": ParamSpec.POSITIONAL_OR_KEYWORD,
-                "type": "int",
+                "type": ["int"],
             }
         ]
 
@@ -535,3 +645,87 @@ class TestAtomicInvokableSerialization:
         data = invokable.to_dict()
 
         assert "signature" not in data
+
+
+class TestAtomicInvokableDescriptionGetter:
+    def test_no_described_params_returns_raw_description(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("y", 1),
+        ])
+
+        assert invokable.description == invokable._description
+
+    def test_one_described_param_appends_bullet(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("p1", 0),
+            make_param("p2", 1, description="second param"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- p2: second param"
+
+    def test_multiple_described_params_append_in_order(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("p1", 0, description="first"),
+            make_param("p2", 1),
+            make_param("p3", 2, description="third"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- p1: first\n- p3: third"
+
+    def test_all_described_params_all_appear(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, description="alpha"),
+            make_param("b", 1, description="beta"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- a: alpha\n- b: beta"
+
+    def test_to_dict_description_is_always_raw(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0, description="has a description"),
+        ])
+
+        assert invokable.to_dict()["description"] == invokable._description
+        assert invokable.to_dict()["description"] != invokable.description
+
+
+class _ExtraDescriptionChild(EchoInvokable):
+    def _extra_description(self) -> str:
+        return "child extra"
+
+
+class _ExtraDescriptionGrandchild(_ExtraDescriptionChild):
+    def _extra_description(self) -> str:
+        parent = super()._extra_description()
+        return f"{parent}\ngrandchild extra"
+
+
+class TestExtraDescriptionHook:
+    def test_default_extra_description_is_empty(self) -> None:
+        invokable = make_invokable()
+
+        assert invokable._extra_description() == ""
+        assert invokable.description == invokable._description
+
+    def test_subclass_extra_description_appends_after_base(self) -> None:
+        invokable = _ExtraDescriptionChild(
+            name="child",
+            namespace="tests",
+            description="Child base.",
+            parameters=[make_param("x", 0)],
+            return_type="Any",
+        )
+
+        assert invokable.description == "Child base.\nchild extra"
+
+    def test_two_level_super_chaining_preserves_ancestor_extra(self) -> None:
+        invokable = _ExtraDescriptionGrandchild(
+            name="grandchild",
+            namespace="tests",
+            description="GC base.",
+            parameters=[make_param("x", 0)],
+            return_type="Any",
+        )
+
+        assert invokable.description == "GC base.\nchild extra\ngrandchild extra"

@@ -2,608 +2,373 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any
 
-from ..core.Invokable import StructuredInvokable
-from ..core.Exceptions import ValidationError
-from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
-from ..core.sentinels import NO_VAL
-from .base import FlowResultDict, Workflow
-from .basic import BasicFlow
-from .metadata import ChildRunRecord, OutputTopology, ParallelFlowRunMetadata
+from ..exceptions import WorkflowError
+from ..core.Invokable import AtomicInvokable
+from ..utils.core import run_coro_sync
+from ..utils.parameters import (
+    build_parameter_reports,
+    apply_parameter_reports,
+    insert_by_category,
+)
+from ..constants.core import IDENTIFIER_PATTERN
+from ..models.results import AtomicResult
+from ..models.results.workflows import ParallelFlowResult
+from .base import Workflow
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["ParallelFlow"]
 
-_VALID_OUTPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-
-class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
+class ParallelFlow(Workflow):
     """Execute a fixed set of branches concurrently and project one outer result.
 
-    Input contract
-    --------------
-    ``ParallelFlow`` accepts one fixed outer input contract determined at
-    construction time by ``input_shape`` + ``parameters``.
+    Construction contract
+    ----------------------
+    - ``branches`` is a non-empty ``list[AtomicInvokable]``. No wrapping,
+      no dict-input option — branches are always positional.
+    - ``parameters`` is not a constructor option. The outer schema is derived
+      by reconciling every branch's own parameters as true N-way peers, not a
+      left-to-right fold: a name with no type compatible across every branch
+      that declares it, or an incompatible kind, raises ``WorkflowError``
+      immediately. A name declared identically everywhere it appears is used
+      as-is. A name that's compatible but not identical across branches is
+      reconciled into one parameter using the full compatible-type witness set
+      (which may be broader than any single branch's own declared type) with
+      kind/default/description taken from the earliest-declaring branch that
+      has it; every such name across one construction call is reported in
+      exactly one grouped warning, not one per name. Two branches
+      independently declaring a same-kind variadic under different names still
+      cannot both survive into the final schema, but this is now caught by the
+      shared parameter-order validator every ``AtomicInvokable`` already goes
+      through (raises ``SchemaError``, a ``WorkflowError`` subclass) rather
+      than a bespoke pre-check naming the specific branches involved -- a
+      minor message-quality regression accepted here, matching the same
+      trade-off `Agent`'s own Pass 2 rework already made.
+    - ``selected_branches`` is a ``list[int]`` of branch positions (each
+      ``0 <= index < len(branches)``, no negative wraparound, no
+      duplicates) choosing which branches feed the projected result, and
+      in what order. ``None`` or ``[]`` both mean "no branches selected" —
+      a legal, meaningful state, not an error.
+    - ``result_mode`` (``SCALAR``/``LIST``/``TUPLE``/``SET``/``DICT`` class
+      constants) selects the projection shape. ``SCALAR`` allows at most
+      one selected branch (zero is legal — see Runtime contract).
+    - ``result_keys`` is a ``list[str]`` of labels, required exactly when
+      ``result_mode='dict'`` and must match ``len(selected_branches)``
+      (raise otherwise). Must be ``None``/empty for every other mode
+      (raise if provided). No auto-derivation from anywhere — always
+      explicit.
+    - ``include_trace`` controls whether invocation results populate
+      ``trace`` with the full per-branch ``AtomicResult`` tuple (ALL
+      branches, not just selected ones). Defaults to ``True``; mutable
+      post-construction via the inherited ``include_trace`` property.
+    - Branch topology, parameter schema, and output projection are all
+      fixed at construction.
 
-    - ``input_shape="broadcast"``
-        The same outer input mapping is forwarded to every branch.
-        ``parameters`` should ideally be provided explicitly. As a convenience
-        fallback, if ``parameters`` is omitted, this class mirrors the first
-        branch's parameters verbatim. That shortcut is intentionally risky:
-        the outer workflow may then filter away keys needed by later branches.
+    Runtime contract
+    ------------------
+    - The same outer input mapping is broadcast, unchanged, to every branch.
+    - All configured branches always execute, concurrently — selection only
+      affects what's projected into the outer result, not what runs.
+    - The final outer result is projected from the branches named by
+      ``selected_branches``, shaped by ``result_mode``:
+        - ``SCALAR``: one selected branch -> that branch's payload; zero
+          selected -> ``None``.
+        - ``LIST`` / ``TUPLE`` / ``SET``: the selected payloads in that
+          container type (empty selection -> empty container).
+        - ``DICT``: ``dict(zip(result_keys, payloads))`` (empty selection
+          -> ``{}``).
 
-    - ``input_shape="nested"``
-        ``parameters`` are required explicitly, must normalize to a fixed
-        ``list[ParamSpec]`` with length exactly equal to ``len(branches)``,
-        and may not contain ``VAR_POSITIONAL`` or ``VAR_KEYWORD`` entries.
-        Parameter ``i`` supplies the nested input payload for branch ``i`` and
-        each such payload must itself be a mapping at runtime.
+    Result
+    ------
+    Per-run result fields (see ``ParallelFlowResult``):
 
-    Output contract
-    ---------------
-    Branches always execute, but the final outer result is projected through
-    the read-only output configuration:
-
-    - ``output_indices``:
-        Ordered branch indices whose results are forwarded.
-    - ``output_shape="nested"``
-        Requires ``output_names`` of matching length. Result shape is:
-        ``{output_names[i]: branch_result[output_indices[i]]}``
-    - ``output_shape="flattened"``
-        Selected branch dicts are flattened in ``output_indices`` order using
-        ``duplicate_key_policy``.
-
-    Metadata
-    --------
-    Per-run metadata contains:
-
-    - ``branch_records``:
-        ``tuple[ChildRunRecord, ...]`` containing one typed child execution
-        record per executed branch.
-    - ``output_topology``:
-        ``OutputTopology`` describing the resolved outward projection for
-        this run.
-    - ``output_count``:
-        Number of branch results forwarded into the final outer result.
-
-    Mutability
-    ----------
-    - Branch topology is fixed after construction.
-    - Input contract is fixed after construction.
-    - Output projection remains mutable only through :meth:`configure_output`.
-    - ``duplicate_key_policy`` is independently mutable.
+    - ``trace``: full ordered tuple of every branch's own ``AtomicResult``
+      (all branches, declaration order), when ``include_trace`` is enabled.
+    - ``result_mode``: fixed projection mode, injected directly by
+      ``make_result()``.
+    - ``selected_indices``: fixed branch positions selected for
+      projection, injected directly by ``make_result()``.
+    - ``result_keys``: single source of truth for the projection's labels,
+      computed once at construction and mirrored verbatim onto the result.
+      For ``DICT`` mode it's the (validated) ``result_keys`` constructor
+      value; for every other mode it's exactly ``selected_indices`` — the
+      same tuple, not a separate concept.
     """
 
-    # Input/output shape options:
-    BROADCAST = "broadcast"
-    NESTED = OutputTopology.NESTED
-    FLATTENED = OutputTopology.FLATTENED
+    SCALAR = "scalar"
+    LIST = "list"
+    TUPLE = "tuple"
+    SET = "set"
+    DICT = "dict"
 
-    # Compatibility alias for older code paths; prefer ``NESTED``.
-    ENVELOPED = NESTED
-
-    # Flattened result duplicate key policies:
-    RAISE = "raise"
-    SKIP = "skip"
-    UPDATE = "update"
+    _OUTPUT_TYPES = {SCALAR, LIST, TUPLE, SET, DICT}
 
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
-        branches: list[Workflow | StructuredInvokable],
+        branches: list[AtomicInvokable] | tuple[AtomicInvokable, ...],
         *,
-        input_shape: str = BROADCAST,
-        parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
-        output_shape: str = NESTED,
-        output_indices: list[int] | None = None,
-        output_range: tuple[int, int] | None = None,
-        output_names: list[str] | None = None,
-        duplicate_key_policy: str = RAISE,
-        filter_extraneous_inputs: Optional[bool] = None,
+        result_mode: str = LIST,
+        selected_branches: list[int] | None = None,
+        result_keys: list[str] | None = None,
+        include_trace: bool = True,
     ) -> None:
-        if not isinstance(branches, list):
+        # 1. branches: always a plain list[AtomicInvokable], no wrapping.
+        if not isinstance(branches, (list, tuple)):
             raise TypeError(
-                f"branches must be a non-empty list[Workflow | StructuredInvokable], got {type(branches)!r}"
+                f"branches must be a non-empty list or tuple[AtomicInvokable], got {type(branches)!r}"
             )
         if not branches:
             raise ValueError("branches must not be empty")
-
-        normalized_branches = tuple(self._normalize_branch(branch) for branch in branches)
-        self._branches: tuple[Workflow, ...] = normalized_branches
-
-        normalized_input_shape = str(input_shape).strip().lower()
-        if normalized_input_shape not in {self.BROADCAST, self.NESTED}:
-            raise ValueError("input_shape must be either 'broadcast' or 'nested'")
-
-        used_parameter_fallback = False
-        if parameters is None:
-            if normalized_input_shape != self.BROADCAST:
-                raise ValueError(
-                    "parameters are required when input_shape='nested'"
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, AtomicInvokable):
+                raise TypeError(
+                    f"ParallelFlow branches must be AtomicInvokable, "
+                    f"got {type(branch)!r} at position {index}"
                 )
-            declared_parameters = list(normalized_branches[0].parameters)
-            used_parameter_fallback = True
-        else:
-            declared_parameters = to_paramspec_list(parameters)
-            is_valid_parameter_order(declared_parameters)
+        branch_items = tuple(branches)
+        branch_count = len(branch_items)
 
-        if normalized_input_shape == self.NESTED:
-            if len(declared_parameters) != len(normalized_branches):
-                raise ValueError(
-                    "nested input_shape requires len(parameters) == len(branches)"
-                )
-            for spec in declared_parameters:
-                if spec.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
-                    raise ValueError(
-                        "nested input_shape does not permit VAR_POSITIONAL or VAR_KEYWORD parameters"
-                    )
-
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else normalized_branches[0].filter_extraneous_inputs
+        # 2. Outer schema is fully derived from branches — no override.
+        # True N-way peer reconciliation (not a left-to-right fold):
+        # every branch's parameters are judged against every other
+        # branch simultaneously.
+        sources = [list(branch.parameters) for branch in branch_items]
+        source_labels = tuple(
+            f"branch {i} ({branch.full_name})"
+            for i, branch in enumerate(branch_items)
         )
+        reports = build_parameter_reports(sources)
+        constructed = apply_parameter_reports(
+            reports, source_labels, error_cls=WorkflowError, stacklevel=3
+        )
+        declared_parameters = insert_by_category([], constructed)
+
+        # 3. result_mode must be one of the known projection shapes.
+        normalized_mode = str(result_mode).strip().lower()
+        if normalized_mode not in self._OUTPUT_TYPES:
+            raise ValueError(
+                f"result_mode must be one of {sorted(self._OUTPUT_TYPES)!r}, got {result_mode!r}"
+            )
+
+        # 4. selected_branches: None/[] both mean "select nothing" — a
+        #    legal state, not an error. Every item must be an in-range,
+        #    non-negative int (no wraparound); no duplicates.
+        if selected_branches is None:
+            selected_branches = []
+        if not isinstance(selected_branches, (list, tuple)):
+            raise TypeError(
+                f"selected_branches must be a list or tuple or None, got {type(selected_branches)!r}"
+            )
+        for raw in selected_branches:
+            if not isinstance(raw, int) or isinstance(raw, bool):
+                raise TypeError(
+                    f"selected_branches items must be int, got {type(raw)!r}"
+                )
+            if raw < 0 or raw >= branch_count:
+                raise IndexError(
+                    f"selected_branches index {raw} out of range for "
+                    f"{branch_count} configured branch(es)"
+                )
+        if len(selected_branches) != len(set(selected_branches)):
+            raise ValueError("selected_branches must not select the same branch twice")
+        selected_indices: tuple[int, ...] = tuple(selected_branches)
+
+        # 5. SCALAR allows at most one selected branch (zero is legal —
+        #    invoke() then returns None).
+        if normalized_mode == self.SCALAR and len(selected_indices) > 1:
+            raise ValueError("result_mode='scalar' allows at most one selected branch")
+
+        # 6. result_keys: required (and validated) exactly for DICT mode,
+        #    forbidden otherwise. Never auto-derived — always explicit.
+        #    Either way, self._result_keys ends up as ONE of two things:
+        #    the validated label list (DICT), or selected_indices itself
+        #    (every other mode) — no third case, no None special-casing.
+        if normalized_mode == self.DICT:
+            if result_keys is None:
+                result_keys = []
+            if not isinstance(result_keys, (list, tuple)):
+                raise TypeError(
+                    f"result_keys must be a list[str] or tuple[str] or None, got {type(result_keys)!r}"
+                )
+            if len(result_keys) != len(selected_indices):
+                raise ValueError(
+                    "result_keys must match the length of selected_branches "
+                    f"({len(result_keys)} given, {len(selected_indices)} selected)"
+                )
+
+            cleaned_keys: list[str] = []
+            for index, raw_name in enumerate(result_keys):
+                if not isinstance(raw_name, str) or not raw_name.strip():
+                    raise ValueError(f"result_keys[{index}] must be a non-empty string")
+                cleaned = raw_name.strip()
+                if not IDENTIFIER_PATTERN.match(cleaned):
+                    raise ValueError(
+                        f"result_keys[{index}]={cleaned!r} is not a valid parameter-style name"
+                    )
+                cleaned_keys.append(cleaned)
+            if len(cleaned_keys) != len(set(cleaned_keys)):
+                raise ValueError("result_keys must be unique")
+
+            resolved_result_keys: tuple[int, ...] | tuple[str, ...] = tuple(cleaned_keys)
+            resolved_return_type = "dict"
+        else:
+            if result_keys is not None:
+                raise ValueError(
+                    f"result_keys must be None when result_mode={normalized_mode!r}"
+                )
+            resolved_result_keys = selected_indices
+            if normalized_mode == self.SCALAR:
+                # "None" (the type string) mirrors utils/parameters.py's own
+                # NoneType -> "None" formatting convention.
+                resolved_return_type = (
+                    branch_items[selected_indices[0]].return_type if selected_indices else "None"
+                )
+            else:
+                resolved_return_type = normalized_mode
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
-            parameters=list(declared_parameters),
-            filter_extraneous_inputs=resolved_filter,
+            parameters=declared_parameters,
+            return_type=resolved_return_type,
+            include_trace=include_trace,
         )
 
-        self._input_shape: str = normalized_input_shape
-        self._used_parameter_fallback: bool = used_parameter_fallback
-
-        self._output_indices: tuple[int, ...] = tuple()
-        self._output_shape: str = self.NESTED
-        self._output_names: tuple[str, ...] | None = None
-
-        self.duplicate_key_policy = duplicate_key_policy
-
-        self.configure_output(
-            output_indices=output_indices,
-            output_range=output_range,
-            output_shape=output_shape,
-            output_names=output_names,
-            duplicate_key_policy=duplicate_key_policy,
-        )
+        self._branches: tuple[AtomicInvokable, ...] = branch_items
+        self._result_mode: str = normalized_mode
+        self._selected_indices: tuple[int, ...] = selected_indices
+        self._result_keys: tuple[int, ...] | tuple[str, ...] = resolved_result_keys
 
     # ------------------------------------------------------------------ #
     # Read-only topology / contract properties
     # ------------------------------------------------------------------ #
     @property
-    def branches(self) -> tuple[Workflow, ...]:
-        """Return the fixed normalized branch tuple."""
+    def branches(self) -> tuple[AtomicInvokable, ...]:
+        """Return the fixed branch tuple, declaration order."""
         return self._branches
 
     @property
-    def input_shape(self) -> str:
-        """Return the fixed outer input-shape contract."""
-        return self._input_shape
+    def result_mode(self) -> str:
+        """Return the fixed output projection mode."""
+        return self._result_mode
 
     @property
-    def output_indices(self) -> list[int]:
-        """Return the resolved ordered output branch indices."""
-        return list(self._output_indices)
+    def selected_indices(self) -> tuple[int, ...]:
+        """Return the fixed branch indices selected for projection, in
+        projection order. May be empty (no branch selected)."""
+        return self._selected_indices
 
     @property
-    def output_shape(self) -> str:
-        """Return the current output projection shape."""
-        return self._output_shape
+    def result_keys(self) -> tuple[int, ...] | tuple[str, ...]:
+        """Return the fixed projection labels — the single source of truth
+        also mirrored onto ``ParallelFlowResult.result_keys``. For DICT
+        mode, the validated label strings; for every other mode, exactly
+        ``selected_indices`` (same tuple, not a separate value)."""
+        return self._result_keys
 
-    @property
-    def output_names(self) -> Optional[list[str]]:
-        """Return the current nested output keys, if any."""
-        return list(self._output_names) if self._output_names is not None else None
+    def _extra_description(self) -> str:
+        """Describe the fixed output projection shape.
 
-    # ------------------------------------------------------------------ #
-    # Independently mutable flattening policy
-    # ------------------------------------------------------------------ #
-    @property
-    def duplicate_key_policy(self) -> str:
-        """Flattened duplicate-key behavior."""
-        return self._duplicate_key_policy
-
-    @duplicate_key_policy.setter
-    def duplicate_key_policy(self, value: str) -> None:
-        normalized = str(value).strip().lower()
-        if normalized not in {self.RAISE, self.SKIP, self.UPDATE}:
-            raise ValueError(
-                "duplicate_key_policy must be one of: 'raise', 'skip', 'update'"
-            )
-        self._duplicate_key_policy = normalized
-
-    # ------------------------------------------------------------------ #
-    # Output reconfiguration
-    # ------------------------------------------------------------------ #
-    def configure_output(
-        self,
-        *,
-        output_indices: list[int] | None = None,
-        output_range: tuple[int, int] | None = None,
-        output_shape: str,
-        output_names: list[str] | None = None,
-        duplicate_key_policy: Optional[str] = None,
-    ) -> None:
-        """Atomically update the output projection contract.
-
-        Notes
-        -----
-        - Pass either ``output_indices`` or ``output_range``, not both.
-        - If neither is supplied, all configured branches are projected in their
-        natural order.
-        - ``output_shape='nested'`` requires valid ``output_names`` whose
-        length matches the resolved output count.
-        - ``output_shape='flattened'`` requires ``output_names is None``.
-        - ``duplicate_key_policy`` is optional for flattened output; when omitted,
-        the current configured policy is reused.
+        A branch's own extra description is only inlined in the SCALAR case
+        with a branch selected, where the result IS that one branch's
+        payload verbatim (a true 1:1 passthrough, not an aggregation).
+        DICT/LIST/TUPLE/SET describe structural shape facts instead of
+        inlining any branch content.
         """
-        resolved_indices = self._resolve_output_indices(
-            output_indices=output_indices,
-            output_range=output_range,
-        )
+        if self._result_mode == self.SCALAR:
+            if not self._selected_indices:
+                return "Returns None (no branch selected)."
+            return self._branches[self._selected_indices[0]]._extra_description()
 
-        normalized_output_shape = str(output_shape).strip().lower()
-        if normalized_output_shape not in {self.NESTED, self.FLATTENED}:
-            raise ValueError("output_shape must be either 'nested' or 'flattened'")
-
-        normalized_names: tuple[str, ...] | None = None
-
-        if normalized_output_shape == self.NESTED:
-            if output_names is None:
-                raise ValueError(
-                    "output_names are required when output_shape='nested'"
-                )
-            if not isinstance(output_names, list):
-                raise TypeError(
-                    f"output_names must be a list[str], got {type(output_names)!r}"
-                )
-            if len(output_names) != len(resolved_indices):
-                raise ValueError(
-                    "len(output_names) must equal the number of projected outputs"
-                )
-
-            cleaned_names: list[str] = []
-            for index, name in enumerate(output_names):
-                if not isinstance(name, str) or not name.strip():
-                    raise ValueError(
-                        f"output_names[{index}] must be a non-empty string"
-                    )
-                cleaned = name.strip()
-                if not _VALID_OUTPUT_NAME.match(cleaned):
-                    raise ValueError(
-                        f"output_names[{index}]={cleaned!r} is not a valid parameter-style name"
-                    )
-                cleaned_names.append(cleaned)
-
-            if len(cleaned_names) != len(set(cleaned_names)):
-                raise ValueError("output_names must be unique")
-
-            normalized_names = tuple(cleaned_names)
-
-        else:
-            if output_names is not None:
-                raise ValueError(
-                    "output_names must be None when output_shape='flattened'"
-                )
-
-            if duplicate_key_policy is not None:
-                self.duplicate_key_policy = duplicate_key_policy
-
-            if self._duplicate_key_policy not in {self.RAISE, self.SKIP, self.UPDATE}:
-                raise ValueError(
-                    "duplicate_key_policy must be one of: 'raise', 'skip', 'update'"
-                )
-
-        self._output_indices = tuple(resolved_indices)
-        self._output_shape = normalized_output_shape
-        self._output_names = normalized_names
-
-    # ------------------------------------------------------------------ #
-    # Internal normalization helpers
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _normalize_branch(branch: Workflow | StructuredInvokable) -> Workflow:
-        """Normalize one configured branch into a workflow-shaped node."""
-        if isinstance(branch, Workflow):
-            return branch
-        if isinstance(branch, StructuredInvokable):
-            return BasicFlow(component=branch)
-        raise TypeError(
-            "ParallelFlow branches must be Workflow or StructuredInvokable, "
-            f"got {type(branch)!r}"
-        )
-
-    def _resolve_output_indices(
-        self,
-        *,
-        output_indices: list[int] | None,
-        output_range: tuple[int, int] | None,
-    ) -> list[int]:
-        """Normalize output filtering into one ordered list of branch indices."""
-        if output_indices is not None and output_range is not None:
-            raise ValueError("Pass either output_indices or output_range, not both")
-
-        branch_count = len(self._branches)
-
-        if output_indices is None and output_range is None:
-            return list(range(branch_count))
-
-        if output_indices is not None:
-            if not isinstance(output_indices, list):
-                raise TypeError(
-                    f"output_indices must be a list[int], got {type(output_indices)!r}"
-                )
-
-            resolved: list[int] = []
-            for raw_index in output_indices:
-                if not isinstance(raw_index, int):
-                    raise TypeError(
-                        f"output_indices items must be int, got {type(raw_index)!r}"
-                    )
-
-                resolved_index = raw_index if raw_index >= 0 else branch_count + raw_index
-                if resolved_index < 0 or resolved_index >= branch_count:
-                    raise IndexError(
-                        f"output index {raw_index} out of range for {branch_count} configured branch(es)"
-                    )
-                resolved.append(resolved_index)
-
-            if len(resolved) != len(set(resolved)):
-                raise ValueError("output_indices must not contain duplicates")
-
-            return resolved
-
-        if (
-            not isinstance(output_range, tuple)
-            or len(output_range) != 2
-            or not all(isinstance(item, int) for item in output_range)
-        ):
-            raise TypeError("output_range must be a 2-int tuple")
-
-        start, end = output_range
-        resolved = list(range(branch_count))[start:end]
-
-        if len(resolved) != len(set(resolved)):
-            raise ValueError("resolved output indices must not contain duplicates")
-
-        return resolved
-
-    def _build_branch_inputs(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Build one concrete input mapping per branch for the current run."""
-        if self._input_shape == self.BROADCAST:
-            shared_inputs = dict(inputs)
-            return [dict(shared_inputs) for _ in self._branches]
-
-        branch_inputs: list[dict[str, Any]] = []
-        declared_parameters = self.parameters
-
-        for branch_index, spec in enumerate(declared_parameters):
-            if spec.name in inputs:
-                payload = inputs[spec.name]
-            elif spec.default is not NO_VAL:
-                payload = spec.default
-            else:
-                raise ValidationError(
-                    f"{self.full_name}: missing nested payload for branch parameter {spec.name!r}"
-                )
-
-            if not isinstance(payload, Mapping):
-                raise ValidationError(
-                    f"{self.full_name}: nested payload for branch {branch_index} "
-                    f"({self._branches[branch_index].full_name}) must be a mapping, "
-                    f"got {type(payload)!r}"
-                )
-
-            branch_inputs.append(dict(payload))
-
-        return branch_inputs
-
-    def _project_result(
-        self,
-        branch_results: list[FlowResultDict],
-    ) -> dict[str, Any]:
-        """Project canonical branch results into the configured outer result shape."""
-        if self._output_shape == self.NESTED:
-            assert self._output_names is not None
-            return {
-                self._output_names[position]: dict(branch_results[branch_index])
-                for position, branch_index in enumerate(self._output_indices)
-            }
-
-        flattened: dict[str, Any] = {}
-        for branch_index in self._output_indices:
-            branch_result = branch_results[branch_index]
-            for key, value in branch_result.items():
-                if key in flattened:
-                    if self._duplicate_key_policy == self.RAISE:
-                        raise ValidationError(
-                            f"{self.full_name}: duplicate flattened output key {key!r}"
-                        )
-                    if self._duplicate_key_policy == self.SKIP:
-                        continue
-                flattened[key] = value
-
-        return flattened
-
-    def _build_output_topology(self) -> OutputTopology:
-        """Build the typed outward projection descriptor for one run."""
-        if self._output_shape == self.NESTED:
-            return OutputTopology(
-                topology=OutputTopology.NESTED,
-                indices=tuple(self._output_indices),
-                names=tuple(self._output_names) if self._output_names is not None else None,
-                duplicate_key_policy=None,
+        if self._result_mode == self.DICT:
+            entries = ", ".join(
+                f"{name} ({self._branches[index].return_type})"
+                for name, index in zip(self._result_keys, self._selected_indices)
             )
+            return f"Returns a dict of {len(self._selected_indices)} keys: {entries}"
 
-        return OutputTopology(
-            topology=OutputTopology.FLATTENED,
-            indices=tuple(self._output_indices),
-            names=None,
-            duplicate_key_policy=self._duplicate_key_policy,
+        return f"Returns a {self._result_mode} of {len(self._selected_indices)} branch outputs."
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+    def _project_result(self, branch_results: list[AtomicResult]) -> Any:
+        """Project executed branch results into the configured outer result."""
+        payloads = [branch_results[index].result for index in self._selected_indices]
+
+        if self._result_mode == self.SCALAR:
+            return payloads[0] if payloads else None
+        if self._result_mode == self.LIST:
+            return list(payloads)
+        if self._result_mode == self.TUPLE:
+            return tuple(payloads)
+        if self._result_mode == self.SET:
+            return set(payloads)
+
+        # DICT: self._result_keys IS the label list in this mode.
+        return dict(zip(self._result_keys, payloads))
+
+    # ------------------------------------------------------------------ #
+    # Result construction
+    # ------------------------------------------------------------------ #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> ParallelFlowResult:
+        """Construct a ParallelFlowResult envelope, injecting the fixed
+        result_mode/selected_indices/result_keys directly — all constant
+        facts about this instance, not per-run data."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=ParallelFlowResult,
+            result_mode=self._result_mode,
+            selected_indices=self._selected_indices,
+            result_keys=self._result_keys,
+            **result_kwargs,
         )
-
-    # ------------------------------------------------------------------ #
-    # Retrieval helpers
-    # ------------------------------------------------------------------ #
-    def get_branch_records(
-        self,
-        run_id: str,
-    ) -> Optional[tuple[ChildRunRecord, ...]]:
-        """Return stored typed branch execution records for one parent run."""
-        checkpoint = self.get_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-
-        return tuple(checkpoint.metadata.branch_records)
-
-    def get_branch_results(
-        self,
-        run_id: str,
-    ) -> Optional[list[dict[str, Any] | None]]:
-        """Return child branch results for one parent run."""
-        branch_records = self.get_branch_records(run_id)
-        if branch_records is None:
-            return None
-
-        branch_results: list[dict[str, Any] | None] = []
-
-        for record_index, record in enumerate(branch_records):
-            branch_index = record.slot
-            if branch_index >= len(self._branches):
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}] references branch index "
-                    f"{branch_index}, but only {len(self._branches)} configured branches exist"
-                )
-
-            branch = self._branches[branch_index]
-            recorded_instance_id = record.instance_id
-
-            if branch.instance_id != recorded_instance_id:
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}] instance_id mismatch for "
-                    f"branch {branch_index}: recorded {recorded_instance_id!r}, current {branch.instance_id!r}"
-                )
-
-            child_checkpoint = branch.get_checkpoint(record.run_id)
-            if child_checkpoint is None:
-                branch_results.append(None)
-            else:
-                branch_results.append(dict(child_checkpoint.result))
-
-        return branch_results
-
-    def get_branch_result(
-        self,
-        run_id: str,
-        branch_index: int,
-    ) -> Optional[dict[str, Any]]:
-        """Return one child branch result for one parent run."""
-        if not isinstance(branch_index, int):
-            raise TypeError(
-                f"branch_index must be an int, got {type(branch_index)!r}"
-            )
-
-        branch_count = len(self._branches)
-        resolved_index = branch_index if branch_index >= 0 else branch_count + branch_index
-        if resolved_index < 0 or resolved_index >= branch_count:
-            raise IndexError(
-                f"branch_index {branch_index} out of range for {branch_count} configured branch(es)"
-            )
-
-        branch_results = self.get_branch_results(run_id)
-        if branch_results is None:
-            return None
-
-        return branch_results[resolved_index]
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[ParallelFlowRunMetadata, Mapping[str, Any]]:
-        """Synchronously execute all configured branches concurrently."""
-        branch_inputs = self._build_branch_inputs(inputs)
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        """Synchronously execute all configured branches concurrently.
 
-        def run_one(item: tuple[int, Workflow, dict[str, Any]]) -> FlowResultDict:
-            index, branch, branch_input = item
-            try:
-                result = branch.invoke(branch_input)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{self.full_name}: branch {index} ({branch.full_name}) failed during invoke"
-                ) from exc
+        Sync is the async path bridged, not a second implementation --
+        matches the run_coro_sync(async gather) pattern this codebase's
+        other batch-dispatching act() implementations already use
+        (PlanActAgent, ScriptActAgent).
+        Branches without a native async_invoke override already run their
+        real .invoke() inside a background thread by default
+        (AtomicInvokable.async_invoke), so a separate thread-pool mechanism
+        here would just duplicate that.
+        """
+        return run_coro_sync(self._async_run(inputs))
 
-            if not isinstance(result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: branch {index} ({branch.full_name}) returned "
-                    f"{type(result)!r}, expected FlowResultDict"
-                )
-
-            return result
-
-        items = [
-            (index, branch, branch_inputs[index])
-            for index, branch in enumerate(self._branches)
-        ]
-
-        with ThreadPoolExecutor(max_workers=len(items)) as executor:
-            branch_results = list(executor.map(run_one, items))
-
-        branch_records = tuple(
-            ChildRunRecord(
-                slot=index,
-                instance_id=branch.instance_id,
-                full_name=branch.full_name,
-                run_id=result.run_id,
-            )
-            for index, (branch, result) in enumerate(zip(self._branches, branch_results))
-        )
-
-        metadata = ParallelFlowRunMetadata(
-            branch_records=branch_records,
-            output_topology=self._build_output_topology(),
-            output_count=len(self._output_indices),
-        )
-        return metadata, self._project_result(branch_results)
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[ParallelFlowRunMetadata, Mapping[str, Any]]:
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Asynchronously execute all configured branches concurrently."""
-        branch_inputs = self._build_branch_inputs(inputs)
+        branch_inputs = [dict(inputs) for _ in self._branches]
 
-        async def run_one(
-            index: int,
-            branch: Workflow,
-            branch_input: dict[str, Any],
-        ) -> FlowResultDict:
+        async def run_one(index: int, branch: AtomicInvokable, branch_input: dict[str, Any]) -> AtomicResult:
             try:
-                result = await branch.async_invoke(branch_input)
+                return await branch.async_invoke(branch_input)
             except Exception as exc:
                 raise RuntimeError(
                     f"{self.full_name}: async branch {index} ({branch.full_name}) failed during invoke"
                 ) from exc
-
-            if not isinstance(result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: async branch {index} ({branch.full_name}) returned "
-                    f"{type(result)!r}, expected FlowResultDict"
-                )
-
-            return result
 
         branch_results = list(
             await asyncio.gather(
@@ -614,39 +379,23 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
             )
         )
 
-        branch_records = tuple(
-            ChildRunRecord(
-                slot=index,
-                instance_id=branch.instance_id,
-                full_name=branch.full_name,
-                run_id=result.run_id,
-            )
-            for index, (branch, result) in enumerate(zip(self._branches, branch_results))
-        )
-
-        metadata = ParallelFlowRunMetadata(
-            branch_records=branch_records,
-            output_topology=self._build_output_topology(),
-            output_count=len(self._output_indices),
-        )
-        return metadata, self._project_result(branch_results)
+        return self._project_result(branch_results), {
+            "trace": tuple(branch_results) if self.include_trace else None,
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the fixed branch topology plus current projection policy."""
+        """Serialize the fixed branch topology plus output projection."""
         data = super().to_dict()
         data.update(
             {
                 "branches": [branch.to_dict() for branch in self._branches],
                 "branch_count": len(self._branches),
-                "input_shape": self._input_shape,
-                "parameters_fallback_used": self._used_parameter_fallback,
-                "output_shape": self._output_shape,
-                "output_indices": list(self._output_indices),
-                "output_names": list(self._output_names) if self._output_names is not None else None,
-                "duplicate_key_policy": self._duplicate_key_policy,
+                "result_mode": self._result_mode,
+                "selected_indices": list(self._selected_indices),
+                "result_keys": list(self._result_keys),
             }
         )
         return data

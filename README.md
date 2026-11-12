@@ -1,4 +1,4 @@
-# Atomic-Agentic
+﻿# Atomic-Agentic
 
 ## Introduction
 
@@ -26,9 +26,10 @@ composable primitives:
     messages.
 -   **Agent** -- An autonomous reasoning component that uses LLM Engines
     and Tools to complete tasks and interact with its environment.
--   **StructuredInvokable** -- A packaging boundary wrapper for other
-    primary primitives to format raw outputs into structured, dictionary-based outputs. 
--   **Workflow** -- An **orchestration and checkpointing** layer that
+-   **StructuredInvokable** -- An explicit output-projection adapter
+    that wraps any other primitive and maps its raw output into a
+    validated, dictionary-based output schema.
+-   **Workflow** -- An **orchestration and tracing** layer that
     coordinates tools, engines, agents, and other workflows into structured
     pipelines.
 
@@ -55,7 +56,7 @@ cd Atomic-Agentic
 
 pip install --upgrade build
 python -m build
-pip install ./dist/atomic-agentic-*.whl
+pip install ./dist/atomic_agentic-*.whl
 ```
 
 Once installed, explore the `examples/` directory for complete
@@ -98,7 +99,7 @@ print(tool.signature)
 print(tool.parameters)
 
 result = tool.invoke({"index": 0})
-print(result)
+print(result.result)
 ```
 
 ------------------------------------------------------------------------
@@ -110,7 +111,7 @@ message-based interface. They receive a sequence of messages and
 generate the next response message.
 
 ``` python
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -120,7 +121,7 @@ response = engine.invoke({
     ]
 })
 
-print(response)
+print(response.result)
 ```
 
 LLM Engines intentionally remain **thin adapters**.\
@@ -135,8 +136,8 @@ orchestration. Those responsibilities belong to agents.
 Agents may also use Tools to interact with their environment.
 
 ``` python
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
 
 accounts = [
     {"name": "Alice Johnson", "birthdate": "1985-03-15", "account_balance": 15750.50, "annual_interest_rate": 0.025},
@@ -156,8 +157,9 @@ Desired Sector to invest: {sector.capitalize()}
 
 engine = OpenAIEngine(model="gpt-4o-mini")
 
-advisor = Agent(
+advisor = BasicAgent(
     name="finance_advisor",
+    namespace="finance",
     description="Investment advisor.",
     llm_engine=engine,
     role_prompt="""You are an expert financial advisor at a bank. 
@@ -167,7 +169,7 @@ provide a bulleted list of relevant investment tickers.""",
 )
 
 result = advisor.invoke({"account_index": 0, "sector": "technology"})
-print(result)
+print(result.result)
 ```
 
 ------------------------------------------------------------------------
@@ -181,22 +183,75 @@ Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 
 ```python
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Plugins import MATH_TOOLS
+from atomic_agentic.llm import OpenAIEngine
+
+def add(a: float, b: float) -> float:
+    """Return the sum of two numbers."""
+    return a + b
+
+def multiply(a: float, b: float) -> float:
+    """Return the product of two numbers."""
+    return a * b
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 
 agent = PlanActAgent(
     name="planner",
+    namespace="planning",
     description="Plans and solves tasks using tools.",
     llm_engine=engine,
 )
 
-agent.batch_register(MATH_TOOLS)
+agent.register_tools([add, multiply])
 
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
-print(result)
+print(result.result)
 ```
+
+**Note:** `PlanActAgent` plans an entire batch of tool calls upfront, in
+one JSON-structured generation; `ReActAgent` decides and dispatches one
+tool call at a time instead, reacting to each result before choosing the
+next -- see `examples/ReAct_Examples/` for worked examples of the latter.
+
+------------------------------------------------------------------------
+
+## Quickstart E: ScriptActAgent
+
+`ScriptActAgent` is the successor to the JSON-based tool-calling agents
+above. Instead of planning in JSON, it plans by writing native,
+restricted-grammar Python statements — calling registered tools, a curated
+set of approved Python builtins, and attribute/method access on
+already-resolved values. Statements with no data dependency on each other
+are batched and dispatched concurrently, inferred automatically from the
+plan's own call-dependency graph, with no model-facing concurrency signal
+needed.
+
+```python
+from atomic_agentic.agents import ScriptActAgent
+from atomic_agentic.llm import OpenAIEngine
+
+engine = OpenAIEngine(model="gpt-4.1-mini")
+
+agent = ScriptActAgent(
+    name="scripter",
+    namespace="planning",
+    description="Plans and solves tasks by writing Python-style call statements.",
+    llm_engine=engine,
+)
+
+result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
+print(result.result)
+```
+
+(No tools registered above -- `ScriptActAgent` solves bare arithmetic like
+this via its own restricted-grammar builtins; see `examples/ScriptAct_Examples/`
+for tool registration in context.)
+
+The grammar accepts positional args, keyword args, `*args`, and `**kwargs`
+unpacking, but deliberately rejects `for`/`while` loops, comprehensions,
+and lambdas outright — it is not a general code-execution sandbox. See
+`examples/ScriptAct_Examples/` for more, including concurrent dispatch,
+repair-on-failure replanning, and cross-invocation result addressing.
 
 ------------------------------------------------------------------------
 
@@ -216,7 +271,7 @@ def raw_tool(x, y):
 schema = ["sum", "product"]
 structured = StructuredInvokable(component=Tool(raw_tool), output_schema=schema)
 result = structured.invoke({"x": 2, "y": 3})
-print(result)  # {'sum': 5, 'product': 6}
+print(result.result)  # {'sum': 5, 'product': 6}
 ```
 
 See the `StructuredInvokable` docstring for advanced options (absent value handling, mapping extras, etc).
@@ -228,50 +283,118 @@ See the `StructuredInvokable` docstring for advanced options (absent value handl
 Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. They provide patterns for composition, branching, iteration, and parallelism, enabling you to build complex agentic systems from modular components.
 
 **Workflow classes include:**
-- `BasicFlow` – wraps a single component
-- `SequentialFlow` – chains steps in sequence
-- `ParallelFlow` – runs branches concurrently
-- `RoutingFlow` – routes input to a selected branch
-- `IterativeFlow` – loops until a judge condition is met
+- `SequentialFlow` — chains steps in sequence
+- `ParallelFlow` — runs branches concurrently
+- `RoutingFlow` — routes input to a selected branch
+- `IterativeFlow` — loops until a checker condition is met
+- `GraphFlow` — cyclic, dynamically-routed node graph; nodes can loop back
+  to earlier nodes based on runtime routing decisions, superstep-batched
+  concurrent execution
 
 **Note:**
-Workflows do not perform output packaging themselves. Always use `StructuredInvokable` to enforce output schemas and handle missing/extra fields.
+Workflows return typed result envelopes (`*FlowResult`) with `.result`, a
+`trace` of the actual child results produced that run (opt out via
+`include_trace=False`), and full run metadata. Use `StructuredInvokable`
+explicitly when you need to project a step's output dict to a fixed schema
+— workflow steps themselves do not apply schema projection.
 
 **For practical workflow usage and advanced patterns, see the examples in:**
 `examples/Workflow_Examples/`
 
 ------------------------------------------------------------------------
 
+## What's New in v2
+
+v2 is a deliberate breaking-change line with two headline improvements:
+
+**Reorganized package structure.** `src/atomic_agentic/` is now
+organized into concern-based layers — `exceptions/`, `constants/`,
+`models/`, and `utils/` sit below the domain packages (`agents/`,
+`tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/`), with `core/`
+holding only the shared invocation contract. The dependency topology
+is explicit and there are no cross-layer back-edges.
+
+**AtomicResult-family return contract.** Every `AtomicInvokable` —
+Tool, Agent, ToolAgent, Workflow, Engine, Command, StructuredInvokable
+— now returns a typed `AtomicResult`-family envelope from
+`invoke()`/`async_invoke()`. The `.result` field is always the
+caller-facing payload; envelope fields (`run_id`, `started_at`,
+`ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
+like token usage, step traces, and tool-call accounting) carry timing
+and provenance. Workflows return typed `*FlowResult` envelopes
+(`SequentialFlowResult`, `IterativeFlowResult`, `GraphFlowResult`, etc.)
+with a per-run `trace` of the actual child results produced, opt-out via
+`include_trace=False`.
+
+For a full breakdown of breaking changes and a v1→v2 migration guide:
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) — v1→v2 migration guide *(coming soon)*
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — full release history
+
+------------------------------------------------------------------------
+
 ## Repository Structure
 
-    Atomic-Agentic/
-    ├── examples/
-    │   ├── Agent_Examples/
-    │   ├── Agentic_Research/
-    │   ├── LLM_Examples/
-    │   ├── output_markdowns/
-    │   ├── PlanAct_Examples/
-    │   ├── RAG_Examples/
-    │   ├── ReAct_Examples/
-    │   ├── Tool_Examples/
-    │   └── Workflow_Examples/
-    │
-    ├── images/
-    │
-    ├── src/
-    │   └── atomic_agentic/
-    │       ├── a2a/
-    │       ├── agents/
-    │       ├── core/
-    │       ├── engines/
-    |       ├── mcp/
-    │       ├── tools/
-    │       ├── workflows/
-    │       ├── __init__.py
-    │       ├── _version.py
-    │       └── py.typed
-    │
-    ├── tests/
-    ├── README.md
-    ├── pyproject.toml
-    └── requirements.txt
+```
+Atomic-Agentic/
+|-- examples/
+|   |-- Agent_Examples/
+|   |-- Agentic_Research/
+|   |-- Invokable_Examples/
+|   |-- LLM_Examples/
+|   |-- PlanAct_Examples/
+|   |-- ReAct_Examples/
+|   |-- ScriptAct_Examples/
+|   |-- Tool_Examples/
+|   |-- Workflow_Examples/
+|
+|-- docs/
+|   |-- CHANGELOG.md
+|
+|-- images/
+|
+|-- src/
+|   |-- atomic_agentic/
+|       |-- a2a/
+|       |-- agents/
+|       |-- constants/
+|       |-- core/
+|       |-- exceptions/
+|       |-- llm/
+|       |-- mcp/
+|       |-- models/
+|       |-- tools/
+|       |-- utils/
+|       |-- workflows/
+|       |-- __init__.py
+|       |-- _version.py
+|       |-- py.typed
+|
+|-- tests/
+|-- README.md
+|-- pyproject.toml
+|-- requirements.txt
+```
+
+### Package topology
+
+The subpackages of `src/atomic_agentic/` form a strict layered
+dependency hierarchy — no back-edges:
+
+```
+{exceptions, constants} → models → utils → core → {agents, tools, workflows, llm, mcp, a2a}
+```
+
+| Layer | Packages | What lives here |
+|---|---|---|
+| Base | `exceptions/`, `constants/` | Exception classes and pure literals/sentinels; zero dependencies |
+| Data | `models/` | Dataclasses: `ParamSpec`, runtime records, result envelopes, workflow checkpoints |
+| Functions | `utils/` | Pure functions: async bridging, parameter ops, MCP and agent helpers |
+| Contract | `core/` | Shared invocation contract: `AtomicInvokable`, `Command`, `StructuredInvokable` |
+| Domain | `agents/`, `tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/` | Behavior implementations |
+
+------------------------------------------------------------------------
+
+## Changelog
+
+See [`docs/CHANGELOG.md`](https://github.com/gearsngenes/Atomic-Agentic/blob/main/docs/CHANGELOG.md)
+for the release history of notable changes.

@@ -1,0 +1,288 @@
+from __future__ import annotations
+
+from typing import (
+    Any,
+    Dict,
+    Mapping,
+    Literal,
+)
+from mcp import types as mcp_types
+
+from ..models.parameters import ParamSpec
+from ..constants.core import NO_VAL
+
+MCPExtractionMode = Literal["extract_result", "structured_content", "content_blocks"]
+
+
+def _json_schema_type_to_tuple(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    """
+    Best-effort conversion from a JSON Schema fragment to AA's canonical
+    ParamSpec.type tuple shape, vocabulary-aligned (PEP 585 lowercase) with
+    the Python-native extraction path so a Python-native and an MCP-sourced
+    ParamSpec for "the same" type actually compare equal.
+    """
+    if not isinstance(schema, Mapping):
+        return ("Any",)
+
+    primitive_map: Dict[str, str] = {
+        "string": "str",
+        "number": "float",
+        "integer": "int",
+        "boolean": "bool",
+        "object": "dict[str, Any]",
+        "array": "list[Any]",
+        "null": "None",
+    }
+
+    # JSON Schema's general union mechanism -- a list of full sub-schemas,
+    # distinct from the "type": [...] array-of-primitive-names shorthand
+    # below. Checked first, since a schema using anyOf/oneOf typically
+    # carries its type information inside each alternative, not at the top
+    # level. "allOf" is a different, unrelated keyword (intersection of
+    # constraints, not a union of alternatives) and is deliberately not
+    # treated as a union source here.
+    for union_key in ("anyOf", "oneOf"):
+        alternatives = schema.get(union_key)
+        if isinstance(alternatives, (list, tuple)) and alternatives:
+            collected: list[str] = []
+            for alt in alternatives:
+                if isinstance(alt, Mapping):
+                    collected.extend(_json_schema_type_to_tuple(alt))
+            return tuple(sorted(set(collected))) if collected else ("Any",)
+
+    raw_type = schema.get("type")
+
+    if isinstance(raw_type, str):
+        if raw_type == "array":
+            items = schema.get("items")
+            inner = " | ".join(_json_schema_type_to_tuple(items)) if isinstance(items, Mapping) else "Any"
+            return (f"list[{inner}]",)
+        return (primitive_map.get(raw_type, "Any"),)
+
+    if isinstance(raw_type, (list, tuple)):
+        parts: list[str] = []
+        for item in raw_type:
+            if not isinstance(item, str):
+                continue
+            if item == "array":
+                items = schema.get("items")
+                inner = " | ".join(_json_schema_type_to_tuple(items)) if isinstance(items, Mapping) else "Any"
+                parts.append(f"list[{inner}]")
+            else:
+                parts.append(primitive_map.get(item, "Any"))
+        return tuple(sorted(set(parts))) if parts else ("Any",)
+
+    return ("Any",)
+
+
+def _plain_mcp_value(value: Any) -> Any:
+    """
+    Convert MCP SDK objects into plain Python values for serialization-friendly
+    metadata snapshots.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain_mcp_value(item) for key, item in value.items()}
+
+    if isinstance(value, list):
+        return [_plain_mcp_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(_plain_mcp_value(item) for item in value)
+
+    if isinstance(value, set):
+        return {_plain_mcp_value(item) for item in value}
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="python")
+        except TypeError:
+            dumped = model_dump()
+        return _plain_mcp_value(dumped)
+
+    if hasattr(value, "__dict__"):
+        return {
+            str(key): _plain_mcp_value(item)
+            for key, item in vars(value).items()
+            if not str(key).startswith("_")
+        }
+
+    return value
+
+
+_UNSET = object()
+
+
+def _mcp_field(obj: Any, new_name: str, old_name: str) -> Any:
+    """
+    Read an MCP SDK object attribute whose canonical name changed under
+    mcp>=2.0 (`new_name`), falling back to the pre-2.0 name (`old_name`)
+    when the new one isn't present on this SDK's object. A sentinel probe
+    is required rather than a plain ``getattr(obj, new_name, None)``
+    default, since a real ``None`` value on an existing field (e.g. an
+    unset optional schema) must not be mistaken for "attribute absent".
+    """
+    value = getattr(obj, new_name, _UNSET)
+    if value is not _UNSET:
+        return value
+    return getattr(obj, old_name, None)
+
+
+def _infer_mcp_extraction_mode(output_schema: Any) -> MCPExtractionMode:
+    """
+    Decide how the proxy should extract the final AA-facing value.
+
+    Rules
+    -----
+    - Missing / non-mapping output schema -> raw content blocks
+    - Singleton object-like schema with one "result" property -> unwrap "result"
+    - Any other mapping schema -> return structuredContent as-is
+    """
+    if not isinstance(output_schema, Mapping):
+        return "content_blocks"
+
+    properties = output_schema.get("properties")
+    if isinstance(properties, Mapping) and len(properties) == 1 and "result" in properties:
+        return "extract_result"
+
+    return "structured_content"
+
+
+def _infer_mcp_return_type(output_schema: Any) -> str:
+    """
+    Infer the AA-facing return type string from an MCP output schema.
+
+    The return type matches the final proxy behavior:
+    - content_blocks     -> List[ContentBlock]
+    - extract_result     -> inferred type of the nested "result" schema
+    - structured_content -> concrete inferred non-object type when possible,
+                            otherwise Dict[str, Any]
+    """
+    extraction_mode = _infer_mcp_extraction_mode(output_schema)
+
+    if extraction_mode == "content_blocks":
+        return "List[ContentBlock]"
+
+    if not isinstance(output_schema, Mapping):
+        return "List[ContentBlock]"
+
+    if extraction_mode == "extract_result":
+        properties = output_schema.get("properties")
+        if isinstance(properties, Mapping):
+            result_schema = properties.get("result")
+            if isinstance(result_schema, Mapping):
+                return " | ".join(_json_schema_type_to_tuple(result_schema))
+        return "Any"
+
+    output_type = output_schema.get("type")
+
+    if isinstance(output_type, str):
+        if output_type == "object":
+            return "dict[str, Any]"
+        return " | ".join(_json_schema_type_to_tuple(output_schema))
+
+    if isinstance(output_type, (list, tuple)):
+        if "object" in output_type:
+            return "dict[str, Any]"
+        return " | ".join(_json_schema_type_to_tuple(output_schema))
+
+    properties = output_schema.get("properties")
+    if isinstance(properties, Mapping):
+        return "dict[str, Any]"
+
+    return " | ".join(_json_schema_type_to_tuple(output_schema))
+
+
+def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
+    """
+    Convert one raw MCP Tool object into the client hub's processed metadata shape.
+    """
+    raw_input_schema = _mcp_field(raw_tool, "input_schema", "inputSchema")
+    input_schema = raw_input_schema if isinstance(raw_input_schema, Mapping) else {}
+    output_schema = _mcp_field(raw_tool, "output_schema", "outputSchema")
+
+    properties = input_schema.get("properties")
+    required_raw = input_schema.get("required")
+    required = (
+        {str(item) for item in required_raw}
+        if isinstance(required_raw, (list, tuple, set))
+        else set()
+    )
+
+    parameters: list[ParamSpec] = []
+    if isinstance(properties, Mapping):
+        for index, (raw_name, raw_meta) in enumerate(properties.items()):
+            name = str(raw_name)
+            meta_schema = raw_meta if isinstance(raw_meta, Mapping) else {}
+
+            # Required params default to NO_VAL. Optional params use the schema
+            # default if provided, otherwise None.
+            if "default" in meta_schema:
+                default = meta_schema.get("default")
+            elif name in required:
+                default = NO_VAL
+            else:
+                default = None
+
+            raw_desc = meta_schema.get("description")
+            description: str | None = raw_desc.strip() or None if isinstance(raw_desc, str) else None
+
+            parameters.append(
+                ParamSpec(
+                    name=name,
+                    index=index,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type=_json_schema_type_to_tuple(meta_schema),
+                    default=default,
+                    description=description,
+                )
+            )
+
+    extraction_mode = _infer_mcp_extraction_mode(output_schema)
+
+    raw_metadata: Dict[str, Any] = {
+        "name": raw_tool.name,
+        "description": raw_tool.description,
+        "inputSchema": _plain_mcp_value(raw_input_schema),
+        "outputSchema": _plain_mcp_value(output_schema),
+    }
+
+    annotations = getattr(raw_tool, "annotations", None)
+    if annotations is not None:
+        raw_metadata["annotations"] = _plain_mcp_value(annotations)
+
+    meta = _mcp_field(raw_tool, "meta", "_meta")
+    if meta is not None:
+        raw_metadata["_meta"] = _plain_mcp_value(meta)
+
+    title = getattr(raw_tool, "title", None)
+    if title is not None:
+        raw_metadata["title"] = _plain_mcp_value(title)
+
+    return {
+        "description": str(raw_tool.description or ""),
+        "parameters": parameters,
+        "return_type": _infer_mcp_return_type(output_schema),
+        "extraction_mode": extraction_mode,
+        "raw_metadata": raw_metadata,
+    }
+
+
+def _normalize_mcp_call_result(raw: mcp_types.CallToolResult) -> Dict[str, Any]:
+    """
+    Normalize a raw MCP CallToolResult into the stable hub envelope.
+
+    Notes
+    -----
+    - `content` is preserved as raw MCP content blocks.
+    - `structuredContent` is preserved exactly as returned by the SDK.
+    - `isError` is preserved exactly as returned by the SDK.
+    """
+    return {
+        "content": list(raw.content),
+        "structuredContent": _mcp_field(raw, "structured_content", "structuredContent"),
+        "isError": _mcp_field(raw, "is_error", "isError"),
+    }

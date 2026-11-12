@@ -1,7 +1,14 @@
 import os
 from dotenv import load_dotenv
-from atomic_agentic.engines.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
+from atomic_agentic.llm import (
+    OpenAIEngine,
+    GeminiEngine,
+    MistralEngine,
+    AnthropicEngine,
+    LlamaCppEngine,
+)
 import logging
+from pprint import pprint
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -9,7 +16,8 @@ logging.basicConfig(level=logging.INFO)
 llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4.1")
 # llm = GeminiEngine(api_key=os.getenv("GOOGLE_API_KEY"), model="gemini-2.5-flash")
 # llm = MistralEngine(api_key=os.getenv("MISTRAL_API_KEY"), model="mistral-small-latest")
-# llm = LlamaCppEngine(repo_id="unsloth/phi-4-GGUF", filename="phi-4-Q4_K_M.gguf", n_ctx=512, verbose=False, n_threads=4)
+# llm = AnthropicEngine(api_key=os.getenv("ANTHROPIC_API_KEY"), model="claude-sonnet-4-6")
+# llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id="unsloth/phi-4-GGUF", filename="phi-4-Q4_K_M.gguf", n_ctx=512, verbose=False, n_threads=4)
 
 # --- Example list of messages (OpenAI-style chat format) ---
 messages = [
@@ -19,4 +27,7 @@ messages = [
 
 # --- Invoke the engine as an AtomicInvokable (dict-first contract) ---
 result = llm.invoke({"messages": messages})
-print("LLM Response:", result)
+print("LLM RESPONSE STRING:")
+print(result.result)
+print("\nLLM RESULT OBJECT:")
+pprint(result)

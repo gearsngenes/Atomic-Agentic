@@ -4,11 +4,9 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
-from atomic_agentic.agents.tool_agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Toolify import toolify
+from atomic_agentic.a2a import PyA2AtomicClient, PyA2AtomicHost
+from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 
@@ -26,21 +24,18 @@ def main() -> None:
 
     planner = PlanActAgent(
         name="InterAgentPlanner",
+        namespace="inter_agent_host",
         description="A planner that orchestrates remote trivia and math agents through PyA2AtomicTool proxies.",
         llm_engine=llm,
-        context_enabled=False,
+        record_enabled=False,
         tool_calls_limit=16,
     )
 
     trivia_client = PyA2AtomicClient(url=TRIVIA_URL)
     math_client = PyA2AtomicClient(url=MATH_URL)
 
-    planner.register(trivia_client,
-                      remote_name=TRIVIA_REMOTE_NAME,
-                      name_collision_mode="raise")
-    planner.register(math_client,
-                     remote_name=MATH_REMOTE_NAME,
-                     name_collision_mode="raise")
+    planner.register_tools([trivia_client], name_collision_policy="raise")
+    planner.register_tools([math_client], name_collision_policy="raise")
 
     host = PyA2AtomicHost(
         invokables=[planner],
@@ -50,7 +45,7 @@ def main() -> None:
         host="localhost",
         port=8000,
     )
-    host.run_server(debug=True)
+    host.run_server()
 
 
 if __name__ == "__main__":

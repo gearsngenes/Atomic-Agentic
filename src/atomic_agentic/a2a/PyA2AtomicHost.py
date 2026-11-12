@@ -14,11 +14,12 @@ from python_a2a import (
 )
 
 from ..core.Invokable import AtomicInvokable
-from .constants import (
+from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
     PYA2A_RESULT_KEY,
 )
+from ..constants.core import IDENTIFIER_PATTERN
 
 __all__ = ["PyA2AtomicHost"]
 
@@ -43,7 +44,12 @@ class PyA2AtomicHost(A2AServer):
         invokable.invoke(inputs=<parsed parameter dict>)
 
     Direct invocation success payload:
-      { "__py_a2a_result__": <invokable result> }
+      { "__py_a2a_result__": <invokable's AtomicResult.result payload> }
+
+      `invoke()` returns an AtomicResult-family envelope; only its `.result`
+      (the caller-facing payload) crosses the wire under this key. Envelope
+      fields (run_id, started_at/ended_at, elapsed_s, invoker_id) are not
+      included.
 
     Error payload:
       {
@@ -53,9 +59,13 @@ class PyA2AtomicHost(A2AServer):
       }
     """
 
+    _RESERVED_REMOTE_NAMES: frozenset[str] = frozenset(
+        {LIST_INVOKABLES_FUNCTION, GET_INVOKABLE_METADATA_FUNCTION}
+    )
+
     def __init__(
         self,
-        invokables: list[AtomicInvokable],
+        invokables: list[AtomicInvokable] | Mapping[str, AtomicInvokable],
         *,
         name: str,
         description: str,
@@ -118,18 +128,35 @@ class PyA2AtomicHost(A2AServer):
 
     @property
     def invokable_names(self) -> list[str]:
+        """
+        Registry keys (remote names) currently registered — equal to each
+        invokable's `.name` only when no override was given at registration.
+        """
         return list(self._invokables.keys())
 
     # ------------------------------------------------------------------ #
     # Local registry management
     # ------------------------------------------------------------------ #
-    def register(self, invokable: AtomicInvokable) -> str:
+    def register(self, invokable: AtomicInvokable, remote_name: str | None = None) -> str:
+        """
+        Register `invokable` under `remote_name` (registry-local alias, never
+        stored on the invokable itself). `remote_name=None` defaults to
+        `invokable.name`. Returns the effective registry key.
+        """
         if not isinstance(invokable, AtomicInvokable):
             raise TypeError(
                 f"register expects an AtomicInvokable, got {type(invokable).__name__!r}."
             )
 
-        key = invokable.name
+        if remote_name is None:
+            key = invokable.name
+            self._validate_remote_name(key, check_identifier=False)
+        else:
+            if not isinstance(remote_name, str) or not remote_name.strip():
+                raise ValueError("remote_name must be a non-empty string.")
+            key = remote_name.strip()
+            self._validate_remote_name(key, check_identifier=True)
+
         if key in self._invokables:
             raise ValueError(f"Duplicate invokable name {key!r} is not allowed.")
 
@@ -138,6 +165,10 @@ class PyA2AtomicHost(A2AServer):
         return key
 
     def remove(self, name: str) -> bool:
+        """
+        Remove the invokable registered under `name` (registry key / remote
+        name). Returns whether an entry was actually removed.
+        """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string.")
         removed = self._invokables.pop(name.strip(), None) is not None
@@ -260,26 +291,61 @@ class PyA2AtomicHost(A2AServer):
 
     def _normalize_invokables(
         self,
-        invokables: list[AtomicInvokable],
+        invokables: list[AtomicInvokable] | Mapping[str, AtomicInvokable],
     ) -> dict[str, AtomicInvokable]:
-        if not isinstance(invokables, list):
-            raise TypeError("invokables must be a list[AtomicInvokable].")
-
+        """
+        Normalize either construction form into a `remote_name -> invokable`
+        registry. Mapping keys are authoritative remote names (identifier-
+        validated); list items default their key to `.name` (already
+        identifier-valid at the invokable's own construction time, so only
+        the reserved-name check applies).
+        """
         registry: dict[str, AtomicInvokable] = {}
-        for index, invokable in enumerate(invokables):
-            if not isinstance(invokable, AtomicInvokable):
-                raise TypeError(
-                    f"invokables[{index}] must be an AtomicInvokable, "
-                    f"got {type(invokable).__name__!r}."
-                )
 
-            key = invokable.name
-            if key in registry:
-                raise ValueError(f"Duplicate invokable name {key!r} is not allowed.")
+        if isinstance(invokables, Mapping):
+            for remote_name, invokable in invokables.items():
+                if not isinstance(invokable, AtomicInvokable):
+                    raise TypeError(
+                        f"invokables[{remote_name!r}] must be an AtomicInvokable, "
+                        f"got {type(invokable).__name__!r}."
+                    )
+                self._validate_remote_name(remote_name, check_identifier=True)
+                registry[remote_name] = invokable
+            return registry
 
-            registry[key] = invokable
+        if isinstance(invokables, list):
+            for index, invokable in enumerate(invokables):
+                if not isinstance(invokable, AtomicInvokable):
+                    raise TypeError(
+                        f"invokables[{index}] must be an AtomicInvokable, "
+                        f"got {type(invokable).__name__!r}."
+                    )
 
-        return registry
+                key = invokable.name
+                self._validate_remote_name(key, check_identifier=False)
+                if key in registry:
+                    raise ValueError(f"Duplicate invokable name {key!r} is not allowed.")
+
+                registry[key] = invokable
+
+            return registry
+
+        raise TypeError("invokables must be a list[AtomicInvokable] or Mapping[str, AtomicInvokable].")
+
+    @staticmethod
+    def _validate_remote_name(remote_name: str, *, check_identifier: bool) -> None:
+        """
+        Shared registry-key validation: always rejects reserved wire function
+        names; additionally rejects non-identifier strings when
+        `check_identifier` is True (dict-form keys and explicit `register()`
+        overrides — list-form `.name` defaults are already identifier-valid).
+        """
+        if remote_name in PyA2AtomicHost._RESERVED_REMOTE_NAMES:
+            raise ValueError(
+                f"remote_name {remote_name!r} collides with a reserved wire function name."
+            )
+        if check_identifier and not IDENTIFIER_PATTERN.fullmatch(remote_name):
+            raise ValueError(f"remote_name {remote_name!r} is not a valid identifier.")
 
     def _list_invokables_payload(self) -> dict[str, dict[str, Any]]:
         return {
@@ -292,12 +358,15 @@ class PyA2AtomicHost(A2AServer):
         if invokable is None:
             raise KeyError(f"Unknown invokable {name!r}.")
         return {
-            "name": invokable.name,
-            "description": invokable.description,
+            "name": name,
+            # Raw description, not the rendered getter - the receiving proxy
+            # derives its own parameter-bullet block from the separately-sent
+            # `parameters` list, so sending rendered text here would double it.
+            "description": invokable._description,
             "parameters": [spec.to_dict() for spec in invokable.parameters],
             "return_type": invokable.return_type,
-            "filter_extraneous_inputs": invokable.filter_extraneous_inputs,
             "invokable_type": type(invokable).__name__,
+            "extra_description": invokable._extra_description(),
         }
 
     def _invoke_registered_invokable(
@@ -308,7 +377,7 @@ class PyA2AtomicHost(A2AServer):
         invokable = self._invokables.get(name)
         if invokable is None:
             raise KeyError(f"Unknown invokable {name!r}.")
-        return invokable.invoke(dict(inputs))
+        return invokable.invoke(dict(inputs)).result
 
     def _make_function_response(
         self,
