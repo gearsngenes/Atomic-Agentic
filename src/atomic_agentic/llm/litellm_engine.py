@@ -15,7 +15,8 @@ try:
         InternalServerError,
         BadGatewayError,
     )
-except ImportError:
+    _SDK_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     litellm = None  # type: ignore[assignment]
     RateLimitError = None
     Timeout = None
@@ -23,6 +24,7 @@ except ImportError:
     ServiceUnavailableError = None
     InternalServerError = None
     BadGatewayError = None
+    _SDK_IMPORT_ERROR = _exc
 
 from .base import LLMEngine
 from ..constants.llm import (
@@ -34,6 +36,7 @@ from ..constants.llm import (
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import LiteLLMTokenUsage, RemoteLLMModelData
+from ..utils.core import format_missing_dependency
 from ..utils.llm import validate_attachment_path
 
 __all__ = ["LiteLLMEngine"]
@@ -263,8 +266,9 @@ class LiteLLMEngine(LLMEngine):
         # 2. SDK presence check
         if litellm is None:
             raise LLMEngineError(
-                "LiteLLMEngine requires the `litellm` package: pip install litellm"
-            )
+                "LiteLLMEngine "
+                + format_missing_dependency("litellm", "litellm", _SDK_IMPORT_ERROR)
+            ) from _SDK_IMPORT_ERROR
 
         # 3. Store request-level params (no client construction step)
         self.provider = provider

@@ -4,12 +4,16 @@ import json
 
 try:
     from huggingface_hub import hf_hub_download
-except ImportError:
+    _HF_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     hf_hub_download = None
+    _HF_IMPORT_ERROR = _exc
 try:
     from llama_cpp import Llama
-except ImportError:
+    _LLAMA_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     Llama = None
+    _LLAMA_IMPORT_ERROR = _exc
 from typing import (
     Any,
     Dict,
@@ -20,6 +24,7 @@ from typing import (
 
 from .base import LLMEngine
 from ..exceptions import LLMEngineError
+from ..utils.core import format_missing_dependency
 from ..models.results.llm import (
     TokenUsage,
     LlamaCppTokenUsage,
@@ -217,8 +222,9 @@ class LlamaCppEngine(LLMEngine):
         # 2. SDK presence check
         if Llama is None:
             raise LLMEngineError(
-                "LlamaCppEngine requires the `llama-cpp-python` package."
-            )
+                "LlamaCppEngine "
+                + format_missing_dependency("llama-cpp-python", "llama", _LLAMA_IMPORT_ERROR)
+            ) from _LLAMA_IMPORT_ERROR
 
         # 3. Resolve model path
         if model_path:
@@ -226,9 +232,9 @@ class LlamaCppEngine(LLMEngine):
         elif repo_id and filename:
             if hf_hub_download is None:
                 raise LLMEngineError(
-                    "LlamaCppEngine requires the `huggingface_hub` package when "
-                    "`repo_id` and `filename` are used."
-                )
+                    "LlamaCppEngine, when `repo_id` and `filename` are used, "
+                    + format_missing_dependency("huggingface-hub", "llama", _HF_IMPORT_ERROR)
+                ) from _HF_IMPORT_ERROR
             resolved_model_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,

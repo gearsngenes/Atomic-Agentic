@@ -57,7 +57,7 @@ class TestLlamaCppEngine:
         monkeypatch.setattr(llama_module, "Llama", FakeLlama)
         monkeypatch.setattr(llama_module, "hf_hub_download", None)
 
-        with pytest.raises(LLMEngineError, match="huggingface_hub"):
+        with pytest.raises(LLMEngineError, match=r"huggingface-hub.*atomic-agentic\[llama\]"):
             LlamaCppEngine(repo_id="org/repo", filename="model.gguf")
 
     def test_constructor_uses_local_model_path(self, monkeypatch: pytest.MonkeyPatch) -> None:

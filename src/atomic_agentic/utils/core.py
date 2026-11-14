@@ -4,6 +4,7 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Mapping
 from dataclasses import fields
+from importlib import metadata
 from types import MappingProxyType
 from typing import Any
 
@@ -13,6 +14,7 @@ from ..constants.core import HeaderValue, T
 __all__ = [
     "apply_name_filter",
     "dataclass_record_to_dict",
+    "format_missing_dependency",
     "is_reserved_name",
     "normalize_headers",
     "run_coro_async",
@@ -34,6 +36,33 @@ def dataclass_record_to_dict(record: Any) -> dict[str, Any]:
     """
     data = {field.name: getattr(record, field.name) for field in fields(record)}
     return {"type": type(record).__name__, **data}
+
+
+def format_missing_dependency(
+    package: str,
+    extra: str,
+    cause: BaseException | None = None,
+) -> str:
+    """
+    Text for an optional dependency that cannot be used: absent, or present but
+    unimportable. ``package`` is the distribution name (``google-genai``) and
+    ``extra`` the atomic-agentic extra that installs it. Callers prefix the
+    owning class name; the helper raises nothing.
+    """
+    hint = f"pip install atomic-agentic[{extra}]"
+    try:
+        metadata.version(package)
+        installed = True
+    except metadata.PackageNotFoundError:
+        installed = False
+
+    if installed and cause is not None:
+        return (
+            f"the `{package}` package is installed but could not be imported "
+            f"({type(cause).__name__}: {cause}); this atomic-agentic version may "
+            f"not support it, see `{hint}` for the supported range."
+        )
+    return f"requires the `{package}` package; install it with `{hint}`."
 
 
 def is_reserved_name(name: str) -> bool:

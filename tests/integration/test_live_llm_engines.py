@@ -122,6 +122,7 @@ def _gemini_engine() -> LLMEngine:
     try:
         return GeminiEngine(
             model=os.getenv("AA_TEST_GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            http_options={"api_version": "v1beta"},
             temperature=0,
             timeout_seconds=60,
             max_retries=0,

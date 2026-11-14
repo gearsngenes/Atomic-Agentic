@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import importlib
 import json
 import mimetypes
 try:
     from mistralai.client import Mistral
     from mistralai.client import errors as mistral_errors
-except ImportError:
+    _SDK_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     Mistral = None
     mistral_errors = None
+    _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
     Any,
@@ -30,9 +33,28 @@ from ..models.results.llm import (
     LLMModelData,
     RemoteLLMModelData
 )
+from ..utils.core import format_missing_dependency
 from ..utils.llm import validate_attachment_path
 
 __all__ = ["MistralEngine"]
+
+
+def _transport_error_types() -> tuple[type[BaseException], ...]:
+    """``TransportError`` classes of whichever HTTP libraries are installed.
+
+    mistralai 2.x raises ``httpx`` errors and 3.x raises ``httpx2`` errors for
+    timeouts and connection failures; neither is wrapped by the SDK.
+    """
+    found: list[type[BaseException]] = []
+    for module_name in ("httpx", "httpx2"):
+        try:
+            found.append(importlib.import_module(module_name).TransportError)
+        except (ImportError, AttributeError):
+            continue
+    return tuple(found)
+
+
+_TRANSPORT_ERRORS = _transport_error_types()
 
 # ── MISTRAL ─────────────────────────────
 class MistralEngine(LLMEngine):
@@ -170,8 +192,9 @@ class MistralEngine(LLMEngine):
         # 2. SDK presence check.
         if Mistral is None:
             raise LLMEngineError(
-                "MistralEngine requires the `mistralai` package to be installed."
-            )
+                "MistralEngine "
+                + format_missing_dependency("mistralai", "mistral", _SDK_IMPORT_ERROR)
+            ) from _SDK_IMPORT_ERROR
 
         # 3. Build _ckw + seed timeout_ms default from the base-engine knob.
         _ckw = dict(client_kwargs)
@@ -426,13 +449,16 @@ class MistralEngine(LLMEngine):
 
     def _should_retry(self, exc: Exception, attempt: int) -> bool:
         """
-        Retry on ``NoResponseError`` (no HTTP response received at all) and
+        Retry on ``NoResponseError`` (no HTTP response received at all), on raw
+        HTTP transport failures (connect/read timeouts, network errors), and
         on retryable HTTP status codes (429, 500, 502, 503, 504) from
         ``SDKError.raw_response``.
         """
         if attempt > self._max_retries:
             return False
         if isinstance(exc, mistral_errors.NoResponseError):
+            return True
+        if _TRANSPORT_ERRORS and isinstance(exc, _TRANSPORT_ERRORS):
             return True
         if isinstance(exc, mistral_errors.SDKError):
             status = getattr(getattr(exc, "raw_response", None), "status_code", None)

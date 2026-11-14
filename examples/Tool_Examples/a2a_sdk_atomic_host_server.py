@@ -16,7 +16,7 @@ from atomic_agentic.tools import toolify
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from prebuilt_tools import BASIC_MATH_TOOLS
+from prebuilt_tools import BASIC_MATH_TOOLS, EXPONENT_TOOLS, STAT_TOOLS
 
 HOST = "127.0.0.1"
 PORT = 9000
@@ -25,12 +25,10 @@ BASE_URL = f"http://{HOST}:{PORT}"
 # Plain functions are toolified on the fly here -- A2AtomicExecutor requires
 # real AtomicInvokable instances (calls .to_agent_card() directly, no
 # toolify step of its own), unlike Agent.register_tools which normalizes a
-# bare callable itself. A subset of BASIC_MATH_TOOLS is exposed, picked for
-# parameter variety: two floats (add), two floats (multiply). NOTE: "sqrt"
-# and "mean" below are pre-existing names in SKILL_NAMES that were never
-# actually in BASIC_MATH_TOOLS (sqrt/mean live in EXPONENT_TOOLS/STAT_TOOLS
-# instead) -- a latent no-op in the filter below, left as found, not fixed
-# here.
+# bare callable itself. A subset of the math tools is exposed, picked for
+# parameter variety: two floats (add, multiply), one float (sqrt), and a
+# sequence of floats (mean). They live in three separate lists, so all three
+# are searched.
 SKILL_NAMES = {"add", "multiply", "sqrt", "mean"}
 
 
@@ -39,7 +37,7 @@ def main() -> None:
 
     skills = [
         toolify(fn, namespace="Basic_Math")
-        for fn in BASIC_MATH_TOOLS
+        for fn in (*BASIC_MATH_TOOLS, *EXPONENT_TOOLS, *STAT_TOOLS)
         if fn.__name__ in SKILL_NAMES
     ]
     executor = A2AtomicExecutor(skills)

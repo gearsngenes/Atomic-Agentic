@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any, Mapping
 
-from python_a2a import (
-    A2AServer,
-    AgentCard,
-    Message,
-    MessageRole,
-    FunctionResponseContent,
-    TextContent,
-    run_server,
-)
+try:
+    from python_a2a import (
+        A2AServer,
+        AgentCard,
+        Message,
+        MessageRole,
+        FunctionResponseContent,
+        TextContent,
+        run_server,
+    )
+    _IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
+    A2AServer = object  # keeps `class PyA2AtomicHost(A2AServer)` definable
+    AgentCard = Message = MessageRole = FunctionResponseContent = TextContent = run_server = None
+    _IMPORT_ERROR = _exc
 
 from ..core.Invokable import AtomicInvokable
+from ..utils.core import format_missing_dependency
 from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
@@ -42,6 +50,9 @@ class PyA2AtomicHost(A2AServer):
     All other function names are treated as a registered invokable name.
     The parsed function-call parameters are passed directly to:
         invokable.invoke(inputs=<parsed parameter dict>)
+
+    Deprecated: requires the ``python-a2a`` extra and will be removed in the
+    final atomic-agentic 2.0.0 release; use ``A2AtomicExecutor`` (a2a-sdk).
 
     Direct invocation success payload:
       { "__py_a2a_result__": <invokable's AtomicResult.result payload> }
@@ -75,6 +86,18 @@ class PyA2AtomicHost(A2AServer):
         url: str | None = None,
         capabilities: Mapping[str, Any] | None = None,
     ) -> None:
+        if _IMPORT_ERROR is not None:
+            raise ImportError(
+                "PyA2AtomicHost "
+                + format_missing_dependency("python-a2a", "python-a2a", _IMPORT_ERROR)
+            ) from _IMPORT_ERROR
+        warnings.warn(
+            "PyA2AtomicHost (python-a2a) is deprecated and will be removed in the "
+            "final atomic-agentic 2.0.0 release; use A2AtomicExecutor (a2a-sdk) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string.")
         if not isinstance(description, str) or not description.strip():

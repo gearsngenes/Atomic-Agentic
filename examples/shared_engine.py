@@ -24,7 +24,9 @@ in ways untied to raw reasoning, e.g. repeating a side effect already
 performed, or folding a value meant to be printed into the return value
 instead); Gemini/Mistral/Anthropic's existing small-tier defaults
 (gemini-2.5-flash/mistral-medium-latest/claude-haiku-4-5) passed that same
-live check cleanly and are unchanged.
+live check cleanly and are unchanged. The Gemini entry pins the API version to
+``v1beta``: google-genai 3.x defaults to ``v1``, which rejects system instructions
+and JSON mode for the 2.5 family (Gemini 3.x models work on either).
 
 Only an example's own core ToolAgent under test should import this -- any
 BasicAgent/PlanActAgent/etc. sub-agents an example builds as delegation
@@ -60,7 +62,8 @@ load_dotenv()
 
 PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
     "o": (OpenAIEngine, {"api_key": os.getenv("OPENAI_API_KEY"), "model": os.getenv("OPENAI_MODEL", "gpt-4o")}),
-    "g": (GeminiEngine, {"api_key": os.getenv("GOOGLE_API_KEY"), "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash")}),
+    "g": (GeminiEngine, {"api_key": os.getenv("GOOGLE_API_KEY"), "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+          "http_options": {"api_version": "v1beta"}}),
     "m": (MistralEngine, {"api_key": os.getenv("MISTRAL_API_KEY"), "model": os.getenv("MISTRAL_MODEL", "mistral-medium-latest")}),
     "a": (AnthropicEngine, {"api_key": os.getenv("ANTHROPIC_API_KEY"), "model": os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")}),
     "p": (

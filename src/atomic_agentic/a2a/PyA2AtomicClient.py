@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from typing import Any, Mapping
 
-from python_a2a import (
-    A2AClient,
-    FunctionCallContent,
-    FunctionParameter,
-    Message,
-    MessageRole,
-)
+try:
+    from python_a2a import (
+        A2AClient,
+        FunctionCallContent,
+        FunctionParameter,
+        Message,
+        MessageRole,
+    )
+    _IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
+    A2AClient = FunctionCallContent = FunctionParameter = Message = MessageRole = None
+    _IMPORT_ERROR = _exc
 
 from ..constants.core import HeaderValue
 from ..exceptions import PyA2AtomicConnectionError, RemoteInvocationError
-from ..utils.core import apply_name_filter, normalize_headers, validate_name_filter
+from ..utils.core import (
+    apply_name_filter,
+    format_missing_dependency,
+    normalize_headers,
+    validate_name_filter,
+)
 from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
@@ -46,6 +57,9 @@ class PyA2AtomicClient:
     list_invokables()'s output only -- discovery-only, not enforced on
     call_invokable()/get_invokable_metadata(), which remain callable by any
     remote name regardless of this filter.
+
+    Deprecated: requires the ``python-a2a`` extra and will be removed in the
+    final atomic-agentic 2.0.0 release; use ``A2AClientHub`` (a2a-sdk).
     """
 
     def __init__(
@@ -57,6 +71,18 @@ class PyA2AtomicClient:
         include_names: list[str] | None = None,
         exclude_names: list[str] | None = None,
     ) -> None:
+        if _IMPORT_ERROR is not None:
+            raise ImportError(
+                "PyA2AtomicClient "
+                + format_missing_dependency("python-a2a", "python-a2a", _IMPORT_ERROR)
+            ) from _IMPORT_ERROR
+        warnings.warn(
+            "PyA2AtomicClient (python-a2a) is deprecated and will be removed in the "
+            "final atomic-agentic 2.0.0 release; use A2AClientHub (a2a-sdk) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url must be a non-empty string.")
 

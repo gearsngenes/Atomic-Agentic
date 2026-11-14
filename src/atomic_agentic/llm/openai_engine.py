@@ -5,11 +5,13 @@ import json
 import mimetypes
 try:
     from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError
-except ImportError:
+    _SDK_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     AsyncOpenAI = None
     OpenAI = None
     APIConnectionError = None
     APIStatusError = None
+    _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
     Any,
@@ -34,7 +36,7 @@ from ..models.results.llm import (
     RemoteLLMModelData
 )
 from ..utils.llm import validate_attachment_path
-from ..utils.core import run_coro_sync
+from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["OpenAIEngine"]
 
@@ -205,8 +207,9 @@ class OpenAIEngine(LLMEngine):
         # Step 2 — SDK presence check.
         if OpenAI is None:
             raise LLMEngineError(
-                "OpenAIEngine requires the `openai` package; install `openai` to use it."
-            )
+                "OpenAIEngine "
+                + format_missing_dependency("openai", "openai", _SDK_IMPORT_ERROR)
+            ) from _SDK_IMPORT_ERROR
 
         # Step 3 — Build shared client kwargs; seed timeout from the base-engine knob.
         _ckw = dict(client_kwargs)

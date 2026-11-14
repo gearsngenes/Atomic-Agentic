@@ -145,19 +145,15 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(
             model="claude-sonnet-4-6",
             max_output_tokens=1024,
-            temperature=0.5,
-            top_p=0.9,
-            top_k=40,
             stop_sequences=["STOP"],
             thinking_config={"type": "adaptive"},
+            extra_body={"temperature": 0.5, "top_k": 40},
         )
         assert engine.model == "claude-sonnet-4-6"
         assert engine.max_output_tokens == 1024
-        assert engine.temperature == 0.5
-        assert engine.top_p == 0.9
-        assert engine.top_k == 40
         assert engine.stop_sequences == ["STOP"]
         assert engine.thinking_config == {"type": "adaptive"}
+        assert engine.extra_body == {"temperature": 0.5, "top_k": 40}
 
     # -- _call_provider routing ------------------------------------------------
 
@@ -306,11 +302,9 @@ class TestAnthropicEngine:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(
             model="claude-opus-4-8",
-            temperature=0.7,
-            top_p=0.9,
-            top_k=20,
             stop_sequences=["END"],
             thinking_config={"type": "adaptive"},
+            extra_body={"temperature": 0.7, "top_p": 0.9, "top_k": 20},
         )
         msgs = [{"role": "user", "content": "hi"}]
 
@@ -544,7 +538,7 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(
             model="claude-opus-4-8",
             max_output_tokens=1024,
-            temperature=0.3,
+            extra_body={"temperature": 0.3},
             stop_sequences=["END"],
             block_separator="---",
         )
@@ -552,7 +546,7 @@ class TestAnthropicEngine:
         assert d["type"] == "AnthropicEngine"
         assert d["model"] == "claude-opus-4-8"
         assert d["max_output_tokens"] == 1024
-        assert d["temperature"] == 0.3
+        assert d["extra_body"] == {"temperature": 0.3}
         assert d["stop_sequences"] == ["END"]
         assert d["block_separator"] == "---"
         assert d["inline_cutoff_chars"] == 200_000
@@ -602,6 +596,7 @@ class TestAnthropicEngine:
 
         assert block["type"] == "document"
         assert block["source"]["type"] == "text"
+        assert block["source"]["media_type"] == "text/plain"
         assert block["source"]["data"] == "Hello notes"
 
     def test_attachment_blocks_appended_to_last_user_turn(

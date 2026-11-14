@@ -27,9 +27,11 @@ openai_engine = OpenAIEngine(
 
 # --- Gemini: single genai.Client handles both sync and async paths ---
 # No separate async client needed — client.aio.models is the async surface.
+# An injected client carries its own options: google-genai 3.x defaults to API v1, which
+# rejects system instructions/JSON mode for the 2.5 family, so pin v1beta on the client.
 gemini_engine = GeminiEngine(
     model="gemini-2.5-flash",
-    client=genai.Client(api_key=os.getenv("GOOGLE_API_KEY")),
+    client=genai.Client(api_key=os.getenv("GOOGLE_API_KEY"), http_options={"api_version": "v1beta"}),
 )
 
 # --- Mistral: single Mistral client handles both sync and async paths ---

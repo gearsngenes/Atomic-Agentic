@@ -503,6 +503,13 @@ class TestMistralShouldRetry:
         exc = mistral_errors.NoResponseError()
         assert engine._should_retry(exc, attempt=1) is True
 
+    def test_raw_transport_errors_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        for exc in (httpx.ConnectTimeout("t"), httpx.ReadTimeout("t"), httpx.ConnectError("c")):
+            assert engine._should_retry(exc, attempt=1) is True
+        assert engine._should_retry(httpx.ConnectTimeout("t"), attempt=3) is False
+        assert engine._should_retry(ValueError("x"), attempt=1) is False
+
     def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch, max_retries=2)
         for code in (429, 500, 502, 503, 504):

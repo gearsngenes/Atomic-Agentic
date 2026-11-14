@@ -92,6 +92,77 @@ class TestGeminiEngine:
         assert fake.kwargs["api_key"] == "secret"
         assert fake.kwargs["http_options"] == {"timeout": 7000}
 
+    def test_http_options_dict_keeps_keys_and_fills_missing_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+        caller_options = {"api_version": "v1beta"}
+
+        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options=caller_options)
+
+        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {
+            "api_version": "v1beta",
+            "timeout": 7000,
+        }
+        assert caller_options == {"api_version": "v1beta"}  # caller's dict is not mutated
+
+    def test_http_options_caller_timeout_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+
+        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0,
+                     http_options={"api_version": "v1", "timeout": 120_000})
+
+        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {
+            "api_version": "v1",
+            "timeout": 120_000,
+        }
+
+    def test_http_options_explicit_none_timeout_is_filled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+
+        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options={"timeout": None})
+
+        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {"timeout": 7000}
+
+    def test_http_options_object_is_merged_without_mutating_the_original(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+        caller_options = _real_genai_types.HttpOptions(api_version="v1beta")
+
+        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options=caller_options)
+
+        merged = FakeGenAIClient.instances[-1].kwargs["http_options"]
+        assert merged.api_version == "v1beta"
+        assert merged.timeout == 7000
+        assert caller_options.timeout is None
+
+    def test_http_options_object_with_timeout_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+
+        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0,
+                     http_options=_real_genai_types.HttpOptions(api_version="v1", timeout=90_000))
+
+        merged = FakeGenAIClient.instances[-1].kwargs["http_options"]
+        assert (merged.api_version, merged.timeout) == ("v1", 90_000)
+
+    def test_real_client_receives_the_merged_options(self) -> None:
+        engine = GeminiEngine(model="gemini-2.5-flash", api_key="dummy-key", timeout_seconds=7.0,
+                              http_options={"api_version": "v1beta"})
+
+        options = engine._client._api_client._http_options
+        assert options.api_version == "v1beta"
+        assert options.timeout == 7000
+
     def test_constructor_client_injection_skips_construction(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

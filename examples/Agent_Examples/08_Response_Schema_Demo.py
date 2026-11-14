@@ -24,7 +24,7 @@ from __future__ import annotations
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.llm import AnthropicEngine, OpenAIEngine
+from atomic_agentic.llm import AnthropicEngine, OpenAIEngine, GeminiEngine, MistralEngine
 from atomic_agentic.exceptions import LLMEngineError
 
 load_dotenv()
