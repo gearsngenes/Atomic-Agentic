@@ -10,6 +10,7 @@ import pytest
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.exceptions import SchemaError
 
 
 class EchoInvokable(AtomicInvokable):
@@ -109,6 +110,15 @@ class TestAtomicInvokableConstruction:
     def test_non_string_return_type_raises(self) -> None:
         with pytest.raises(TypeError):
             make_invokable(return_type=dict)  # type: ignore[arg-type]
+
+    def test_constructor_copies_parameters_list(self) -> None:
+        params = [make_param("x", 0)]
+        invokable = make_invokable(parameters=params)
+
+        params.append(make_param("y", 1))
+
+        assert len(invokable.parameters) == 1
+        assert invokable.parameters[0] is params[0]
 
 
 class TestAtomicInvokableIdentity:
@@ -729,3 +739,231 @@ class TestExtraDescriptionHook:
         )
 
         assert invokable.description == "GC base.\nchild extra\ngrandchild extra"
+
+
+def _two_required() -> EchoInvokable:
+    return make_invokable(parameters=[make_param("a", 0), make_param("b", 1)])
+
+
+class TestAtomicInvokableDefaultMutators:
+    # setting
+    def test_set_defaults_makes_param_optional(self) -> None:
+        invokable = _two_required()
+
+        invokable.set_defaults({"a": 1, "b": 2})
+
+        assert [p.default for p in invokable.parameters] == [1, 2]
+        assert invokable.filter_inputs({}) == {"a": 1, "b": 2}
+
+    def test_set_defaults_replaces_existing_default(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+
+        invokable.set_defaults({"a": 5})
+
+        assert invokable.parameters[0].default == 5
+        assert invokable.filter_inputs({}) == {"a": 5}
+
+    def test_set_defaults_returns_none(self) -> None:
+        invokable = make_invokable()
+
+        assert invokable.set_defaults({"x": 1}) is None
+
+    def test_set_defaults_shares_value_by_reference(self) -> None:
+        invokable = make_invokable()
+        shared: list[int] = []
+
+        invokable.set_defaults({"x": shared})
+
+        assert invokable.filter_inputs({})["x"] is shared
+
+    def test_set_defaults_accepts_no_val_as_no_default(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.KEYWORD_ONLY, default=1),
+        ])
+
+        invokable.set_defaults({"a": NO_VAL})
+
+        assert invokable.parameters[0].default is NO_VAL
+
+    def test_set_defaults_keyword_only_any_order(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.KEYWORD_ONLY, default=1),
+            make_param("b", 1, ParamSpec.KEYWORD_ONLY),
+        ])
+
+        invokable.set_defaults({"b": 2})
+        assert invokable.parameters[1].default == 2
+
+        invokable.set_defaults({"a": 9})
+        assert invokable.parameters[0].default == 9
+
+    def test_set_defaults_empty_mapping_is_noop(self) -> None:
+        invokable = _two_required()
+        before = invokable.parameters
+
+        invokable.set_defaults({})
+
+        assert invokable.parameters == before
+
+    @pytest.mark.parametrize("bad", [["a"], "a", None])
+    def test_set_defaults_non_mapping_raises_type_error(self, bad: Any) -> None:
+        invokable = make_invokable()
+
+        with pytest.raises(TypeError, match="must be a mapping"):
+            invokable.set_defaults(bad)
+
+    def test_set_defaults_unknown_name_raises_value_error(self) -> None:
+        invokable = make_invokable()
+
+        with pytest.raises(ValueError, match="unknown parameter.*nope"):
+            invokable.set_defaults({"nope": 1})
+
+    @pytest.mark.parametrize("kind", [ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD])
+    def test_set_defaults_variadic_name_raises_value_error(self, kind: str) -> None:
+        invokable = make_invokable(parameters=[make_param("rest", 0, kind)])
+
+        with pytest.raises(ValueError, match="variadic") as excinfo:
+            invokable.set_defaults({"rest": 1})
+
+        assert "unknown" not in str(excinfo.value)
+
+    def test_set_defaults_order_violation_raises_schema_error_naming_param(self) -> None:
+        invokable = _two_required()
+
+        with pytest.raises(SchemaError, match="'b'"):
+            invokable.set_defaults({"a": 1})
+
+    def test_set_defaults_batch_judged_on_final_state(self) -> None:
+        invokable = _two_required()
+
+        invokable.set_defaults({"a": 1, "b": 2})
+
+        assert [p.default for p in invokable.parameters] == [1, 2]
+
+    def test_set_defaults_failure_changes_nothing(self) -> None:
+        invokable = _two_required()
+        snapshot = invokable.parameters
+
+        with pytest.raises(ValueError):
+            invokable.set_defaults({"a": 1, "nope": 2})
+
+        assert invokable.parameters == snapshot
+
+    def test_set_defaults_reflected_in_signature_and_to_dict(self) -> None:
+        invokable = _two_required()
+
+        invokable.set_defaults({"a": 1, "b": 2})
+
+        assert "a: Any = 1, b: Any = 2" in invokable.signature
+        assert [p["default"] for p in invokable.to_dict()["parameters"]] == [1, 2]
+
+    # removing
+    def test_remove_defaults_makes_param_required(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+
+        invokable.remove_defaults(["a"])
+
+        assert invokable.parameters[0].default is NO_VAL
+        assert invokable.filter_inputs({}) == {}
+
+    def test_remove_defaults_returns_none(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+
+        assert invokable.remove_defaults(["a"]) is None
+
+    def test_remove_defaults_no_default_raises_value_error(self) -> None:
+        invokable = make_invokable()
+
+        with pytest.raises(ValueError, match="have no default"):
+            invokable.remove_defaults(["x"])
+
+    def test_remove_defaults_unknown_name_raises_value_error(self) -> None:
+        invokable = make_invokable()
+
+        with pytest.raises(ValueError, match="unknown parameter"):
+            invokable.remove_defaults(["nope"])
+
+    def test_remove_defaults_variadic_name_raises_value_error(self) -> None:
+        invokable = make_invokable(parameters=[make_param("rest", 0, ParamSpec.VAR_POSITIONAL)])
+
+        with pytest.raises(ValueError, match="variadic") as excinfo:
+            invokable.remove_defaults(["rest"])
+
+        assert "have no default" not in str(excinfo.value)
+
+    def test_remove_defaults_order_violation_raises_schema_error(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, default=1),
+            make_param("b", 1, default=2),
+        ])
+
+        # Removing only "b" would leave a required positional after a defaulted one.
+        with pytest.raises(SchemaError, match="'b'"):
+            invokable.remove_defaults(["b"])
+
+        invokable.remove_defaults(["a", "b"])
+        assert [p.default for p in invokable.parameters] == [NO_VAL, NO_VAL]
+
+    def test_remove_defaults_failure_changes_nothing(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, default=1),
+            make_param("b", 1, default=2),
+        ])
+        snapshot = invokable.parameters
+
+        with pytest.raises(SchemaError):
+            invokable.remove_defaults(["b"])
+
+        assert invokable.parameters == snapshot
+
+    def test_remove_defaults_bare_string_raises_type_error(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, default=1),
+            make_param("b", 1, default=2),
+        ])
+
+        with pytest.raises(TypeError, match="bare string"):
+            invokable.remove_defaults("ab")
+
+    def test_remove_defaults_non_iterable_raises_type_error(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+
+        with pytest.raises(TypeError):
+            invokable.remove_defaults(5)  # type: ignore[arg-type]
+
+    def test_remove_defaults_empty_is_noop(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+        before = invokable.parameters
+
+        invokable.remove_defaults([])
+
+        assert invokable.parameters == before
+
+    def test_remove_defaults_duplicate_names_harmless(self) -> None:
+        invokable = make_invokable(parameters=[make_param("a", 0, default=1)])
+
+        invokable.remove_defaults(["a", "a"])
+
+        assert invokable.parameters[0].default is NO_VAL
+
+    # isolation
+    def test_shared_spec_unaffected_when_one_invokable_sets_default(self) -> None:
+        spec = make_param("x", 0)
+        original_hash = hash(spec)
+        first = make_invokable(parameters=[spec])
+        second = make_invokable(parameters=[spec], name="other")
+
+        first.set_defaults({"x": 1})
+
+        assert first.parameters[0].default == 1
+        assert second.parameters[0].default is NO_VAL
+        assert spec.default is NO_VAL
+        assert hash(spec) == original_hash
+
+    def test_parameters_copy_not_affected_by_later_set(self) -> None:
+        invokable = make_invokable()
+        taken = invokable.parameters
+
+        invokable.set_defaults({"x": 1})
+
+        assert taken[0].default is NO_VAL

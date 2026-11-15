@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Mapping, Dict, Sequence, Optional, TypeVar
+from dataclasses import replace
+from typing import Any, Iterable, Mapping, Dict, Sequence, Optional, TypeVar
 import threading
 import asyncio
 from uuid import uuid4
@@ -59,6 +60,17 @@ class AtomicInvokable(ABC):
 
     The list order is canonical and defines parameter sequence. ``index`` is stored for
     redundancy (enabling self-sufficiency) and should match list position.
+
+    Mutable defaults
+    ----------------
+    Names, parameter names, kinds, types and the return type are fixed at
+    construction. Defaults are the exception: ``set_defaults`` and
+    ``remove_defaults`` change which parameters are required, which is not part of
+    the I/O shape. The schema default is authoritative at call time
+    (``filter_inputs`` fills it); a wrapped callable's own defaults are untouched.
+    A change is local to this invokable and never reaches components it wraps.
+    Limitation: a default changed after the invokable is hosted over A2A or after a
+    client connects is not propagated to the remote side's advertised schema.
 
     Dict-First Invocation Contract
     -------------------------------
@@ -166,7 +178,7 @@ class AtomicInvokable(ABC):
                 f"{type(self).__name__}: return_type must be a str, got {type(return_type)!r}"
             )
 
-        self._parameters: list[ParamSpec] = parameters
+        self._parameters: list[ParamSpec] = list(parameters)
         self._return_type: str = return_type
         self._invoke_lock = threading.RLock()
         # unique identifier for this invokable instance
@@ -283,6 +295,87 @@ class AtomicInvokable(ABC):
         Prefer ``parameters`` for ordered list access.
         """
         return {spec.name: spec for spec in self._parameters}
+
+    # ---------------------------------------------------------------- #
+    # Default mutators
+    # ---------------------------------------------------------------- #
+    def set_defaults(self, defaults: Mapping[str, Any]) -> None:
+        """Give each named parameter the mapped default (replacing any existing one).
+
+        All-or-nothing: the resulting schema is validated as a whole before
+        anything changes, so a batch may set a positional parameter and the ones
+        after it together. Values are shared by reference and are not type-checked;
+        ``NO_VAL`` as a value leaves that parameter with no default.
+
+        Raises ``TypeError`` for a non-mapping, ``ValueError`` for unknown or
+        variadic names, and ``SchemaError`` if the result breaks parameter ordering.
+        """
+        if not isinstance(defaults, Mapping):
+            raise TypeError(
+                f"{type(self).__name__}.set_defaults: defaults must be a mapping, "
+                f"got {type(defaults)!r}"
+            )
+        if not defaults:
+            return None
+
+        specs = self.parameters_map
+        unknown = [name for name in defaults if name not in specs]
+        if unknown:
+            raise ValueError(
+                f"{type(self).__name__}.set_defaults: unknown parameter(s) {unknown!r}"
+            )
+        variadic = [
+            name for name in defaults
+            if specs[name].kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+        ]
+        if variadic:
+            raise ValueError(
+                f"{type(self).__name__}.set_defaults: variadic parameter(s) "
+                f"{variadic!r} cannot take a default"
+            )
+
+        updated = [
+            replace(spec, default=defaults[spec.name]) if spec.name in defaults else spec
+            for spec in self._parameters
+        ]
+        _validate_parameter_order(updated)  # SchemaError propagates; self unchanged
+        self._parameters = updated  # the only mutation, one rebind
+
+    def remove_defaults(self, names: Iterable[str]) -> None:
+        """Make each named parameter required again.
+
+        Same all-or-nothing validation as ``set_defaults``. A name with no
+        default raises, so a typo cannot silently do nothing. Removing a default
+        also overrides a default the wrapped callable has on its own: the schema
+        decides what is required.
+
+        Raises ``TypeError`` for a bare string or non-iterable, and ``ValueError``
+        for unknown, variadic or default-less names.
+        """
+        if isinstance(names, (str, bytes)):
+            raise TypeError(
+                f"{type(self).__name__}.remove_defaults: names must be an iterable of "
+                "parameter names, not a bare string"
+            )
+        names = list(names)
+        if not names:
+            return None
+
+        specs = self.parameters_map
+        no_default = [
+            name for name in names
+            if name in specs
+            and specs[name].kind not in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+            and specs[name].default is NO_VAL
+        ]
+        if no_default:
+            raise ValueError(
+                f"{type(self).__name__}.remove_defaults: parameter(s) {no_default!r} "
+                "have no default"
+            )
+
+        # Unknown and variadic names raise in set_defaults, which also validates ordering.
+        self.set_defaults({name: NO_VAL for name in names})
 
     # ---------------------------------------------------------------- #
     # Signature helper

@@ -239,6 +239,34 @@ class TestToolBindingBasic:
 
         assert tool.invoke({"a": 1, "b": 2, "extra": 3}).result == 3
 
+    def test_tool_with_all_defaults_set_callable_with_no_arguments(self) -> None:
+        tool = Tool(
+            function=add,
+            name="add",
+            namespace="tests",
+            description="Add values.",
+        )
+
+        tool.set_defaults({"a": 1, "b": 2})
+
+        assert tool() == 3
+        assert tool.invoke({}).result == 3
+
+    def test_remove_defaults_overrides_wrapped_function_default(self) -> None:
+        tool = Tool(
+            function=greet,
+            name="greet",
+            namespace="tests",
+            description="Greet.",
+        )
+        assert tool.parameters_map["punctuation"].default == "!"
+
+        tool.remove_defaults(["punctuation"])
+
+        assert tool.parameters_map["punctuation"].default is NO_VAL
+        with pytest.raises(TypeError, match="missing required"):
+            tool.invoke({"name": "Ada"})
+
 
 class TestToolBindingPositionalKinds:
     def test_positional_only_parameters_bind_as_args(self) -> None:
@@ -516,3 +544,14 @@ class TestToolNaturalAtomicInvokableWrapping:
 
         assert tool.name == "custom"
         assert tool.description == "Custom."
+
+    def test_set_defaults_on_wrapper_tool_does_not_change_wrapped_invokable(self) -> None:
+        inner = AddInvokable()
+        tool = Tool(function=inner)
+        before = inner.parameters
+
+        tool.set_defaults({"a": 10})
+
+        assert tool.parameters_map["a"].default == 10
+        assert inner.parameters == before
+        assert inner.parameters_map["a"].default is NO_VAL

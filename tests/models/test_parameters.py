@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from typing import Any, Mapping
 
 import pytest
@@ -94,6 +94,27 @@ class TestParamSpec:
 
         assert "default" not in spec.to_dict()
         assert spec.default is NO_VAL
+
+    def test_replace_default_leaves_original_spec_and_hash_unchanged(self) -> None:
+        spec = ParamSpec(
+            name="x",
+            index=0,
+            kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+            type="int",
+        )
+        original_hash = hash(spec)
+
+        new = replace(spec, default=5)
+
+        assert spec.default is NO_VAL
+        assert hash(spec) == original_hash
+        assert new.default == 5
+        assert (new.name, new.index, new.kind, new.type) == (
+            spec.name,
+            spec.index,
+            spec.kind,
+            spec.type,
+        )
 
     def test_paramspec_is_mapping_immutable_via_setitem(self) -> None:
         spec = make_param("x", 0)
