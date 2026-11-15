@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
-from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools.base import Tool
@@ -100,6 +100,17 @@ def make_param(
     )
 
 
+class _ExtraDescriptionTool(Tool):
+    """Tool whose _extra_description is a fixed string, for flow/Tool chaining tests."""
+
+    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._extra = extra
+
+    def _extra_description(self) -> str:
+        return self._extra
+
+
 class TestToolConstruction:
     def test_valid_construction_from_callable(self) -> None:
         tool = Tool(
@@ -177,11 +188,12 @@ class TestToolExtraDescription:
         assert tool.description == tool._description
 
     def test_invokable_backed_tool_chains_wrapped_extra_description(self) -> None:
-        inner = Tool(function=add, name="add", namespace="tests")
-        structured = StructuredInvokable(component=inner, output_schema=["result"])
-        tool = Tool(function=structured, name="structured_add", namespace="tests")
+        inner = _ExtraDescriptionTool(
+            function=add, name="add_extra", namespace="tests", extra="inner extra"
+        )
+        tool = Tool(function=inner, name="chained_add", namespace="tests")
 
-        assert tool._extra_description() == "Output schema: [result]"
+        assert tool._extra_description() == "inner extra"
 
 
 
@@ -251,6 +263,19 @@ class TestToolBindingBasic:
 
         assert tool() == 3
         assert tool.invoke({}).result == 3
+
+    def test_async_tool_with_all_defaults_set_callable_with_no_arguments(self) -> None:
+        tool = Tool(
+            function=add,
+            name="add",
+            namespace="tests",
+            description="Add values.",
+        )
+
+        tool.set_defaults({"a": 1, "b": 2})
+
+        assert asyncio.run(tool.async_call()) == 3
+        assert asyncio.run(tool.async_invoke({})).result == 3
 
     def test_remove_defaults_overrides_wrapped_function_default(self) -> None:
         tool = Tool(

@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools import toolify
-from atomic_agentic import StructuredInvokable
 from atomic_agentic.workflows import IterativeFlow
 
 load_dotenv()
@@ -58,6 +57,10 @@ def writer_pre(*, prompt: str = "", revision_notes: str = "") -> str:
     )
 
 
+def writer_post(result: str) -> dict[str, str]:
+    return {"draft": result}
+
+
 writer_agent = BasicAgent(
     name="story_writer",
     namespace="examples",
@@ -76,14 +79,9 @@ writer_agent = BasicAgent(
         "Return only the revised story text and never include bullet points, explanations, or editor notes."
     ),
     pre_invoke=writer_pre,
+    post_invoke=writer_post,
+    response_to_post="result",
     record_enabled=True,
-)
-
-writer = StructuredInvokable(
-    component=writer_agent,
-    name="story_writer_step",
-    description="Structured story-writing step that emits a draft field.",
-    output_schema=["draft"],
 )
 
 
@@ -99,6 +97,10 @@ def critic_pre(*, draft: str) -> str:
         "respond with exactly <<APPROVED>> and nothing else. Otherwise, provide concrete "
         "revision notes that the writer can directly apply."
     )
+
+
+def critic_post(result: str) -> dict[str, str]:
+    return {"revision_notes": result}
 
 
 critic_agent = BasicAgent(
@@ -117,14 +119,9 @@ critic_agent = BasicAgent(
         "and should not meander into abstract literary theory."
     ),
     pre_invoke=critic_pre,
+    post_invoke=critic_post,
+    response_to_post="result",
     record_enabled=True,
-)
-
-critic = StructuredInvokable(
-    component=critic_agent,
-    name="story_critic_step",
-    description="Structured story-critic step that emits revision notes.",
-    output_schema=["revision_notes"],
 )
 
 
@@ -149,7 +146,7 @@ flow = IterativeFlow(
     name="story_writer_checker_flow",
     namespace="examples",
     description="Iterative writer/critic loop with a checker-gated approval judge.",
-    body_steps=[writer, critic],
+    body_steps=[writer_agent, critic_agent],
     max_iterations=5,
     checkers=[None, (judge, True)],  # critic's notes checked for approval
     result_setting_indices=[0],  # outer result is the writer's draft

@@ -45,9 +45,8 @@ def text_flags(text: str) -> dict[str, bool]:
     }
 
 # ──────────────────────────────────────────────────────────────
-# Wrap each function as a Tool — branches no longer need to be
-# Mapping-shaped via StructuredInvokable; ParallelFlow does no
-# Mapping validation on branch results.
+# Wrap each function as a Tool; ParallelFlow does no Mapping
+# validation on branch results.
 # ──────────────────────────────────────────────────────────────
 word_stats_tool = Tool(
     function=word_stats,

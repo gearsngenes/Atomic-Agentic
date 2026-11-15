@@ -740,6 +740,17 @@ class TestExtraDescriptionHook:
 
         assert invokable.description == "GC base.\nchild extra\ngrandchild extra"
 
+    def test_described_param_bullets_precede_extra_description(self) -> None:
+        invokable = _ExtraDescriptionChild(
+            name="child",
+            namespace="tests",
+            description="Child base.",
+            parameters=[make_param("x", 0, description="the x value")],
+            return_type="Any",
+        )
+
+        assert invokable.description == "Child base.\n\n- x: the x value\nchild extra"
+
 
 def _two_required() -> EchoInvokable:
     return make_invokable(parameters=[make_param("a", 0), make_param("b", 1)])

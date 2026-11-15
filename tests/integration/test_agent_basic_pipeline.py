@@ -8,8 +8,7 @@ import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.results.structured import StructuredResult
+from atomic_agentic.models.results import AgentResult
 from atomic_agentic.models.results.workflows import SequentialFlowResult
 from atomic_agentic.workflows.sequential import SequentialFlow
 from ..fake_engines import FakeLLMEngine, echo_latest_user
@@ -68,65 +67,39 @@ def make_agent(
     )
 
 
-def make_structured_agent(
+def make_agent_sequential_flow(
     *,
     engine: FakeLLMEngine | None = None,
     record_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable]:
+) -> tuple[FakeLLMEngine, BasicAgent, SequentialFlow]:
     resolved_engine = engine or FakeLLMEngine(response_fn=echo_latest_user())
     agent = make_agent(
         engine=resolved_engine,
         record_enabled=record_enabled,
         records_window=records_window,
     )
-    structured_agent = StructuredInvokable(
-        component=agent,
-        name="structured_writer_agent",
-        description="Structured writer agent integration wrapper.",
-        output_schema=["final", "length", "was_postprocessed"],
-    )
-    return resolved_engine, agent, structured_agent
-
-
-def make_agent_sequential_flow(
-    *,
-    engine: FakeLLMEngine | None = None,
-    record_enabled: bool = False,
-    records_window: int | None = None,
-) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable, SequentialFlow]:
-    resolved_engine, agent, structured_agent = make_structured_agent(
-        engine=engine,
-        record_enabled=record_enabled,
-        records_window=records_window,
-    )
     flow = SequentialFlow(
         name="writer_agent_sequential_flow",
         namespace="integration",
-        description="SequentialFlow wrapping a structured Agent.",
-        steps=[structured_agent],
+        description="SequentialFlow wrapping an Agent.",
+        steps=[agent],
     )
-    return resolved_engine, agent, structured_agent, flow
+    return resolved_engine, agent, flow
 
 
-def make_summary_step() -> StructuredInvokable:
-    tool = Tool(
+def make_summary_step() -> Tool:
+    return Tool(
         function=summarize_agent_result,
         name="summarize_agent_result",
         namespace="integration",
-        description="Summarize the structured agent result.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        name="structured_summary_step",
-        description="Structured summary step.",
-        output_schema=["summary"],
+        description="Summarize the agent result.",
     )
 
 
-class TestAgentStructuredBasicPipeline:
-    def test_agent_can_be_structured_and_wrapped_in_sequential_flow(self) -> None:
-        engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
+class TestAgentBasicPipeline:
+    def test_agent_can_be_wrapped_in_sequential_flow(self) -> None:
+        engine, _agent, flow = make_agent_sequential_flow()
 
         result = flow.invoke({"topic": "pytest", "tone": "strict"})
 
@@ -148,26 +121,26 @@ class TestAgentStructuredBasicPipeline:
             ]
         ]
 
-    def test_sequential_flow_trace_records_structured_agent_result(self) -> None:
-        _engine, agent, structured_agent, flow = make_agent_sequential_flow()
+    def test_sequential_flow_trace_records_agent_result(self) -> None:
+        _engine, agent, flow = make_agent_sequential_flow()
 
         result = flow.invoke({"topic": "agents", "tone": "concise"})
         step_result = result.trace[0]
 
-        assert isinstance(step_result, StructuredResult)
+        assert isinstance(step_result, AgentResult)
         assert step_result.result == result.result
         # This agent is constructed with record_enabled=False (the
         # make_agent_sequential_flow default), so nothing is stored.
         assert agent.get_conversation().records == []
 
-    def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
-        _engine, _agent, structured_agent = make_structured_agent()
+    def test_agent_can_feed_sequential_flow_step(self) -> None:
+        agent = make_agent()
         summary_step = make_summary_step()
         flow = SequentialFlow(
             name="agent_summary_sequence",
             namespace="integration",
             description="Agent result feeding a downstream summary step.",
-            steps=[structured_agent, summary_step],
+            steps=[agent, summary_step],
         )
 
         result = flow.invoke({"topic": "composition", "tone": "direct"})
@@ -193,7 +166,7 @@ class TestAgentStructuredBasicPipeline:
     def test_wrapped_record_enabled_agent_preserves_history_across_flow_invokes(
         self,
     ) -> None:
-        engine, agent, _structured_agent, flow = make_agent_sequential_flow(
+        engine, agent, flow = make_agent_sequential_flow(
             record_enabled=True,
         )
 
@@ -217,8 +190,8 @@ class TestAgentStructuredBasicPipeline:
         assert second_call_messages[2]["content"] == f"ECHO: {wrap(first_prompt)}"
         assert second_call_messages[3]["content"] == wrap(second_prompt)
 
-    def test_async_structured_agent_sequential_flow_pipeline(self) -> None:
-        engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
+    def test_async_agent_sequential_flow_pipeline(self) -> None:
+        engine, _agent, flow = make_agent_sequential_flow()
 
         result = asyncio.run(
             flow.async_invoke({"topic": "async pytest", "tone": "strict"})
@@ -239,7 +212,7 @@ class TestAgentStructuredBasicPipeline:
     def test_composed_agent_pipeline_to_dict_exposes_agent_and_engine_snapshot(
         self,
     ) -> None:
-        _engine, agent, structured_agent, flow = make_agent_sequential_flow(
+        _engine, agent, flow = make_agent_sequential_flow(
             record_enabled=True,
             records_window=1,
         )
@@ -251,11 +224,7 @@ class TestAgentStructuredBasicPipeline:
         assert data["name"] == "writer_agent_sequential_flow"
         assert data["step_count"] == 1
 
-        structured_snapshot = data["steps"][0]
-        assert structured_snapshot["type"] == "StructuredInvokable"
-        assert structured_snapshot["name"] == structured_agent.name
-
-        agent_snapshot = structured_snapshot["component"]
+        agent_snapshot = data["steps"][0]
         assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT

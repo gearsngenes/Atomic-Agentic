@@ -26,9 +26,6 @@ composable primitives:
     messages.
 -   **Agent** -- An autonomous reasoning component that uses LLM Engines
     and Tools to complete tasks and interact with its environment.
--   **StructuredInvokable** -- An explicit output-projection adapter
-    that wraps any other primitive and maps its raw output into a
-    validated, dictionary-based output schema.
 -   **Workflow** -- An **orchestration and tracing** layer that
     coordinates tools, engines, agents, and other workflows into structured
     pipelines.
@@ -278,26 +275,30 @@ repair-on-failure replanning, and cross-invocation result addressing.
 
 ------------------------------------------------------------------------
 
-## Structured Output: StructuredInvokable
+## Shaping a Step's Output
 
-Atomic-Agentic uses `StructuredInvokable` to transform and validate outputs from tools, agents, or other AtomicInvokable objects. This ensures outputs conform to a specified schema and handles missing or extra fields robustly.
-
-**Minimal Example:**
+A workflow step passes a mapping to the next step, so a step's function returns a dict whose keys are the next step's parameter names.
 
 ```python
-from atomic_agentic import StructuredInvokable
 from atomic_agentic.tools import Tool
+from atomic_agentic.workflows import SequentialFlow
 
-def raw_tool(x, y):
-    return x + y, x * y
+def add(x: int, y: int) -> dict[str, int]:
+    return {"value": x + y}
 
-schema = ["sum", "product"]
-structured = StructuredInvokable(component=Tool(raw_tool), output_schema=schema)
-result = structured.invoke({"x": 2, "y": 3})
-print(result.result)  # {'sum': 5, 'product': 6}
+def double(value: int) -> dict[str, int]:
+    return {"result": value * 2}
+
+flow = SequentialFlow(
+    name="add_then_double",
+    namespace="demo",
+    description="Add two numbers, then double the sum.",
+    steps=[Tool(add), Tool(double)],
+)
+print(flow.invoke({"x": 2, "y": 3}).result)  # {'result': 10}
 ```
 
-See the `StructuredInvokable` docstring for advanced options (absent value handling, mapping extras, etc).
+An agent does the same through `post_invoke` (with `response_to_post="result"`): the function receives the agent's reply and returns the dict.
 
 ------------------------------------------------------------------------
 
@@ -317,9 +318,8 @@ Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. Th
 **Note:**
 Workflows return typed result envelopes (`*FlowResult`) with `.result`, a
 `trace` of the actual child results produced that run (opt out via
-`include_trace=False`), and full run metadata. Use `StructuredInvokable`
-explicitly when you need to project a step's output dict to a fixed schema
-— workflow steps themselves do not apply schema projection.
+`include_trace=False`), and full run metadata. A non-final `SequentialFlow`
+step must return a mapping; see Shaping a Step's Output.
 
 **For practical workflow usage and advanced patterns, see the examples in:**
 `examples/Workflow_Examples/`
@@ -338,7 +338,7 @@ holding only the shared invocation contract. The dependency topology
 is explicit and there are no cross-layer back-edges.
 
 **AtomicResult-family return contract.** Every `AtomicInvokable` —
-Tool, Agent, ToolAgent, Workflow, Engine, Command, StructuredInvokable
+Tool, Agent, ToolAgent, Workflow, Engine
 — now returns a typed `AtomicResult`-family envelope from
 `invoke()`/`async_invoke()`. The `.result` field is always the
 caller-facing payload; envelope fields (`run_id`, `started_at`,
@@ -362,7 +362,6 @@ Atomic-Agentic/
 |-- examples/
 |   |-- Agent_Examples/
 |   |-- Agentic_Research/
-|   |-- Invokable_Examples/
 |   |-- LLM_Examples/
 |   |-- PlanAct_Examples/
 |   |-- ReAct_Examples/
@@ -411,7 +410,7 @@ dependency hierarchy — no back-edges:
 | Base | `exceptions/`, `constants/` | Exception classes and pure literals/sentinels; zero dependencies |
 | Data | `models/` | Dataclasses: `ParamSpec`, runtime records, result envelopes, workflow checkpoints |
 | Functions | `utils/` | Pure functions: async bridging, parameter ops, MCP and agent helpers |
-| Contract | `core/` | Shared invocation contract: `AtomicInvokable`, `Command`, `StructuredInvokable` |
+| Contract | `core/` | Shared invocation contract: `AtomicInvokable` |
 | Domain | `agents/`, `tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/` | Behavior implementations |
 
 ------------------------------------------------------------------------

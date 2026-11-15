@@ -2,9 +2,8 @@
 01_SequentialFlow.py
 
 Beginner-friendly SequentialFlow example.
-Step 1 wraps a tuple-returning function in StructuredInvokable to adapt it
-into a mapping-shaped result. Steps 2 and 3 are plain Tools whose functions
-already return dicts with the keys the next step (or the caller) expects.
+Steps 1-3 are plain Tools whose functions return dicts with the keys the next
+step (or the caller) expects.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from atomic_agentic.workflows import SequentialFlow
 from atomic_agentic.tools import Tool
 
 
-def add_and_carry(x: int, y: int, factor: int = 10) -> tuple[int, int]:
+def add_and_carry(x: int, y: int, factor: int = 10) -> dict[str, int]:
     """Step 1: Add x + y, carry forward 'factor'"""
     return {"value": x + y, "factor": factor}
 

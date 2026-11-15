@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results.workflows import (
     IterativeFlowResult,
     ParallelFlowResult,
@@ -22,24 +21,12 @@ from atomic_agentic.workflows.sequential import SequentialFlow
 pytestmark = [pytest.mark.integration]
 
 
-def structured_component(
-    function: Any,
-    *,
-    name: str,
-    output_schema: list[str],
-) -> StructuredInvokable:
-    tool = Tool(
+def make_step(function: Any, *, name: str) -> Tool:
+    return Tool(
         function=function,
         name=name,
         namespace="integration",
         description=f"Integration test tool: {name}.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        name=f"structured_{name}",
-        description=f"Structured integration component: {name}.",
-        output_schema=output_schema,
-        ignore_unhandled=True,
     )
 
 
@@ -70,20 +57,12 @@ def finalize_routed_result(branch: str, payload: Any) -> dict[str, str]:
     }
 
 
-def make_text_branch() -> StructuredInvokable:
-    return structured_component(
-        uppercase_text,
-        name="uppercase_text",
-        output_schema=["branch", "payload"],
-    )
+def make_text_branch() -> Tool:
+    return make_step(uppercase_text, name="uppercase_text")
 
 
-def make_number_branch() -> StructuredInvokable:
-    return structured_component(
-        double_route_number,
-        name="double_route_number",
-        output_schema=["branch", "payload"],
-    )
+def make_number_branch() -> Tool:
+    return make_step(double_route_number, name="double_route_number")
 
 
 def make_mode_router() -> Tool:
@@ -142,21 +121,9 @@ def make_parallel_enrichment_flow() -> ParallelFlow:
         namespace="integration",
         description="Enrich a normalized topic in parallel.",
         branches=[
-            structured_component(
-                title_branch,
-                name="title_branch",
-                output_schema=["title"],
-            ),
-            structured_component(
-                keywords_branch,
-                name="keywords_branch",
-                output_schema=["keywords"],
-            ),
-            structured_component(
-                summary_branch,
-                name="summary_branch",
-                output_schema=["summary"],
-            ),
+            make_step(title_branch, name="title_branch"),
+            make_step(keywords_branch, name="keywords_branch"),
+            make_step(summary_branch, name="summary_branch"),
         ],
         result_mode=ParallelFlow.DICT,
         selected_branches=[0, 1, 2],
@@ -170,17 +137,9 @@ def make_sequential_parallel_report_flow() -> SequentialFlow:
         namespace="integration",
         description="Normalize a topic, enrich it in parallel, then merge a report.",
         steps=[
-            structured_component(
-                normalize_topic,
-                name="normalize_topic",
-                output_schema=["topic"],
-            ),
+            make_step(normalize_topic, name="normalize_topic"),
             make_parallel_enrichment_flow(),
-            structured_component(
-                merge_report,
-                name="merge_report",
-                output_schema=["report"],
-            ),
+            make_step(merge_report, name="merge_report"),
         ],
     )
 
@@ -218,16 +177,8 @@ def make_text_sequence_branch() -> SequentialFlow:
         namespace="integration",
         description="Text processing sequence branch.",
         steps=[
-            structured_component(
-                extract_text_payload,
-                name="extract_text_payload",
-                output_schema=["text_payload"],
-            ),
-            structured_component(
-                label_text,
-                name="label_text",
-                output_schema=["text_result"],
-            ),
+            make_step(extract_text_payload, name="extract_text_payload"),
+            make_step(label_text, name="label_text"),
         ],
     )
 
@@ -238,16 +189,8 @@ def make_number_sequence_branch() -> SequentialFlow:
         namespace="integration",
         description="Number processing sequence branch.",
         steps=[
-            structured_component(
-                increment_number,
-                name="increment_number",
-                output_schema=["number"],
-            ),
-            structured_component(
-                square_number,
-                name="square_number",
-                output_schema=["number_result"],
-            ),
+            make_step(increment_number, name="increment_number"),
+            make_step(square_number, name="square_number"),
         ],
     )
 
@@ -301,16 +244,8 @@ def make_title_sequence_branch() -> SequentialFlow:
         namespace="integration",
         description="Extract and score an article title.",
         steps=[
-            structured_component(
-                extract_title,
-                name="extract_title",
-                output_schema=["title"],
-            ),
-            structured_component(
-                score_title,
-                name="score_title",
-                output_schema=["title", "title_score"],
-            ),
+            make_step(extract_title, name="extract_title"),
+            make_step(score_title, name="score_title"),
         ],
     )
 
@@ -321,16 +256,8 @@ def make_tag_sequence_branch() -> SequentialFlow:
         namespace="integration",
         description="Extract and score article tags.",
         steps=[
-            structured_component(
-                extract_tags,
-                name="extract_tags",
-                output_schema=["tags"],
-            ),
-            structured_component(
-                score_tags,
-                name="score_tags",
-                output_schema=["tags", "tag_score"],
-            ),
+            make_step(extract_tags, name="extract_tags"),
+            make_step(score_tags, name="score_tags"),
         ],
     )
 
@@ -359,8 +286,8 @@ def initialize_score(score: int) -> dict[str, int]:
     }
 
 
-def improve_score(score: int) -> int:
-    return score + 1
+def improve_score(score: int) -> dict[str, int]:
+    return {"score": score + 1}
 
 
 def approve_score_at_three(score: int) -> bool:
@@ -387,11 +314,7 @@ def make_iterative_score_flow() -> IterativeFlow:
         namespace="integration",
         description="Improve a score until the judge approves it.",
         body_steps=[
-            structured_component(
-                improve_score,
-                name="improve_score",
-                output_schema=["score"],
-            )
+            make_step(improve_score, name="improve_score")
         ],
         max_iterations=5,
         checkers=[(judge, True)],
@@ -406,17 +329,9 @@ def make_sequential_iterative_score_flow() -> SequentialFlow:
         namespace="integration",
         description="Initialize, iteratively improve, then finalize a score.",
         steps=[
-            structured_component(
-                initialize_score,
-                name="initialize_score",
-                output_schema=["score"],
-            ),
+            make_step(initialize_score, name="initialize_score"),
             make_iterative_score_flow(),
-            structured_component(
-                finalize_score,
-                name="finalize_score",
-                output_schema=["final_score", "status"],
-            ),
+            make_step(finalize_score, name="finalize_score"),
         ],
     )
 
@@ -439,11 +354,7 @@ class TestCompositeWorkflows:
             description="Route an input and finalize the selected branch result.",
             steps=[
                 routing_flow,
-                structured_component(
-                    finalize_routed_result,
-                    name="finalize_routed_result",
-                    output_schema=["final"],
-                ),
+                make_step(finalize_routed_result, name="finalize_routed_result"),
             ],
         )
 

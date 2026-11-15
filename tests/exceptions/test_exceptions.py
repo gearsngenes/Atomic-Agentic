@@ -9,7 +9,6 @@ from atomic_agentic.exceptions import (
     DependencyFailedError,
     ExecutionError,
     LLMEngineError,
-    PackagingError,
     RemoteInvocationError,
     SchemaError,
     ToolAgentError,
@@ -86,9 +85,6 @@ class TestWorkflowErrors:
     def test_schema_error_inherits_validation_error(self) -> None:
         assert issubclass(SchemaError, ValidationError)
 
-    def test_packaging_error_inherits_validation_error(self) -> None:
-        assert issubclass(PackagingError, ValidationError)
-
     def test_execution_error_inherits_workflow_error_and_runtime_error(self) -> None:
         assert issubclass(ExecutionError, WorkflowError)
         assert issubclass(ExecutionError, RuntimeError)
@@ -98,7 +94,6 @@ class TestWorkflowErrors:
         [
             ValidationError,
             SchemaError,
-            PackagingError,
         ],
     )
     def test_validation_family_can_be_caught_as_validation_error(
@@ -113,7 +108,6 @@ class TestWorkflowErrors:
         [
             ValidationError,
             SchemaError,
-            PackagingError,
             ExecutionError,
         ],
     )
