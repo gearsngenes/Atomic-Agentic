@@ -331,8 +331,8 @@ class TestAgentTaskContextFields:
         assert task.post_inputs == {}
         assert task.agentic_inputs == {}
         assert task.run_id is None
-        assert task.started_at is None
-        assert task.ended_at is None
+        assert not hasattr(task, "started_at")
+        assert not hasattr(task, "ended_at")
 
     def test_new_mutable_fields_are_per_instance(self) -> None:
         first = AgentTask(turns=[], inputs={})

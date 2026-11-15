@@ -11,6 +11,8 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.models.results import AgentResult
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
@@ -289,6 +291,7 @@ def make_agent(
     inputs_to_context: Any = None,
     system_prompt: str = ROLE_PROMPT,
     agent_cls: type[_EchoAgent] = _EchoAgent,
+    name: str = "writer_agent",
 ) -> _EchoAgent:
     # Default binding "result" matches the first parameter of the default
     # post (package_response) and most helper posts below; it applies only
@@ -305,7 +308,7 @@ def make_agent(
         )
         response_to_post = "result" if "result" in names else None
     return agent_cls(
-        name="writer_agent",
+        name=name,
         namespace="tests",
         description="Deterministic writer test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
@@ -1106,14 +1109,17 @@ class TestSharedConversation:
         assert shared.records[2].prev is shared.records[1]
 
     def test_agent_id_differs_per_writer(self) -> None:
-        a, b = self._pair()
+        a = make_agent(record_enabled=True, name="first_writer")
+        b = make_agent(record_enabled=True, name="second_writer")
+        b.import_conversation(a.get_conversation(), name="default_alias")
+        b.switch_conversation("default_alias")
 
         a.invoke(_INPUTS)
         b.invoke(_INPUTS)
 
         first, second = a.get_conversation().records
-        assert first.agent_id == f"{a.full_name};{a.instance_id}"
-        assert second.agent_id == f"{b.full_name};{b.instance_id}"
+        assert first.agent_id == a.full_name
+        assert second.agent_id == b.full_name
         assert first.agent_id != second.agent_id
 
     def test_context_is_shared(self) -> None:
@@ -1160,11 +1166,12 @@ class TestAgentId:
 
         record = agent.get_conversation().records[0]
 
-        assert record.agent_id == f"{agent.full_name};{agent.instance_id}"
+        assert record.agent_id == agent.full_name
         assert record.to_dict()["agent_id"] == record.agent_id
 
-    def test_distinct_instances_get_distinct_ids(self) -> None:
-        a, b = make_agent(record_enabled=True), make_agent(record_enabled=True)
+    def test_distinct_names_get_distinct_ids(self) -> None:
+        a = make_agent(record_enabled=True, name="agent_a")
+        b = make_agent(record_enabled=True, name="agent_b")
         a.invoke(_INPUTS)
         b.invoke(_INPUTS)
 
@@ -2059,9 +2066,17 @@ class TestCreateTask:
         task = agent.create_task(agent.filter_inputs(_INPUTS))
 
         assert task.conversation == "side"
-        assert task.run_id and task.started_at is not None and task.ended_at is None
+        assert task.run_id
+        assert not hasattr(task, "started_at")
         assert task.context == {}
         assert task.user_prompt == ""
+
+    def test_run_id_is_none_when_not_recording(self) -> None:
+        agent = make_agent(record_enabled=False)
+
+        task = agent.create_task(agent.filter_inputs(_INPUTS))
+
+        assert task.run_id is None
 
     def test_run_ids_are_distinct_per_task(self) -> None:
         agent = make_agent()
@@ -2376,12 +2391,13 @@ class TestSummarizeAndPreProcess:
 class TestPostProcessAndRecord:
     def test_post_process_builds_result_from_the_task(self) -> None:
         agent = make_agent()
-        task, result = _run_until_post(agent, _INPUTS)
+        task, payload = _run_until_post(agent, _INPUTS)
 
-        assert result.run_id == task.run_id
-        assert result.started_at == task.started_at
-        assert result.ended_at == task.ended_at and task.ended_at is not None
-        assert result.result["final"] == "ECHO: Write about pytest in a strict tone."
+        assert payload["run_id"] == task.run_id
+        assert payload["result"]["final"] == "ECHO: Write about pytest in a strict tone."
+        assert len(payload["llm_token_usage"]) == len(task.llm_records)
+        assert payload["llm_model_data"] == agent.llm_engine.model_data
+        assert "started_at" not in payload and "ended_at" not in payload
 
     def test_post_process_overlays_the_response_onto_post_inputs(self) -> None:
         agent = make_agent(post_invoke=post_with_suffix)
@@ -2403,8 +2419,7 @@ class TestPostProcessAndRecord:
 
         asynchronous = asyncio.run(agent.async_post_process(task))
 
-        assert asynchronous.result == sync.result
-        assert asynchronous.run_id == sync.run_id
+        assert asynchronous == sync
 
     def test_record_disabled_stores_nothing(self) -> None:
         agent = make_agent(record_enabled=False)
@@ -2636,7 +2651,7 @@ class _ValueAgent(Agent):
     """Agent whose generated response is a fixed arbitrary Python value
     (mapping / list / int / bytes ...), so binding tests are not limited to
     the str responses ``_EchoAgent`` requires. It still makes one real
-    engine call so ``build_result_from_task`` has an LLM record to read."""
+    engine call so ``result_payload_from_task`` has an LLM record to read."""
 
     def __init__(self, *, response_value: Any, **kwargs: Any) -> None:
         self._response_value = response_value
@@ -3787,6 +3802,85 @@ class TestResultModelData:
 
         assert len(result.llm_token_usage) == 1
         assert result.llm_model_data == agent.llm_engine.model_data
+
+
+def _boom_post(result: str) -> str:
+    raise RuntimeError("post failed")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ExtraAgentResult(AgentResult):
+    extra: str = dataclasses.field(kw_only=True)
+
+
+class _ExtraPayloadAgent(_EchoAgent):
+    result_cls = _ExtraAgentResult
+
+    def result_payload_from_task(self, task: AgentTask, result: Any) -> dict[str, Any]:
+        return {**super().result_payload_from_task(task, result), "extra": "added"}
+
+
+class TestInvokeHook:
+    def test_invoke_is_the_inherited_template(self) -> None:
+        assert "invoke" not in Agent.__dict__
+        assert "async_invoke" not in Agent.__dict__
+        assert Agent.invoke is AtomicInvokable.invoke
+        assert Agent.result_cls is AgentResult
+
+    def test_run_id_is_none_when_not_recording(self) -> None:
+        agent = make_agent(record_enabled=False)
+
+        result = agent.invoke(_INPUTS)
+
+        assert isinstance(result, AgentResult)
+        assert result.run_id is None
+        assert agent.get_conversation().records == []
+
+    def test_run_id_matches_the_stored_record_when_recording(self) -> None:
+        agent = make_agent(record_enabled=True)
+
+        result = agent.invoke(_INPUTS)
+
+        assert result.run_id
+        assert agent.get_conversation().records[0].run_id == result.run_id
+        assert agent.get_record(run_id=result.run_id) is agent.get_conversation().records[0]
+
+    def test_async_run_id_matches_the_stored_record(self) -> None:
+        agent = make_agent(record_enabled=True)
+
+        result = asyncio.run(agent.async_invoke(_INPUTS))
+
+        assert agent.get_record(run_id=result.run_id).run_id == result.run_id
+        assert make_agent(record_enabled=False).invoke(_INPUTS).run_id is None
+
+    def test_result_timing_and_identity_come_from_the_template(self) -> None:
+        agent = make_agent()
+
+        result = agent.invoke(_INPUTS)
+
+        assert result.invoker_id == agent.full_name
+        assert result.started_at <= result.ended_at
+        assert result.elapsed_time >= 0
+
+    def test_failure_before_record_leaves_no_record(self) -> None:
+        agent = make_agent(record_enabled=True, post_invoke=_boom_post)
+
+        with pytest.raises(Exception, match="post failed"):
+            agent.invoke(_INPUTS)
+        with pytest.raises(Exception, match="post failed"):
+            asyncio.run(agent.async_invoke(_INPUTS))
+
+        assert agent.get_conversation().records == []
+
+    def test_result_payload_from_task_is_the_family_override_point(self) -> None:
+        agent = make_agent(agent_cls=_ExtraPayloadAgent)
+
+        result = agent.invoke(_INPUTS)
+        async_result = asyncio.run(agent.async_invoke(_INPUTS))
+
+        assert isinstance(result, _ExtraAgentResult)
+        assert result.extra == "added"
+        assert async_result.extra == "added"
 
 
 class _HookAgent(_EchoAgent):

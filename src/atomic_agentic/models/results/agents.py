@@ -130,7 +130,9 @@ class AgentResult(AtomicResult):
     ------
     run_id:
         Identifier of this invocation, minted by the agent when it seeds the
-        task. Key for ``Agent.get_record(run_id=...)``. Not re-validated here.
+        task; ``None`` when the agent's ``record_enabled`` is False (nothing to
+        look up). Key for ``Agent.get_record(run_id=...)``. Not re-validated
+        here.
 
     llm_token_usage:
         Per-call token usage for every LLM generation that contributed to this
@@ -144,7 +146,7 @@ class AgentResult(AtomicResult):
 
     llm_token_usage: tuple[TokenUsage, ...]
     llm_model_data: LLMModelData
-    run_id: str = field(kw_only=True)
+    run_id: str | None = field(kw_only=True)
 
     def __post_init__(self) -> None:
         normalized = self._normalize_llm_token_usage(self.llm_token_usage)

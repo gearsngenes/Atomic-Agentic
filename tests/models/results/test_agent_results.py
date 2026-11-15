@@ -187,6 +187,20 @@ class TestAgentResult:
                 llm_model_data=make_model_data(),
             )
 
+    def test_run_id_may_be_none(self) -> None:
+        started_at = datetime.now(timezone.utc)
+        result = AgentResult(
+            result="out",
+            invoker_id="agent-1",
+            run_id=None,
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=1),
+            llm_token_usage=(),
+            llm_model_data=make_model_data(),
+        )
+        assert result.run_id is None
+        assert result.to_dict()["run_id"] is None
+
     def test_run_id_round_trips_in_to_dict(self) -> None:
         result = make_agent_result()
         assert result.run_id == "run-1"

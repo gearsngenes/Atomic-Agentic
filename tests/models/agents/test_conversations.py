@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from types import MappingProxyType
+from uuid import uuid4
 
 import pytest
 
@@ -392,6 +393,7 @@ class TestRememberRenderMode:
 
 
 def rec(prompt: str = "p", **kwargs: object) -> AgentRecord:
+    kwargs.setdefault("run_id", uuid4().hex)
     return AgentRecord(user_prompt=prompt, generated_response="r", **kwargs)  # type: ignore[arg-type]
 
 

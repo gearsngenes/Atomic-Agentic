@@ -256,6 +256,7 @@ class TestLLMRecord:
 class TestAgentRecord:
     def test_valid_record_stores_prompt_and_response(self) -> None:
         record = AgentRecord(
+            run_id="run-1",
             user_prompt="write a summary",
             generated_response="raw assistant text",
         )
@@ -263,40 +264,30 @@ class TestAgentRecord:
         assert record.generated_response == "raw assistant text"
         assert isinstance(record.run_id, str) and record.run_id
 
-    def test_run_id_and_timing_auto_fill_when_omitted(self) -> None:
-        record = AgentRecord(user_prompt="run", generated_response="raw")
-        assert isinstance(record.run_id, str) and record.run_id
-        assert isinstance(record.started_at, datetime)
-        assert isinstance(record.ended_at, datetime)
+    def test_run_id_is_required(self) -> None:
+        with pytest.raises(TypeError, match="run_id"):
+            AgentRecord(user_prompt="run", generated_response="raw")  # type: ignore[call-arg]
 
-    def test_run_id_and_timing_accept_explicit_values(self) -> None:
-        ts = datetime.now(timezone.utc)
-        record = AgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            run_id="abc123",
-            started_at=ts,
-            ended_at=ts,
-        )
+    def test_run_id_accepts_explicit_value(self) -> None:
+        record = AgentRecord(user_prompt="run", generated_response="raw", run_id="abc123")
         assert record.run_id == "abc123"
-        assert record.started_at == ts
-        assert record.ended_at == ts
 
     def test_agent_id_defaults_to_none(self) -> None:
-        record = AgentRecord(user_prompt="x", generated_response="y")
+        record = AgentRecord(run_id="run-3", user_prompt="x", generated_response="y")
         assert record.agent_id is None
 
     def test_agent_id_is_keyword_only_and_serialized(self) -> None:
-        record = AgentRecord(user_prompt="x", generated_response="y", agent_id="ns.a;123")
+        record = AgentRecord(run_id="run-4", user_prompt="x", generated_response="y", agent_id="ns.a;123")
         assert record.agent_id == "ns.a;123"
         assert record.to_dict()["agent_id"] == "ns.a;123"
 
     def test_llm_records_rejects_str(self) -> None:
         with pytest.raises(TypeError, match="llm_records"):
-            AgentRecord(user_prompt="x", generated_response="y", llm_records="abc")  # type: ignore[arg-type]
+            AgentRecord(run_id="run-5", user_prompt="x", generated_response="y", llm_records="abc")  # type: ignore[arg-type]
 
     def test_to_dict_has_no_final_result_key(self) -> None:
         record = AgentRecord(
+            run_id="run-6",
             user_prompt="run",
             generated_response="raw",
         )
@@ -308,8 +299,6 @@ class TestAgentRecord:
             "generated_response": "raw",
             "run_id": record.run_id,
             "agent_id": None,
-            "started_at": record.started_at.isoformat(),
-            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
@@ -317,6 +306,7 @@ class TestAgentRecord:
 
     def test_to_dict_includes_inputs_field(self) -> None:
         record = AgentRecord(
+            run_id="run-7",
             user_prompt="run",
             generated_response="raw",
             inputs={"lang": "English"},
@@ -325,30 +315,31 @@ class TestAgentRecord:
 
     def test_inputs_shallow_copied_on_construction(self) -> None:
         ctx = {"key": "val"}
-        record = AgentRecord(user_prompt="x", generated_response="y", inputs=ctx)
+        record = AgentRecord(run_id="run-8", user_prompt="x", generated_response="y", inputs=ctx)
         ctx["key"] = "mutated"
         assert record.inputs["key"] == "val"
 
     def test_rejects_non_string_user_prompt(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
-            AgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
+            AgentRecord(run_id="run-9", user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_accepts_string_user_prompt(self) -> None:
-        record = AgentRecord(user_prompt="plain string", generated_response="raw")
+        record = AgentRecord(run_id="run-10", user_prompt="plain string", generated_response="raw")
         assert record.user_prompt == "plain string"
 
     def test_is_frozen(self) -> None:
-        record = AgentRecord(user_prompt="run", generated_response="raw")
+        record = AgentRecord(run_id="run-11", user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.generated_response = "other"  # type: ignore[misc]
 
     def test_llm_records_defaults_to_empty_tuple(self) -> None:
-        record = AgentRecord(user_prompt="hi", generated_response="there")
+        record = AgentRecord(run_id="run-12", user_prompt="hi", generated_response="there")
         assert record.llm_records == ()
 
     def test_llm_records_populated_on_completed_record(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
+            run_id="run-13",
             user_prompt="hi",
             generated_response="there",
             llm_records=(llm_rec,),
@@ -358,6 +349,7 @@ class TestAgentRecord:
     def test_llm_records_normalizes_list_to_tuple(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
+            run_id="run-14",
             user_prompt="hi",
             generated_response="there",
             llm_records=[llm_rec],
@@ -367,6 +359,7 @@ class TestAgentRecord:
     def test_to_dict_includes_llm_records(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
+            run_id="run-15",
             user_prompt="hi",
             generated_response="there",
             llm_records=(llm_rec,),
@@ -377,50 +370,52 @@ class TestAgentRecord:
         assert d["llm_records"] == [llm_rec.to_dict()]
 
     def test_prev_defaults_to_none(self) -> None:
-        record = AgentRecord(user_prompt="x", generated_response="y")
+        record = AgentRecord(run_id="run-16", user_prompt="x", generated_response="y")
         assert record.prev is None
 
     def test_prev_accepts_agent_record_instance(self) -> None:
         completed = AgentRecord(
+            run_id="run-17",
             user_prompt="first",
             generated_response="response",
         )
-        record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
+        record = AgentRecord(run_id="run-18", user_prompt="second", generated_response="r2", prev=completed)
         assert record.prev is completed
 
     def test_to_dict_prev_run_id_is_none_when_no_prev(self) -> None:
-        record = AgentRecord(user_prompt="x", generated_response="y")
+        record = AgentRecord(run_id="run-19", user_prompt="x", generated_response="y")
         assert record.to_dict()["prev_run_id"] is None
 
     def test_to_dict_prev_run_id_matches_prev_run_id(self) -> None:
         prev_record = AgentRecord(
+            run_id="run-20",
             user_prompt="first",
             generated_response="r1",
         )
-        record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
+        record = AgentRecord(run_id="run-21", user_prompt="second", generated_response="r2", prev=prev_record)
         assert record.to_dict()["prev_run_id"] == prev_record.run_id
 
     def test_children_defaults_to_empty_list(self) -> None:
-        record = AgentRecord(user_prompt="x", generated_response="y")
+        record = AgentRecord(run_id="run-22", user_prompt="x", generated_response="y")
         assert record.children == []
 
     def test_children_accepts_agent_record_instances(self) -> None:
-        child = AgentRecord(user_prompt="child", generated_response="r")
-        record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
+        child = AgentRecord(run_id="run-23", user_prompt="child", generated_response="r")
+        record = AgentRecord(run_id="run-24", user_prompt="x", generated_response="y", children=[child])
         assert record.children == [child]
 
     def test_children_not_normalized_to_tuple(self) -> None:
         # Deliberately mutable -- unlike llm_records, children is appended to
         # in place after construction (Agent.record's children
         # bookkeeping), so it must stay a real list, not a frozen tuple.
-        record = AgentRecord(user_prompt="x", generated_response="y")
+        record = AgentRecord(run_id="run-25", user_prompt="x", generated_response="y")
         assert isinstance(record.children, list)
-        record.children.append(AgentRecord(user_prompt="c", generated_response="r"))
+        record.children.append(AgentRecord(run_id="run-26", user_prompt="c", generated_response="r"))
         assert len(record.children) == 1
 
     def test_to_dict_child_ids_reflects_current_children(self) -> None:
-        child = AgentRecord(user_prompt="child", generated_response="r")
-        record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
+        child = AgentRecord(run_id="run-27", user_prompt="child", generated_response="r")
+        record = AgentRecord(run_id="run-28", user_prompt="x", generated_response="y", children=[child])
         assert record.to_dict()["child_ids"] == [child.run_id]
 
 
@@ -429,6 +424,7 @@ class TestToolAgentRecord:
         statements = (ToolStatement(identifier="x", tool="add"),)
         failed = (ToolStatement(identifier="y", tool="add", exception=ValueError("boom")),)
         record = ToolAgentRecord(
+            run_id="run-29",
             user_prompt="run tools",
             generated_response=42,
             statements=statements,
@@ -441,7 +437,7 @@ class TestToolAgentRecord:
         assert record.regenerations_used == 2
 
     def test_fields_default_to_empty(self) -> None:
-        record = ToolAgentRecord(user_prompt="run tools", generated_response=42)
+        record = ToolAgentRecord(run_id="run-30", user_prompt="run tools", generated_response=42)
 
         assert record.statements == ()
         assert record.failed_statements == ()
@@ -449,19 +445,21 @@ class TestToolAgentRecord:
 
     def test_statements_normalized_to_tuple(self) -> None:
         statements = [ToolStatement(identifier="x", tool="add")]
-        record = ToolAgentRecord(user_prompt="run", generated_response=1, statements=statements)
+        record = ToolAgentRecord(run_id="run-31", user_prompt="run", generated_response=1, statements=statements)
 
         assert isinstance(record.statements, tuple)
 
     def test_rejects_non_tool_statement_in_statements(self) -> None:
         with pytest.raises(TypeError, match="ToolStatement"):
             ToolAgentRecord(
+                run_id="run-32",
                 user_prompt="run", generated_response=1, statements=("not a statement",)  # type: ignore[arg-type]
             )
 
     def test_rejects_non_tool_statement_in_failed_statements(self) -> None:
         with pytest.raises(TypeError, match="ToolStatement"):
             ToolAgentRecord(
+                run_id="run-33",
                 user_prompt="run", generated_response=1,
                 failed_statements=("not a statement",),  # type: ignore[arg-type]
             )
@@ -469,6 +467,7 @@ class TestToolAgentRecord:
     def test_to_dict_includes_statements_and_regenerations_used(self) -> None:
         statements = (ToolStatement(identifier="x", tool="add", args=(_const(1), _const(2))),)
         record = ToolAgentRecord(
+            run_id="run-34",
             user_prompt="run tools", generated_response=42, statements=statements, regenerations_used=1,
         )
         d = record.to_dict()
@@ -478,17 +477,17 @@ class TestToolAgentRecord:
 
     def test_inherits_agent_record_validation(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
-            ToolAgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
+            ToolAgentRecord(run_id="run-35", user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        record = ToolAgentRecord(user_prompt="run", generated_response="raw")
+        record = ToolAgentRecord(run_id="run-36", user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.regenerations_used = 1  # type: ignore[misc]
 
     def test_render_as_code_groups_by_batch(self) -> None:
         a = ToolStatement(identifier="a", tool="tool_a", batch_index=0)
         b = ToolStatement(identifier="b", tool="tool_b", batch_index=1)
-        record = ToolAgentRecord(user_prompt="do it", generated_response=None, statements=(a, b))
+        record = ToolAgentRecord(run_id="run-37", user_prompt="do it", generated_response=None, statements=(a, b))
 
         rendered = record.render_as_code()
 
@@ -502,6 +501,7 @@ class TestToolAgentRecord:
         )
         failed = (ToolStatement(identifier="c", tool="add", exception=ValueError("boom")),)
         record = ToolAgentRecord(
+            run_id="run-38",
             user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
         )
 
@@ -516,7 +516,7 @@ class TestToolAgentRecord:
             ToolStatement(identifier="a", tool="add"),
             ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)}),
         )
-        record = ToolAgentRecord(user_prompt="do it", generated_response=1, statements=statements)
+        record = ToolAgentRecord(run_id="run-39", user_prompt="do it", generated_response=1, statements=statements)
 
         report = record.usage_report()
 
@@ -529,6 +529,7 @@ class TestToolAgentRecord:
         statements = (ToolStatement(identifier="a", tool="add"),)
         failed = (ToolStatement(identifier="b", tool="sub", exception=ValueError("boom")),)
         record = ToolAgentRecord(
+            run_id="run-40",
             user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
         )
 
@@ -539,6 +540,7 @@ class TestToolAgentRecord:
 class TestThinkingAgentRecord:
     def test_is_an_agent_record(self) -> None:
         record = ThinkingAgentRecord(
+            run_id="run-41",
             user_prompt="write a poem",
             generated_response="a poem",
             thoughts=("first thought", "second thought"),
@@ -548,6 +550,7 @@ class TestThinkingAgentRecord:
 
     def test_thoughts_defaults_to_empty_tuple(self) -> None:
         record = ThinkingAgentRecord(
+            run_id="run-42",
             user_prompt="write a poem",
             generated_response="a poem",
         )
@@ -555,6 +558,7 @@ class TestThinkingAgentRecord:
 
     def test_thoughts_normalizes_list_to_tuple(self) -> None:
         record = ThinkingAgentRecord(
+            run_id="run-43",
             user_prompt="write a poem",
             generated_response="a poem",
             thoughts=["a thought", {"k": "v"}, 3],
@@ -565,6 +569,7 @@ class TestThinkingAgentRecord:
     def test_thoughts_rejects_non_sequence(self) -> None:
         with pytest.raises(TypeError, match="thoughts"):
             ThinkingAgentRecord(
+                run_id="run-44",
                 user_prompt="write a poem",
                 generated_response="a poem",
                 thoughts="not a sequence",  # type: ignore[arg-type]
@@ -572,6 +577,7 @@ class TestThinkingAgentRecord:
 
     def test_to_dict_includes_thoughts(self) -> None:
         record = ThinkingAgentRecord(
+            run_id="run-45",
             user_prompt="write a poem",
             generated_response="a poem",
             thoughts=["a thought", {"k": "v"}, 3],
@@ -584,8 +590,6 @@ class TestThinkingAgentRecord:
             "generated_response": "a poem",
             "run_id": record.run_id,
             "agent_id": None,
-            "started_at": record.started_at.isoformat(),
-            "ended_at": record.ended_at.isoformat(),
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
@@ -594,10 +598,10 @@ class TestThinkingAgentRecord:
 
     def test_inherits_agent_record_validation(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
-            ThinkingAgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
+            ThinkingAgentRecord(run_id="run-46", user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        record = ThinkingAgentRecord(user_prompt="run", generated_response="raw")
+        record = ThinkingAgentRecord(run_id="run-47", user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.thoughts = ("x",)  # type: ignore[misc]
 
@@ -707,6 +711,7 @@ class TestScriptActAgentRecordSerialization:
         )
         failed = (ToolStatement(identifier="f", tool="add", exception=ValueError("boom")),)
         record = ScriptActAgentRecord(
+            run_id="run-48",
             user_prompt="do it", generated_response=5, statements=statements, failed_statements=failed,
         )
 
@@ -737,7 +742,7 @@ class TestScriptActAgentRecordSerialization:
     def test_render_as_code_groups_by_batch(self) -> None:
         a = ToolStatement(identifier="a", tool="tool_a", batch_index=0)
         b = ToolStatement(identifier="b", tool="tool_b", batch_index=1)
-        record = ScriptActAgentRecord(user_prompt="do it", generated_response=None, statements=(a, b))
+        record = ScriptActAgentRecord(run_id="run-49", user_prompt="do it", generated_response=None, statements=(a, b))
 
         rendered = record.render_as_code()
 
@@ -756,7 +761,7 @@ class TestScriptActAgentToolUsage:
             ToolStatement(identifier="e", tool=RHS_ASSIGN_ALIAS, kwargs={"val": binop_val}),
             ToolStatement(identifier="f", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
         )
-        record = ScriptActAgentRecord(user_prompt="do it", generated_response=None, statements=statements)
+        record = ScriptActAgentRecord(run_id="run-50", user_prompt="do it", generated_response=None, statements=statements)
 
         usage = record.dispatch_breakdown()
 
@@ -772,6 +777,7 @@ class TestScriptActAgentToolUsage:
         statements = (ToolStatement(identifier="a", tool="add"),)
         failed = (ToolStatement(identifier="b", tool="add", exception=RuntimeError("boom")),)
         record = ScriptActAgentRecord(
+            run_id="run-51",
             user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
         )
 
@@ -784,7 +790,7 @@ class TestScriptActAgentToolUsage:
             ToolStatement(identifier="a", tool=PY_BUILTIN_ALIAS, args=("len", _name("x")), exception=ValueError()),
             ToolStatement(identifier="b", tool=ATTR_CALL_ALIAS, args=(_name("x"), "m"), exception=ValueError()),
         )
-        record = ScriptActAgentRecord(user_prompt="do it", generated_response=None, failed_statements=failed)
+        record = ScriptActAgentRecord(run_id="run-52", user_prompt="do it", generated_response=None, failed_statements=failed)
 
         usage = record.dispatch_breakdown()
 
@@ -796,9 +802,11 @@ class TestScriptActAgentToolUsage:
             ToolStatement(identifier="a", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
         )
         without_failures = ScriptActAgentRecord(
+            run_id="run-53",
             user_prompt="do it", generated_response=None, statements=statements,
         )
         with_failures = ScriptActAgentRecord(
+            run_id="run-54",
             user_prompt="do it", generated_response=None, statements=statements,
             failed_statements=(ToolStatement(identifier="b", tool="add", exception=ValueError()),),
         )
@@ -810,7 +818,7 @@ class TestScriptActAgentToolUsage:
         )
 
     def test_empty_record_has_all_zero_metrics(self) -> None:
-        record = ScriptActAgentRecord(user_prompt="do it", generated_response=None)
+        record = ScriptActAgentRecord(run_id="run-55", user_prompt="do it", generated_response=None)
 
         assert record.dispatch_breakdown() == ScriptActAgentToolUsage(
             registered_tool_calls=0, builtin_calls=0, attribute_calls=0,

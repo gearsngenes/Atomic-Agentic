@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict
-from uuid import uuid4
 
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import ToolUsageReport
@@ -120,11 +118,11 @@ class AgentRecord:
     Canonical memory record for one completed Agent invocation.
 
     A record stores the lifecycle artifacts needed to reconstruct future
-    LLM-facing context. It carries its own identity (``run_id``) and timing
-    (``started_at``/``ended_at``) directly -- no attached ``AgentResult``.
+    LLM-facing context. It carries its own identity (``run_id``) directly --
+    no attached ``AgentResult``.
     A record's processed, post-``post_invoke`` output is deliberately NOT
-    recoverable from history: only ``run_id``/timing (identity + rendering
-    material) and the raw ``generated_response`` persist. A caller wanting
+    recoverable from history: only ``run_id`` and the raw
+    ``generated_response`` persist. A caller wanting
     the processed result must capture it from ``invoke()``'s live return
     value at call time.
 
@@ -161,24 +159,12 @@ class AgentRecord:
         ``post_invoke`` processing.
 
     run_id:
-        This record's own identity. Optional at construction
-        (``None``-default, keyword-only) -- auto-minted via ``uuid4().hex``
-        in ``__post_init__`` if omitted, mirroring ``AtomicResult.run_id``'s
-        own precedent. ``Agent.record`` always passes an explicit
-        value in production; the default exists purely for bare-
-        construction convenience (tests, ad-hoc usage).
-
-    started_at, ended_at:
-        This invocation's timing envelope. Same optional/auto-fill shape as
-        ``run_id`` -- both default to a single shared
-        ``datetime.now(timezone.utc)`` call in ``__post_init__`` if either
-        is omitted. No type/shape validation beyond the fill logic itself --
-        framework-internal plumbing, not a validated external boundary.
+        This record's identity; required. Minted by ``Agent.create_task``
+        (records exist only when the agent records).
 
     agent_id:
-        The writing agent, ``f"{full_name};{instance_id}"``; ``None`` for
-        bare construction. Provenance only -- history replay does not
-        distinguish writers.
+        The writing agent's ``full_name``; ``None`` for bare construction.
+        Provenance only -- history replay does not distinguish writers.
 
     llm_records:
         Complete record of every LLM generation that contributed to this
@@ -204,9 +190,7 @@ class AgentRecord:
 
     user_prompt: str
     generated_response: Any
-    run_id: str | None = field(default=None, kw_only=True)
-    started_at: datetime | None = field(default=None, kw_only=True)
-    ended_at: datetime | None = field(default=None, kw_only=True)
+    run_id: str = field(kw_only=True)
     agent_id: str | None = field(default=None, kw_only=True)
     inputs: dict = field(default_factory=dict, hash=False, compare=False)
     llm_records: tuple[LLMRecord, ...] = ()
@@ -220,15 +204,6 @@ class AgentRecord:
                 f"got {type(self.user_prompt).__name__}."
             )
         object.__setattr__(self, "inputs", dict(self.inputs))
-
-        # Identity/timing auto-fill -- mirrors AtomicResult.run_id's own
-        # None-default-then-mint precedent. Production (Agent.record) always
-        # supplies explicit values; this exists purely for bare-construction
-        # convenience.
-        object.__setattr__(self, "run_id", self.run_id or uuid4().hex)
-        now = datetime.now(timezone.utc) if self.started_at is None or self.ended_at is None else None
-        object.__setattr__(self, "started_at", self.started_at or now)
-        object.__setattr__(self, "ended_at", self.ended_at or now)
 
         if not isinstance(self.llm_records, (tuple, list)) or isinstance(self.llm_records, (str, bytes)):
             raise TypeError(
@@ -245,8 +220,6 @@ class AgentRecord:
             "generated_response": self.generated_response,
             "run_id": self.run_id,
             "agent_id": self.agent_id,
-            "started_at": self.started_at.isoformat(),
-            "ended_at": self.ended_at.isoformat(),
             "llm_records": [r.to_dict() for r in self.llm_records],
             "prev_run_id": self.prev.run_id if self.prev is not None else None,
             "child_ids": [c.run_id for c in self.children],

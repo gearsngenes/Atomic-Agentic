@@ -5,13 +5,13 @@ from collections.abc import Iterable, Set as AbstractSet
 from typing import (
     Any,
     Callable,
+    ClassVar,
     Dict,
     List,
     Mapping,
     Optional,
 )
 from dataclasses import replace
-from datetime import datetime, timezone
 from uuid import uuid4
 import logging
 
@@ -71,10 +71,22 @@ class Agent(AtomicInvokable, ABC):
 
     Lifecycle
     ---------
-    ``invoke(inputs)`` runs the public steps spelled out in its docstring
-    (``async_invoke`` mirrors it); each can also be called by hand to assemble
-    a custom lifecycle. ``record`` is the only step that runs under the lock,
-    and nothing is stored at all when ``record_enabled`` is false.
+    ``invoke``/``async_invoke`` are the inherited ``AtomicInvokable``
+    templates. ``_invoke_impl`` runs the public steps (recipe below) and
+    returns the result payload; each step can also be called by hand to
+    assemble a custom lifecycle. Nothing is stored when ``record_enabled`` is
+    false.
+
+        task = self.create_task(inputs)
+        task = self.summarize(task)
+        task = self.pre_process(task)
+        while not task.complete:
+            task = self.think(task)
+            task = self.prepare(task)
+            task = self.act(task)
+        payload = self.post_process(task)
+        self.record(task)
+        return payload
 
     Schema composition
     -------------------
@@ -169,8 +181,8 @@ class Agent(AtomicInvokable, ABC):
     History is stored per-conversation in ``self._conversations: dict[str,
     Conversation]``, seeded with a single empty ``"default"`` conversation
     at construction. Exactly one conversation is "active" at a time
-    (``self._active_conversation``); ``invoke``/``async_invoke`` always read
-    from and (when they commit) write to whichever conversation is active at
+    (``self._active_conversation``); an invocation always reads
+    from and (when it commits) writes to whichever conversation is active at
     call time -- always its own current tail, never an arbitrary earlier
     record. Retargeting to an earlier point requires an explicit
     ``import_conversation`` (of a ``Conversation.slice``) or
@@ -187,7 +199,9 @@ class Agent(AtomicInvokable, ABC):
     object under a key, so several agents (of any type) can read and extend
     one history and context. Each reader renders the records with its own
     ``render_turn``. The registry itself (which keys exist, which is active)
-    stays per-agent under ``_invoke_lock``.
+    is per-agent and unsynchronized: mutating it concurrently with an
+    in-flight call is the caller's concern (``Conversation.commit`` is the one
+    synchronized step).
 
     Context and recording
     ---------------------
@@ -202,6 +216,8 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Class-level configuration
     # ------------------------------------------------------------------ #
+    result_cls: ClassVar[type[AgentResult]] = AgentResult
+
     # The only per-family variation ``create_task`` consults: which task
     # class to build. Further per-family seeding goes through ``_seed_task``.
     _TASK_CLS: type[AgentTask] = AgentTask
@@ -644,8 +660,8 @@ class Agent(AtomicInvokable, ABC):
         mapping, untouched), ``context`` (a shallow copy of the bound
         conversation's context taken here -- the seed point; a later
         ``remember()`` is not visible to the task), the ``pre_inputs``/
-        ``post_inputs``/``agentic_inputs`` views, ``run_id`` and
-        ``started_at``. Right after the task is built (before ``_seed_task``
+        ``post_inputs``/``agentic_inputs`` views, ``run_id`` (minted only
+        when ``record_enabled``). Right after the task is built (before ``_seed_task``
         and ``pre_process``) ``_seed_context`` writes the call's
         ``runtime_context`` dict (when ``use_runtime_context`` is on) and
         ``inputs_to_context`` into ``task.context``, the explicit mapping
@@ -667,9 +683,8 @@ class Agent(AtomicInvokable, ABC):
         family-specific seeding. Not overridden by subclasses. Pure
         computation, no I/O.
         """
-        with self._invoke_lock:
-            active_key = self._active_conversation
-            conversation = self._conversations[active_key]
+        active_key = self._active_conversation
+        conversation = self._conversations[active_key]
         history = conversation.records
         window = self._records_window
         if window == 0:
@@ -687,8 +702,7 @@ class Agent(AtomicInvokable, ABC):
             pre_inputs={k: v for k, v in inputs.items() if k in self._pre_names},
             post_inputs={k: v for k, v in inputs.items() if k in self._post_names},
             agentic_inputs={k: v for k, v in inputs.items() if k in self._agentic_names},
-            run_id=uuid4().hex,
-            started_at=datetime.now(timezone.utc),
+            run_id=uuid4().hex if self._record_enabled else None,
         )
         self._seed_context(task)
         self._seed_task(task)
@@ -1013,7 +1027,7 @@ class Agent(AtomicInvokable, ABC):
                 task.context[name] = replace(variable, value=value)
                 task.changed_context.add(name)
 
-    def post_process(self, task: AgentTask) -> AgentResult:
+    def post_process(self, task: AgentTask) -> dict[str, Any]:
         """Resolve response bindings, run ``post_invoke``, write the context
         sink, and build the result.
 
@@ -1024,7 +1038,7 @@ class Agent(AtomicInvokable, ABC):
            runs over ``task.post_inputs``.
         3. Context sink: the ``response_to_context`` values create or replace
            ``task.context`` variables (``_write_context``, readonly skipped).
-        4. Stamp ``task.ended_at``; build the ``AgentResult`` from the task.
+        4. Build the result payload from the task.
         Errors from steps 1-2 propagate unchanged, before the sink and before
         ``record``, so nothing is written and the turn is not recorded.
         """
@@ -1035,10 +1049,9 @@ class Agent(AtomicInvokable, ABC):
         else:
             result = self._post_invoke.invoke(task.post_inputs).result
         self._write_context(task, bound, create=True)
-        task.ended_at = datetime.now(timezone.utc)
-        return self.build_result_from_task(task, result)
+        return self.result_payload_from_task(task, result)
 
-    async def async_post_process(self, task: AgentTask) -> AgentResult:
+    async def async_post_process(self, task: AgentTask) -> dict[str, Any]:
         """Async mirror of ``post_process``."""
         logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
         bound = self._bind_response(task)
@@ -1047,13 +1060,12 @@ class Agent(AtomicInvokable, ABC):
         else:
             result = (await self._post_invoke.async_invoke(task.post_inputs)).result
         self._write_context(task, bound, create=True)
-        task.ended_at = datetime.now(timezone.utc)
-        return self.build_result_from_task(task, result)
+        return self.result_payload_from_task(task, result)
 
     def _record_base_fields(self, task: AgentTask) -> dict[str, Any]:
         """Common ``AgentRecord`` kwargs for a finished task.
 
-        Identity and timing come from the task; ``prev`` is the last turn this
+        Identity comes from the task; ``prev`` is the last turn this
         call read (``task.turns[-1]``), ``None`` when it read none;
         ``agent_id`` names this agent as the writer. Family overrides of
         ``_build_record_from_task`` splat this and add their own fields.
@@ -1062,12 +1074,10 @@ class Agent(AtomicInvokable, ABC):
             "user_prompt": task.user_prompt,
             "generated_response": task.generated_response,
             "run_id": task.run_id,
-            "started_at": task.started_at,
-            "ended_at": task.ended_at,
             "inputs": task.inputs,
             "llm_records": tuple(task.llm_records),
             "prev": task.turns[-1] if task.turns else None,
-            "agent_id": f"{self.full_name};{self.instance_id}",
+            "agent_id": self.full_name,
         }
 
     def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
@@ -1081,36 +1091,24 @@ class Agent(AtomicInvokable, ABC):
         return AgentRecord(**self._record_base_fields(task))
 
     # ------------------------------------------------------------------ #
-    # Result construction
+    # Result payload
     # ------------------------------------------------------------------ #
-    def build_result_from_task(self, task: AgentTask, result: Any) -> AgentResult:
-        """Construct this Agent's ``AgentResult`` envelope directly from a
-        finished task, wrapping the low-level ``_make_result`` primitive.
+    def result_payload_from_task(self, task: AgentTask, result: Any) -> dict[str, Any]:
+        """Build the ``result_cls`` payload from a finished task; the override
+        point for a family's extra result fields.
 
-        Public -- external subclasses may legitimately override this to
-        choose a more specific result class or add subclass-specific result
-        fields. Built independently of the record: both read the task.
-
-        ``result`` (the post-``post_invoke`` final caller-facing value) is not
-        on the task, so it stays an explicit parameter -- distinct from
-        ``task.generated_response``, the pre-``post_invoke`` raw value.
-        ``run_id`` and ``started_at``/``ended_at`` come from the task.
-
-        ``llm_model_data`` comes from the engine's configuration, so a task
-        that finished without any LLM call still builds a result.
+        ``result`` is the post-``post_invoke`` value (distinct from
+        ``task.generated_response``); ``run_id`` is ``None`` when not
+        recording; ``llm_model_data`` comes from the engine config so a task
+        with no LLM call still builds.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = self._llm_engine.model_data
-
-        return self._make_result(
-            result=result,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            result_cls=AgentResult,
-            run_id=task.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-        )
+        return {
+            "result": result,
+            "llm_token_usage": llm_token_usage,
+            "llm_model_data": self._llm_engine.model_data,
+            "run_id": task.run_id,
+        }
 
     def record(self, task: AgentTask) -> None:
         """Build this invocation's ``AgentRecord`` from the task and commit it.
@@ -1120,11 +1118,9 @@ class Agent(AtomicInvokable, ABC):
 
         The record is built first (independent of the result). With
         ``record_enabled`` False nothing is stored. Otherwise the conversation
-        bound at ``create_task`` is looked up under ``self._invoke_lock``
-        (even if the active one has since changed) and ``Conversation.commit``
-        runs outside it, so the agent and conversation locks are never held
-        together; see ``commit`` for the append, ``children`` link and context
-        write-back rules. There is no implicit forking: branching happens only
+        bound at ``create_task`` is looked up (even if the active one has since
+        changed) and committed; see ``commit`` for the append, ``children``
+        link and context write-back rules. There is no implicit forking: branching happens only
         through explicit ``import_conversation``.
 
         Context write-back offers ``commit`` only the variables this call
@@ -1148,8 +1144,7 @@ class Agent(AtomicInvokable, ABC):
             return
         record = self._build_record_from_task(task)
 
-        with self._invoke_lock:
-            conv = self._conversations[task.conversation]
+        conv = self._conversations[task.conversation]
         changed = {
             name: task.context[name]
             for name in task.changed_context
@@ -1168,16 +1163,13 @@ class Agent(AtomicInvokable, ABC):
         stays intact there); ``self._conversations`` becomes a single fresh
         ``"default"`` built by ``_new_conversation()`` and the active
         conversation resets to ``"default"``.
-        Takes ``self._invoke_lock`` like every other registry-mutating method
-        -- without it, an in-flight ``invoke``/``async_invoke`` whose
-        ``create_task`` snapshot predates this call could have its later
-        ``record`` reference a conversation key this reset just removed.
+        Not synchronized: an in-flight call whose ``record`` looks up a key
+        this reset removed raises ``KeyError``.
         """
-        with self._invoke_lock:
-            self._conversations = {
-                DEFAULT_CONVERSATION_NAME: self._new_conversation()
-            }
-            self._active_conversation = DEFAULT_CONVERSATION_NAME
+        self._conversations = {
+            DEFAULT_CONVERSATION_NAME: self._new_conversation()
+        }
+        self._active_conversation = DEFAULT_CONVERSATION_NAME
 
     def _new_conversation(self) -> Conversation:
         """Build one fresh, empty default conversation for this agent.
@@ -1199,10 +1191,7 @@ class Agent(AtomicInvokable, ABC):
         return Conversation()
 
     def _check_new_conversation_name(self, name: str, caller: str) -> None:
-        """Raise ``ValueError`` if ``name`` is badly shaped or already taken.
-
-        The caller holds ``self._invoke_lock``.
-        """
+        """Raise ``ValueError`` if ``name`` is badly shaped or already taken."""
         if not CONVERSATION_NAME_PATTERN.fullmatch(name):
             raise ValueError(
                 f"{caller}: invalid conversation name {name!r} (must be "
@@ -1226,11 +1215,10 @@ class Agent(AtomicInvokable, ABC):
         ``conversation_id=None`` resolves to the active conversation. An
         unknown key raises ``AgentInvocationError``.
         """
-        with self._invoke_lock:
-            key = self._active_conversation if conversation_id is None else conversation_id
-            if key not in self._conversations:
-                raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
-            return self._conversations[key]
+        key = self._active_conversation if conversation_id is None else conversation_id
+        if key not in self._conversations:
+            raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
+        return self._conversations[key]
 
     def create_conversation(
         self,
@@ -1246,7 +1234,7 @@ class Agent(AtomicInvokable, ABC):
         ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
         that already exists raises ``ValueError`` with a specific message.
 
-        1. under ``self._invoke_lock``: check the name.
+        1. check the name.
         2. start from ``self._new_conversation()``.
         3. assign each argument that is not ``None`` onto it. The three
            preview limits (``None`` unlimited, ``0`` hidden, else
@@ -1259,20 +1247,19 @@ class Agent(AtomicInvokable, ABC):
         ``None`` means "not given" for every argument, so a limit cannot be
         set back to ``None`` over a default the agent's hook already set.
         """
-        with self._invoke_lock:
-            self._check_new_conversation_name(name, "create_conversation")
-            conv = self._new_conversation()
-            given = {
-                "response_preview_limit": response_preview_limit,
-                "prompt_preview_limit": prompt_preview_limit,
-                "context_preview_limit": context_preview_limit,
-                "render_mode": render_mode,
-            }
-            for field, value in given.items():
-                if value is not None:
-                    setattr(conv, field, value)
-            self._conversations[name] = conv
-            return conv
+        self._check_new_conversation_name(name, "create_conversation")
+        conv = self._new_conversation()
+        given = {
+            "response_preview_limit": response_preview_limit,
+            "prompt_preview_limit": prompt_preview_limit,
+            "context_preview_limit": context_preview_limit,
+            "render_mode": render_mode,
+        }
+        for field, value in given.items():
+            if value is not None:
+                setattr(conv, field, value)
+        self._conversations[name] = conv
+        return conv
 
     def get_record(
         self,
@@ -1298,8 +1285,7 @@ class Agent(AtomicInvokable, ABC):
             if index is not None:
                 raise ValueError("get_record: run_id may not be combined with index.")
             if conversation is None:
-                with self._invoke_lock:
-                    convs = list(self._conversations.values())
+                convs = list(self._conversations.values())
             else:
                 convs = [self.get_conversation(conversation)]
             for conv in convs:
@@ -1334,22 +1320,20 @@ class Agent(AtomicInvokable, ABC):
                 f"got {type(conversation)!r}."
             )
 
-        with self._invoke_lock:
-            self._check_new_conversation_name(name, "import_conversation")
-            if any(c is conversation for c in self._conversations.values()):
-                raise ValueError(
-                    "import_conversation: conversation is already registered here."
-                )
-            self._conversations[name] = conversation
+        self._check_new_conversation_name(name, "import_conversation")
+        if any(c is conversation for c in self._conversations.values()):
+            raise ValueError(
+                "import_conversation: conversation is already registered here."
+            )
+        self._conversations[name] = conversation
 
     def switch_conversation(self, key: str) -> None:
         """Switch the active conversation. Unknown key raises ``AgentInvocationError``."""
-        with self._invoke_lock:
-            if key not in self._conversations:
-                raise AgentInvocationError(
-                    f"switch_conversation: unknown conversation {key!r}."
-                )
-            self._active_conversation = key
+        if key not in self._conversations:
+            raise AgentInvocationError(
+                f"switch_conversation: unknown conversation {key!r}."
+            )
+        self._active_conversation = key
 
     def remove_conversation(self, key: str) -> Conversation:
         """Unregister ``key`` and return the popped conversation.
@@ -1362,33 +1346,44 @@ class Agent(AtomicInvokable, ABC):
         conversation (switch first); otherwise it is popped and returned. An
         unknown key raises ``AgentInvocationError``.
         """
-        with self._invoke_lock:
-            if key not in self._conversations:
-                raise AgentInvocationError(
-                    f"remove_conversation: unknown conversation {key!r}."
-                )
-            if key == DEFAULT_CONVERSATION_NAME:
-                old = self._conversations[key]
-                self._conversations[key] = self._new_conversation()
-                return old
-            if key == self._active_conversation:
-                raise AgentInvocationError(
-                    f"remove_conversation: cannot remove the active "
-                    f"conversation {key!r}; switch first."
-                )
-            return self._conversations.pop(key)
+        if key not in self._conversations:
+            raise AgentInvocationError(
+                f"remove_conversation: unknown conversation {key!r}."
+            )
+        if key == DEFAULT_CONVERSATION_NAME:
+            old = self._conversations[key]
+            self._conversations[key] = self._new_conversation()
+            return old
+        if key == self._active_conversation:
+            raise AgentInvocationError(
+                f"remove_conversation: cannot remove the active "
+                f"conversation {key!r}; switch first."
+            )
+        return self._conversations.pop(key)
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
-        """Async analog of ``invoke``.
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Run the lifecycle (class docstring) and return the result payload."""
+        # 1. seed and prepare the task
+        task = self.create_task(inputs)
+        task = self.summarize(task)
+        task = self.pre_process(task)
 
-        The same lifecycle with ``await`` at ``pre_process``/``post_process``
-        and the ``async_*`` hooks. ``create_task``, ``summarize`` and
-        ``record`` are sync (pure computation, no I/O) and serve both paths.
-        Same lock scope as ``invoke``; see its docstring.
-        """
-        logger.info(f"[Async {self.full_name} started]")
+        # 2-3. the think/prepare/act loop
+        logger.debug(f"Agent.{self.name} performing logic")
+        while not task.complete:
+            task = self.think(task)
+            task = self.prepare(task)
+            task = self.act(task)
 
-        inputs = self.filter_inputs(inputs)
+        # 4-6. payload, then record; a raise before record stores nothing
+        payload = self.post_process(task)
+        self.record(task)
+        return payload
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin: ``async_summarize``/``async_pre_process``/``async_think``/
+        ``async_prepare``/``async_act``/``async_post_process``; ``create_task`` and
+        ``record`` are sync."""
         task = self.create_task(inputs)
         task = await self.async_summarize(task)
         task = await self.async_pre_process(task)
@@ -1399,56 +1394,9 @@ class Agent(AtomicInvokable, ABC):
             task = await self.async_prepare(task)
             task = await self.async_act(task)
 
-        result = await self.async_post_process(task)
+        payload = await self.async_post_process(task)
         self.record(task)
-
-        logger.info(f"[Async {self.full_name} finished]")
-        return result
-
-    def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
-        """Invoke the agent with a single input mapping.
-
-        Only ``record`` takes locks (``self._invoke_lock`` for the registry
-        lookup, the conversation's own lock for the commit); everything
-        before it is unlocked, so concurrent calls on one instance genuinely
-        overlap. Reads are stale-safe (records are append-only and
-        ``create_task`` pins its turn copy). Accepted consequence: two calls
-        reading the same tail both append in commit order, each with ``prev``
-        set to the record it read (so that record has two children).
-
-        The lifecycle, spelled out -- each step is public, so this is also the
-        recipe for assembling your own::
-
-            inputs = self.filter_inputs(inputs)
-            task = self.create_task(inputs)
-            task = self.summarize(task)
-            task = self.pre_process(task)
-            while not task.complete:
-                task = self.think(task)
-                task = self.prepare(task)
-                task = self.act(task)
-            result = self.post_process(task)
-            self.record(task)
-            return result
-        """
-        logger.info(f"[{self.full_name} started]")
-
-        inputs = self.filter_inputs(inputs)
-        task = self.create_task(inputs)
-        task = self.summarize(task)
-        task = self.pre_process(task)
-
-        logger.debug(f"Agent.{self.name} performing logic")
-        while not task.complete:
-            task = self.think(task)
-            task = self.prepare(task)
-            task = self.act(task)
-
-        result = self.post_process(task)
-        self.record(task)
-
-        logger.info(f"[{self.full_name} finished]")
-        return result
+        return payload
 
     # ------------------------------------------------------------------ #
     # Serialization
