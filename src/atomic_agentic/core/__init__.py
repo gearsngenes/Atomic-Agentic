@@ -1,4 +1,4 @@
-from .Invokable import AtomicInvokable
+from .atomic_invokable import AtomicInvokable
 from .core_api import extract_io, parameter_overlap, parameter_collisions
 
 __all__ = [

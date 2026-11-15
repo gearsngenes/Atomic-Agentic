@@ -11,10 +11,10 @@ from typing import Any, Awaitable, Callable
 import pytest
 
 from atomic_agentic.exceptions import MCPConnectionError, MCPToolError
-from atomic_agentic.mcp.MCPClientHub import MCPClientHub
+from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
 from atomic_agentic.utils.core import start_background_loop, stop_background_loop
 
-client_hub_module = importlib.import_module("atomic_agentic.mcp.MCPClientHub")
+client_hub_module = importlib.import_module("atomic_agentic.mcp.mcp_client_hub")
 
 
 class FakeSession:

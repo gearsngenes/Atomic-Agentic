@@ -24,7 +24,7 @@ from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolUsageRecord, ToolUsageReport
 
 if TYPE_CHECKING:
-    from ..core.Invokable import AtomicInvokable
+    from ..core.atomic_invokable import AtomicInvokable
 
 __all__ = [
     "evaluate_expr",

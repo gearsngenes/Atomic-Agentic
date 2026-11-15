@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from ..exceptions import ValidationError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..models.results.workflows import SequentialFlowResult
 from .base import Workflow
 

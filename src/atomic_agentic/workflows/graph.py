@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any, ClassVar, NamedTuple
 
 from ..exceptions import ValidationError, WorkflowError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec, ParameterReport
 from ..models.workflows.graph import StatePolicySpec
 from ..models.results import AtomicResult

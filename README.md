@@ -415,6 +415,30 @@ dependency hierarchy — no back-edges:
 
 ------------------------------------------------------------------------
 
+## Running the Tests
+
+Install the test tooling (`pytest`, `pytest-cov` and the A2A HTTP server)
+from a source checkout, then run from the repository root:
+
+``` bash
+pip install -e ".[dev]"
+
+pytest -m "not llm and not network" -q    # offline suite (what CI runs)
+pytest tests/workflows -q                 # one folder
+pytest tests/core/test_invokable.py -q    # one file
+pytest -m llm                             # live tests; need API keys in .env
+```
+
+Coverage (`pytest-cov`; branch coverage is on, and `pyproject.toml` sets
+the source and exclusions):
+
+``` bash
+pytest -m "not llm and not network" --cov=atomic_agentic --cov-report=term-missing
+pytest -m "not llm and not network" --cov=atomic_agentic --cov-report=html   # open htmlcov/index.html
+```
+
+------------------------------------------------------------------------
+
 ## Changelog
 
 See [`docs/CHANGELOG.md`](https://github.com/gearsngenes/Atomic-Agentic/blob/main/docs/CHANGELOG.md)

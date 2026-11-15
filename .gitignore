@@ -30,6 +30,7 @@ src/atomic_agentic/*/*/__pycache__/
 
 # Ignore coverage reports
 .coverage
+htmlcov/
 
 # Ignore environment variable files
 .env

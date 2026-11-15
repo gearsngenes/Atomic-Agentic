@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 import pytest
 
 from atomic_agentic.exceptions import SchemaError
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParameterReport, ParamSpec
 from atomic_agentic.utils.parameters import (
     _insertion_category,

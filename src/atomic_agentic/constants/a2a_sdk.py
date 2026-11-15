@@ -6,7 +6,7 @@ from a2a.types import TaskState
 # a2a-sdk Transport Mode Literals
 # =============================================================================
 # Used by:
-# - a2a/A2AClientHub.py: transport_mode constructor validation and
+# - a2a/a2a_client_hub.py: transport_mode constructor validation and
 #   ClientConfig.supported_protocol_bindings selection
 #
 # Sibling to constants/python_a2a.py -- kept in a separate module, matching
@@ -37,11 +37,11 @@ VALID_TRANSPORT_MODES: tuple[str, ...] = (
 # a2a-sdk TaskState Terminal-Failure Set
 # =============================================================================
 # Used by:
-# - a2a/A2AClientHub.py: send_parts/async_send_parts's terminal-failure check
+# - a2a/a2a_client_hub.py: send_parts/async_send_parts's terminal-failure check
 #
 # The TaskState values a remote task can end in that A2AClientHub treats as
 # unrecoverable failures (raises A2AProxyError). Kept here, not as a
-# module-local constant inside A2AClientHub.py, since it describes a2a-sdk's
+# module-local constant inside a2a_client_hub.py, since it describes a2a-sdk's
 # own TaskState semantics -- a domain constant, not implementation-private
 # state.
 
@@ -58,9 +58,9 @@ TERMINAL_FAILURE_STATES: frozenset[TaskState] = frozenset(
 # A2AtomicExecutor / A2AClientHub Shared Conventions
 # =============================================================================
 # Used by:
-# - a2a/A2AtomicExecutor.py: card extension publication (PARAM_SCHEMA_EXT_URI),
+# - a2a/a2atomic_executor.py: card extension publication (PARAM_SCHEMA_EXT_URI),
 #   Message.metadata routing (SKILL_ROUTING_KEY), result wrapping (ATOMIC_RESULT_KEY)
-# - a2a/A2AClientHub.py: extension detection, call_atomic_skill/
+# - a2a/a2a_client_hub.py: extension detection, call_atomic_skill/
 #   async_call_atomic_skill routing and result unwrapping
 #
 # PARAM_SCHEMA_EXT_URI identifies AA's own AgentExtension on a published

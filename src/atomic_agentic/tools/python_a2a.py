@@ -4,14 +4,14 @@ import asyncio
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec
 from ..constants.python_a2a import PYA2A_RESULT_KEY
 from ..models.results.tools import PyA2AtomicToolResult
 from .base import Tool
-from ..a2a.PyA2AtomicClient import PyA2AtomicClient
+from ..a2a.py_a2atomic_client import PyA2AtomicClient
 
 
 __all__ = ["PyA2AtomicTool"]

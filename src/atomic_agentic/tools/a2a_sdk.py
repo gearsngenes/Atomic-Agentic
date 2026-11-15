@@ -4,7 +4,7 @@ import functools
 import re
 from typing import Any, Dict, Mapping, Optional
 
-from ..a2a.A2AClientHub import A2AClientHub
+from ..a2a.a2a_client_hub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..exceptions import ToolDefinitionError, ToolInvocationError

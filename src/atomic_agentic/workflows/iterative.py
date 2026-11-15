@@ -7,7 +7,7 @@ from typing import Any, NamedTuple
 
 from ..constants.core import NO_VAL
 from ..exceptions import ValidationError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..models.results.workflows import IterativeFlowResult
 from .base import Workflow
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from atomic_agentic.mcp.MCPClientHub import MCPClientHub
+from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
 
 _FIXTURE_SERVER = str(Path(__file__).parent / "_stdio_fixture_server.py")
 

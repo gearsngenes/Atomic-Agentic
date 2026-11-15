@@ -4,8 +4,8 @@ from __future__ import annotations
 # A2A Protocol Function Names
 # =============================================================================
 # Used by:
-# - a2a/PyA2AtomicHost.py: message dispatch and A2A function registry
-# - a2a/PyA2AtomicClient.py: remote function call routing
+# - a2a/py_a2atomic_host.py: message dispatch and A2A function registry
+# - a2a/py_a2atomic_client.py: remote function call routing
 # - tools/a2a.py: remote metadata fetching
 #
 # These function names form the core of the PyA2Atomic A2A protocol contract
@@ -26,8 +26,8 @@ GET_INVOKABLE_METADATA_FUNCTION = "get_invokable_metadata"
 # A2A Result Container Key
 # =============================================================================
 # Used by:
-# - a2a/PyA2AtomicHost.py: wrapping invokable results in A2A response payloads
-# - a2a/PyA2AtomicClient.py: extracting invokable results from A2A payloads
+# - a2a/py_a2atomic_host.py: wrapping invokable results in A2A response payloads
+# - a2a/py_a2atomic_client.py: extracting invokable results from A2A payloads
 #
 # When a PyA2AtomicHost executes an invokable, the result is wrapped inside
 # a JSON object with this key to distinguish it from A2A infrastructure responses

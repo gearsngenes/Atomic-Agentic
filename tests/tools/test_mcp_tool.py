@@ -8,7 +8,7 @@ import pytest
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import MCPToolResult
-from atomic_agentic.mcp.MCPClientHub import MCPClientHub
+from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.constants.core import NO_VAL
 

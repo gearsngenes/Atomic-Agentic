@@ -20,10 +20,10 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import Part, Role
 from google.protobuf.json_format import MessageToDict
 
-from atomic_agentic.a2a.A2AClientHub import A2AClientHub
-from atomic_agentic.a2a.A2AtomicExecutor import A2AtomicExecutor
+from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
+from atomic_agentic.a2a.a2atomic_executor import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.atomic import AtomicResult

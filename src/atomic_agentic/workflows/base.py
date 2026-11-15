@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from ..exceptions import ExecutionError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results.workflows import WorkflowResult
 
