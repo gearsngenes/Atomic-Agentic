@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "Development-v2.0"]
+  pull_request:
+    branches: [main, "Development-v2.0"]
+
+jobs:
+  offline-suite:
+    name: ${{ matrix.extras }} / py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+        # Every flavor also installs `dev` (pytest and the a2a http server).
+        # `llama` is left out: llama-cpp-python builds from source.
+        extras:
+          - dev
+          - openai,dev
+          - anthropic,dev
+          - gemini,dev
+          - mistral,dev
+          - litellm,dev
+          - python-a2a,dev
+          # All providers together except llama (checks the caps coexist).
+          - openai,anthropic,gemini,mistral,litellm,dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # setuptools-scm derives the version from tags
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[${{ matrix.extras }}]"
+          pip check
+      - name: Offline suite
+        run: pytest -m "not llm and not network" -q

@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-import openai
 import pytest
+
+openai = pytest.importorskip("openai")
 
 openai_module = importlib.import_module("atomic_agentic.llm.openai_engine")
 

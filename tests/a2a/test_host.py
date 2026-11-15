@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import pytest
 
+pytest.importorskip("python_a2a", reason="requires the python-a2a extra")
+
 from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
 from atomic_agentic.constants.python_a2a import (
     PYA2A_RESULT_KEY,

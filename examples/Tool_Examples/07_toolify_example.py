@@ -1,3 +1,6 @@
+# NOTE: PyA2AtomicClient/PyA2AtomicHost use the deprecated python-a2a stack (removed in
+# the final 2.0.0 release). Install it with `pip install atomic-agentic[python-a2a]`;
+# prefer the a2a-sdk examples (A2AClientHub / A2AtomicExecutor) for new work.
 from __future__ import annotations
 
 import json

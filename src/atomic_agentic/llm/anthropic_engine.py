@@ -8,11 +8,13 @@ from typing import Any, Dict, List, Mapping, Optional
 
 try:
     from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
-except ImportError:
+    _SDK_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     Anthropic = None            # type: ignore[assignment,misc]
     AsyncAnthropic = None       # type: ignore[assignment,misc]
     APIConnectionError = None   # type: ignore[assignment,misc]
     APIStatusError = None       # type: ignore[assignment,misc]
+    _SDK_IMPORT_ERROR = _exc
 
 from .base import LLMEngine
 from ..constants.llm import (
@@ -25,7 +27,7 @@ from ..constants.llm import (
 from ..exceptions import LLMEngineError
 from ..models.results.llm import AnthropicTokenUsage, RemoteLLMModelData
 from ..utils.llm import validate_attachment_path
-from ..utils.core import run_coro_sync
+from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["AnthropicEngine"]
 
@@ -74,8 +76,9 @@ class AnthropicEngine(LLMEngine):
     and forwarded as the top-level ``system=`` parameter (joined with
     ``"\\n\\n"`` when multiple system messages are present).  The remaining
     messages form the ``messages=`` list.  ``max_tokens`` is always sent
-    (required by Anthropic).  ``temperature``, ``top_p``, ``top_k``,
-    ``stop_sequences``, and ``thinking`` are omitted when ``None``.
+    (required by Anthropic).  ``stop_sequences``, ``thinking`` and
+    ``extra_body`` (sampling fields such as ``temperature``) are omitted
+    when ``None``.
     ``block_separator`` (default ``""``) controls how multiple response text
     blocks are rejoined into the returned string — relevant when a response
     contains more than one ``text`` block (e.g. Anthropic citations, which
@@ -119,11 +122,9 @@ class AnthropicEngine(LLMEngine):
         description: str = "Anthropic Claude language model engine.",
         client: Anthropic | AsyncAnthropic | None = None,
         max_output_tokens: int = 8192,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        top_k: int | None = None,
         stop_sequences: list[str] | None = None,
         thinking_config: dict[str, Any] | None = None,
+        extra_body: Mapping[str, Any] | None = None,
         block_separator: str = "",
         inline_cutoff_chars: int = 200_000,
         *,
@@ -152,16 +153,18 @@ class AnthropicEngine(LLMEngine):
             ``Anthropic(**client_kwargs)`` is built.
         max_output_tokens:
             Always sent as ``max_tokens=`` (required by the Anthropic API).
-        temperature:
-            Sampling temperature. ``None`` omits the parameter entirely.
-        top_p, top_k:
-            Optional sampling parameters; omitted when ``None``.
         stop_sequences:
             Optional list of stop strings; omitted when ``None``.
         thinking_config:
             Optional extended-thinking configuration dict (e.g.
             ``{"type": "adaptive"}``); sent as ``thinking=``, omitted when
             ``None``.
+        extra_body:
+            Extra request fields forwarded verbatim through the SDK's
+            ``extra_body`` passthrough, e.g. ``{"temperature": 0.3}`` or
+            ``{"top_k": 5}``. Which fields the API accepts depends on the
+            API version the SDK speaks (anthropic 2.x rejects
+            ``temperature``); AA does not validate them. Omitted when ``None``.
         block_separator:
             Controls how multiple response text blocks are rejoined into the
             returned string (relevant for citation-bearing responses).
@@ -194,9 +197,9 @@ class AnthropicEngine(LLMEngine):
         # 2. SDK presence check
         if Anthropic is None:
             raise LLMEngineError(
-                "AnthropicEngine requires the `anthropic` package: "
-                "pip install anthropic"
-            )
+                "AnthropicEngine "
+                + format_missing_dependency("anthropic", "anthropic", _SDK_IMPORT_ERROR)
+            ) from _SDK_IMPORT_ERROR
 
         # 3. Build client kwargs; seed timeout default
         _ckw = dict(client_kwargs)
@@ -210,11 +213,9 @@ class AnthropicEngine(LLMEngine):
         # 5. Store request-level params
         self.model = model
         self.max_output_tokens = int(max_output_tokens)
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
         self.stop_sequences = stop_sequences
         self.thinking_config = thinking_config
+        self.extra_body = dict(extra_body) if extra_body is not None else None
         self.block_separator = block_separator
         self._inline_cutoff_chars = int(inline_cutoff_chars)
 
@@ -312,19 +313,12 @@ class AnthropicEngine(LLMEngine):
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
 
-        # anthropic>=1.0 dropped temperature/top_p/top_k from messages.create()'s
-        # top-level signature; extra_body is the SDK's supported passthrough for
-        # provider params it no longer validates client-side, and is accepted
-        # identically on anthropic 0.x and 1.x.
-        extra_body: dict[str, Any] = {}
-        if self.temperature is not None:
-            extra_body["temperature"] = self.temperature
-        if self.top_p is not None:
-            extra_body["top_p"] = self.top_p
-        if self.top_k is not None:
-            extra_body["top_k"] = self.top_k
-        if extra_body:
-            payload["extra_body"] = extra_body
+        # Sampling params (temperature, top_p, top_k, ...) are no longer fixed
+        # engine knobs: newer Anthropic API versions (SDK 2.x) reject some of
+        # them, so they travel through the SDK's extra_body passthrough exactly
+        # as the caller supplied them.
+        if self.extra_body:
+            payload["extra_body"] = dict(self.extra_body)
 
         if self.stop_sequences is not None:
             payload["stop_sequences"] = self.stop_sequences
@@ -462,6 +456,7 @@ class AnthropicEngine(LLMEngine):
                 "type": "document",
                 "source": {
                     "type": "text",
+                    "media_type": "text/plain",
                     "data": text,
                 },
             }
@@ -484,11 +479,9 @@ class AnthropicEngine(LLMEngine):
         d.update({
             "model": self.model,
             "max_output_tokens": self.max_output_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
             "stop_sequences": self.stop_sequences,
             "thinking_config": self.thinking_config,
+            "extra_body": self.extra_body,
             "block_separator": self.block_separator,
             "inline_cutoff_chars": self._inline_cutoff_chars,
         })

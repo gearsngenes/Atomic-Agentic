@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+pytest.importorskip("python_a2a", reason="requires the python-a2a extra")
+
 client_module = importlib.import_module("atomic_agentic.a2a.PyA2AtomicClient")
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 from types import SimpleNamespace
 from typing import Any
 
@@ -624,6 +625,9 @@ class TestLiteLLMEngine:
         assert "truncated" in block["text"]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("litellm") is None, reason="requires the litellm extra"
+)
 class TestLiteLLMShouldRetry:
     def _engine(self, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> LiteLLMEngine:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())

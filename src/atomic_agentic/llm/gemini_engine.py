@@ -5,9 +5,11 @@ import mimetypes
 try:
     from google import genai
     from google.genai import errors as genai_errors
-except ImportError:
+    _SDK_IMPORT_ERROR: ImportError | None = None
+except ImportError as _exc:
     genai = None
     genai_errors = None
+    _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
     Any,
@@ -29,6 +31,7 @@ from ..models.results.llm import (
     LLMModelData,
     RemoteLLMModelData
 )
+from ..utils.core import format_missing_dependency
 from ..utils.llm import validate_attachment_path
 
 __all__ = ["GeminiEngine"]
@@ -44,9 +47,22 @@ class GeminiEngine(LLMEngine):
     ``genai.Client`` exposes both sync (``client.models``) and async
     (``client.aio.models``) paths — no isinstance routing is needed.
 
-    ``client=None`` builds ``genai.Client(**client_kwargs)`` with
-    ``http_options.timeout`` seeded from ``timeout_seconds`` (in milliseconds,
-    as required by the SDK). An injected client is used as-is.
+    ``client=None`` builds ``genai.Client(**client_kwargs)``. ``timeout_seconds``
+    becomes ``http_options.timeout`` (milliseconds, as the SDK requires) unless
+    the ``http_options`` you pass already sets a timeout, which then wins. An
+    injected client is used as-is, so set its options on the client itself.
+
+    API version
+    -----------
+    The engine never sets the Gemini API version; the SDK default applies
+    (``v1beta`` on google-genai 2.x, ``v1`` on 3.x). The Gemini 2.5 family needs
+    ``v1beta`` on 3.x (``v1`` rejects system instructions and JSON mode for it);
+    newer models work on ``v1``. Pass it explicitly through ``http_options``, which
+    behaves the same on 2.x and 3.x (the ``GOOGLE_GENAI_API_VERSION`` variable
+    only works on 3.x)::
+
+        GeminiEngine(model="gemini-2.5-flash", api_key=key,
+                     http_options={"api_version": "v1beta"})
 
     Flow per call
     -------------
@@ -150,10 +166,10 @@ class GeminiEngine(LLMEngine):
         **client_kwargs:
             Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
             during client construction. Common uses: ``api_key``, ``credentials``,
-            ``project``, ``location``, ``vertexai``, ``http_options``. A default
-            ``http_options={"timeout": <ms>}`` is seeded from ``timeout_seconds``
-            unless ``http_options`` is supplied explicitly. Not forwarded when
-            ``client`` is injected.
+            ``project``, ``location``, ``vertexai``, ``http_options`` (a dict or
+            ``types.HttpOptions``; every key is kept, and only a missing
+            ``timeout`` is filled in from ``timeout_seconds``). Not forwarded
+            when ``client`` is injected.
         """
         # Step 1 — Name sanitization and base init.
         sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
@@ -170,13 +186,25 @@ class GeminiEngine(LLMEngine):
         # Step 2 — SDK presence check.
         if genai is None:
             raise LLMEngineError(
-                "GeminiEngine requires the `google-genai` package; "
-                "install `google-genai` to use it."
-            )
+                "GeminiEngine "
+                + format_missing_dependency("google-genai", "gemini", _SDK_IMPORT_ERROR)
+            ) from _SDK_IMPORT_ERROR
 
-        # Step 3 — Build client kwargs; seed http_options.timeout (milliseconds).
+        # Step 3 — Build client kwargs; fill http_options.timeout (milliseconds)
+        # from timeout_seconds unless the caller's http_options already sets one.
+        # Everything else the caller put in http_options (api_version, ...) is kept.
         _ckw = dict(client_kwargs)
-        _ckw.setdefault("http_options", {"timeout": int(self._timeout_seconds * 1000)})
+        _timeout_ms = int(self._timeout_seconds * 1000)
+        _http = _ckw.get("http_options")
+        if _http is None:
+            _http = {"timeout": _timeout_ms}
+        elif isinstance(_http, Mapping):
+            _http = {**_http}
+            if _http.get("timeout") is None:
+                _http["timeout"] = _timeout_ms
+        elif _http.timeout is None:  # types.HttpOptions
+            _http = _http.model_copy(update={"timeout": _timeout_ms})
+        _ckw["http_options"] = _http
 
         # Step 4 — Single client: injected as-is or built from kwargs.
         self._client: genai.Client = client if client is not None else genai.Client(**_ckw)
