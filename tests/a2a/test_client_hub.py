@@ -38,15 +38,9 @@ from a2a.types import (
 from google.protobuf.json_format import MessageToDict
 from starlette.applications import Starlette
 
-from atomic_agentic.a2a.A2AClientHub import A2AClientHub
+from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
 
-# a2a/__init__.py's own `from .A2AClientHub import A2AClientHub` shadows the
-# package's A2AClientHub *submodule* attribute with the *class* -- so a plain
-# `import atomic_agentic.a2a.A2AClientHub as X` resolves X to the class, not
-# the module, and `X.create_client` (below) doesn't exist. importlib.import_module
-# bypasses that shadowing by going straight through sys.modules -- same fix
-# already applied in tests/llm/test_base.py for the identical scenario.
-a2a_client_hub_module = importlib.import_module("atomic_agentic.a2a.A2AClientHub")
+a2a_client_hub_module = importlib.import_module("atomic_agentic.a2a.a2a_client_hub")
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_GRPC, TRANSPORT_JSON_RPC, TRANSPORT_REST
 from atomic_agentic.exceptions import A2AProxyError
 from atomic_agentic.utils.core import run_coro_sync, start_background_loop, stop_background_loop

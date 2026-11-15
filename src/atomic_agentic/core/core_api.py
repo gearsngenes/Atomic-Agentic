@@ -4,7 +4,7 @@ parameter comparison.
 Lives in ``core/`` rather than ``utils/`` because these functions need to
 recognize ``AtomicInvokable`` directly (via ``extract_io``), and ``utils/``
 sits *below* ``core/`` in the layered dependency topology
-(``core/Invokable.py`` already imports from ``utils/parameters.py``) — an
+(``core/atomic_invokable.py`` already imports from ``utils/parameters.py``) — an
 ``AtomicInvokable``-aware function living in ``utils/`` would be a
 circular import, not just a layering preference. ``extract_io`` was here
 first (a25); ``parameter_overlap``/``parameter_collisions`` joined it here
@@ -23,7 +23,7 @@ from ..utils.parameters import (
     _unwrap_annotated,
     build_parameter_reports,
 )
-from .Invokable import AtomicInvokable
+from .atomic_invokable import AtomicInvokable
 
 __all__ = ["extract_io", "parameter_overlap", "parameter_collisions"]
 

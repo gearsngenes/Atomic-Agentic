@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from atomic_agentic.exceptions import ExecutionError, WorkflowError
-from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import ParallelFlowResult
 from atomic_agentic.tools.base import Tool
@@ -306,40 +305,46 @@ class TestParallelFlowConstruction:
         assert flow.include_trace is False
 
 
-def make_structured_branch(name: str, output_schema: list[str]) -> StructuredInvokable:
+class _ExtraDescriptionTool(Tool):
+    """Tool whose _extra_description is a fixed string, for flow/Tool chaining tests."""
+
+    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._extra = extra
+
+    def _extra_description(self) -> str:
+        return self._extra
+
+
+def make_described_branch(name: str) -> _ExtraDescriptionTool:
     def return_value(value: Any) -> Any:
         """Return the provided value."""
         return value
 
-    tool = Tool(
+    return _ExtraDescriptionTool(
         function=return_value,
         name=name,
         namespace="tests",
         description=f"Return the provided value ({name}).",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=output_schema,
-        name=f"structured_{name}",
-        description=f"Structured {name}.",
+        extra="value branch extra",
     )
 
 
 class TestParallelFlowExtraDescription:
     def test_scalar_output_surfaces_selected_branch_extra_description(self) -> None:
-        structured = make_structured_branch("value_branch", ["value"])
+        described = make_described_branch("value_branch")
 
         flow = ParallelFlow(
             name="parallel_flow",
             namespace="tests",
             description="Parallel test flow.",
-            branches=[structured, make_branch("b")],
+            branches=[described, make_branch("b")],
             result_mode=ParallelFlow.SCALAR,
             selected_branches=[0],
         )
 
-        assert flow._extra_description() == "Output schema: [value]"
-        assert flow.description == "Parallel test flow.\nOutput schema: [value]"
+        assert flow._extra_description() == "value branch extra"
+        assert flow.description == "Parallel test flow.\nvalue branch extra"
 
     def test_scalar_with_no_selection_states_none(self) -> None:
         flow = make_three_branch_flow(result_mode=ParallelFlow.SCALAR, selected_branches=[])
@@ -359,13 +364,13 @@ class TestParallelFlowExtraDescription:
         )
 
     def test_list_output_states_branch_count_and_omits_branch_content(self) -> None:
-        structured = make_structured_branch("value_branch", ["value"])
+        described = make_described_branch("value_branch")
 
         flow = ParallelFlow(
             name="parallel_flow",
             namespace="tests",
             description="Parallel test flow.",
-            branches=[structured, make_branch("b"), make_branch("c")],
+            branches=[described, make_branch("b"), make_branch("c")],
             selected_branches=[0, 1, 2],
         )
 

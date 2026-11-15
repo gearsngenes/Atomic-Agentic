@@ -1,8 +1,8 @@
 """Shared per-skill metadata for the a2a-sdk-backed A2A track.
 
-``A2AtomicSkillMetadata`` is the one type both ``a2a.A2AtomicExecutor``
+``A2AtomicSkillMetadata`` is the one type both ``a2a.a2atomic_executor``
 (serializes instances into its published card extension) and
-``a2a.A2AClientHub`` (deserializes them back out) build against, so the two
+``a2a.a2a_client_hub`` (deserializes them back out) build against, so the two
 sides of the wire can never independently drift on shape.
 """
 

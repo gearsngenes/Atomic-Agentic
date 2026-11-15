@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
+from atomic_agentic.a2a.py_a2atomic_client import PyA2AtomicClient
 from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import RemoteInvocationError, ToolDefinitionError, ToolInvocationError

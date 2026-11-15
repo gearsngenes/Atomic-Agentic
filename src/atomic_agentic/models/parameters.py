@@ -58,6 +58,15 @@ class ParamSpec:
     It does not support mapping-style access. Use :meth:`to_dict` when a concrete
     dictionary representation is needed, and :meth:`from_dict` when rebuilding a
     ``ParamSpec`` from serialized metadata.
+
+    Defaults
+    --------
+    ``default`` is shared by reference, exactly like a Python function default:
+    no copy is made anywhere, so a mutable default is the same object on every
+    call. The spec stays frozen and has no setter; an invokable changes a default
+    by swapping in a ``dataclasses.replace`` copy (see
+    ``AtomicInvokable.set_defaults``), so other invokables holding the original
+    spec are unaffected.
     """
 
     # Shims onto constants/parameters.py -- that module is the real source of

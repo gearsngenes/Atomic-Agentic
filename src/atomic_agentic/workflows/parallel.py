@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from ..exceptions import WorkflowError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..utils.core import run_coro_sync
 from ..utils.parameters import (
     build_parameter_reports,

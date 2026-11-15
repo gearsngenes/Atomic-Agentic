@@ -4,16 +4,16 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.a2a.A2AClientHub import A2AClientHub
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
+from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
+from atomic_agentic.a2a.py_a2atomic_client import PyA2AtomicClient
 from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.exceptions import ToolDefinitionError
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.mcp.MCPClientHub import MCPClientHub
-from atomic_agentic.tools.Toolify import batch_toolify, toolify
+from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
+from atomic_agentic.tools.toolification import batch_toolify, toolify
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool

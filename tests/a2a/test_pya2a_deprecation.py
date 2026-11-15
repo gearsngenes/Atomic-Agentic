@@ -9,10 +9,10 @@ import pytest
 
 pytest.importorskip("python_a2a", reason="requires the python-a2a extra")
 
-client_module = importlib.import_module("atomic_agentic.a2a.PyA2AtomicClient")
+client_module = importlib.import_module("atomic_agentic.a2a.py_a2atomic_client")
 
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
+from atomic_agentic.a2a.py_a2atomic_client import PyA2AtomicClient
+from atomic_agentic.a2a.py_a2atomic_host import PyA2AtomicHost
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.tools import Tool
 from atomic_agentic.tools.python_a2a import PyA2AtomicTool

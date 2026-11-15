@@ -10,7 +10,6 @@ import pytest
 
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import ExecutionError, ValidationError, WorkflowError
-from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import RoutingFlowResult
 from atomic_agentic.tools.base import Tool
@@ -533,41 +532,41 @@ class TestRoutingFlowConstruction:
         assert flow.include_trace is False
 
 
-def make_structured_branch(tag: str, output_schema: list[str] | None) -> StructuredInvokable:
+class _ExtraDescriptionTool(Tool):
+    """Tool whose _extra_description is a fixed string, for flow/Tool chaining tests."""
+
+    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._extra = extra
+
+    def _extra_description(self) -> str:
+        return self._extra
+
+
+def make_described_branch(tag: str) -> _ExtraDescriptionTool:
     def select(value: Any) -> Any:
         return {"branch": tag, "value": value}
 
-    tool = Tool(
+    return _ExtraDescriptionTool(
         function=select,
         name=f"branch_{tag}",
         namespace="tests",
         description=f"Branch {tag}.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=output_schema,
-        name=f"structured_branch_{tag}",
-        description=f"Structured branch {tag}.",
+        extra="branch extra",
     )
 
 
-def make_structured_router(selector: Any) -> StructuredInvokable:
+def make_constant_router(selector: Any) -> Tool:
     """Router whose .invoke(inputs).result == selector (the raw selector)."""
 
     def select(value: Any) -> Any:
         return selector
 
-    tool = Tool(
+    return Tool(
         function=select,
         name="select_constant",
         namespace="tests",
         description="Return a constant selector.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=None,
-        name="structured_router",
-        description="Structured router returning a raw selector.",
     )
 
 
@@ -578,14 +577,14 @@ class TestRoutingFlowExtraDescription:
             namespace="tests",
             description="Routing test flow.",
             branches=[
-                make_structured_branch("a", ["value"]),
-                make_structured_branch("b", ["value"]),
+                make_described_branch("a"),
+                make_described_branch("b"),
             ],
-            router=make_structured_router(0),
+            router=make_constant_router(0),
         )
 
         assert flow._extra_description() == (
-            "Selects 1 of 2 branches at runtime.\nOutput schema: [value]"
+            "Selects 1 of 2 branches at runtime.\nbranch extra"
         )
 
     def test_divergent_extras_state_branch_count_only(self) -> None:
@@ -594,10 +593,10 @@ class TestRoutingFlowExtraDescription:
             namespace="tests",
             description="Routing test flow.",
             branches=[
-                make_structured_branch("a", ["value"]),
+                make_described_branch("a"),
                 make_branch("b"),
             ],
-            router=make_structured_router(0),
+            router=make_constant_router(0),
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
@@ -608,7 +607,7 @@ class TestRoutingFlowExtraDescription:
             namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
-            router=make_structured_router(0),
+            router=make_constant_router(0),
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."

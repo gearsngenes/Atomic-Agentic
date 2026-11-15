@@ -88,11 +88,7 @@ class ValidationError(WorkflowError, ValueError):
 
 
 class SchemaError(ValidationError):
-    """Raised when `output_schema` is malformed or incompatible with options."""
-
-
-class PackagingError(ValidationError):
-    """Raised when a raw result cannot be normalized to `output_schema`."""
+    """Raised when a declared parameter schema is malformed or breaks parameter-ordering rules."""
 
 
 class ExecutionError(WorkflowError, RuntimeError):
@@ -186,7 +182,6 @@ __all__ = [
     "WorkflowError",
     "ValidationError",
     "SchemaError",
-    "PackagingError",
     "ExecutionError",
     "RemoteInvocationError",
     "MCPError",

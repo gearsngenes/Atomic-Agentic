@@ -13,7 +13,7 @@ from typing import (
 )
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError
-from ..core.Invokable import AtomicInvokable
+from ..core.atomic_invokable import AtomicInvokable
 from ..core.core_api import extract_io
 from ..models.parameters import ParamSpec
 from ..utils.core import run_coro_sync

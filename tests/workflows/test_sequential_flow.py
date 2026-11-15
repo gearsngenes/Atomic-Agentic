@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from atomic_agentic.exceptions import ExecutionError, ValidationError
-from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import SequentialFlowResult
 from atomic_agentic.tools.base import Tool
@@ -60,35 +59,37 @@ def third_step(second: int) -> dict[str, str]:
     return {"third": f"value={second}"}
 
 
-def make_structured_component(
-    function: Any,
-    *,
-    name: str,
-    output_schema: list[str],
-) -> StructuredInvokable:
-    tool = Tool(
+def make_step(function: Any, *, name: str) -> Tool:
+    return Tool(
         function=function,
         name=name,
         namespace="tests",
         description=f"Test tool {name}.",
     )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=output_schema,
-        name=f"structured_{name}",
-        description=f"Structured test component {name}.",
-    )
 
 
-def make_three_step_flow(*, return_index: int | None = None) -> SequentialFlow:
+class _ExtraDescriptionTool(Tool):
+    """Tool whose _extra_description is a fixed string, for flow/Tool chaining tests."""
+
+    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._extra = extra
+
+    def _extra_description(self) -> str:
+        return self._extra
+
+
+def make_three_step_flow(
+    *, return_index: int | None = None, second: Tool | None = None
+) -> SequentialFlow:
     return SequentialFlow(
         name="sequential_flow",
         namespace="tests",
         description="Sequential test flow.",
         steps=[
-            make_structured_component(first_step, name="first_step", output_schema=["first"]),
-            make_structured_component(second_step, name="second_step", output_schema=["second"]),
-            make_structured_component(third_step, name="third_step", output_schema=["third"]),
+            make_step(first_step, name="first_step"),
+            second or make_step(second_step, name="second_step"),
+            make_step(third_step, name="third_step"),
         ],
         return_index=return_index,
     )
@@ -135,8 +136,8 @@ class TestSequentialFlowConstruction:
         assert flow.steps == (child,)
         assert flow.steps[0] is child
 
-    def test_constructor_stores_structured_invokable_step_unwrapped(self) -> None:
-        component = make_structured_component(first_step, name="first_step", output_schema=["first"])
+    def test_constructor_stores_tool_step_unwrapped(self) -> None:
+        component = make_step(first_step, name="first_step")
 
         flow = SequentialFlow(
             name="sequential_flow",
@@ -187,10 +188,17 @@ class TestSequentialFlowConstruction:
 
 class TestSequentialFlowExtraDescription:
     def test_surfaces_return_index_step_extra_description(self) -> None:
-        flow = make_three_step_flow(return_index=1)
+        second = _ExtraDescriptionTool(
+            function=second_step,
+            name="second_step",
+            namespace="tests",
+            description="Test tool second_step.",
+            extra="second step extra",
+        )
+        flow = make_three_step_flow(return_index=1, second=second)
 
-        assert flow._extra_description() == "Output schema: [second]"
-        assert flow.description == "Sequential test flow.\nOutput schema: [second]"
+        assert flow._extra_description() == "second step extra"
+        assert flow.description == "Sequential test flow.\nsecond step extra"
 
     def test_empty_when_return_index_step_has_no_extra_description(self) -> None:
         flow = SequentialFlow(

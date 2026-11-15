@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.exceptions import ExecutionError, ValidationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import IterativeFlowResult
@@ -364,31 +363,37 @@ class TestIterativeFlowCheckerMutation:
             flow.remove_checker(0)
 
 
-def make_structured_step(name: str, output_schema: list[str]) -> StructuredInvokable:
+class _ExtraDescriptionTool(Tool):
+    """Tool whose _extra_description is a fixed string, for flow/Tool chaining tests."""
+
+    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._extra = extra
+
+    def _extra_description(self) -> str:
+        return self._extra
+
+
+def make_described_step(name: str) -> _ExtraDescriptionTool:
     def step(count: int) -> dict[str, int]:
         return {"count": count}
 
-    tool = Tool(
+    return _ExtraDescriptionTool(
         function=step,
         name=name,
         namespace="tests",
         description=f"Step {name}.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=output_schema,
-        name=f"structured_{name}",
-        description=f"Structured step {name}.",
+        extra="counter extra",
     )
 
 
 class TestIterativeFlowExtraDescription:
     def test_surfaces_result_setting_step_extra_description_plus_iteration_bound(self) -> None:
-        step = make_structured_step("counter", ["count"])
+        step = make_described_step("counter")
         flow = make_iterative_flow(body_steps=[step], max_iterations=5, result_setting_indices=[0])
 
         assert flow._extra_description() == (
-            "Output schema: [count]\nRuns up to 5 iteration(s)."
+            "counter extra\nRuns up to 5 iteration(s)."
         )
 
     def test_states_iteration_bound_only_when_no_result_setting_extra(self) -> None:

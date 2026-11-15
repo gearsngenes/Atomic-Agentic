@@ -71,7 +71,7 @@ def handle_escalation(topic: str, urgency: int = 0) -> str:
 # becomes optional on the OUTER schema: default=None, and "None" is added
 # to its declared type (unlike the type-signature lie a plain
 # default=None-with-untouched-type would be). filter_inputs
-# (core/Invokable.py) injects declared defaults for absent params at EVERY
+# (core/atomic_invokable.py) injects declared defaults for absent params at EVERY
 # layer, so an omitted `notes` arrives at this branch as a real notes=None
 # value, not a missing argument. Branches meant to receive a
 # router-absent parameter should handle None defensively for anything the

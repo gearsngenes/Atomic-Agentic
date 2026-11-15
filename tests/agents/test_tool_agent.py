@@ -15,7 +15,7 @@ from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.a2a import A2AClientHub
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.tools import Tool
 from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
 from atomic_agentic.constants.agents import BUILTINS_PREAMBLE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE

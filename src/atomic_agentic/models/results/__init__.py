@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from .atomic import AtomicResult
-from .commands import CommandResult
-from .structured import StructuredResult
 from .agents import (
     AgentResult,
     ToolAgentResult,
@@ -43,8 +41,6 @@ __all__ = [
     "MCPToolResult",
     "PyA2AtomicToolResult",
     "A2AProxyToolResult",
-    "CommandResult",
-    "StructuredResult",
     "TokenUsage",
     "OpenAITokenUsage",
     "GeminiTokenUsage",

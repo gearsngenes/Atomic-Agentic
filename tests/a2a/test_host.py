@@ -8,12 +8,12 @@ import pytest
 
 pytest.importorskip("python_a2a", reason="requires the python-a2a extra")
 
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
+from atomic_agentic.a2a.py_a2atomic_host import PyA2AtomicHost
 from atomic_agentic.constants.python_a2a import (
     PYA2A_RESULT_KEY,
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,)
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.atomic import AtomicResult
 
