@@ -13,11 +13,7 @@ from .utils.parameters import (
     semantically_compatible,
     semantically_identical,
 )
-from .core.Invokable import (
-    AtomicInvokable,
-    Command,
-    StructuredInvokable,
-)
+from .core.Invokable import AtomicInvokable
 from .core.core_api import extract_io, parameter_overlap, parameter_collisions
 
 __all__ = [
@@ -34,8 +30,4 @@ __all__ = [
     "parameter_collisions",
     # Invokable core types
     "AtomicInvokable",
-    # Command invokable type
-    "Command",
-    # Structured invokable types
-    "StructuredInvokable",
     ]
