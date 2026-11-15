@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "atomic-agentic"
 description = "Provider-agnostic, schema-driven tools, agents, and workflows for building agentic systems."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dynamic = ["version"]
 
@@ -35,7 +35,7 @@ mistral   = ["mistralai>=2.6.0,<4"]
 litellm   = ["litellm>=1.108,<3"]
 llama = [
   "llama-cpp-python>=0.3.16,<0.4",
-  "huggingface-hub>=1.5,<2",
+  "huggingface-hub>=1.5,<3",
 ]
 
 # Every LLM provider (llama-cpp-python builds from source).

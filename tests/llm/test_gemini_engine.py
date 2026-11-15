@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+pytest.importorskip("google.genai")
 from google.genai import errors as genai_errors
 from google.genai import types as _real_genai_types
 

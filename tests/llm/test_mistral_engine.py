@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from types import SimpleNamespace
 from typing import Any
 
@@ -486,6 +487,9 @@ class TestMistralTokenUsage:
         assert result.cached_tokens == 7
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("mistralai") is None, reason="requires the mistral extra"
+)
 class TestMistralShouldRetry:
     def _status_error(self, status_code: int) -> Any:
         from mistralai.client import errors as mistral_errors

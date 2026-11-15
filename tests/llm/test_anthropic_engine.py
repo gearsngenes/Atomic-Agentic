@@ -5,9 +5,10 @@ import pathlib
 from types import SimpleNamespace
 from typing import Any
 
-import anthropic
 import httpx
 import pytest
+
+anthropic = pytest.importorskip("anthropic")
 
 import atomic_agentic.llm.anthropic_engine as engine_module
 from atomic_agentic.llm.anthropic_engine import AnthropicEngine

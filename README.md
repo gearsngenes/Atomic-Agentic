@@ -40,10 +40,33 @@ reasoning while deterministic execution logic lives in code.**
 
 ## Installation
 
+The core install carries only the protocol libraries (`mcp`, `a2a-sdk`,
+`httpx`). LLM provider SDKs are optional extras, so install only the ones you
+use:
+
+``` bash
+pip install "atomic-agentic[openai]"      # OpenAIEngine
+pip install "atomic-agentic[anthropic]"   # AnthropicEngine
+pip install "atomic-agentic[gemini]"      # GeminiEngine
+pip install "atomic-agentic[mistral]"     # MistralEngine
+pip install "atomic-agentic[litellm]"     # LiteLLMEngine
+pip install "atomic-agentic[llama]"       # LlamaCppEngine (builds llama-cpp-python from source)
+pip install "atomic-agentic[all_llm]"     # every provider above
+```
+
+Constructing an engine whose SDK is missing raises an error that names the
+extra to install. Other extras: `dev` (test tooling) and `python-a2a`
+(deprecated; the `python-a2a` client and host are removed in the final 2.0.0
+release, use `A2AClientHub` and `A2AtomicExecutor` instead).
+
+`LiteLLMEngine` can also talk to a LiteLLM proxy over HTTP (`base_url`). The
+proxy server is a separate program: install it with `litellm[proxy]`, ideally
+in its own environment.
+
 ### Install directly from GitHub
 
 ``` bash
-pip install git+https://github.com/gearsngenes/Atomic-Agentic.git
+pip install "atomic-agentic[openai] @ git+https://github.com/gearsngenes/Atomic-Agentic.git"
 ```
 
 ### Install from source
@@ -372,7 +395,6 @@ Atomic-Agentic/
 |-- tests/
 |-- README.md
 |-- pyproject.toml
-|-- requirements.txt
 ```
 
 ### Package topology
