@@ -8,16 +8,18 @@ Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 ## [2.0.0a33.post1] - 2026-11-15
 
 Packaging release. LLM provider SDKs leave the core install and become
-per-provider extras; the caps were verified against live providers across
-every SDK major in range. One breaking engine change (Anthropic sampling
-parameters) came out of that walk.
+per-provider extras, and their version caps were verified against live
+providers across every SDK major in range. A CI workflow now tests the core
+install and each extra on its own. The release is breaking in three ways:
+provider SDKs are no longer installed by default, `AnthropicEngine` no longer
+takes `temperature`, `top_p` or `top_k`, and the minimum Python is now 3.11.
 
 ### Added
 
 - Per-provider extras: `openai`, `anthropic`, `gemini`, `mistral`, `litellm`,
   `llama`, plus `all_llm` for every provider. `dev` (test tooling) and
   `extras` (`python-a2a` plus `dev`) are also defined.
-- `.github/workflows/tests.yml`: the offline suite on Python 3.10 and 3.12
+- `.github/workflows/tests.yml`: the offline suite on Python 3.11 and 3.12
   across core only, each single extra, and all providers together (llama is
   left out because it builds from source).
 - Tests that need an optional SDK skip when it is not installed, so each extra
@@ -46,9 +48,14 @@ parameters) came out of that walk.
   models.
 - `MistralEngine` retries raw `httpx`/`httpx2` transport errors.
 - README installation section rewritten around the extras.
+- Examples pin `http_options={"api_version": "v1beta"}` for Gemini 2.5 models,
+  and the `python-a2a` examples note the extra they need.
 
 ### Fixed
 
+- `examples/Tool_Examples/a2a_sdk_atomic_host_server.py` filtered for `sqrt` and
+  `mean` in a list that did not contain them; it now searches all three math
+  tool lists.
 - `AnthropicEngine` text and code attachments now send `media_type:
   "text/plain"` on the `document` block.
 
