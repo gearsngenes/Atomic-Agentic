@@ -5,6 +5,56 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a33.post2] - 2026-11-15
+
+Invokable cleanup release. `Command` and `StructuredInvokable` are removed
+along with their result classes and `PackagingError`, so `AtomicInvokable` is
+the only class left in the invokable module. A `Tool` whose parameter defaults
+are set now covers the fixed-input case `Command` served, through two new
+`AtomicInvokable` methods. Seven modules were renamed to snake_case. The release
+is breaking: the removed classes, and the deep-path imports of the renamed
+modules.
+
+### Added
+
+- `AtomicInvokable.set_defaults(mapping)` and `remove_defaults(names)` set or
+  clear parameter defaults after construction. Each validates the final state
+  and applies it in one step (`ValueError` for an unknown or variadic name,
+  `SchemaError` for a parameter-order violation), and a wrapper's defaults never
+  reach the invokable it wraps.
+- README "Shaping a Step's Output" (the dict-returning step pattern for
+  workflows) and "Running the Tests" (offline suite and coverage commands).
+
+### Changed
+
+- breaking: the modules were renamed, so deep-path imports must change:
+  `atomic_agentic.core.Invokable` to `core.atomic_invokable`, `tools.Toolify` to
+  `tools.toolification`, `mcp.MCPClientHub` to `mcp.mcp_client_hub`,
+  `a2a.A2AClientHub` to `a2a.a2a_client_hub`, `a2a.A2AtomicExecutor` to
+  `a2a.a2atomic_executor`, `a2a.PyA2AtomicClient` to `a2a.py_a2atomic_client` and
+  `a2a.PyA2AtomicHost` to `a2a.py_a2atomic_host`. Imports from the packages
+  (`from atomic_agentic.a2a import A2AClientHub`) are unchanged.
+- The `AtomicInvokable` constructor copies the parameter list it is given, so a
+  subclass never aliases the caller's list. `ParamSpec` documents that defaults
+  are shared by reference, like Python function defaults.
+- `SchemaError` is documented as the error for a malformed parameter schema or
+  a parameter-order violation.
+- The workflow examples and tests build steps from plain dict-returning `Tool`s,
+  or an agent's `post_invoke` with `response_to_post`. The agent-pipeline
+  integration tests were renamed `test_agent_basic_pipeline.py` and
+  `test_live_agent_basic_pipeline.py`.
+
+### Removed
+
+- breaking: `Command` and `CommandResult`. Use a `Tool` with defaults set
+  through `set_defaults`. Parameters that have a default stay visible to a
+  `ToolAgent`'s model.
+- breaking: `StructuredInvokable` and `StructuredResult`. Return a dict from the
+  step function, or give an agent a `post_invoke` and `response_to_post`. The
+  `RAISE`/`DROP`/`FILL` packaging controls have no replacement.
+- breaking: `PackagingError`. The exceptions package exports 21 classes.
+- `examples/Invokable_Examples/` and the README "Structured Output" section.
+
 ## [2.0.0a33.post1] - 2026-11-15
 
 Packaging release. LLM provider SDKs leave the core install and become
