@@ -36,6 +36,7 @@ def make_agent_result(*, value: Any = "output") -> AgentResult:
     return AgentResult(
         result=value,
         invoker_id="agent-1",
+        run_id="run-1",
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
         llm_token_usage=(make_token_usage(),),
@@ -91,6 +92,7 @@ class TestAgentResult:
         result = AgentResult(
             result="done",
             invoker_id="agent-1",
+            run_id="run-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(token_usage,),
@@ -105,6 +107,7 @@ class TestAgentResult:
         result = AgentResult(
             result="out",
             invoker_id="agent-1",
+            run_id="run-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=[make_token_usage()],
@@ -125,6 +128,7 @@ class TestAgentResult:
         result = AgentResult(
             result="out",
             invoker_id="agent-1",
+            run_id="run-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(),
@@ -138,6 +142,7 @@ class TestAgentResult:
             AgentResult(
                 result="out",
                 invoker_id="agent-1",
+                run_id="run-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
                 llm_token_usage=42,  # type: ignore[arg-type]
@@ -150,6 +155,7 @@ class TestAgentResult:
             AgentResult(
                 result="out",
                 invoker_id="agent-1",
+                run_id="run-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
                 llm_token_usage=("not a token usage",),  # type: ignore[arg-type]
@@ -162,16 +168,29 @@ class TestAgentResult:
             AgentResult(
                 result="out",
                 invoker_id="agent-1",
+                run_id="run-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
                 llm_token_usage=(make_token_usage(),),
                 llm_model_data="not model data",  # type: ignore[arg-type]
             )
 
-    def test_run_id_auto_generated(self) -> None:
+    def test_run_id_is_required(self) -> None:
+        started_at = datetime.now(timezone.utc)
+        with pytest.raises(TypeError, match="run_id"):
+            AgentResult(  # type: ignore[call-arg]
+                result="out",
+                invoker_id="agent-1",
+                started_at=started_at,
+                ended_at=started_at + timedelta(seconds=1),
+                llm_token_usage=(),
+                llm_model_data=make_model_data(),
+            )
+
+    def test_run_id_round_trips_in_to_dict(self) -> None:
         result = make_agent_result()
-        assert isinstance(result.run_id, str)
-        assert result.run_id  # non-empty
+        assert result.run_id == "run-1"
+        assert result.to_dict()["run_id"] == "run-1"
 
     def test_is_frozen(self) -> None:
         result = make_agent_result()
@@ -193,6 +212,7 @@ class TestToolAgentResult:
         return ToolAgentResult(
             result="done",
             invoker_id="agent-1",
+            run_id="run-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(make_token_usage(),),
@@ -239,6 +259,7 @@ class TestToolAgentResult:
             ToolAgentResult(
                 result="done",
                 invoker_id="agent-1",
+                run_id="run-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
                 llm_token_usage=(make_token_usage(),),
@@ -276,6 +297,7 @@ class TestThinkingAgentResult:
         return ThinkingAgentResult(
             result="done",
             invoker_id="agent-1",
+            run_id="run-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(make_token_usage(),),

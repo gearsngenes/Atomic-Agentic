@@ -1,22 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import replace
-from typing import Any, Iterable, Mapping, Dict, TypeVar
+from typing import Any, ClassVar, Iterable, Mapping, Dict
 import threading
-import asyncio
-from uuid import uuid4
 import logging
 
-from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.core import DEFAULT_LOG_LEVEL, IDENTIFIER_PATTERN, NO_VAL
 from ..models.parameters import ParamSpec
 from ..utils.parameters import _validate_parameter_order
 from ..models.results import AtomicResult
 
 
 logger = logging.getLogger(__name__)
-_R = TypeVar("_R", bound=AtomicResult)
 
 # Deprecated aliases removed in v2: use `ParamSpec` and the `parameters` property.
 
@@ -31,9 +28,8 @@ class AtomicInvokable(ABC):
     executable primitives in this codebase must satisfy. It standardises:
 
     - **identity**: validated `name` and `description` (human-friendly strings).
-    - **interface**: a single execution entrypoint
-      ``invoke(inputs: Mapping[str, Any])`` returning an ``AtomicResult``-family
-      successful-invocation envelope.
+    - **interface**: ``invoke(inputs: Mapping[str, Any])`` and its async twin,
+      returning an ``AtomicResult``-family successful-invocation envelope.
     - **parameters & return type**: declared at construction time as concrete
       `parameters: list[ParamSpec]` and `return_type: str`.
     - **metadata serialization**: default ``to_dict()`` implementation for
@@ -85,6 +81,16 @@ class AtomicInvokable(ABC):
       - Returning an ``AtomicResult``-family object whose ``.result`` field contains
         the caller-facing payload
 
+    Invocation template
+    -------------------
+    ``invoke`` / ``async_invoke`` are concrete templates that own start/end
+    logging (at ``log_level``), input filtering, timing and result construction.
+    Subclasses implement ``_invoke_impl`` and ``_async_invoke_impl``, which
+    receive the already-filtered inputs and return a payload dict containing
+    ``result`` (plus any extra fields of the subclass's ``result_cls``). The
+    template builds ``result_cls(invoker_id=full_name, started_at, ended_at,
+    **payload)``. Exceptions from filtering or the hook propagate unchanged.
+
     Return Type Contract
     --------------------
     ``return_type`` describes the caller-facing payload stored in
@@ -99,6 +105,8 @@ class AtomicInvokable(ABC):
       ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
       ``ParamSpec`` and the `parameters` property on invokable instances.
     """
+
+    result_cls: ClassVar[type[AtomicResult]] = AtomicResult
 
     def __init__(
         self,
@@ -180,8 +188,7 @@ class AtomicInvokable(ABC):
         self._parameters: list[ParamSpec] = list(parameters)
         self._return_type: str = return_type
         self._invoke_lock = threading.RLock()
-        # unique identifier for this invokable instance
-        self._instance_id = str(uuid4())
+        self._log_level: int | None = DEFAULT_LOG_LEVEL
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -250,12 +257,20 @@ class AtomicInvokable(ABC):
     def full_name(self) -> str:
         """Fully-qualified name of the form ``Type.namespace.name``."""
         return f"{type(self).__name__}.{self._namespace}.{self._name}"
-    
+
     @property
-    def instance_id(self) -> str:
-        """Unique identifier for this invokable instance."""
-        return self._instance_id
-    
+    def log_level(self) -> int | None:
+        """Level for start/end invocation logs; None disables them."""
+        return self._log_level
+
+    @log_level.setter
+    def log_level(self, value: int | None) -> None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise TypeError(
+                f"log_level must be an int logging level or None, got {value!r}"
+            )
+        self._log_level = value
+
     # ---------------------------------------------------------------- #
     # Parameters and return type (primary API)
     # ---------------------------------------------------------------- #
@@ -492,73 +507,53 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # Abstract contract
     # ---------------------------------------------------------------- #
-    @abstractmethod
     def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        """Perform work and return an AtomicResult-family envelope."""
-        raise NotImplementedError
+        """
+        Run one invocation through the template: stamp start, log, filter inputs,
+        run ``_invoke_impl``, stamp end, log, build ``result_cls``. Exceptions
+        propagate unchanged and suppress the end log.
+        """
+        started_at = datetime.now(timezone.utc)
+        if self._log_level is not None:
+            logger.log(self._log_level, "[%s started]", self.full_name)
+        filtered = self.filter_inputs(inputs)
+        payload = self._invoke_impl(filtered)
+        ended_at = datetime.now(timezone.utc)
+        if self._log_level is not None:
+            logger.log(self._log_level, "[%s finished]", self.full_name)
+        return self.result_cls(
+            invoker_id=self.full_name,
+            started_at=started_at,
+            ended_at=ended_at,
+            **payload,
+        )
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        """
-        Default async compatibility wrapper.
-
-        Returns an AtomicResult-family envelope, mirroring `invoke(...)`.
-        This preserves the current sync-first implementation by running
-        `invoke(inputs)` in a worker thread.
-        """
-        return await asyncio.to_thread(self.invoke, inputs)
-
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> AtomicResult:
-        """
-        Construct this invokable's default AtomicResult-family envelope.
-
-        Subclasses may override this hook to choose a more specific result class
-        or add subclass-specific result fields while preserving the public
-        invocation template.
-        """
-        return self._make_result(
-            result=result,
+        """Async twin of ``invoke``; awaits ``_async_invoke_impl``."""
+        started_at = datetime.now(timezone.utc)
+        if self._log_level is not None:
+            logger.log(self._log_level, "[Async %s started]", self.full_name)
+        filtered = self.filter_inputs(inputs)
+        payload = await self._async_invoke_impl(filtered)
+        ended_at = datetime.now(timezone.utc)
+        if self._log_level is not None:
+            logger.log(self._log_level, "[Async %s finished]", self.full_name)
+        return self.result_cls(
+            invoker_id=self.full_name,
             started_at=started_at,
             ended_at=ended_at,
-            **result_kwargs,
+            **payload,
         )
 
-    def _make_result(
-        self,
-        *,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        result_cls: type[_R] = AtomicResult,
-        **result_kwargs: Any,
-    ) -> _R:
-        """
-        Construct an AtomicResult-family object for this invokable.
+    @abstractmethod
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Do the work on filtered inputs; return a payload dict (``result`` required)."""
+        raise NotImplementedError
 
-        This helper only centralizes the common envelope construction details:
-        injecting this invokable's ``instance_id`` as ``invoker_id`` and passing
-        through caller-provided timing values and explicit subclass fields.
-
-        It intentionally does not capture time, wrap exceptions, record traces,
-        manage lifecycle state, or choose result classes from instance-level
-        registry/configuration.
-        """
-        if not isinstance(result_cls, type) or not issubclass(result_cls, AtomicResult):
-            raise TypeError(
-                f"result_cls must be a subclass of AtomicResult, got {result_cls!r}"
-            )
-        return result_cls(
-            result=result,
-            invoker_id=self.instance_id,
-            started_at=started_at,
-            ended_at=ended_at,
-            **result_kwargs,
-        )
+    @abstractmethod
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin of ``_invoke_impl``."""
+        raise NotImplementedError
 
     # ---------------------------------------------------------------- #
     # Input Filtering and Validation
@@ -659,7 +654,6 @@ class AtomicInvokable(ABC):
         """
         return {
             "type": type(self).__name__,
-            "instance_id": self.instance_id,
             "name": self.name,
             "namespace": self.namespace,
             "description": self._description,
@@ -689,7 +683,7 @@ class AtomicInvokable(ABC):
         """Short, single-line, unambiguous form. `full_name` already leads
         with the class name (`Type.namespace.name`), so no separate class
         name prefix is added."""
-        return f"<{self.full_name} @{self.instance_id}>"
+        return f"<{self.full_name}>"
 
     # ---------------------------------------------------------------- #
     # callable contract

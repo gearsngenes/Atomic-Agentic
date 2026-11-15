@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, TypeAlias, TypeVar
 
@@ -33,6 +34,14 @@ class _NoValSentinel:
 
 
 NO_VAL: Any = _NoValSentinel()
+
+
+# =============================================================================
+# Invocation logging
+# =============================================================================
+# Used by: core/atomic_invokable.py (default for AtomicInvokable.log_level)
+
+DEFAULT_LOG_LEVEL: int = logging.DEBUG
 
 
 # =============================================================================
@@ -78,6 +87,7 @@ HeaderValue: TypeAlias = str | int | float | bool | bytes | bytearray
 __all__ = [
     "NO_VAL_REPR",
     "NO_VAL",
+    "DEFAULT_LOG_LEVEL",
     "IDENTIFIER_PATTERN_TEXT",
     "IDENTIFIER_PATTERN",
     "T",

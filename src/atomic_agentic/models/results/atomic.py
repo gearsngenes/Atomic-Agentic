@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 __all__ = ["AtomicResult"]
 
@@ -14,7 +13,7 @@ class AtomicResult:
     Base successful-invocation result envelope.
 
     ``AtomicResult`` carries the caller-facing payload produced by one completed
-    invocation plus minimal run identity and timing metadata.
+    invocation plus minimal provenance and timing metadata.
 
     Fields
     ------
@@ -22,7 +21,7 @@ class AtomicResult:
         Caller-facing payload produced by the invocation.
 
     invoker_id:
-        Stable instance identifier of the invokable that produced this result.
+        ``full_name`` of the invokable that produced this result.
 
     started_at:
         Timezone-aware invocation start timestamp. Stored normalized to UTC.
@@ -30,22 +29,14 @@ class AtomicResult:
     ended_at:
         Timezone-aware invocation end timestamp. Stored normalized to UTC.
 
-    run_id:
-        Result-owned unique run identifier. If omitted or None, generated during
-        construction using ``uuid4().hex``. If provided, validated and normalized
-        before storage.
-
-    elapsed_s:
-        Invocation duration in seconds, derived from ``ended_at - started_at``.
+    elapsed_time:
+        Derived property: seconds between ``started_at`` and ``ended_at``.
     """
 
     result: Any
     invoker_id: str
     started_at: datetime
     ended_at: datetime
-
-    run_id: str | None = field(default=None, kw_only=True)
-    elapsed_s: float = field(init=False)
 
     def __post_init__(self) -> None:
         normalized_invoker_id = self._normalize_invoker_id(self.invoker_id)
@@ -61,18 +52,14 @@ class AtomicResult:
         if normalized_ended_at < normalized_started_at:
             raise ValueError("ended_at must be greater than or equal to started_at.")
 
-        raw_run_id = uuid4().hex if self.run_id is None else self.run_id
-        normalized_run_id = self._normalize_run_id(raw_run_id)
-
         object.__setattr__(self, "invoker_id", normalized_invoker_id)
         object.__setattr__(self, "started_at", normalized_started_at)
         object.__setattr__(self, "ended_at", normalized_ended_at)
-        object.__setattr__(self, "run_id", normalized_run_id)
-        object.__setattr__(
-            self,
-            "elapsed_s",
-            (normalized_ended_at - normalized_started_at).total_seconds(),
-        )
+
+    @property
+    def elapsed_time(self) -> float:
+        """Seconds between started_at and ended_at."""
+        return (self.ended_at - self.started_at).total_seconds()
 
     @staticmethod
     def _normalize_invoker_id(value: str) -> str:
@@ -85,20 +72,6 @@ class AtomicResult:
         normalized = value.strip()
         if not normalized:
             raise ValueError("invoker_id must be a non-empty string.")
-
-        return normalized
-
-    @staticmethod
-    def _normalize_run_id(value: str) -> str:
-        """Validate and normalize a result run identifier."""
-        if not isinstance(value, str):
-            raise TypeError(
-                f"run_id must be a str or None, got {type(value).__name__}."
-            )
-
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("run_id must be a non-empty string when provided.")
 
         return normalized
 
@@ -118,10 +91,9 @@ class AtomicResult:
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
-            "run_id": self.run_id,
             "invoker_id": self.invoker_id,
             "started_at": self.started_at.isoformat(),
             "ended_at": self.ended_at.isoformat(),
-            "elapsed_s": self.elapsed_s,
+            "elapsed_time": self.elapsed_time,
             "result": self.result,
         }
