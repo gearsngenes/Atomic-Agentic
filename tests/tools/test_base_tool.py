@@ -9,6 +9,7 @@ from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.models.results.tools import ToolResult
 from atomic_agentic.tools.base import Tool
 
 
@@ -526,12 +527,11 @@ class AddInvokable(AtomicInvokable):
             return_type="int",
         )
 
-    def invoke(self, inputs):
-        filtered = self.filter_inputs(inputs)
-        return int(filtered["a"]) + int(filtered.get("b", 0))
+    def _invoke_impl(self, inputs):
+        return {"result": int(inputs["a"]) + int(inputs.get("b", 0))}
 
-    async def async_invoke(self, inputs):
-        return self.invoke(inputs)
+    async def _async_invoke_impl(self, inputs):
+        return self._invoke_impl(inputs)
 
 
 class TestToolNaturalAtomicInvokableWrapping:
@@ -580,3 +580,50 @@ class TestToolNaturalAtomicInvokableWrapping:
         assert tool.parameters_map["a"].default == 10
         assert inner.parameters == before
         assert inner.parameters_map["a"].default is NO_VAL
+
+
+class TestToolInvokeHook:
+    def test_invoke_returns_tool_result_with_invoker_id_and_value(self) -> None:
+        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+
+        result = tool.invoke({"a": 2, "b": 3})
+
+        assert isinstance(result, ToolResult)
+        assert result.invoker_id == tool.full_name
+        assert result.result == 5
+
+    def test_callable_receives_bound_args_from_filtered_inputs(self) -> None:
+        seen: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def spy(a: int, *, flag: bool = False) -> int:
+            seen.append(((a,), {"flag": flag}))
+            return a
+
+        tool = Tool(function=spy, name="spy", namespace="tests", description="Spy.")
+
+        tool.invoke({"a": 1, "flag": True, "unknown": 9})
+
+        assert seen == [((1,), {"flag": True})]
+
+    def test_async_invoke_returns_tool_result_for_each_target_kind(self) -> None:
+        for fn in (add, async_add, AddInvokable()):
+            tool = Tool(function=fn, name="t", namespace="tests", description="T.")
+            result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
+            assert isinstance(result, ToolResult)
+            assert result.invoker_id == tool.full_name
+            assert result.result == 5
+
+    def test_tool_invocation_error_still_surfaces_from_both_paths(self) -> None:
+        tool = Tool(function=raise_tool_invocation_error, name="e", namespace="tests", description="E.")
+        with pytest.raises(ToolInvocationError, match="deliberate invocation error"):
+            tool.invoke({})
+        with pytest.raises(ToolInvocationError, match="deliberate invocation error"):
+            asyncio.run(tool.async_invoke({}))
+
+    def test_plain_tool_uses_inherited_template(self) -> None:
+        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+
+        assert "invoke" not in Tool.__dict__
+        assert "async_invoke" not in Tool.__dict__
+        assert not hasattr(tool, "make_result")
+        assert Tool.result_cls is ToolResult

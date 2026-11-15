@@ -26,7 +26,7 @@ Distinguishing features relative to ``PlanActAgent``:
   specifically: ``RETURN_TOOL_NAME`` and ``RETURN_ALIAS`` are the identical
   literal string ``"return"`` (`constants/agents.py`), so anywhere else
   ``is_dispatched`` is consulted for *accounting* purposes (see
-  ``build_result_from_task`` below), a real, successful ``return`` call
+  ``result_payload_from_task`` below), a real, successful ``return`` call
   is still indistinguishable from the sentinel and gets excluded --
   correctly, per ``ToolUsageRecord.call_count``'s own "non-return
   executions" contract, but via the same string coincidence, not a
@@ -62,8 +62,7 @@ from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import ReActTask
 from ..models.agents.records import ToolAgentRecord, LLMRecord
-from ..models.results.agents import ToolAgentResult
-from ..utils.agents import build_usage_report, resolve_statement_args
+from ..utils.agents import resolve_statement_args
 from ..utils.sigils import (
     build_react_schema,
     parse_react_call,
@@ -586,27 +585,5 @@ class ReActAgent(ToolAgent):
             **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
-            regenerations_used=task.regenerations_used,
-        )
-
-    def build_result_from_task(self, task: ReActTask, result: Any) -> ToolAgentResult:
-        """
-        Construct this agent's ``ToolAgentResult`` envelope directly from a
-        finished ``ReActTask``. Mirrors ``PlanActAgent.build_result_from_task``
-        exactly.
-        """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = self._llm_engine.model_data
-
-        return self._make_result(
-            result=result,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            result_cls=ToolAgentResult,
-            run_id=task.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            usage_report=build_usage_report(task.completed, task.failed_statements),
-            failed_call_count=len(task.failed_statements),
             regenerations_used=task.regenerations_used,
         )

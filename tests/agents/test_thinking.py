@@ -599,3 +599,18 @@ class TestResponseSchema:
         payloads = agent._llm_engine.payloads
         assert payloads[0]["output_structure"] is None
         assert payloads[1]["output_structure"] == schema
+
+
+class TestResultHook:
+    def test_result_cls_and_no_per_family_builder(self) -> None:
+        assert ThinkingAgent.result_cls is ThinkingAgentResult
+        assert not hasattr(ThinkingAgent, "build_result_from_task")
+
+    def test_run_id_matches_the_stored_record(self) -> None:
+        agent = make_stub_thinker(["A", "R"], done_after=1, record_enabled=True)
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert type(result) is ThinkingAgentResult
+        assert result.thoughts_produced == 1
+        assert result.run_id == agent.get_conversation().records[-1].run_id

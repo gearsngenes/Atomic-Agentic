@@ -24,6 +24,7 @@ from atomic_agentic.exceptions import (
     ToolRegistrationError,
 )
 from atomic_agentic.models.agents.tasks import ScriptActAgentTask
+from atomic_agentic.models.results.agents import ScriptActAgentResult
 from atomic_agentic.tools import Tool
 from ..fake_engines import FakeLLMEngine
 from .conftest import make_script_agent
@@ -1320,3 +1321,20 @@ class TestAsyncMirrors:
             asyncio.run(agent.async_invoke({"prompt": "go"}))
 
         assert engine.call_count == 0
+
+
+class TestResultHook:
+    def test_result_cls_and_no_per_family_builder(self) -> None:
+        assert ScriptActAgent.result_cls is ScriptActAgentResult
+        assert not hasattr(ScriptActAgent, "build_result_from_task")
+
+    def test_scripted_run_returns_family_result_matching_record(self) -> None:
+        agent = make_script_agent(_engine("result = add(x=4, y=6)\nreturn result"), record_enabled=True)
+
+        result = agent.invoke({"prompt": "add"})
+
+        assert type(result) is ScriptActAgentResult
+        assert result.result == 10
+        assert result.repair_rounds_used == 0
+        assert result.failed_call_count == 0
+        assert result.run_id == agent.get_conversation().records[-1].run_id

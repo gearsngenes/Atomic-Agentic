@@ -583,7 +583,7 @@ class TestAgentContext:
         # Python str syntax) -- see utils.rendering.stringify_value.
         agent = make_agent(engine=FakeLLMEngine([]), record_enabled=True)
         value = {"summary": "ok", "confident": True, "score": None}
-        record = AgentRecord(user_prompt="hello", generated_response=value)
+        record = AgentRecord(user_prompt="hello", generated_response=value, run_id="run-0")
 
         as_json = agent.render_turn(record, render_mode="j")
         as_str = agent.render_turn(record)
@@ -2079,7 +2079,7 @@ class TestCreateTask:
         assert task.run_id is None
 
     def test_run_ids_are_distinct_per_task(self) -> None:
-        agent = make_agent()
+        agent = make_agent(record_enabled=True)
         inputs = agent.filter_inputs(_INPUTS)
         assert agent.create_task(inputs).run_id != agent.create_task(inputs).run_id
 
@@ -2473,7 +2473,7 @@ class TestPostProcessAndRecord:
         automatic = make_agent(record_enabled=True)
         auto_result = automatic.invoke(_INPUTS)
 
-        assert result.result == auto_result.result
+        assert result["result"] == auto_result.result
         m, a = manual.get_conversation().records[0], automatic.get_conversation().records[0]
         assert (m.user_prompt, m.generated_response, m.inputs) == (a.user_prompt, a.generated_response, a.inputs)
 
@@ -3233,7 +3233,7 @@ class TestContextSink:
         task, result = self._run(agent)
 
         assert task.context["resp"].value == "old"
-        assert result.result == "new"
+        assert result["result"] == "new"
 
     def test_absent_name_is_created_and_persisted(self) -> None:
         agent = make_value_agent("new", response_to_context="notes", record_enabled=True)
@@ -3316,7 +3316,7 @@ class TestContextSink:
 
         task, result = self._run(agent)
 
-        assert result.result == "new"
+        assert result["result"] == "new"
         assert task.context["notes"].value == "new"
 
     def test_failing_post_writes_nothing_and_records_nothing(self) -> None:
@@ -3865,9 +3865,9 @@ class TestInvokeHook:
     def test_failure_before_record_leaves_no_record(self) -> None:
         agent = make_agent(record_enabled=True, post_invoke=_boom_post)
 
-        with pytest.raises(Exception, match="post failed"):
+        with pytest.raises(ToolInvocationError, match="post failed"):
             agent.invoke(_INPUTS)
-        with pytest.raises(Exception, match="post failed"):
+        with pytest.raises(ToolInvocationError, match="post failed"):
             asyncio.run(agent.async_invoke(_INPUTS))
 
         assert agent.get_conversation().records == []

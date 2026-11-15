@@ -687,3 +687,17 @@ class TestAsyncParity:
         assert calls(async_agent) == calls(sync_agent)
         assert structures(async_agent) == structures(sync_agent)
         assert last_record(async_agent).thoughts == ("t1", "t2")
+
+
+class TestResultHook:
+    def test_result_cls_and_no_per_family_builder(self) -> None:
+        assert ScratchpadAgent.result_cls is ThinkingAgentResult
+        assert not hasattr(ScratchpadAgent, "build_result_from_task")
+
+    def test_run_id_matches_the_stored_record(self) -> None:
+        agent = make_agent(["t1", "R"], record_enabled=True)
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert type(result) is ThinkingAgentResult
+        assert result.run_id == last_record(agent).run_id

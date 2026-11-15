@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import keyword
 from collections.abc import Iterable
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from ..mcp.mcp_client_hub import MCPClientHub
 from ..a2a.a2a_client_hub import A2AClientHub
@@ -35,7 +35,7 @@ from ..exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
-from ..utils.agents import build_usage_report, check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
+from ..utils.agents import check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
     parse_generation,
@@ -100,6 +100,7 @@ class ScriptActAgent(ToolAgent):
     """
 
     _TASK_CLS = ScriptActAgentTask
+    result_cls: ClassVar[type[ScriptActAgentResult]] = ScriptActAgentResult
     TOOL_INSTRUCTIONS = ONESHOT_PLANNER_PROMPT
 
     def __init__(
@@ -294,30 +295,11 @@ class ScriptActAgent(ToolAgent):
             repair_rounds_used=task.repair_rounds_used,
         )
 
-    def build_result_from_task(self, task: ScriptActAgentTask, result: Any) -> ScriptActAgentResult:
-        """
-        Construct this agent's ``ScriptActAgentResult`` envelope directly from
-        a finished ``ScriptActAgentTask`` -- surfaces ``regenerations_used``/
-        ``repair_rounds_used`` past the ephemeral task. Also populates
-        ``usage_report`` (via ``build_usage_report``) and ``failed_call_count``,
-        both required fields inherited from ``ToolAgentResult``.
-        """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = self._llm_engine.model_data
-
-        return self._make_result(
-            result=result,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            result_cls=ScriptActAgentResult,
-            run_id=task.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            usage_report=build_usage_report(task.completed, task.failed_statements),
-            failed_call_count=len(task.failed_statements),
-            regenerations_used=task.regenerations_used,
-            repair_rounds_used=task.repair_rounds_used,
-        )
+    def result_payload_from_task(self, task: ScriptActAgentTask, result: Any) -> dict[str, Any]:
+        """ToolAgent payload plus ``repair_rounds_used``."""
+        payload = super().result_payload_from_task(task, result)
+        payload["repair_rounds_used"] = task.repair_rounds_used
+        return payload
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks

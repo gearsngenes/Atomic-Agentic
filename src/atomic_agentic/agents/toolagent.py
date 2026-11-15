@@ -56,7 +56,8 @@ from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.prompts import PromptConfig
-from ..utils.agents import normalize_prompt_config
+from ..models.results.agents import ToolAgentResult
+from ..utils.agents import build_usage_report, normalize_prompt_config
 from ..utils.rendering import frame_content
 
 
@@ -118,6 +119,7 @@ class ToolAgent(Agent, ABC):
     #: A concrete family must set it; there is no default, so an omission
     #: surfaces as an ``AttributeError`` when the system message is rendered.
     TOOL_INSTRUCTIONS: ClassVar[str]
+    result_cls: ClassVar[type[ToolAgentResult]] = ToolAgentResult
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
 
@@ -792,6 +794,17 @@ class ToolAgent(Agent, ABC):
             task.context[name] = ContextVariable(
                 name=name, value=value, readonly=True, preview_limit=0
             )
+
+    def result_payload_from_task(self, task: ToolAgentTask, result: Any) -> dict[str, Any]:
+        """Base payload plus the tool-agent fields (usage report, failed-call
+        count, regenerations)."""
+        payload = super().result_payload_from_task(task, result)
+        payload.update(
+            usage_report=build_usage_report(task.completed, task.failed_statements),
+            failed_call_count=len(task.failed_statements),
+            regenerations_used=task.regenerations_used,
+        )
+        return payload
 
     @abstractmethod
     def think(self, task: AgentTask) -> AgentTask:
