@@ -46,7 +46,7 @@ class SequentialFlowResult(WorkflowResult):
         The fixed step index whose result became this result's ``result``
         payload. When ``trace`` is populated (inherited from
         ``WorkflowResult``), ``trace[return_index]`` is that step's full
-        ``AtomicResult``, including its own ``run_id``.
+        ``AtomicResult``.
     """
 
     return_index: int

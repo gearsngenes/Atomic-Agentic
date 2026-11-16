@@ -4,9 +4,8 @@ import logging
 import warnings
 from dataclasses import replace
 from collections.abc import Hashable, Iterable, Mapping
-from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 from ..exceptions import ValidationError, WorkflowError
 from ..core.atomic_invokable import AtomicInvokable
@@ -115,6 +114,8 @@ class RoutingFlow(Workflow):
     - The router result is used only for selection, not as a handoff payload.
     - Exactly one branch is invoked per run.
     """
+
+    result_cls: ClassVar[type[RoutingFlowResult]] = RoutingFlowResult
 
     def __init__(
         self,
@@ -380,30 +381,6 @@ class RoutingFlow(Workflow):
                 f"for {len(self._branches)} configured branch(es)"
             )
         return selector
-
-    # ------------------------------------------------------------------ #
-    # Result construction
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> RoutingFlowResult:
-        """Construct a RoutingFlowResult envelope for this workflow's invocation.
-
-        No fixed-topology constant to inject here -- selected_branch varies
-        per invocation, so it flows through result_kwargs from
-        _run/_async_run rather than being injected here.
-        """
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=RoutingFlowResult,
-            **result_kwargs,
-        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks

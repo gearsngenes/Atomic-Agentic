@@ -174,7 +174,6 @@ if __name__ == "__main__":
     with open(checkpoints_path, "w", encoding="utf-8") as f:
         f.write("=== OUTER ITERATIVE RESULT ===\n")
         pprint(final, stream=f)
-        f.write(f"\nouter run_id: {final.run_id}\n")
 
         # The checker sits at the body's last step (critic, index 1), so no
         # step is ever skipped by an early exit here -- every completed

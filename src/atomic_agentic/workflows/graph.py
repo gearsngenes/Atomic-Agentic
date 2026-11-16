@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime
 from types import MappingProxyType
 from typing import Any, ClassVar, NamedTuple
 
@@ -105,6 +104,8 @@ class GraphFlow(Workflow):
         outgoing: tuple[str, ...]
         routers: tuple[AtomicInvokable, ...]
         priority: int
+
+    result_cls: ClassVar[type[GraphFlowResult]] = GraphFlowResult
 
     def __init__(
         self,
@@ -448,33 +449,6 @@ class GraphFlow(Workflow):
         return f"Enters at node {self._start!r}. {cap_note}"
 
     # ------------------------------------------------------------------ #
-    # Result construction
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> GraphFlowResult:
-        """Construct a GraphFlowResult envelope for this workflow's invocation.
-
-        ``edge_traversals``/``termination_reason``/``trace`` arrive via
-        ``result_kwargs`` from ``_async_run``, same passthrough pattern
-        ``IterativeFlow.make_result`` uses.
-        """
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=GraphFlowResult,
-            max_edge_traversals=self._max_edge_traversals,
-            result_mode=self._result_mode,
-            return_keys=self._return_keys,
-            **result_kwargs,
-        )
-
-    # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -483,12 +457,9 @@ class GraphFlow(Workflow):
         Sync is the async path bridged, not a second implementation --
         matches ParallelFlow._run's exact pattern. No independent sync
         engine: GraphFlow's per-round concurrency is exactly what
-        asyncio.gather already provides, and every AtomicInvokable's
-        default async_invoke already backstops sync-only nodes via a
-        background thread -- a hand-rolled sync engine would either
-        serialize a round's nodes (weakening the core "everything ready
-        runs together" guarantee) or duplicate that existing thread-bridge
-        for no behavioral gain.
+        asyncio.gather already provides, and a hand-rolled sync engine
+        would serialize a round's nodes (weakening the core "everything
+        ready runs together" guarantee) for no behavioral gain.
         """
         return run_coro_sync(self._async_run(inputs))
 
@@ -659,6 +630,9 @@ class GraphFlow(Workflow):
             "trace": tuple(trace_entries) if self.include_trace else None,
             "edge_traversals": tuple(edge_traversals),
             "termination_reason": termination_reason,
+            "max_edge_traversals": self._max_edge_traversals,
+            "result_mode": self._result_mode,
+            "return_keys": self._return_keys,
         }
 
     # ------------------------------------------------------------------ #

@@ -933,8 +933,8 @@ class TestGraphFlowTraceAndEdgeTraversals:
         result = flow.invoke({"x": 1})
 
         assert len(result.trace) == 2
-        assert result.trace[0].invoker_id == start_node.instance_id
-        assert result.trace[1].invoker_id == router.instance_id
+        assert result.trace[0].invoker_id == start_node.full_name
+        assert result.trace[1].invoker_id == router.full_name
 
 
 class TestGraphFlowAsyncInvoke:
@@ -1102,3 +1102,23 @@ class TestGraphFlowSerialization:
         assert data["return_keys"] == ["x"]
         assert set(data["nodes"].keys()) == {"start", "next"}
         assert ("start", "next") in data["edges"]
+
+
+class TestGraphFlowInvokeHook:
+    def test_result_cls_and_no_make_result(self) -> None:
+        assert GraphFlow.result_cls is GraphFlowResult
+        assert not hasattr(GraphFlow, "make_result")
+
+    def test_sync_and_async_results_carry_fixed_fields(self) -> None:
+        flow = make_graph_flow(
+            result_mode=GraphFlow.SCALAR, return_keys=["x"], max_edge_traversals=5
+        )
+
+        for result in (
+            flow.invoke({"x": 1}),
+            asyncio.run(flow.async_invoke({"x": 1})),
+        ):
+            assert isinstance(result, GraphFlowResult)
+            assert result.max_edge_traversals == flow.max_edge_traversals
+            assert result.result_mode == flow.result_mode
+            assert result.return_keys == flow.return_keys

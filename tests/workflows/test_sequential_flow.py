@@ -9,6 +9,7 @@ import pytest
 
 from atomic_agentic.exceptions import ExecutionError, ValidationError
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results import AtomicResult
 from atomic_agentic.models.results.workflows import SequentialFlowResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.base import Workflow
@@ -270,13 +271,9 @@ class TestSequentialFlowValidationAndErrors:
     def _make_bad_result() -> Any:
         """A result object whose ``.result`` is a non-mapping payload."""
         now = datetime.now(timezone.utc)
-        tool = Tool(
-            function=lambda: 123,
-            name="bad_step",
-            namespace="tests",
-            description="Returns a non-mapping payload.",
+        return AtomicResult(
+            result=123, invoker_id="tests.bad_step", started_at=now, ended_at=now
         )
-        return tool.make_result(result=123, started_at=now, ended_at=now)
 
     def test_non_final_step_non_mapping_result_raises_validation_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -319,17 +316,6 @@ class TestSequentialFlowValidationAndErrors:
 
         assert isinstance(exc_info.value.__cause__, ValidationError)
 
-    def test_make_result_rejects_non_tuple_trace(self) -> None:
-        flow = make_three_step_flow()
-
-        with pytest.raises(TypeError, match="trace must be a tuple"):
-            flow.make_result(
-                result={"third": "x"},
-                started_at=datetime.now(timezone.utc),
-                ended_at=datetime.now(timezone.utc),
-                trace=["not", "a", "tuple"],
-            )
-
 
 class TestSequentialFlowSerialization:
     def test_to_dict_includes_steps_and_return_index(self) -> None:
@@ -342,3 +328,18 @@ class TestSequentialFlowSerialization:
         assert data["step_count"] == 3
         assert "steps" in data and len(data["steps"]) == 3
         assert "checkpoints" not in data
+
+
+class TestSequentialFlowInvokeHook:
+    def test_result_cls_and_no_make_result(self) -> None:
+        assert SequentialFlow.result_cls is SequentialFlowResult
+        assert not hasattr(SequentialFlow, "make_result")
+
+    def test_sync_and_async_results_carry_return_index(self) -> None:
+        flow = make_three_step_flow(return_index=1)
+
+        assert flow.invoke({"value": 2}).return_index == flow.return_index == 1
+        assert (
+            asyncio.run(flow.async_invoke({"value": 2})).return_index
+            == flow.return_index
+        )

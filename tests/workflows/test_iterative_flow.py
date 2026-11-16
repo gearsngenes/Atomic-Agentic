@@ -571,3 +571,17 @@ class TestIterativeFlowSerialization:
         assert data["max_iterations"] == flow.max_iterations
         assert "checkpoints" not in data
         assert "loop_body" not in data
+
+
+class TestIterativeFlowInvokeHook:
+    def test_result_cls_and_no_make_result(self) -> None:
+        assert IterativeFlow.result_cls is IterativeFlowResult
+        assert not hasattr(IterativeFlow, "make_result")
+
+    def test_sync_and_async_results_are_iterative_results(self) -> None:
+        flow = make_iterative_flow()
+
+        assert isinstance(flow.invoke({"count": 0}), IterativeFlowResult)
+        assert isinstance(
+            asyncio.run(flow.async_invoke({"count": 0})), IterativeFlowResult
+        )

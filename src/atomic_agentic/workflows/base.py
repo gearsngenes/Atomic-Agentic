@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from ..exceptions import ExecutionError
 from ..core.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results.workflows import WorkflowResult
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "Workflow",
@@ -29,12 +25,16 @@ class Workflow(AtomicInvokable, ABC):
     - Both run hooks must return ``(payload, result_kwargs)`` where:
         * ``payload`` is the caller-facing result value (any type)
         * ``result_kwargs`` is a dict of per-kind extra fields forwarded to
-          the result subclass constructor via ``make_result()`` — including,
-          when the executing subclass populates it, a ``trace`` entry.
-    - Public ``invoke()`` / ``async_invoke()`` wrap the payload in a
-      ``WorkflowResult``-family envelope. Whether that envelope's ``trace``
-      field is populated is controlled by ``include_trace``.
+          the result subclass constructor — including, when the executing
+          subclass populates it, a ``trace`` entry.
+    - ``_invoke_impl`` / ``_async_invoke_impl`` merge the two into the payload
+      dict, and the inherited ``AtomicInvokable`` template builds ``result_cls``
+      from it. Subclasses with fixed per-instance fields include them in
+      ``result_kwargs``. Whether ``trace`` is populated is controlled by
+      ``include_trace``.
     """
+
+    result_cls: ClassVar[type[WorkflowResult]] = WorkflowResult
 
     def __init__(
         self,
@@ -85,7 +85,7 @@ class Workflow(AtomicInvokable, ABC):
             ``(payload, result_kwargs)`` where:
             - ``payload`` is the caller-facing workflow output (any type)
             - ``result_kwargs`` is a plain dict of per-kind extra fields
-              forwarded to the ``WorkflowResult`` subclass constructor
+              forwarded to the result constructor
         """
         raise NotImplementedError
 
@@ -97,81 +97,27 @@ class Workflow(AtomicInvokable, ABC):
         return await asyncio.to_thread(self._run, inputs)
 
     # ------------------------------------------------------------------ #
-    # Result construction
+    # Invoke hooks
     # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> WorkflowResult:
-        """Construct a WorkflowResult envelope for this workflow's invocation.
-
-        Subclasses override this to fix their own ``result_cls``. This base
-        override is required — without it the fallback is
-        ``AtomicInvokable.make_result()`` which hardcodes ``result_cls=AtomicResult``.
-        """
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=WorkflowResult,
-            **result_kwargs,
-        )
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-    def invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
-        """Synchronously invoke the workflow."""
-        logger.info("[%s started]", self.full_name)
-
-        started_at = datetime.now(timezone.utc)
-        filtered_inputs = self.filter_inputs(inputs)
-
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Run ``_run``; payload = ``result`` plus the per-kind fields it returns."""
         try:
-            payload, result_kwargs = self._run(filtered_inputs)
+            payload, result_kwargs = self._run(inputs)
         except Exception as exc:
             raise ExecutionError(
                 f"{type(self).__name__}._run failed: {exc}"
             ) from exc
+        return {"result": payload, **result_kwargs}
 
-        ended_at = datetime.now(timezone.utc)
-        workflow_result = self.make_result(
-            result=payload,
-            started_at=started_at,
-            ended_at=ended_at,
-            **result_kwargs,
-        )
-
-        logger.info("[%s finished]", self.full_name)
-        return workflow_result
-
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
-        """Asynchronously invoke the workflow."""
-        logger.info("[Async %s started]", self.full_name)
-
-        started_at = datetime.now(timezone.utc)
-        filtered_inputs = self.filter_inputs(inputs)
-
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin of ``_invoke_impl`` over ``_async_run``."""
         try:
-            payload, result_kwargs = await self._async_run(filtered_inputs)
+            payload, result_kwargs = await self._async_run(inputs)
         except Exception as exc:
             raise ExecutionError(
                 f"{type(self).__name__}._async_run failed: {exc}"
             ) from exc
-
-        ended_at = datetime.now(timezone.utc)
-        workflow_result = self.make_result(
-            result=payload,
-            started_at=started_at,
-            ended_at=ended_at,
-            **result_kwargs,
-        )
-
-        logger.info("[Async %s finished]", self.full_name)
-        return workflow_result
+        return {"result": payload, **result_kwargs}
 
     # ------------------------------------------------------------------ #
     # Serialization

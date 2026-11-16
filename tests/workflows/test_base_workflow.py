@@ -172,9 +172,8 @@ class TestWorkflowSyncInvoke:
 
         assert isinstance(result, WorkflowResult)
         assert result.result == {"value": 123}
-        assert isinstance(result.run_id, str)
         assert result.started_at <= result.ended_at
-        assert result.elapsed_s >= 0
+        assert result.elapsed_time >= 0
 
     def test_invoke_filters_extraneous_inputs(self) -> None:
         workflow = EchoWorkflow()
@@ -260,3 +259,27 @@ class TestWorkflowSerialization:
         assert "checkpoints" not in data
         assert "checkpoint_count" not in data
         assert "runs" not in data
+
+
+class TestWorkflowInvokeHook:
+    def test_result_cls_is_workflow_result(self) -> None:
+        assert Workflow.result_cls is WorkflowResult
+
+    def test_no_invoke_overrides_on_workflow(self) -> None:
+        for attr in ("invoke", "async_invoke", "make_result"):
+            assert attr not in Workflow.__dict__
+
+    def test_result_invoker_id_is_full_name(self) -> None:
+        workflow = EchoWorkflow()
+
+        assert workflow.invoke({"value": 1}).invoker_id == workflow.full_name
+        assert (
+            asyncio.run(workflow.async_invoke({"value": 1})).invoker_id
+            == workflow.full_name
+        )
+
+    def test_filter_inputs_failure_is_not_wrapped(self) -> None:
+        workflow = EchoWorkflow()
+
+        with pytest.raises(TypeError):
+            workflow.invoke(["not", "a", "mapping"])  # type: ignore[arg-type]

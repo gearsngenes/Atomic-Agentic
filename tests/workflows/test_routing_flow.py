@@ -771,3 +771,17 @@ class TestRoutingFlowSerialization:
 
         assert isinstance(data["branches"], dict)
         assert set(data["branches"].keys()) == {"left", "right"}
+
+
+class TestRoutingFlowInvokeHook:
+    def test_result_cls_and_no_make_result(self) -> None:
+        assert RoutingFlow.result_cls is RoutingFlowResult
+        assert not hasattr(RoutingFlow, "make_result")
+
+    def test_sync_and_async_results_are_routing_results(self) -> None:
+        flow = make_list_routing_flow(1)
+
+        assert isinstance(flow.invoke({"value": 5}), RoutingFlowResult)
+        assert isinstance(
+            asyncio.run(flow.async_invoke({"value": 5})), RoutingFlowResult
+        )
