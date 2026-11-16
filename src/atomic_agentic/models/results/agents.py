@@ -205,7 +205,7 @@ class ToolAgentResult(AgentResult):
     usage_report:
         ``ToolUsageReport`` summarizing per-tool call counts plus
         ``total_dispatched``/``total_failed`` for the invocation. Re-derived
-        (by the caller, e.g. ``PlanActAgent.build_result_from_task``) via
+        (by the caller, e.g. ``PlanActAgent.result_payload_from_task``) via
         ``utils.agents.build_usage_report`` over the task's statements.
 
     failed_call_count:
@@ -246,7 +246,7 @@ class ScriptActAgentResult(ToolAgentResult):
     Successful ScriptActAgent invocation result, a ``ToolAgentResult``
     subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
     are all real, inherited, required fields -- ``agents/scriptact.py``'s
-    ``build_result_from_task`` populates ``usage_report``/
+    ``result_payload_from_task`` populates ``usage_report``/
     ``failed_call_count`` via ``build_usage_report``/
     ``len(task.failed_statements)``, mirroring ``PlanActAgent``'s/
     ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
@@ -282,7 +282,7 @@ class ScriptActAgentResult(ToolAgentResult):
 class ThinkingAgentResult(AgentResult):
     """
     Successful thinking-agent invocation result (every ``ThinkingAgent``
-    subclass), built by ``ThinkingAgent.build_result_from_task``.
+    subclass), built by ``ThinkingAgent.result_payload_from_task``.
 
     Extends ``AgentResult`` with the count of thoughts the invocation
     produced -- a derived reduction like ``llm_token_usage``, not a duplicate

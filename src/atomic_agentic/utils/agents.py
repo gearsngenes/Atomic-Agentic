@@ -270,7 +270,7 @@ def build_usage_report(
     Walks ``statements`` then ``failed_statements``, in that order, counting
     only dispatched calls (``is_dispatched``) under their real identity
     (``tool_identity``). Shared by ``ToolAgentRecord.usage_report()`` and
-    each ``ToolAgent`` family's ``build_result_from_task``, so a result can
+    each ``ToolAgent`` family's ``result_payload_from_task``, so a result can
     be built from a task without a record.
     """
     failed_statements = tuple(failed_statements)

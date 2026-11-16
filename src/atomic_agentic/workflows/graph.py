@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
@@ -17,7 +16,6 @@ from ..utils.core import run_coro_sync
 from ..utils.parameters import _simplify_type_set, build_parameter_reports
 from .base import Workflow
 
-logger = logging.getLogger(__name__)
 
 __all__ = ["GraphFlow"]
 

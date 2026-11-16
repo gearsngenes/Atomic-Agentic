@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from typing import (
     Any,
     Callable,
@@ -18,9 +17,6 @@ from ..core.core_api import extract_io
 from ..models.parameters import ParamSpec
 from ..utils.core import run_coro_sync
 from ..models.results.tools import ToolResult
-
-
-logger = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────────────────────────────────────

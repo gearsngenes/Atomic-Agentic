@@ -59,7 +59,7 @@ class PyA2AtomicHost(A2AServer):
 
       `invoke()` returns an AtomicResult-family envelope; only its `.result`
       (the caller-facing payload) crosses the wire under this key. Envelope
-      fields (run_id, started_at/ended_at, elapsed_s, invoker_id) are not
+      fields (started_at/ended_at, elapsed_time, invoker_id) are not
       included.
 
     Error payload:

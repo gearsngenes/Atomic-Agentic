@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
@@ -18,7 +17,6 @@ from ..models.results import AtomicResult
 from ..models.results.workflows import ParallelFlowResult
 from .base import Workflow
 
-logger = logging.getLogger(__name__)
 
 __all__ = ["ParallelFlow"]
 

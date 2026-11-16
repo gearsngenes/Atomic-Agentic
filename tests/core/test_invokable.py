@@ -1229,6 +1229,26 @@ class TestLogLevel:
             f"[Async {invokable.full_name} finished]",
         ]
 
+    def test_filter_failure_logs_start_but_not_finished(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = _build(SpyInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(TypeError):
+                invokable.invoke(["x"])  # type: ignore[arg-type]
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert messages == [f"[{invokable.full_name} started]"]
+
+    def test_async_filter_failure_logs_start_but_not_finished(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = _build(SpyInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(TypeError):
+                asyncio.run(invokable.async_invoke(["x"]))  # type: ignore[arg-type]
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert messages == [f"[Async {invokable.full_name} started]"]
+
 
 class TestCallThroughTemplate:
     def test_call_returns_unwrapped_payload(self) -> None:
