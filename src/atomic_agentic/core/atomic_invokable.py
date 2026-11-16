@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Any, ClassVar, Iterable, Mapping, Dict
-import threading
 import logging
 
 from ..constants.core import DEFAULT_LOG_LEVEL, IDENTIFIER_PATTERN, NO_VAL
@@ -187,7 +186,6 @@ class AtomicInvokable(ABC):
 
         self._parameters: list[ParamSpec] = list(parameters)
         self._return_type: str = return_type
-        self._invoke_lock = threading.RLock()
         self._log_level: int | None = DEFAULT_LOG_LEVEL
 
     # ---------------------------------------------------------------- #

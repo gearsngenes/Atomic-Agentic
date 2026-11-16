@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import functools
-from datetime import datetime
 from typing import (
     Any,
     Callable,
+    ClassVar,
     Dict,
     Literal,
     Mapping,
@@ -30,6 +30,8 @@ class MCPProxyTool(Tool):
     alternative) -- matches `A2AProxyTool`'s convention; construct an
     `MCPClientHub` explicitly and pass it in.
     """
+
+    result_cls: ClassVar[type[MCPToolResult]] = MCPToolResult
 
     def __init__(
         self,
@@ -124,26 +126,6 @@ class MCPProxyTool(Tool):
         raw = self._mcpdata.get("raw_metadata")
         return dict(raw) if isinstance(raw, Mapping) else {}
 
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> MCPToolResult:
-        """Construct an MCPToolResult carrying this proxy's transport identity."""
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=MCPToolResult,
-            transport_mode=self.transport_mode,
-            remote_name=self.remote_name,
-            endpoint=self.endpoint,
-            command=self.command,
-            **result_kwargs,
-        )
-
     def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
         parameters = self._mcpdata.get("parameters")
         return_type = self._mcpdata.get("return_type")
@@ -175,7 +157,7 @@ class MCPProxyTool(Tool):
         # MCP calls are always dict-first.
         return tuple(), dict(inputs)
 
-    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: MCP tools do not accept positional arguments; got {args!r}."
@@ -200,13 +182,19 @@ class MCPProxyTool(Tool):
         if bool(is_error):
             self._raise_mcp_tool_error(raw_result)
 
-        return self._extract_proxy_result(raw_result)
+        return {
+            "transport_mode": self.transport_mode,
+            "remote_name": self.remote_name,
+            "endpoint": self.endpoint,
+            "command": self.command,
+            "result": self._extract_proxy_result(raw_result),
+        }
 
     async def async_execute(
         self,
         args: tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Any:
+    ) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: MCP tools do not accept positional arguments; got {args!r}."
@@ -233,7 +221,13 @@ class MCPProxyTool(Tool):
         if bool(is_error):
             self._raise_mcp_tool_error(raw_result)
 
-        return self._extract_proxy_result(raw_result)
+        return {
+            "transport_mode": self.transport_mode,
+            "remote_name": self.remote_name,
+            "endpoint": self.endpoint,
+            "command": self.command,
+            "result": self._extract_proxy_result(raw_result),
+        }
 
     def _extract_proxy_result(self, raw_result: Mapping[str, Any]) -> Any:
         mode = self._mcpdata.get("extraction_mode")

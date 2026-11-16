@@ -73,11 +73,13 @@ class Tool(AtomicInvokable):
     Filtered dict-first inputs are bound into ordinary Python call-style
     ``(*args, **kwargs)`` before calling the stored callable.
 
-    ``execute(...)`` and ``async_execute(...)`` return the raw execution payload.
+    ``execute(...)`` and ``async_execute(...)`` return the result payload dict
+    (``{"result": <value>}``; proxies add their fixed transport fields).
     Public ``invoke(...)`` and ``async_invoke(...)`` wrap that payload in a
     ``ToolResult`` whose ``.result`` field contains the caller-facing value.
 
-    Subclasses select their result class with ``result_cls``.
+    Subclasses select their result class with ``result_cls``; proxy subclasses
+    also put their fixed transport fields in the dict their ``execute`` returns.
     """
 
     result_cls: ClassVar[type[ToolResult]] = ToolResult
@@ -240,8 +242,8 @@ class Tool(AtomicInvokable):
         args, kwargs = self._dict_to_args_kwargs(inputs)
         return args, kwargs
 
-    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        """Synchronously execute the underlying target.
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronously execute the underlying target; returns ``{"result": value}``.
 
         Calls the stored callable directly with ``(*args, **kwargs)``.
 
@@ -261,14 +263,14 @@ class Tool(AtomicInvokable):
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
-        return result
+        return {"result": result}
 
     async def async_execute(
         self,
         args: tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Any:
-        """Asynchronously execute the underlying target.
+    ) -> Dict[str, Any]:
+        """Asynchronously execute the underlying target; returns ``{"result": value}``.
 
         Execution dispatch:
 
@@ -293,20 +295,20 @@ class Tool(AtomicInvokable):
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
-        return result
+        return {"result": result}
 
     # ------------------------------------------------------------------ #
     # Invoke hooks
     # ------------------------------------------------------------------ #
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """to_arg_kwarg(inputs) -> execute(args, kwargs); return {"result": ...}."""
+        """to_arg_kwarg -> execute; ``execute`` returns the result payload."""
         args, kwargs = self.to_arg_kwarg(inputs)
-        return {"result": self.execute(args, kwargs)}
+        return self.execute(args, kwargs)
 
     async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Async twin: awaits ``async_execute``."""
         args, kwargs = self.to_arg_kwarg(inputs)
-        return {"result": await self.async_execute(args, kwargs)}
+        return await self.async_execute(args, kwargs)
 
     # ------------------------------------------------------------------ #
     # Serialization

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -627,3 +628,33 @@ class TestToolInvokeHook:
         assert "async_invoke" not in Tool.__dict__
         assert not hasattr(tool, "make_result")
         assert Tool.result_cls is ToolResult
+
+    def test_execute_returns_result_payload_dict(self) -> None:
+        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+
+        assert tool.execute((2, 3), {}) == {"result": 5}
+        assert asyncio.run(tool.async_execute((2, 3), {})) == {"result": 5}
+
+    def test_execute_dict_fields_feed_result_cls(self) -> None:
+        @dataclass(frozen=True, slots=True)
+        class TaggedResult(ToolResult):
+            tag: str = ""
+
+        class TaggedTool(Tool):
+            result_cls = TaggedResult
+
+            def execute(self, args, kwargs):
+                return {"tag": "t", **super().execute(args, kwargs)}
+
+            async def async_execute(self, args, kwargs):
+                return {"tag": "t", **await super().async_execute(args, kwargs)}
+
+        tool = TaggedTool(function=add, name="add", namespace="tests", description="Add.")
+
+        for result in (tool.invoke({"a": 2, "b": 3}), asyncio.run(tool.async_invoke({"a": 2, "b": 3}))):
+            assert type(result) is TaggedResult
+            assert result.tag == "t"
+            assert result.result == 5
+
+    def test_no_result_fields_hook(self) -> None:
+        assert not hasattr(Tool, "_result_fields")

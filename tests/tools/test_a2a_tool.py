@@ -356,6 +356,49 @@ class TestPyA2AtomicToolMakeResult:
         assert result.invokable_type == "EchoInvokable"
 
 
+class TestPyA2AtomicToolResultHook:
+    def test_execute_returns_payload_with_transport_fields(self) -> None:
+        client = FakePyA2AtomicClient(result={"ok": True})
+        tool = make_tool(client=client)
+
+        payload = tool.execute((), {"value": 1})
+
+        assert set(payload) == {"url", "remote_name", "invokable_type", "result"}
+        assert payload["url"] == tool.url
+        assert payload["remote_name"] == tool.remote_name
+        assert payload["invokable_type"] == tool._remote_metadata["invokable_type"]
+        assert payload["result"] == {"ok": True}
+
+    def test_async_execute_returns_payload_with_transport_fields(self) -> None:
+        client = FakePyA2AtomicClient(result={"ok": True})
+        tool = make_tool(client=client)
+
+        payload = asyncio.run(tool.async_execute((), {"value": 1}))
+
+        assert payload == {
+            "url": tool.url,
+            "remote_name": tool.remote_name,
+            "invokable_type": tool._remote_metadata["invokable_type"],
+            "result": {"ok": True},
+        }
+
+    def test_invoke_populates_transport_fields(self) -> None:
+        tool = make_tool()
+
+        for result in (tool.invoke({"value": 1}), asyncio.run(tool.async_invoke({"value": 1}))):
+            assert type(result) is PyA2AtomicToolResult
+            assert result.url == tool.url
+            assert result.remote_name == tool.remote_name
+            assert result.invokable_type == tool._remote_metadata["invokable_type"]
+
+    def test_no_make_result_and_no_hook_overrides(self) -> None:
+        tool = make_tool()
+
+        assert not hasattr(tool, "make_result")
+        assert "_invoke_impl" not in PyA2AtomicTool.__dict__
+        assert "_async_invoke_impl" not in PyA2AtomicTool.__dict__
+
+
 class TestPyA2AtomicToolErrorHandling:
     def test_error_payload_raises_remote_invocation_error(self) -> None:
         client = FakePyA2AtomicClient(

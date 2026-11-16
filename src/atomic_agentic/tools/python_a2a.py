@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, ClassVar, Dict, Mapping, Optional
 
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 
@@ -40,6 +39,8 @@ class PyA2AtomicTool(Tool):
     call `self.client.refresh(...)` directly; lifecycle belongs to the
     client, not this wrapper.
     """
+
+    result_cls: ClassVar[type[PyA2AtomicToolResult]] = PyA2AtomicToolResult
 
     def __init__(
         self,
@@ -202,7 +203,7 @@ class PyA2AtomicTool(Tool):
             )
         return payload[PYA2A_RESULT_KEY]
 
-    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
@@ -211,13 +212,18 @@ class PyA2AtomicTool(Tool):
             payload = self._function(self._remote_name, inputs=kwargs)
         except Exception as e:
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
-        return self._handle_a2a_payload(payload)
+        return {
+            "url": self.url,
+            "remote_name": self.remote_name,
+            "invokable_type": self._remote_metadata["invokable_type"],
+            "result": self._handle_a2a_payload(payload),
+        }
 
     async def async_execute(
         self,
         args: tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Any:
+    ) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
@@ -233,29 +239,12 @@ class PyA2AtomicTool(Tool):
             raise ToolInvocationError(
                 f"{self.full_name}: async invocation failed: {exc}"
             ) from exc
-        return self._handle_a2a_payload(payload)
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> PyA2AtomicToolResult:
-        """Construct a PyA2AtomicToolResult carrying this proxy's transport identity."""
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=PyA2AtomicToolResult,
-            url=self.url,
-            remote_name=self.remote_name,
-            invokable_type=self._remote_metadata["invokable_type"],
-            **result_kwargs,
-        )
+        return {
+            "url": self.url,
+            "remote_name": self.remote_name,
+            "invokable_type": self._remote_metadata["invokable_type"],
+            "result": self._handle_a2a_payload(payload),
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization

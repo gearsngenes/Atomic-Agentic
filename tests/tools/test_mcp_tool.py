@@ -503,6 +503,65 @@ class TestMCPProxyToolMakeResult:
         assert result.remote_name == "search"
 
 
+class TestMCPProxyToolResultHook:
+    def test_execute_returns_payload_with_transport_fields(self) -> None:
+        tool = make_tool()
+
+        payload = tool.execute((), {"query": "hello"})
+
+        assert set(payload) == {"transport_mode", "remote_name", "endpoint", "command", "result"}
+        assert payload["transport_mode"] == tool.transport_mode
+        assert payload["remote_name"] == tool.remote_name
+        assert payload["endpoint"] == tool.endpoint
+        assert payload["command"] == tool.command
+
+    def test_async_execute_returns_payload_with_transport_fields(self) -> None:
+        hub = FakeMCPClientHub(
+            async_result={"structuredContent": {"result": "x"}, "isError": False}
+        )
+        tool = make_tool(hub=hub)
+
+        payload = asyncio.run(tool.async_execute((), {"query": "hello"}))
+
+        assert payload == {
+            "transport_mode": tool.transport_mode,
+            "remote_name": tool.remote_name,
+            "endpoint": tool.endpoint,
+            "command": tool.command,
+            "result": "x",
+        }
+
+    def test_invoke_populates_transport_fields(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"query": "hello"})
+
+        assert type(result) is MCPToolResult
+        assert result.transport_mode == tool.transport_mode
+        assert result.remote_name == tool.remote_name
+        assert result.endpoint == tool.endpoint
+        assert result.command == tool.command
+
+    def test_async_invoke_populates_transport_fields(self) -> None:
+        hub = FakeMCPClientHub(
+            async_result={"structuredContent": {"result": "x"}, "isError": False}
+        )
+        tool = make_tool(hub=hub)
+
+        result = asyncio.run(tool.async_invoke({"query": "hello"}))
+
+        assert type(result) is MCPToolResult
+        assert result.transport_mode == tool.transport_mode
+        assert result.remote_name == tool.remote_name
+
+    def test_no_make_result_and_no_hook_overrides(self) -> None:
+        tool = make_tool()
+
+        assert not hasattr(tool, "make_result")
+        assert "_invoke_impl" not in MCPProxyTool.__dict__
+        assert "_async_invoke_impl" not in MCPProxyTool.__dict__
+
+
 class TestMCPProxyToolHeaders:
     def test_headers_getter_reads_from_client_hub(self) -> None:
         hub = FakeMCPClientHub()

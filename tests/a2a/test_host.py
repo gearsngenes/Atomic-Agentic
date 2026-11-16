@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
 
@@ -15,23 +14,16 @@ from atomic_agentic.constants.python_a2a import (
     LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.models.results.atomic import AtomicResult
 
 
 class EchoInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        started_at = datetime.now(timezone.utc)
-        filtered = self.filter_inputs(inputs)
-        ended_at = datetime.now(timezone.utc)
-        return self.make_result(filtered, started_at, ended_at)
+    def _invoke_impl(self, inputs): return {"result": inputs}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs}
 
 
 class ScalarInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        started_at = datetime.now(timezone.utc)
-        value = inputs.get("value")
-        ended_at = datetime.now(timezone.utc)
-        return self.make_result(value, started_at, ended_at)
+    def _invoke_impl(self, inputs): return {"result": inputs.get("value")}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs.get("value")}
 
 
 def make_param(name: str, index: int) -> ParamSpec:
@@ -67,11 +59,8 @@ class DescribedInvokable(AtomicInvokable):
     """Has a described parameter and non-empty extra content - proves the
     host payload stops double-baking bullets and now carries extra_description."""
 
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        started_at = datetime.now(timezone.utc)
-        filtered = self.filter_inputs(inputs)
-        ended_at = datetime.now(timezone.utc)
-        return self.make_result(filtered, started_at, ended_at)
+    def _invoke_impl(self, inputs): return {"result": inputs}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs}
 
     def _extra_description(self) -> str:
         return "Output schema: [value]"

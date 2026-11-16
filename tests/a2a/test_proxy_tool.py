@@ -5,8 +5,7 @@ import base64
 import socket
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
 import pytest
@@ -26,7 +25,6 @@ from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.models.results.atomic import AtomicResult
 from atomic_agentic.models.results.tools import A2AProxyToolResult
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.utils.a2a import _dict_to_part, _part_to_dict
@@ -142,16 +140,13 @@ def _free_port() -> int:
 
 
 class AddInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        started_at = datetime.now(timezone.utc)
-        result = inputs["a"] + inputs["b"]
-        ended_at = datetime.now(timezone.utc)
-        return self.make_result(result, started_at, ended_at)
+    def _invoke_impl(self, inputs): return {"result": inputs["a"] + inputs["b"]}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs["a"] + inputs["b"]}
 
 
 class FailingInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        raise RuntimeError("deliberate failure")
+    def _invoke_impl(self, inputs): raise RuntimeError("deliberate failure")
+    async def _async_invoke_impl(self, inputs): raise RuntimeError("deliberate failure")
 
 
 def _make_param(name: str, index: int) -> ParamSpec:
@@ -346,6 +341,35 @@ class TestSkillMode:
             tool = A2AProxyTool(hub, skill_id="boom")
             with pytest.raises(ToolInvocationError):
                 tool.invoke({})
+        finally:
+            hub.close()
+
+    def test_execute_payload_and_result_fields(self, atomic_fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        try:
+            tool = A2AProxyTool(hub, skill_id="add")
+            fields = {
+                "transport_mode": tool.transport_mode,
+                "base_url": tool.base_url,
+                "persistent": tool.persistent,
+                "skill_id": tool.skill_id,
+            }
+            assert tool.execute((), {"a": 1, "b": 2}) == {**fields, "result": 3}
+            assert asyncio.run(tool.async_execute((), {"a": 1, "b": 2})) == {**fields, "result": 3}
+            for result in (tool.invoke({"a": 1, "b": 2}), asyncio.run(tool.async_invoke({"a": 1, "b": 2}))):
+                assert type(result) is A2AProxyToolResult
+                for key, value in fields.items():
+                    assert getattr(result, key) == value
+        finally:
+            hub.close()
+
+    def test_no_make_result_and_no_hook_overrides(self, atomic_fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        try:
+            tool = A2AProxyTool(hub, skill_id="add")
+            assert not hasattr(tool, "make_result")
+            assert "_invoke_impl" not in A2AProxyTool.__dict__
+            assert "_async_invoke_impl" not in A2AProxyTool.__dict__
         finally:
             hub.close()
 

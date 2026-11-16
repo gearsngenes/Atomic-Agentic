@@ -4,9 +4,8 @@ import asyncio
 import socket
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
 import pytest
@@ -26,7 +25,6 @@ from atomic_agentic.constants.a2a_sdk import PARAM_SCHEMA_EXT_URI, TRANSPORT_JSO
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.exceptions import A2AProxyError
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.models.results.atomic import AtomicResult
 from atomic_agentic.utils.core import run_coro_sync, start_background_loop, stop_background_loop
 
 
@@ -40,16 +38,13 @@ def make_param(name: str, index: int) -> ParamSpec:
 
 
 class AddInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        started_at = datetime.now(timezone.utc)
-        result = inputs["a"] + inputs["b"]
-        ended_at = datetime.now(timezone.utc)
-        return self.make_result(result, started_at, ended_at)
+    def _invoke_impl(self, inputs): return {"result": inputs["a"] + inputs["b"]}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs["a"] + inputs["b"]}
 
 
 class FailingInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
-        raise RuntimeError("deliberate failure")
+    def _invoke_impl(self, inputs): raise RuntimeError("deliberate failure")
+    async def _async_invoke_impl(self, inputs): raise RuntimeError("deliberate failure")
 
 
 def make_add_invokable(name: str = "add") -> AddInvokable:

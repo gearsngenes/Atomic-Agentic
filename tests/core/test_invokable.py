@@ -1172,6 +1172,11 @@ class TestInvokeTemplate:
         assert invokable.hook_inputs == []
 
 
+class TestNoInvokeLock:
+    def test_instances_have_no_invoke_lock(self) -> None:
+        assert not hasattr(_build(EchoInvokable), "_invoke_lock")
+
+
 class TestLogLevel:
     def test_default_is_debug(self) -> None:
         assert make_invokable().log_level == logging.DEBUG
