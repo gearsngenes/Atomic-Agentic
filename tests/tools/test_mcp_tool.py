@@ -135,10 +135,10 @@ def make_tool(
     description: str = "",
 ) -> MCPProxyTool:
     return MCPProxyTool(
-        remote_name=remote_name,
+        hub or FakeMCPClientHub(),
+        remote_name,
         name=name,
         description=description,
-        client_hub=hub or FakeMCPClientHub(),
     )
 
 
@@ -188,7 +188,17 @@ class TestMCPProxyToolConstruction:
 
     def test_non_hub_client_hub_raises(self) -> None:
         with pytest.raises(TypeError, match="client_hub"):
-            MCPProxyTool(remote_name="search", client_hub=object())  # type: ignore[arg-type]
+            MCPProxyTool(object(), "search")  # type: ignore[arg-type]
+
+    def test_positional_order_is_hub_remote_name_name_description(self) -> None:
+        hub = FakeMCPClientHub()
+
+        tool = MCPProxyTool(hub, "search", "local_search", "Local description.")
+
+        assert tool.client_hub is hub
+        assert tool.remote_name == "search"
+        assert tool.name == "local_search"
+        assert tool.description == "Local description."
 
     def test_missing_remote_tool_raises(self) -> None:
         hub = FakeMCPClientHub(tools={})

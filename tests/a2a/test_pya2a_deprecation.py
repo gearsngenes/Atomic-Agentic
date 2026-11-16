@@ -87,6 +87,6 @@ class TestPyA2AtomicDeprecation:
 
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            PyA2AtomicTool(remote_name="echo", client=client)
+            PyA2AtomicTool(client, "echo")
 
         assert not [w for w in record if "2.0.0" in str(w.message)]

@@ -35,11 +35,10 @@ class MCPProxyTool(Tool):
 
     def __init__(
         self,
+        client_hub: MCPClientHub,
         remote_name: str,
         name: str | None = None,
-        description: str = "",
-        *,
-        client_hub: MCPClientHub,
+        description: str | None = None,
     ) -> None:
         if not isinstance(client_hub, MCPClientHub):
             raise TypeError(

@@ -137,8 +137,8 @@ def main() -> None:
     )
 
     tool = PyA2AtomicTool(
-        remote_name=remote_name,
-        client=client,
+        client,
+        remote_name,
     )
     show_plan(tool)
 

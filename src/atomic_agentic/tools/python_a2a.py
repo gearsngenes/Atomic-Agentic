@@ -43,11 +43,10 @@ class PyA2AtomicTool(Tool):
 
     def __init__(
         self,
+        client: PyA2AtomicClient,
         remote_name: str,
         name: str | None = None,
         description: str | None = None,
-        *,
-        client: PyA2AtomicClient,
     ) -> None:
         if not isinstance(client, PyA2AtomicClient):
             raise TypeError(

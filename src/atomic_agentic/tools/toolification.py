@@ -19,9 +19,9 @@ __all__ = ["toolify", "batch_toolify"]
 # ───────────────────────────────────────────────────────────────────────────────
 def toolify(
     component: AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub,
-    *,
     name: str | None = None,
     description: str | None = None,
+    *,
     remote_name: str | None = None,
 ) -> Tool:
     """
@@ -134,10 +134,10 @@ def toolify(
             )
 
         return MCPProxyTool(
-            remote_name=resolved_remote_name,
+            component,
+            resolved_remote_name,
             name=name,
-            description=description or "",
-            client_hub=component,
+            description=description,
         )
 
     # 4) PyA2AtomicClient -> PyA2AtomicTool.
@@ -149,10 +149,10 @@ def toolify(
             )
 
         return PyA2AtomicTool(
-            remote_name=resolved_remote_name,
+            component,
+            resolved_remote_name,
             name=name,
             description=description,
-            client=component,
         )
 
     # 5) A2AClientHub -> A2AProxyTool. Unlike routes 3/4, remote_name is
@@ -163,8 +163,8 @@ def toolify(
         resolved_skill_id = str(remote_name).strip() if remote_name_provided else None
 
         return A2AProxyTool(
-            client_hub=component,
-            skill_id=resolved_skill_id,
+            component,
+            resolved_skill_id,
             name=name,
             description=description,
         )

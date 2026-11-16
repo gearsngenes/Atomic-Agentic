@@ -130,10 +130,10 @@ def make_tool(
     description: str | None = None,
 ) -> PyA2AtomicTool:
     return PyA2AtomicTool(
-        remote_name=remote_name,
+        client or FakePyA2AtomicClient(),
+        remote_name,
         name=name,
         description=description,
-        client=client or FakePyA2AtomicClient(),
     )
 
 
@@ -194,7 +194,19 @@ class TestPyA2AtomicToolConstruction:
 
     def test_non_client_raises(self) -> None:
         with pytest.raises(TypeError, match="PyA2AtomicClient"):
-            PyA2AtomicTool(remote_name="echo", client=object())  # type: ignore[arg-type]
+            PyA2AtomicTool(object(), "echo")  # type: ignore[arg-type]
+
+class TestPyA2AtomicToolPositionalOrder:
+    def test_positional_order_is_client_remote_name_name_description(self) -> None:
+        client = FakePyA2AtomicClient()
+
+        tool = PyA2AtomicTool(client, "echo", "local_echo", "Local description.")
+
+        assert tool.client is client
+        assert tool.remote_name == "echo"
+        assert tool.name == "local_echo"
+        assert tool.description == "Local description."
+
 
 class TestPyA2AtomicToolSignatureAndMetadata:
     def test_parameters_and_return_type_come_from_remote_metadata(self) -> None:

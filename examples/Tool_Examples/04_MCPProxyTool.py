@@ -95,7 +95,7 @@ def main() -> None:
     print("Discovered tools:", tool_names.keys())
 
     for name in tool_names:
-        proxy = MCPProxyTool(remote_name=name, client_hub=client)
+        proxy = MCPProxyTool(client, name)
         _show_plan(proxy)
 
         inputs = EXAMPLE_INPUTS.get(name)

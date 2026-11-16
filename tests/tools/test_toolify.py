@@ -477,6 +477,36 @@ class TestToolifyExistingTool:
             toolify(original, remote_name="remote_add")
 
 
+class TestToolifyPositionalOverrides:
+    """`name` and `description` are positional-or-keyword; `remote_name` stays
+    keyword-only."""
+
+    def test_callable_accepts_positional_name_and_description(self) -> None:
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        tool = toolify(add, "adder", "Adds two ints.")
+
+        assert tool.name == "adder"
+        assert tool.description == "Adds two ints."
+
+    def test_existing_tool_accepts_positional_name(self) -> None:
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        original = toolify(add)
+
+        renamed = toolify(original, "renamed")
+
+        assert renamed is not original
+        assert renamed.name == "renamed"
+        assert renamed.function is original
+
+    def test_remote_name_is_keyword_only(self) -> None:
+        with pytest.raises(TypeError):
+            toolify(FakeMCPClientHub(), None, None, "search")  # type: ignore[misc]
+
+
 class TestToolifyExistingProxyTool:
     """`toolify()`'s route 1 ("already a Tool") must work uniformly across
     plain `Tool` and every proxy-tool subtype (`MCPProxyTool`,
@@ -484,14 +514,14 @@ class TestToolifyExistingProxyTool:
     an explicit Pass 4 checklist item that was previously unverified."""
 
     def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
-        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+        original = MCPProxyTool(FakeMCPClientHub(), "search")
 
         result = toolify(original)
 
         assert result is original
 
     def test_mcp_proxy_tool_with_overrides_wraps_by_reference(self) -> None:
-        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+        original = MCPProxyTool(FakeMCPClientHub(), "search")
 
         result = toolify(original, name="local_search")
 
@@ -502,14 +532,14 @@ class TestToolifyExistingProxyTool:
         assert result.invoke({"query": "hello"}).result == "mcp result"
 
     def test_pya2atomic_tool_without_overrides_returned_unchanged(self) -> None:
-        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
 
         result = toolify(original)
 
         assert result is original
 
     def test_pya2atomic_tool_with_overrides_wraps_by_reference(self) -> None:
-        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
 
         result = toolify(original, name="local_echo")
 
