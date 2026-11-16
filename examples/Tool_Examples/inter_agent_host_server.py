@@ -27,7 +27,6 @@ def main() -> None:
 
     planner = PlanActAgent(
         name="InterAgentPlanner",
-        namespace="inter_agent_host",
         description="A planner that orchestrates remote trivia and math agents through PyA2AtomicTool proxies.",
         llm_engine=llm,
         record_enabled=False,

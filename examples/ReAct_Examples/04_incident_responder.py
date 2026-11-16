@@ -124,7 +124,6 @@ def page_oncall(message: str) -> str:
 
 responder = ReActAgent(
     name="IncidentResponder",
-    namespace="examples",
     description="Investigates and remediates service incidents, escalating when it can't fix something directly.",
     llm_engine=llm_engine,
     # A failed restart here is real, recoverable information -- not a

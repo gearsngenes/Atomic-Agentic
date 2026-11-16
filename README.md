@@ -110,7 +110,6 @@ def get_account_details(index: int) -> dict:
 tool = Tool(
     function=get_account_details,
     name="get_account_details",
-    namespace="banking",
     description="Retrieve bank account details by index."
 )
 
@@ -179,7 +178,6 @@ engine = OpenAIEngine(model="gpt-4o-mini")
 
 advisor = BasicAgent(
     name="finance_advisor",
-    namespace="finance",
     description="Investment advisor.",
     llm_engine=engine,
     role_prompt="""You are an expert financial advisor at a bank. 
@@ -217,7 +215,6 @@ engine = OpenAIEngine(model="gpt-4.1-mini")
 
 agent = PlanActAgent(
     name="planner",
-    namespace="planning",
     description="Plans and solves tasks using tools.",
     llm_engine=engine,
 )
@@ -254,7 +251,6 @@ engine = OpenAIEngine(model="gpt-4.1-mini")
 
 agent = ScriptActAgent(
     name="scripter",
-    namespace="planning",
     description="Plans and solves tasks by writing Python-style call statements.",
     llm_engine=engine,
 )
@@ -291,7 +287,6 @@ def double(value: int) -> dict[str, int]:
 
 flow = SequentialFlow(
     name="add_then_double",
-    namespace="demo",
     description="Add two numbers, then double the sum.",
     steps=[Tool(add), Tool(double)],
 )

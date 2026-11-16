@@ -54,7 +54,6 @@ class _PreambleStub(StubToolAgent):
 def _build(cls: type[StubToolAgent], **overrides: Any) -> StubToolAgent:
     kwargs: dict[str, Any] = {
         "name": "tests",
-        "namespace": "tests",
         "description": "Stub subclass under test.",
         "llm_engine": FakeLLMEngine([]),
     }
@@ -247,7 +246,7 @@ class TestToolAgentAbstractContract:
     def test_toolagent_cannot_be_instantiated_directly(self) -> None:
         with pytest.raises(TypeError):
             ToolAgent(  # type: ignore[abstract]
-                name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine([]),
+                name="a", description="d", llm_engine=FakeLLMEngine([]),
             )
 
     def test_toolagent_abstract_set_is_exactly_the_eight_hooks(self) -> None:
@@ -265,7 +264,7 @@ class TestToolAgentAbstractContract:
 
         with pytest.raises(TypeError):
             incomplete(
-                name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine([]),
+                name="a", description="d", llm_engine=FakeLLMEngine([]),
             )
 
     def test_react_implements_the_frame_hooks(self) -> None:
@@ -273,21 +272,6 @@ class TestToolAgentAbstractContract:
 
     def test_planact_implements_the_frame_hooks(self) -> None:
         assert PlanActAgent.__abstractmethods__ == frozenset()
-
-
-# --------------------------------------------------------------------------- #
-# Namespace
-# --------------------------------------------------------------------------- #
-class TestToolAgentNamespace:
-    def test_namespace_is_required(self) -> None:
-        with pytest.raises(TypeError):
-            StubToolAgent(  # type: ignore[call-arg]
-                name="a", description="d", llm_engine=FakeLLMEngine([]),
-            )
-
-    def test_namespace_explicit(self) -> None:
-        agent = make_stub_tool_agent(name="a", namespace="stub_ns")
-        assert agent.namespace == "stub_ns"
 
 
 # --------------------------------------------------------------------------- #
@@ -305,7 +289,7 @@ class TestToolRegistration:
 
     def test_register_tool_instance_stores_directly_not_retoolified(self) -> None:
         agent = make_stub_tool_agent()
-        tool = Tool(function=add, name="adder", namespace="myns", description="Add values.")
+        tool = Tool(function=add, name="adder", description="Add values.")
 
         registered = agent.register_tool(tool)
 
@@ -464,7 +448,7 @@ class TestToolRegistration:
 
     def test_register_tools_mixed_invokables_and_callables(self) -> None:
         agent = make_stub_tool_agent()
-        tool = Tool(function=multiply, name="mult", namespace="myns", description="Mult.")
+        tool = Tool(function=multiply, name="mult", description="Mult.")
 
         agent.register_tools([add, tool])
 
@@ -579,7 +563,7 @@ class TestFamilyToolInstructions:
 
     def test_scriptact_appends_builtins_after_the_tool_list(self) -> None:
         agent = ScriptActAgent(
-            name="tests", namespace="tests", description="d", llm_engine=FakeLLMEngine([])
+            name="tests", description="d", llm_engine=FakeLLMEngine([])
         )
         agent.register_tool(add)
 

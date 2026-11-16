@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import functools
-import re
 from typing import Any, ClassVar, Dict, Mapping, Optional
 
 from ..a2a.a2a_client_hub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
-from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.core import NO_VAL
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..models.results.tools import A2AProxyToolResult
@@ -14,11 +13,6 @@ from ..utils.a2a import _dict_to_part, _part_to_dict
 from .base import Tool
 
 __all__ = ["A2AProxyTool"]
-
-# Collapses runs of '-', '.', or whitespace into one '_' before the
-# IDENTIFIER_PATTERN check -- "My  Agent" / "my--agent" / "my.agent" all
-# normalize to one clean candidate, not one underscore per separator char.
-_NAMESPACE_SEPARATOR_PATTERN = re.compile(r"[-.\s]+")
 
 
 class A2AProxyTool(Tool):
@@ -51,7 +45,6 @@ class A2AProxyTool(Tool):
         client_hub: A2AClientHub,
         skill_id: Optional[str] = None,
         name: Optional[str] = None,
-        namespace: Optional[str] = None,
         description: Optional[str] = None,
     ) -> None:
         if not isinstance(client_hub, A2AClientHub):
@@ -83,14 +76,6 @@ class A2AProxyTool(Tool):
         if not resolved_name:
             resolved_name = self._skill_id if is_skill_mode else "send_parts"
 
-        explicit_namespace = str(namespace or "").strip()
-        if explicit_namespace:
-            resolved_namespace = explicit_namespace
-        else:
-            card_name = str(getattr(client_hub.agent_card, "name", "") or "")
-            candidate = self._sanitize_namespace_candidate(card_name)
-            resolved_namespace = candidate if candidate is not None else "a2a"
-
         explicit_description = str(description or "").strip()
         card_description = str(getattr(client_hub.agent_card, "description", "") or "").strip()
         if is_skill_mode:
@@ -119,21 +104,8 @@ class A2AProxyTool(Tool):
         super().__init__(
             function=function,
             name=resolved_name,
-            namespace=resolved_namespace,
             description=resolved_description,
         )
-
-    @staticmethod
-    def _sanitize_namespace_candidate(card_name: str) -> Optional[str]:
-        """
-        Turn a remote AgentCard's ``name`` into a usable namespace, or
-        ``None`` if it doesn't sanitize into one. Case is preserved verbatim
-        -- no AA convention forces lowercase namespaces. A ``None`` return
-        means the caller falls back to ``"a2a"``, never to an empty-string
-        namespace.
-        """
-        candidate = _NAMESPACE_SEPARATOR_PATTERN.sub("_", card_name.strip())
-        return candidate if IDENTIFIER_PATTERN.fullmatch(candidate) else None
 
     # ------------------------------------------------------------------ #
     # Proxy properties
@@ -161,7 +133,7 @@ class A2AProxyTool(Tool):
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
         if self._skill_id is not None:
             return list(self._skill_metadata.params), self._skill_metadata.return_type
 

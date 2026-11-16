@@ -25,7 +25,6 @@ MAX_REVISIONS = 3
 # ---------------------------------------------------------------------
 maker_checker = IterativeFlow(
     name="research_report_makerchecker",
-    namespace="research",
     description="Iteratively refine an APA report with early-stop approval.",
     body_steps=[writer, critic],
     max_iterations=MAX_REVISIONS,
@@ -38,7 +37,6 @@ maker_checker = IterativeFlow(
 # ------------------------------------------------------
 flow = SequentialFlow(
     name="atomic_researcher_flow",
-    namespace="research",
     description="Atomic workflow chaining Tavily research with iterative maker-checker refinement.",
     steps=[research_tool, maker_checker],
 )

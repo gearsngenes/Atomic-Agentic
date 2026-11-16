@@ -391,7 +391,7 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
         assert list(tools) == ["search"]
         assert tools["search"]["description"] == "Search documents."
-        assert tools["search"]["return_type"] == "str"
+        assert tools["search"]["return_type"] == ("str",)
 
     def test_call_tool_uses_fake_session(self) -> None:
         session = FakeSession()

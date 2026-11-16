@@ -24,7 +24,6 @@ logging.basicConfig(level=logging.INFO)
 
 orchestrator = ReActAgent(
     name="MathOrchestrator",
-    namespace="examples",
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
     llm_engine=llm_engine,
     records_window=20,    # send-window (turns) to the model

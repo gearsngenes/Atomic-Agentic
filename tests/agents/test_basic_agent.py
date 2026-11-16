@@ -27,7 +27,6 @@ def make_basic_agent(
 ) -> BasicAgent:
     return BasicAgent(
         name="basic_agent",
-        namespace="tests",
         description="BasicAgent under test.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=role_prompt,
@@ -164,7 +163,6 @@ class TestBasicAgentMergePromptParameters:
         agent = _MergingAgent(
             extra=[tone],
             name="merging",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             role_prompt=config,

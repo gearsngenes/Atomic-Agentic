@@ -27,7 +27,45 @@ from ..constants.parameters import (
     VALID_KINDS,
 )
 
-__all__ = ["ParamSpec", "ParameterReport"]
+__all__ = ["ParamSpec", "ParameterReport", "normalize_type_tuple"]
+
+
+def normalize_type_tuple(
+    value: str | tuple[str, ...] | list[str] | set[str] | frozenset[str],
+    *,
+    label: str,
+) -> tuple[str, ...]:
+    """Canonical type-tuple normalizer for ``ParamSpec.type``, invokable return
+    types and remote type metadata; ``label`` names the field in error messages.
+
+    A ``str`` is one member (never split on ``|``); a tuple, list, set or
+    frozenset is its members. Members are stripped, deduplicated and sorted.
+    """
+    if isinstance(value, str):
+        items: tuple[Any, ...] = (value,)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        items = tuple(value)
+    else:
+        raise TypeError(
+            f"{label} must be a str, tuple, list or set of str, "
+            f"got {value.__class__.__name__}"
+        )
+
+    if not items:
+        raise ValueError(f"{label} must be non-empty")
+
+    cleaned: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError(
+                f"{label} members must be str, got {item.__class__.__name__}"
+            )
+        stripped = item.strip()
+        if not stripped:
+            raise ValueError(f"{label} members must be non-empty strings")
+        cleaned.append(stripped)
+
+    return tuple(sorted(set(cleaned)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +152,7 @@ class ParamSpec:
         name: str,
         index: int,
         kind: str,
-        type: str | tuple[str, ...] | list[str],
+        type: str | tuple[str, ...] | list[str] | set[str] | frozenset[str],
         description: str | None = None,
     ) -> tuple[str, int, str, tuple[str, ...], str | None]:
         """Validate and normalize constructor fields before state is finalized."""
@@ -151,31 +189,7 @@ class ParamSpec:
                 f"{', '.join(cls._VALID_KINDS)}; got {kind!r}"
             )
 
-        if isinstance(type, str):
-            type_items: tuple[Any, ...] = (type,)
-        elif isinstance(type, (tuple, list)):
-            type_items = tuple(type)
-        else:
-            raise TypeError(
-                f"ParamSpec.type must be a str, tuple[str, ...], or list[str], "
-                f"got {type.__class__.__name__}"
-            )
-
-        if not type_items:
-            raise ValueError("ParamSpec.type must be non-empty")
-
-        cleaned_items: list[str] = []
-        for item in type_items:
-            if not isinstance(item, str):
-                raise TypeError(
-                    f"ParamSpec.type members must be str, got {item.__class__.__name__}"
-                )
-            stripped_item = item.strip()
-            if not stripped_item:
-                raise ValueError("ParamSpec.type members must be non-empty strings")
-            cleaned_items.append(stripped_item)
-
-        cleaned_type = tuple(sorted(set(cleaned_items)))
+        cleaned_type = normalize_type_tuple(type, label="ParamSpec.type")
 
         if description is not None and not isinstance(description, str):
             raise TypeError(

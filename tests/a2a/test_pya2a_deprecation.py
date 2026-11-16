@@ -72,7 +72,7 @@ class TestPyA2AtomicDeprecation:
         assert deprecations[0].filename == __file__
 
     def test_host_construction_warns_once_at_the_caller(self) -> None:
-        tool = Tool(function=_echo, name="echo", namespace="tests")
+        tool = Tool(function=_echo, name="echo")
 
         with pytest.warns(DeprecationWarning, match=r"2\.0\.0.*A2AtomicExecutor") as record:
             PyA2AtomicHost([tool], name="host", description="Host.")

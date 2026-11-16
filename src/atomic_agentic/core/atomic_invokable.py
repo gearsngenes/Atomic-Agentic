@@ -7,7 +7,7 @@ from typing import Any, ClassVar, Iterable, Mapping, Dict
 import logging
 
 from ..constants.core import DEFAULT_LOG_LEVEL, IDENTIFIER_PATTERN, NO_VAL
-from ..models.parameters import ParamSpec
+from ..models.parameters import ParamSpec, normalize_type_tuple
 from ..utils.parameters import _validate_parameter_order
 from ..models.results import AtomicResult
 
@@ -30,7 +30,8 @@ class AtomicInvokable(ABC):
     - **interface**: ``invoke(inputs: Mapping[str, Any])`` and its async twin,
       returning an ``AtomicResult``-family successful-invocation envelope.
     - **parameters & return type**: declared at construction time as concrete
-      `parameters: list[ParamSpec]` and `return_type: str`.
+      `parameters: list[ParamSpec]` and `return_type` (a sorted, deduplicated
+      tuple of type strings, like ``ParamSpec.type``).
     - **metadata serialization**: default ``to_dict()`` implementation for
       persisting metadata.
 
@@ -111,10 +112,9 @@ class AtomicInvokable(ABC):
         self,
         *,
         name: str,
-        namespace: str,
         description: str,
         parameters: list[ParamSpec],
-        return_type: str,
+        return_type: str | tuple[str, ...] | list[str] | set[str] | frozenset[str],
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string")
@@ -125,16 +125,6 @@ class AtomicInvokable(ABC):
         self._name = name
         self.__name__ = self._name
         self.description = description
-
-        # Validate and store namespace — same identifier rules as name.
-        if not isinstance(namespace, str) or not namespace.strip():
-            raise ValueError("namespace must be a non-empty string")
-        if not IDENTIFIER_PATTERN.fullmatch(namespace):
-            raise ValueError(
-                f"namespace must be alphanumeric/underscore and not start with a digit; "
-                f"got {namespace!r}"
-            )
-        self._namespace: str = namespace
 
         # Validate parameters
         if not isinstance(parameters, list):
@@ -178,14 +168,10 @@ class AtomicInvokable(ABC):
         # Validate parameter ordering (will raise SchemaError if invalid)
         _validate_parameter_order(parameters)
 
-        # Validate return type
-        if not isinstance(return_type, str):
-            raise TypeError(
-                f"{type(self).__name__}: return_type must be a str, got {type(return_type)!r}"
-            )
-
         self._parameters: list[ParamSpec] = list(parameters)
-        self._return_type: str = return_type
+        self._return_type: tuple[str, ...] = normalize_type_tuple(
+            return_type, label=f"{type(self).__name__}: return_type"
+        )
         self._log_level: int | None = DEFAULT_LOG_LEVEL
 
     # ---------------------------------------------------------------- #
@@ -247,14 +233,9 @@ class AtomicInvokable(ABC):
         return ""
 
     @property
-    def namespace(self) -> str:
-        """Grouping label for this invokable, used as the middle segment of ``full_name``."""
-        return self._namespace
-
-    @property
     def full_name(self) -> str:
-        """Fully-qualified name of the form ``Type.namespace.name``."""
-        return f"{type(self).__name__}.{self._namespace}.{self._name}"
+        """Derived ``Type.name`` label for logs, errors and ``invoker_id``; not a lookup key."""
+        return f"{type(self).__name__}.{self._name}"
 
     @property
     def log_level(self) -> int | None:
@@ -292,8 +273,8 @@ class AtomicInvokable(ABC):
         return any(p.kind == ParamSpec.VAR_KEYWORD for p in self._parameters)
 
     @property
-    def return_type(self) -> str:
-        """Payload return type stored inside ``AtomicResult.result``."""
+    def return_type(self) -> tuple[str, ...]:
+        """Sorted, deduplicated payload return type members stored inside ``AtomicResult.result``."""
         return self._return_type
 
     # ---------------------------------------------------------------- #
@@ -444,63 +425,7 @@ class AtomicInvokable(ABC):
             params.append("/")
 
         params_str = ", ".join(params)
-        return f"{self.name}({params_str}) -> {self.return_type}"
-
-    @property
-    def fullname_signature(self) -> str:
-        """
-        Returns a signature like:
-
-            ClassName.name(a: T, b: T, /, c: T, d: T = 1, *args: T, e: T, f: T = 2, **kwargs: T) -> return_type
-
-        Mirrors ``inspect.Signature.__str__``'s own convention: a bare
-        ``/`` marks the end of a run of POSITIONAL_ONLY parameters (only
-        when at least one preceded it), and a bare ``*`` marks the start
-        of KEYWORD_ONLY parameters -- but only when no VAR_POSITIONAL
-        (``*name``) already opened keyword-only territory, since a second
-        bare ``*`` right after it would be redundant/invalid.
-        """
-        params = []
-        emitted_positional_only = False
-        seen_var_positional = False
-        emitted_keyword_only_marker = False
-
-        for spec in self._parameters:
-            ptype = " | ".join(spec.type)
-            default_marker = ""
-            if spec.default is not NO_VAL:
-                default_marker = f" = {spec.default!r}"
-
-            if spec.kind == ParamSpec.POSITIONAL_ONLY:
-                emitted_positional_only = True
-            elif emitted_positional_only:
-                params.append("/")
-                emitted_positional_only = False
-
-            if (
-                spec.kind == ParamSpec.KEYWORD_ONLY
-                and not seen_var_positional
-                and not emitted_keyword_only_marker
-            ):
-                params.append("*")
-                emitted_keyword_only_marker = True
-
-            if spec.kind == ParamSpec.VAR_POSITIONAL:
-                seen_var_positional = True
-                params.append(f"*{spec.name}: {ptype}{default_marker}")
-            elif spec.kind == ParamSpec.VAR_KEYWORD:
-                params.append(f"**{spec.name}: {ptype}{default_marker}")
-            else:
-                params.append(f"{spec.name}: {ptype}{default_marker}")
-
-        if emitted_positional_only:
-            # Every parameter was POSITIONAL_ONLY -- the closing "/" never
-            # got emitted inside the loop above (it only fires on the
-            # *next* differently-kinded parameter), so emit it here.
-            params.append("/")
-
-        params_str = ", ".join(params)
-        return f"{self.full_name}({params_str}) -> {self.return_type}"
+        return f"{self.name}({params_str}) -> {' | '.join(self._return_type)}"
 
     # ---------------------------------------------------------------- #
     # Abstract contract
@@ -653,10 +578,9 @@ class AtomicInvokable(ABC):
         return {
             "type": type(self).__name__,
             "name": self.name,
-            "namespace": self.namespace,
             "description": self._description,
             "parameters": [spec.to_dict() for spec in self._parameters],
-            "return_type": self.return_type,
+            "return_type": list(self.return_type),
         }
 
     # ---------------------------------------------------------------- #
@@ -671,7 +595,6 @@ class AtomicInvokable(ABC):
         return (
             f"{type(self).__name__}("
             f"name={self.name!r}, "
-            f"namespace={self.namespace!r}, "
             f"parameters={self.parameters!r}, "
             f"return_type={self.return_type!r}, "
             f"description={self.description!r})"
@@ -679,8 +602,8 @@ class AtomicInvokable(ABC):
 
     def __repr__(self) -> str:
         """Short, single-line, unambiguous form. `full_name` already leads
-        with the class name (`Type.namespace.name`), so no separate class
-        name prefix is added."""
+        with the class name (`Type.name`), so no separate class name prefix
+        is added."""
         return f"<{self.full_name}>"
 
     # ---------------------------------------------------------------- #

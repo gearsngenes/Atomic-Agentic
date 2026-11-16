@@ -67,7 +67,6 @@ class ScratchpadAgent(ThinkingAgent):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str | PromptConfig | None = None,
@@ -128,7 +127,6 @@ class ScratchpadAgent(ThinkingAgent):
         # 3. Construct through BasicAgent.
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             role_prompt=role_prompt,

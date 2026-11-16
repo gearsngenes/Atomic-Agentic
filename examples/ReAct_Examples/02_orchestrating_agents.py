@@ -54,7 +54,6 @@ def builder_prestep(task_description: str | None = None, *, review_feedback: dic
 
 builder = BasicAgent(
     name="CodeBuilderAgent",
-    namespace="examples",
     description="""
     Returns complete Python module source, joined with "#- path/to/module.py" headers.
     """,
@@ -84,7 +83,6 @@ def reviewer_prestep(draft_code: str, criteria: str) -> str:
 
 reviewer = BasicAgent(
     name="CodeReviewer",
-    namespace="examples",
     description="""
     Inputs: draft_code (project source) and criteria (string acceptance criteria).
     Returns a dict: {"approval_status": "Rebuild"|"Acceptable"|"Outstanding", "feedback": <critique string>}.
@@ -141,7 +139,6 @@ ONLY approval_status decides whether to continue the loop -- never judge the cod
 
 orchestrator = ReActAgent(
     name="AgenticOrchestrator",
-    namespace="examples",
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm_engine,
     tool_calls_limit=10,

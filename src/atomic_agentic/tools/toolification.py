@@ -21,7 +21,6 @@ def toolify(
     component: AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub,
     *,
     name: str | None = None,
-    namespace: str | None = None,
     description: str | None = None,
     remote_name: str | None = None,
 ) -> Tool:
@@ -32,7 +31,7 @@ def toolify(
     -------------
     1) If ``component`` is already a ``Tool``:
        - return it unchanged when no local wrapper overrides are provided;
-       - if ``name``, ``namespace``, or ``description`` is provided, return
+       - if ``name`` or ``description`` is provided, return
          a new ``Tool`` that delegates to ``component`` by reference (calls
          its real ``invoke``/``async_invoke`` under the hood) under the
          requested identity — the original is never mutated. Works
@@ -79,7 +78,6 @@ def toolify(
     # wrapper Tool, not mutation of the original Tool.
     local_tool_override_requested = (
         name is not None
-        or namespace is not None
         or description is not None
     )
 
@@ -106,7 +104,6 @@ def toolify(
         return Tool(
             function=component,
             name=name if name is not None else component.name,
-            namespace=namespace if namespace is not None else component.namespace,
             description=description if description is not None else component._description,
         )
 
@@ -125,7 +122,6 @@ def toolify(
         return Tool(
             function=component,
             name=name if name is not None else component.name,
-            namespace=namespace if namespace is not None else component.namespace,
             description=description if description is not None else component._description,
         )
 
@@ -140,7 +136,6 @@ def toolify(
         return MCPProxyTool(
             remote_name=resolved_remote_name,
             name=name,
-            namespace=namespace,
             description=description or "",
             client_hub=component,
         )
@@ -156,7 +151,6 @@ def toolify(
         return PyA2AtomicTool(
             remote_name=resolved_remote_name,
             name=name,
-            namespace=namespace,
             description=description,
             client=component,
         )
@@ -172,7 +166,6 @@ def toolify(
             client_hub=component,
             skill_id=resolved_skill_id,
             name=name,
-            namespace=namespace,
             description=description,
         )
 
@@ -212,7 +205,6 @@ def toolify(
         return Tool(
             function=component,
             name=resolved_name,
-            namespace=namespace,
             description=effective_description,
         )
 
@@ -224,8 +216,6 @@ def toolify(
 
 def batch_toolify(
     sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub] | None = None,
-    *,
-    batch_namespace: str | None = None,
 ) -> list[Tool]:
     """
     Toolify every provided source into Tool objects.
@@ -234,8 +224,7 @@ def batch_toolify(
     --------
     - Callables and AtomicInvokables are each toolified into one Tool
       (AtomicInvokable-backed Tools delegate to the original by reference).
-    - Existing Tool instances are returned unchanged unless batch-level wrapper
-      overrides are provided, in which case a new Tool wrapper is created.
+    - Existing Tool instances are returned unchanged.
     - Each MCPClientHub is expanded by listing all remote tools and toolifying
       each one into its own MCPProxyTool.
     - Each PyA2AtomicClient is expanded by listing all remote invokables and
@@ -250,8 +239,6 @@ def batch_toolify(
     sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub]
         Mixed list of local invokables, callables, Tools, and/or remote
         client hubs.
-    batch_namespace : str | None
-        Namespace override passed to each produced local or remote tool.
 
     Returns
     -------
@@ -274,7 +261,6 @@ def batch_toolify(
                     toolify(
                         source,
                         remote_name=remote_name,
-                        namespace=batch_namespace,
                     )
                 )
 
@@ -289,7 +275,6 @@ def batch_toolify(
                     toolify(
                         source,
                         remote_name=remote_name,
-                        namespace=batch_namespace,
                     )
                 )
 
@@ -298,10 +283,10 @@ def batch_toolify(
 
         if isinstance(source, A2AClientHub):
             skill_tools = [
-                toolify(source, remote_name=skill_id, namespace=batch_namespace)
+                toolify(source, remote_name=skill_id)
                 for skill_id in source.get_atomic_skills()
             ]
-            generic_tool = toolify(source, namespace=batch_namespace)
+            generic_tool = toolify(source)
 
             tools.extend([*skill_tools, generic_tool])
             continue
@@ -309,7 +294,6 @@ def batch_toolify(
         tools.append(
             toolify(
                 source,
-                namespace=batch_namespace,
             )
         )
 

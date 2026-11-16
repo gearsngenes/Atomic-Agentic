@@ -42,7 +42,6 @@ def make_agent(
 ) -> ScratchpadAgent:
     return cls(
         name="tests",
-        namespace="tests",
         description="ScratchpadAgent under test.",
         llm_engine=FakeLLMEngine(responses if responses is not None else []),
         role_prompt=role_prompt,
@@ -90,7 +89,7 @@ class TestConstruction:
     def test_thinking_rounds_is_required(self) -> None:
         with pytest.raises(TypeError, match="thinking_rounds"):
             ScratchpadAgent(
-                name="tests", namespace="tests", description="d",
+                name="tests", description="d",
                 llm_engine=FakeLLMEngine([]),
             )
 
@@ -197,7 +196,7 @@ class TestConstruction:
 class TestFixedRounds:
     def test_zero_rounds_makes_one_basic_agent_call(self) -> None:
         basic = BasicAgent(
-            name="tests", namespace="tests", description="basic",
+            name="tests", description="basic",
             llm_engine=FakeLLMEngine(["R"]), role_prompt=ROLE,
         )
         agent = make_agent(["R"], thinking_rounds=0)

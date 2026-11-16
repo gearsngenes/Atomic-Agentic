@@ -49,7 +49,6 @@ def divide(numerator: int, denominator: int) -> float:
 # ──────────────────────────  SET-UP  ───────────────────────────
 agent = ScriptActAgent(
     name="Test_ScriptActAgent",
-    namespace="examples",
     description="Testing framework-only repair rounds via a coerced divide-by-zero.",
     llm_engine=llm_engine,
     record_enabled=True,

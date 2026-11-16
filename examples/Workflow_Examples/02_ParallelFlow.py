@@ -51,21 +51,18 @@ def text_flags(text: str) -> dict[str, bool]:
 word_stats_tool = Tool(
     function=word_stats,
     name="word_stats",
-    namespace="examples",
     description="Compute word and unique word counts.",
 )
 
 line_stats_tool = Tool(
     function=line_stats,
     name="line_stats",
-    namespace="examples",
     description="Compute line and non-empty line counts.",
 )
 
 text_flags_tool = Tool(
     function=text_flags,
     name="text_flags",
-    namespace="examples",
     description="Compute simple boolean flags for text.",
 )
 
@@ -74,7 +71,6 @@ text_flags_tool = Tool(
 # ──────────────────────────────────────────────────────────────
 parallel = ParallelFlow(
     name="text_parallel_analysis",
-    namespace="examples",
     description="Run several text-analysis branches in parallel.",
     branches=[
         word_stats_tool,
@@ -116,7 +112,6 @@ for i, branch_result in enumerate(result.trace):
 # ──────────────────────────────────────────────────────────────
 parallel_subset = ParallelFlow(
     name="text_parallel_subset",
-    namespace="examples",
     description="Project only the text-flags and word-stats branches, as a list.",
     branches=[
         word_stats_tool,
@@ -139,7 +134,6 @@ print("\n=== EMPTY SELECTION: selected_branches omitted ===")
 # "select nothing." SCALAR mode returns None in that case.
 parallel_none = ParallelFlow(
     name="text_parallel_none",
-    namespace="examples",
     description="No branches selected -- demonstrates the empty-selection default.",
     branches=[word_stats_tool, line_stats_tool, text_flags_tool],
     result_mode=ParallelFlow.SCALAR,

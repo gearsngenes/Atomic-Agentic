@@ -38,8 +38,8 @@ def package_tool_result(result: Any, label: str) -> dict[str, Any]:
 
 def register_math_tools(agent: PlanActAgent | ReActAgent | ScriptActAgent) -> dict[str, str]:
     """Register add/multiply/join_text/fail_tool and return their effective
-    (bare, unaliased) ids -- each toolified under agent.name as namespace, so
-    the effective id (no alias given) is just the function's own __name__."""
+    (bare, unaliased) ids -- the effective id (no alias given) is just the
+    function's own __name__."""
     for tool in (add, multiply, join_text, fail_tool):
         agent.register_tool(tool)
     return {"add": "add", "multiply": "multiply", "join_text": "join_text", "fail_tool": "fail_tool"}
@@ -59,7 +59,6 @@ def make_planact_agent(
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
-        namespace="tests",
         description="PlanAct agent under test.",
         llm_engine=FakeLLMEngine(responses),
         record_enabled=record_enabled,
@@ -89,7 +88,6 @@ def make_react_agent(
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
-        namespace="tests",
         description="ReAct agent under test.",
         llm_engine=FakeLLMEngine(responses),
         record_enabled=record_enabled,
@@ -106,13 +104,12 @@ def make_react_agent(
 
 
 def make_script_agent(engine: FakeLLMEngine, **overrides: Any) -> ScriptActAgent:
-    """name="tests", namespace="tests", the shared math tools registered
+    """name="tests", the shared math tools registered
     (add/multiply/join_text/fail_tool); any keyword (``record_enabled``,
     ``replanning_limit``, ``instructions``, ...) overrides or extends the
     ScriptActAgent defaults."""
     kwargs: dict[str, Any] = {
         "name": "tests",
-        "namespace": "tests",
         "description": "ScriptActAgent under test.",
         "llm_engine": engine,
     }
@@ -244,11 +241,10 @@ def make_stub_thinker(
     record_enabled: bool = False,
     **kwargs: Any,
 ) -> StubThinker:
-    """name="tests", namespace="tests", engine=FakeLLMEngine(responses); the
+    """name="tests", engine=FakeLLMEngine(responses); the
     scripted responses are consumed thinking-first, then the reply."""
     return StubThinker(
         name="tests",
-        namespace="tests",
         description="StubThinker under test.",
         llm_engine=FakeLLMEngine(responses),
         role_prompt=role_prompt,
@@ -306,12 +302,11 @@ class StubToolAgent(ToolAgent):
 
 
 def make_stub_tool_agent(**overrides: Any) -> StubToolAgent:
-    """name="tests", namespace="tests", engine=FakeLLMEngine([]); any keyword
+    """name="tests", engine=FakeLLMEngine([]); any keyword
     (``record_enabled``, ``tools``, ``instructions``, ``steps_text``, ...)
     overrides or extends the defaults."""
     kwargs: dict[str, Any] = {
         "name": "tests",
-        "namespace": "tests",
         "description": "StubToolAgent under test.",
         "llm_engine": FakeLLMEngine([]),
     }

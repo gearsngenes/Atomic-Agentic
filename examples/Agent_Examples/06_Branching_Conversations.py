@@ -147,7 +147,6 @@ def main() -> None:
 
     agent = BasicAgent(
         name="branching_demo_agent",
-        namespace="examples",
         description="Conversational agent for branching context demonstration.",
         llm_engine=engine,
         role_prompt=(

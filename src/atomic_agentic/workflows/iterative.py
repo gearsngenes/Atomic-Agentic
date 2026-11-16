@@ -94,7 +94,6 @@ class IterativeFlow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         body_steps: list[AtomicInvokable],
         max_iterations: int = 1,
@@ -200,19 +199,16 @@ class IterativeFlow(Workflow):
         parameters = self._body_steps[0].parameters
 
         if self._result_setting_indices:
-            selected_types = [
-                self._body_steps[i].return_type for i in self._result_setting_indices
-            ]
-            unique_types = list(dict.fromkeys(selected_types))
-            resolved_return_type = (
-                unique_types[0] if len(unique_types) == 1 else " | ".join(unique_types)
-            )
+            resolved_return_type = {
+                t
+                for i in self._result_setting_indices
+                for t in self._body_steps[i].return_type
+            }
         else:
             resolved_return_type = type(self._fallback_value).__name__
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters,
             return_type=resolved_return_type,

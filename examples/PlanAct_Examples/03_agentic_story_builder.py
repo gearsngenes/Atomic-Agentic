@@ -86,7 +86,6 @@ return the latest updated_draft as the final answer.
 
 outliner = BasicAgent(
     name="StoryOutliner",
-    namespace="examples",
     description="Generate a structured outline from a one-sentence idea.",
     llm_engine=sub_agent_llm,
     role_prompt=OUTLINER_PROMPT,
@@ -102,7 +101,6 @@ def writer_pre(outline: str | None = None, revision_notes: str | None = None) ->
 
 writer = BasicAgent(
     name="StoryWriter",
-    namespace="examples",
     description="Writes a first draft from an outline, then revises using only reviewer notes.",
     llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
@@ -115,7 +113,6 @@ def reviewer_pre(draft: str) -> str:
 
 reviewer = BasicAgent(
     name="DraftReviewer",
-    namespace="examples",
     description="Reviews drafts and provides revision notes.",
     llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
@@ -125,7 +122,6 @@ reviewer = BasicAgent(
 
 orch = PlanActAgent(
     name="StoryPlanner",
-    namespace="examples",
     description="Plan-once agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
     record_enabled=False,

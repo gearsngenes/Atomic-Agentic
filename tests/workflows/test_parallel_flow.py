@@ -33,13 +33,11 @@ class EchoWorkflow(Workflow):
         *,
         tag: str,
         name: str | None = None,
-        namespace: str = "tests",
         description: str = "Echo workflow.",
         param_description: str | None = None,
     ) -> None:
         super().__init__(
             name=name if name is not None else f"echo_workflow_{tag}",
-            namespace=namespace,
             description=description,
             parameters=[make_value_param(description=param_description)],
             return_type="dict[str, Any]",
@@ -57,7 +55,6 @@ def make_branch(tag: str, **kwargs: Any) -> EchoWorkflow:
 def make_three_branch_flow(**kwargs: Any) -> ParallelFlow:
     return ParallelFlow(
         name="parallel_flow",
-        namespace="tests",
         description="Parallel test flow.",
         branches=[make_branch("a"), make_branch("b"), make_branch("c")],
         **kwargs,
@@ -70,7 +67,6 @@ class TypedParamWorkflow(Workflow):
     def __init__(self, *, param_type: str, tag: str) -> None:
         super().__init__(
             name=f"typed_{tag}",
-            namespace="tests",
             description="Typed-param branch.",
             parameters=[
                 ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=param_type)
@@ -89,7 +85,6 @@ class VariadicWorkflow(Workflow):
     def __init__(self, *, param_name: str, tag: str) -> None:
         super().__init__(
             name=f"variadic_{tag}",
-            namespace="tests",
             description="Variadic-param branch.",
             parameters=[
                 ParamSpec(
@@ -112,7 +107,6 @@ class TestParallelFlowConstruction:
         with pytest.raises(ValueError, match="branches must not be empty"):
             ParallelFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 branches=[],
             )
@@ -120,7 +114,6 @@ class TestParallelFlowConstruction:
         with pytest.raises(TypeError, match="branches must be"):
             ParallelFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 branches="not-a-list",  # type: ignore[arg-type]
             )
@@ -130,7 +123,6 @@ class TestParallelFlowConstruction:
 
         flow = ParallelFlow(
             name="parallel_flow",
-            namespace="tests",
             description="Parallel test flow.",
             branches=[b0, b1],
         )
@@ -143,7 +135,6 @@ class TestParallelFlowConstruction:
         with pytest.raises(TypeError, match="position 1"):
             ParallelFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 branches=[make_branch("a"), object()],  # type: ignore[list-item]
             )
@@ -154,7 +145,6 @@ class TestParallelFlowConstruction:
 
         flow = ParallelFlow(
             name="parallel_flow",
-            namespace="tests",
             description="Parallel test flow.",
             branches=[b0, b1],
         )
@@ -165,7 +155,6 @@ class TestParallelFlowConstruction:
         with pytest.raises(WorkflowError, match="no compatible reconciliation"):
             ParallelFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 branches=[
                     TypedParamWorkflow(param_type="int", tag="a"),
@@ -181,7 +170,6 @@ class TestParallelFlowConstruction:
         with pytest.raises(WorkflowError, match="Only one VAR_POSITIONAL parameter is allowed"):
             ParallelFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 branches=[
                     VariadicWorkflow(param_name="args_a", tag="a"),
@@ -196,7 +184,6 @@ class TestParallelFlowConstruction:
         with pytest.warns(UserWarning, match="compatible across"):
             flow = ParallelFlow(
                 name="parallel_flow",
-                namespace="tests",
                 description="Parallel test flow.",
                 branches=[earlier, later],
             )
@@ -214,7 +201,6 @@ class TestParallelFlowConstruction:
         with pytest.warns(UserWarning, match="compatible across"):
             flow = ParallelFlow(
                 name="parallel_flow",
-                namespace="tests",
                 description="Parallel test flow.",
                 branches=[
                     TypedParamWorkflow(param_type="dict[str, int]", tag="a"),
@@ -324,7 +310,6 @@ def make_described_branch(name: str) -> _ExtraDescriptionTool:
     return _ExtraDescriptionTool(
         function=return_value,
         name=name,
-        namespace="tests",
         description=f"Return the provided value ({name}).",
         extra="value branch extra",
     )
@@ -336,7 +321,6 @@ class TestParallelFlowExtraDescription:
 
         flow = ParallelFlow(
             name="parallel_flow",
-            namespace="tests",
             description="Parallel test flow.",
             branches=[described, make_branch("b")],
             result_mode=ParallelFlow.SCALAR,
@@ -368,7 +352,6 @@ class TestParallelFlowExtraDescription:
 
         flow = ParallelFlow(
             name="parallel_flow",
-            namespace="tests",
             description="Parallel test flow.",
             branches=[described, make_branch("b"), make_branch("c")],
             selected_branches=[0, 1, 2],
@@ -435,7 +418,6 @@ class TestParallelFlowSyncInvoke:
 
         flow = ParallelFlow(
             name="parallel_flow",
-            namespace="tests",
             description="Parallel test flow.",
             branches=[TaggedScalar(tag="a"), TaggedScalar(tag="b"), TaggedScalar(tag="c")],
             result_mode=ParallelFlow.SET,

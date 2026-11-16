@@ -10,9 +10,7 @@ from ..constants.agents import (
     ATTR_CALL_ALIAS,
     PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
-    RETURN_TOOL_FULL_NAME,
     RETURN_TOOL_NAME,
-    RETURN_TOOL_NAMESPACE,
     RETURN_VALUE_FIELD,
 )
 
@@ -30,20 +28,12 @@ def _return(val: Any) -> Any:
     return val
 
 
-# The executable Tool instance lives in this module; RETURN_TOOL_FULL_NAME is
-# used for canonical runtime identity checks.
+# The executable Tool instance lives in this module.
 return_tool = Tool(
     function=_return,
     name=RETURN_TOOL_NAME,
-    namespace=RETURN_TOOL_NAMESPACE,
     description=RETURN_TOOL_DESCRIPTION,
 )
-
-if return_tool.full_name != RETURN_TOOL_FULL_NAME:
-    raise RuntimeError(
-        f"return_tool.full_name mismatch: expected {RETURN_TOOL_FULL_NAME!r}, "
-        f"got {return_tool.full_name!r}."
-    )
 
 _return_param_names = [spec.name for spec in return_tool.parameters]
 if _return_param_names != [RETURN_VALUE_FIELD]:
@@ -96,13 +86,11 @@ def call_python_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 
 # Never registered into any agent's toolbox -- resolved directly by
 # ScriptActAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
-# sentinel, never through get_tool(). No return_tool-style identity assert
-# needed: nothing references this Tool by a full_name string, only by
-# direct object reference from agents/scriptact.py.
+# sentinel, never through get_tool(). Nothing references this Tool by a
+# full_name string, only by direct object reference from agents/scriptact.py.
 builtin_call_tool = Tool(
     function=call_python_builtin,
     name=PY_BUILTIN_ALIAS,
-    namespace="scriptact_agent",
     description=(
         "Internal ScriptActAgent dispatcher for approved Python builtin calls. "
         "Never registered into any agent's toolbox -- resolved directly by "
@@ -153,7 +141,6 @@ def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> 
 attr_call_tool = Tool(
     function=_call_attr_method,
     name=ATTR_CALL_ALIAS,
-    namespace="scriptact_agent",
     description=(
         "Internal ScriptActAgent dispatcher for attribute/method calls on a "
         "value the plan already holds. Never registered into any agent's "

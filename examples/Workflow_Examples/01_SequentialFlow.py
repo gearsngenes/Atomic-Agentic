@@ -34,7 +34,6 @@ def main() -> None:
 
     flow = SequentialFlow(
         name="demo_sequential",
-        namespace="examples",
         description="Demo SequentialFlow: add -> multiply -> format",
         steps=[step1, step2, step3],
     )
@@ -60,7 +59,6 @@ def main() -> None:
     print("\n=== include_trace=False: no per-step visibility ===")
     lean_flow = SequentialFlow(
         name="demo_sequential_lean",
-        namespace="examples",
         description="Same pipeline, tracing disabled.",
         steps=[step1, step2, step3],
         include_trace=False,

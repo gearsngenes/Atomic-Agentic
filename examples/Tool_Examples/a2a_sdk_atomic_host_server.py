@@ -36,7 +36,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     skills = [
-        toolify(fn, namespace="Basic_Math")
+        toolify(fn)
         for fn in (*BASIC_MATH_TOOLS, *EXPONENT_TOOLS, *STAT_TOOLS)
         if fn.__name__ in SKILL_NAMES
     ]

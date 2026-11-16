@@ -69,7 +69,6 @@ def haiku_post(poem: str, premise: str) -> str:
 
 haiku_writer = BasicAgent(
     name="HaikuWriter",
-    namespace="examples",
     description="Writes and prints a 3-line 5-7-5 haiku for the given premise, returning the final poem.",
     llm_engine=sub_agent_llm,
     role_prompt=(
@@ -97,7 +96,6 @@ def math_post(answer: Any, question: str) -> Any:
 
 math_specialist = ScriptActAgent(
     name="MathSpecialist",
-    namespace="examples",
     description="Solves one math question and prints the question/answer pair, while returning the final result.",
     llm_engine=sub_agent_llm,
     record_enabled=False,
@@ -114,7 +112,6 @@ math_specialist.register_tools(EXPONENT_TOOLS)
 
 delegator = ScriptActAgent(
     name="Delegator",
-    namespace="examples",
     description="Delegates each item in a batch to the appropriate specialist agent.",
     llm_engine=llm_engine,
     record_enabled=True,

@@ -12,7 +12,7 @@ def make_result(**overrides) -> AtomicResult:
     started_at = datetime.now(timezone.utc)
     kwargs = dict(
         result="payload",
-        invoker_id="Tool.ns.name",
+        invoker_id="Tool.name",
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=2),
     )
@@ -26,17 +26,17 @@ class TestAtomicResultConstruction:
         ended_at = started_at + timedelta(seconds=1)
         result = AtomicResult(
             result=[1, 2],
-            invoker_id="Tool.ns.name",
+            invoker_id="Tool.name",
             started_at=started_at,
             ended_at=ended_at,
         )
         assert result.result == [1, 2]
-        assert result.invoker_id == "Tool.ns.name"
+        assert result.invoker_id == "Tool.name"
         assert result.started_at == started_at
         assert result.ended_at == ended_at
 
     def test_invoker_id_is_stripped(self) -> None:
-        assert make_result(invoker_id="  Tool.ns.name  ").invoker_id == "Tool.ns.name"
+        assert make_result(invoker_id="  Tool.name  ").invoker_id == "Tool.name"
 
     def test_datetimes_normalized_to_utc(self) -> None:
         tz = timezone(timedelta(hours=5))
@@ -110,7 +110,7 @@ class TestAtomicResultToDict:
     def test_to_dict_values(self) -> None:
         result = make_result()
         d = result.to_dict()
-        assert d["invoker_id"] == "Tool.ns.name"
+        assert d["invoker_id"] == "Tool.name"
         assert d["started_at"] == result.started_at.isoformat()
         assert d["ended_at"] == result.ended_at.isoformat()
         assert d["elapsed_time"] == 2.0

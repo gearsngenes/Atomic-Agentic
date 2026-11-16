@@ -27,7 +27,6 @@ class PyA2AtomicTool(Tool):
     Local AA-facing identity
     ------------------------
     - name: user-supplied name, otherwise remote_name
-    - namespace: user-supplied namespace, otherwise remote agent card name, otherwise "pya2a"
     - description: user-supplied description, otherwise remote metadata description,
       otherwise remote agent card description, otherwise a stub
 
@@ -46,7 +45,6 @@ class PyA2AtomicTool(Tool):
         self,
         remote_name: str,
         name: str | None = None,
-        namespace: str | None = None,
         description: str | None = None,
         *,
         client: PyA2AtomicClient,
@@ -70,10 +68,6 @@ class PyA2AtomicTool(Tool):
 
         resolved_name = str(name or "").strip() or self._remote_name
 
-        resolved_namespace = str(namespace or "").strip()
-        if not resolved_namespace:
-            resolved_namespace = str(getattr(agent_card, "name", "") or "").strip() or "pya2a"
-
         explicit_description = str(description or "").strip()
         remote_description = str(self._remote_metadata.get("description") or "").strip()
         host_description = str(getattr(agent_card, "description", "") or "").strip()
@@ -89,7 +83,6 @@ class PyA2AtomicTool(Tool):
         super().__init__(
             function=function,
             name=resolved_name,
-            namespace=resolved_namespace,
             description=resolved_description,
         )
 
@@ -143,7 +136,7 @@ class PyA2AtomicTool(Tool):
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
         parameters_raw = self._remote_metadata.get("parameters")
         return_type = self._remote_metadata.get("return_type")
 
@@ -151,9 +144,9 @@ class PyA2AtomicTool(Tool):
             raise ToolDefinitionError(
                 f"{self.full_name}: remote metadata 'parameters' must be a list."
             )
-        if not isinstance(return_type, str):
+        if not isinstance(return_type, (str, list, tuple)):
             raise ToolDefinitionError(
-                f"{self.full_name}: remote metadata 'return_type' must be a str."
+                f"{self.full_name}: remote metadata 'return_type' must be a str or list of str."
             )
 
         parameters: list[ParamSpec] = []

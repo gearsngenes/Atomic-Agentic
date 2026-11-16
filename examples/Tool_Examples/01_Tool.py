@@ -42,21 +42,18 @@ t_add = Tool(
     add,
     name="add",
     description="Add two integers.",
-    namespace="local",
 )
 
 t_greet = Tool(
     greet,
     name="greet",
     description="Greet a person by name.",
-    namespace="local",
 )
 
 t_sum = Tool(
     summarize,
     name="summarize",
     description="Summarize text clamped to a character limit.",
-    namespace="local",
 )
 
 
@@ -65,7 +62,7 @@ t_sum = Tool(
 def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", tool.fullname_signature)
+    print("signature:", tool.signature)
     print("parameters:")
     for param in tool.parameters:
         default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"

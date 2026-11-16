@@ -24,7 +24,7 @@ class MCPProxyTool(Tool):
     """
     Proxy a single remote MCP tool as a normal AA Tool.
 
-    The proxy owns the AA-facing identity (`name`, `namespace`, `description`)
+    The proxy owns the AA-facing identity (`name`, `description`)
     and a remote MCP binding (`remote_name`) backed by one `MCPClientHub`.
     Only `client_hub`-based construction is supported (no raw-transport-param
     alternative) -- matches `A2AProxyTool`'s convention; construct an
@@ -37,7 +37,6 @@ class MCPProxyTool(Tool):
         self,
         remote_name: str,
         name: str | None = None,
-        namespace: str | None = None,
         description: str = "",
         *,
         client_hub: MCPClientHub,
@@ -80,7 +79,6 @@ class MCPProxyTool(Tool):
         super().__init__(
             function=function,
             name=resolved_name,
-            namespace=namespace or "mcp",
             description=resolved_description,
         )
 
@@ -126,7 +124,7 @@ class MCPProxyTool(Tool):
         raw = self._mcpdata.get("raw_metadata")
         return dict(raw) if isinstance(raw, Mapping) else {}
 
-    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
         parameters = self._mcpdata.get("parameters")
         return_type = self._mcpdata.get("return_type")
 
@@ -136,9 +134,9 @@ class MCPProxyTool(Tool):
             raise TypeError(
                 f"{type(self).__name__}: MCP metadata parameters must be list[ParamSpec]."
             )
-        if not isinstance(return_type, str):
+        if not isinstance(return_type, (str, list, tuple)):
             raise TypeError(
-                f"{type(self).__name__}: MCP metadata return_type must be str."
+                f"{type(self).__name__}: MCP metadata return_type must be str, list or tuple."
             )
 
         return list(parameters), return_type

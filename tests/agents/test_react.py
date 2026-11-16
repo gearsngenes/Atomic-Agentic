@@ -56,7 +56,6 @@ class TestReActConstruction:
         with pytest.raises(TypeError):
             ReActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 **removed,
@@ -71,7 +70,6 @@ class TestReActConstruction:
         with pytest.raises(ToolAgentError):
             ReActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 fail_fast="yes",  # type: ignore[arg-type]
@@ -83,7 +81,6 @@ class TestReActConstruction:
         # would have zero structural backstop.
         agent = ReActAgent(
             name="tests",
-            namespace="tests",
             description=".",
             llm_engine=FakeLLMEngine([]),
         )
@@ -93,7 +90,6 @@ class TestReActConstruction:
         with pytest.raises(ToolAgentError, match="tool_calls_limit"):
             ReActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 tool_calls_limit=-1,

@@ -87,7 +87,6 @@ class Tool(AtomicInvokable):
         self,
         function: AtomicInvokable | Callable[..., Any],
         name: Optional[str] = None,
-        namespace: Optional[str] = None,
         description: Optional[str] = None,
     ) -> None:
         """Initialize a Tool from a plain callable or an AtomicInvokable.
@@ -101,9 +100,6 @@ class Tool(AtomicInvokable):
         name:
             Optional Tool name override. If omitted, defaults to
             ``function.__name__``.
-
-        namespace:
-            Optional Tool namespace. Defaults to ``"default"``.
 
         description:
             Optional Tool description override. If omitted, defaults to the
@@ -145,12 +141,10 @@ class Tool(AtomicInvokable):
         # Build tool signature (template method)
         parameters, return_type = self._build_tool_signature()
 
-        # namespace is stored by AtomicInvokable; no local storage needed
         # Delegate name/description validation and schema setup to parent
         super().__init__(
             name=inferred_name,
             description=inferred_description,
-            namespace=namespace or "default",
             parameters=parameters,
             return_type=return_type,
         )
@@ -187,7 +181,7 @@ class Tool(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
         """Build this Tool's parameter and return schema.
 
         Schema is derived through ``extract_io(...)`` on the underlying
@@ -199,8 +193,8 @@ class Tool(AtomicInvokable):
 
         Returns
         -------
-        tuple[list[ParamSpec], str]
-            Ordered parameter specs and return type string.
+        tuple[list[ParamSpec], tuple[str, ...]]
+            Ordered parameter specs and the return type tuple.
         """
         return extract_io(self._function)
 
@@ -312,12 +306,10 @@ class Tool(AtomicInvokable):
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this tool's metadata and argument schema.
 
-        The base metadata includes identity, schema, namespace, and
-        import-path hints. This method does not guarantee that the Tool is
-        reconstructable; reconstruction is left to future factory logic.
+        The base metadata includes identity, schema, and import-path hints.
+        This method does not guarantee that the Tool is reconstructable; reconstruction is left to future factory logic.
         """
         d = super().to_dict()
-        # "namespace" is emitted by super().to_dict(); not repeated here
         d.update({
             "module": self.module,
             "qualname": self.qualname,

@@ -46,7 +46,6 @@ class BasicAgent(Agent):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str | PromptConfig | None = None,
@@ -88,7 +87,6 @@ class BasicAgent(Agent):
         # extra_parameters source.
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             record_enabled=record_enabled,

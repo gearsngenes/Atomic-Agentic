@@ -39,11 +39,10 @@ block lists it with its value hidden, and the value shows in the history as
 "$task_result_N: <type> = <value>".
 
 # HOW TO CALL A TOOL
-Call a tool by the short alias shown before "(" in its signature in the
-AVAILABLE TOOLS frame -- exactly as written, never a dotted
-Type.namespace.name form. Each plan entry calls one tool, then optionally
-binds its result via "result_name": a plain identifier (letters, digits,
-underscore, not starting with a digit) that never starts with
+Call a tool by the name shown before "(" in its signature in the AVAILABLE
+TOOLS frame -- exactly as written. Each plan entry calls one tool, then
+optionally binds its result via "result_name": a plain identifier (letters,
+digits, underscore, not starting with a digit) that never starts with
 "task_result_", is never shaped like "__name__", and is never the name of a
 readonly context variable or of a tool. A writable context variable's name updates it.
 
@@ -228,9 +227,9 @@ block lists it with its value hidden, and the value shows in the history as
 "$task_result_N: <type> = <value>".
 
 # HOW TO CALL A TOOL
-Your one call this round calls a tool by the short alias shown before "("
-in its signature in the AVAILABLE TOOLS frame -- exactly as written, never
-a dotted Type.namespace.name form. It then optionally binds its result via
+Your one call this round calls a tool by the name shown before "(" in its
+signature in the AVAILABLE TOOLS frame -- exactly as written. It then
+optionally binds its result via
 "result_name": a plain identifier (letters, digits, underscore, not
 starting with a digit) that never starts with "task_result_", is never
 shaped like "__name__", and is never the name of a readonly context
@@ -453,7 +452,7 @@ in the runtime context --
 batter = make_batter()
 
 # THIS BATCH FAILED:
-cake = bake_cake(batter=batter, minutes=250)  # FAILED: ToolInvocationError('Tool.kitchen.bake_cake: invocation failed: minutes out of range')
+cake = bake_cake(batter=batter, minutes=250)  # FAILED: ToolInvocationError('Tool.bake_cake: invocation failed: minutes out of range')
 
 -- only this batch, not the full failure history -- then a user
 instruction to continue, fixing what failed, using the work above as a

@@ -34,7 +34,6 @@ def summarize(text: str, limit: int = 40) -> str:
 pre_wrapped_tool = Tool(
     function=summarize,
     name="summarize",
-    namespace="local_demo",
     description="Truncate text to a character limit (default limit: 40).",
 )
 
@@ -47,13 +46,11 @@ def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
 pre_invoke_tool = Tool(
     function=to_prompt,
     name="to_prompt",
-    namespace="local_demo",
     description="Compose a prompt from {topic, style, audience?}. Returns a string prompt.",
 )
 
 agent = BasicAgent(
     name="Writer",
-    namespace="agent_wrapped",
     description="Concise writing assistant.",
     llm_engine=OpenAIEngine("gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
@@ -62,7 +59,6 @@ agent = BasicAgent(
 
 
 MCP_ENDPOINT = "http://127.0.0.1:8000/mcp"
-MCP_NAMESPACE = "demo_mcp"
 MCP_HEADERS: Mapping[str, str] | None = None
 
 A2A_MATH_URL = "http://localhost:7000"
@@ -97,9 +93,8 @@ def _jsonable_params(t: Tool) -> list[dict[str, Any]]:
 def show_plan(t: Tool) -> None:
     print("\n" + "=" * 72)
     print(f"Tool       : {t.full_name}")
-    print(f"Namespace  : {t.namespace}")
     print(f"Description: {t.description}")
-    print(f"Signature  : {t.fullname_signature}")
+    print(f"Signature  : {t.signature}")
     print(f"Return type: {t.return_type}")
     print("Parameters :")
     print(json.dumps(_jsonable_params(t), indent=2))
@@ -141,7 +136,6 @@ def main() -> None:
         add_scale,
         name="add_scale",
         description="Compute (a + b) * scale.",
-        namespace="local_demo",
     )
     show_plan(callable_tool)
     invoke_with_inputs(callable_tool, {"a": 2, "b": 3, "scale": 10})
@@ -149,7 +143,6 @@ def main() -> None:
     print("\n[3] Tool -> new Tool instance wrapping the same function, with overrides applied")
     updated_tool = toolify(
         pre_wrapped_tool,
-        namespace="local_demo_updated",
         description="Truncate text to a character limit with ellipsis.",
     )
     show_plan(updated_tool)
@@ -188,7 +181,6 @@ def main() -> None:
             mcp_tool = toolify(
                 mcp_hub,
                 remote_name=remote_name,
-                namespace=MCP_NAMESPACE,
             )
             show_plan(mcp_tool)
             invoke_with_inputs(mcp_tool, example_inputs_by_remote_name.get(remote_name))
@@ -209,7 +201,6 @@ def main() -> None:
         a2a_tool = toolify(
             a2a_client,
             remote_name=A2A_MATH_REMOTE_NAME,
-            namespace="demo_a2a",
         )
         show_plan(a2a_tool)
         invoke_with_inputs(
@@ -230,7 +221,6 @@ def main() -> None:
         )
         a2a_tools = batch_toolify(
             [a2a_client],
-            batch_namespace="demo_a2a_batch",
         )
         print(f"[A2A] batch_toolify produced {len(a2a_tools)} tool(s):")
         for t in a2a_tools:
@@ -248,7 +238,7 @@ def main() -> None:
 
         if skills:
             skill_id = "add" if "add" in skills else next(iter(skills))
-            skill_tool = toolify(atomic_hub, remote_name=skill_id, namespace="demo_a2a_sdk")
+            skill_tool = toolify(atomic_hub, remote_name=skill_id)
             show_plan(skill_tool)
             invoke_with_inputs(skill_tool, {"a": 12, "b": 5})
 
@@ -262,7 +252,7 @@ def main() -> None:
         print(f"[A2A-sdk] {foreign_hub.agent_card.name!r} publishes "
               f"{len(foreign_hub.get_atomic_skills())} Atomic skill(s) -- not invokable, generic mode only")
 
-        generic_tool = toolify(foreign_hub, namespace="demo_a2a_sdk")
+        generic_tool = toolify(foreign_hub)
         show_plan(generic_tool)
         invoke_with_inputs(
             generic_tool,
@@ -281,7 +271,6 @@ def main() -> None:
         atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
         a2a_sdk_tools = batch_toolify(
             [atomic_hub],
-            batch_namespace="demo_a2a_sdk_batch",
         )
         print(f"[A2A-sdk] batch_toolify produced {len(a2a_sdk_tools)} tool(s):")
         for t in a2a_sdk_tools:

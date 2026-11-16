@@ -127,13 +127,11 @@ def make_tool(
     client: FakePyA2AtomicClient | None = None,
     remote_name: str = "echo",
     name: str | None = None,
-    namespace: str | None = None,
     description: str | None = None,
 ) -> PyA2AtomicTool:
     return PyA2AtomicTool(
         remote_name=remote_name,
         name=name,
-        namespace=namespace,
         description=description,
         client=client or FakePyA2AtomicClient(),
     )
@@ -150,9 +148,8 @@ class TestPyA2AtomicToolConstruction:
         assert tool.headers is None
         assert tool.agent_card.name == "remote_agent"
         assert tool.name == "echo"
-        assert tool.namespace == "remote_agent"
         assert tool.description == "Remote echo invokable."
-        assert tool.full_name == "PyA2AtomicTool.remote_agent.echo"
+        assert tool.full_name == "PyA2AtomicTool.echo"
         assert client.metadata_calls == ["echo"]
 
     def test_remote_name_is_stripped(self) -> None:
@@ -163,21 +160,13 @@ class TestPyA2AtomicToolConstruction:
     def test_explicit_identity_overrides_defaults(self) -> None:
         tool = make_tool(
             name="local_echo",
-            namespace="a2a_tools",
             description="Local description.",
         )
 
         assert tool.name == "local_echo"
-        assert tool.namespace == "a2a_tools"
         assert tool.description == "Local description."
-        assert tool.full_name == "PyA2AtomicTool.a2a_tools.local_echo"
+        assert tool.full_name == "PyA2AtomicTool.local_echo"
 
-    def test_namespace_falls_back_to_pya2a_when_agent_card_name_missing(self) -> None:
-        client = FakePyA2AtomicClient(agent_name="")
-
-        tool = make_tool(client=client)
-
-        assert tool.namespace == "pya2a"
 
     def test_description_uses_agent_card_when_metadata_description_missing(self) -> None:
         client = FakePyA2AtomicClient(
@@ -215,7 +204,7 @@ class TestPyA2AtomicToolSignatureAndMetadata:
             ("value", ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",), NO_VAL),
             ("tag", ParamSpec.POSITIONAL_OR_KEYWORD, ("str",), "default"),
         ]
-        assert tool.return_type == "dict[str, Any]"
+        assert tool.return_type == ("dict[str, Any]",)
 
     def test_remote_metadata_property_returns_copy(self) -> None:
         tool = make_tool()
@@ -495,7 +484,6 @@ class TestPyA2AtomicToolHeadersAndSerialization:
 
         assert data["type"] == "PyA2AtomicTool"
         assert data["name"] == "echo"
-        assert data["namespace"] == "remote_agent"
         assert data["remote_name"] == "echo"
         assert data["client"]["type"] == "FakePyA2AtomicClient"
         assert data["client"]["url"] == "http://example.test/a2a"

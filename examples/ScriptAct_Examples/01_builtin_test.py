@@ -32,7 +32,6 @@ print("Testing prebuilt tools with ScriptActAgent's one-shot decomposition")
 # ──────────────────────────  SET-UP  ───────────────────────────
 agent = ScriptActAgent(
     name="Test_ScriptActAgent",
-    namespace="examples",
     description="Testing the prebuilt tool lists with one-shot planning + execution.",
     llm_engine=llm_engine,
     record_enabled=True,

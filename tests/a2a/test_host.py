@@ -35,10 +35,9 @@ def make_param(name: str, index: int) -> ParamSpec:
     )
 
 
-def make_invokable(name: str = "echo", namespace: str = "tests") -> EchoInvokable:
+def make_invokable(name: str = "echo") -> EchoInvokable:
     return EchoInvokable(
         name=name,
-        namespace=namespace,
         description="Echo invokable.",
         parameters=[make_param("value", 0)],
         return_type="dict[str, Any]",
@@ -48,7 +47,6 @@ def make_invokable(name: str = "echo", namespace: str = "tests") -> EchoInvokabl
 def make_scalar_invokable(name: str = "scalar") -> ScalarInvokable:
     return ScalarInvokable(
         name=name,
-        namespace="tests",
         description="Scalar invokable.",
         parameters=[make_param("value", 0)],
         return_type="int",
@@ -69,7 +67,6 @@ class DescribedInvokable(AtomicInvokable):
 def make_described_invokable(name: str = "described") -> DescribedInvokable:
     return DescribedInvokable(
         name=name,
-        namespace="tests",
         description="Described invokable.",
         parameters=[
             ParamSpec(
@@ -175,8 +172,8 @@ class TestPyA2AtomicHostConstruction:
     def test_dict_form_same_underlying_name_different_keys_succeeds(self) -> None:
         host = PyA2AtomicHost(
             {
-                "a": make_invokable("echo", namespace="ns_a"),
-                "b": make_invokable("echo", namespace="ns_b"),
+                "a": make_invokable("echo"),
+                "b": make_invokable("echo"),
             },
             name="test_host",
             description="Test host.",
@@ -282,8 +279,8 @@ class TestPyA2AtomicHostRegistry:
             description="Test host.",
         )
 
-        host.register(make_invokable("echo", namespace="ns_a"))
-        host.register(make_invokable("echo", namespace="ns_b"), remote_name="alt")
+        host.register(make_invokable("echo"))
+        host.register(make_invokable("echo"), remote_name="alt")
 
         assert host.invokable_names == ["echo", "alt"]
 
@@ -342,7 +339,7 @@ class TestPyA2AtomicHostPayloads:
         metadata = host._get_invokable_metadata_payload("echo")
 
         assert metadata["name"] == "echo"
-        assert metadata["return_type"] == "dict[str, Any]"
+        assert metadata["return_type"] == ["dict[str, Any]"]
         assert metadata["invokable_type"] == "EchoInvokable"
 
     def test_get_invokable_metadata_payload_uses_remote_name_not_intrinsic_name(self) -> None:

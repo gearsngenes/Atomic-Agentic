@@ -41,7 +41,6 @@ def testDelayPrint() -> None:
 
 async_tester = ScriptActAgent(
     name="Async_Delay_Tester",
-    namespace="examples",
     description="Tests the ability to run independent statements concurrently.",
     llm_engine=llm_engine,
     record_enabled=True,

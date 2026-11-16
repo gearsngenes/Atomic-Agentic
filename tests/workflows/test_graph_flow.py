@@ -14,7 +14,7 @@ from atomic_agentic.workflows.graph import GraphFlow
 
 def T(fn: Any, name: str) -> Tool:
     """Shorthand for a deterministic Tool node/router, no LLM involved."""
-    return Tool(function=fn, name=name, namespace="tests", description=f"node {name}.")
+    return Tool(function=fn, name=name, description=f"node {name}.")
 
 
 def make_node(name: str = "start") -> Tool:
@@ -41,7 +41,6 @@ def make_graph_flow(
     resolved_edges = edges if edges is not None else []
     return GraphFlow(
         name=name,
-        namespace="tests",
         description="Graph test flow.",
         nodes=resolved_nodes,
         edges=resolved_edges,
@@ -201,7 +200,6 @@ class TestGraphFlowConstruction:
         # they're never part of self._node_data.
         flow = GraphFlow(
             name="router_scope",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -282,11 +280,11 @@ class TestGraphFlowConstruction:
             result_mode=GraphFlow.SCALAR,
             return_keys=["y"],
         )
-        assert flow.return_type == "int"
+        assert flow.return_type == ("int",)
 
     def test_scalar_return_type_any_for_orphan_key(self) -> None:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=["never_declared"])
-        assert flow.return_type == "Any"
+        assert flow.return_type == ("Any",)
 
     def test_construction_raises_when_any_reader_coexists_with_a_real_type_conflict(self) -> None:
         # "y" declared as int by one node and str by another -- a genuine
@@ -340,7 +338,7 @@ class TestGraphFlowConstruction:
             result_mode=GraphFlow.SCALAR,
             return_keys=["y"],
         )
-        assert flow.return_type == "int"
+        assert flow.return_type == ("int",)
 
     def test_scalar_return_type_unions_genuinely_distinct_compatible_declarations(self) -> None:
         # "y" declared as dict[str, Any] by one node, dict[str, int] by
@@ -366,7 +364,7 @@ class TestGraphFlowConstruction:
             result_mode=GraphFlow.SCALAR,
             return_keys=["y"],
         )
-        assert flow.return_type == "dict[str, Any] | dict[str, int]"
+        assert flow.return_type == ("dict[str, Any]", "dict[str, int]")
 
     def test_scalar_return_type_simplifies_bare_origin_redundancy(self) -> None:
         # "y" declared as bare dict by one node, dict[str, int] by another,
@@ -396,15 +394,15 @@ class TestGraphFlowConstruction:
             result_mode=GraphFlow.SCALAR,
             return_keys=["y"],
         )
-        assert flow.return_type == "dict"
+        assert flow.return_type == ("dict",)
 
     def test_scalar_return_type_none_when_no_return_keys(self) -> None:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=None)
-        assert flow.return_type == "None"
+        assert flow.return_type == ("None",)
 
     def test_non_scalar_return_type_is_mode_name(self) -> None:
         flow = make_graph_flow(result_mode=GraphFlow.DICT, return_keys=["x"])
-        assert flow.return_type == "dict"
+        assert flow.return_type == ("dict",)
 
 
 class TestGraphFlowNodeDataAssembly:
@@ -603,7 +601,6 @@ class TestGraphFlowSyncInvoke:
         edges = [("start", "left"), ("start", "right"), ("left", "merge"), ("right", "merge")]
         flow = GraphFlow(
             name="fanout",
-            namespace="tests",
             description=".",
             nodes=nodes,
             edges=edges,
@@ -629,7 +626,6 @@ class TestGraphFlowSyncInvoke:
         router = T(loop_or_stop, "router")
         flow = GraphFlow(
             name="cycle",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -671,7 +667,6 @@ class TestGraphFlowSyncInvoke:
         }
         flow = GraphFlow(
             name="multi_router",
-            namespace="tests",
             description=".",
             nodes=nodes,
             edges=[("source", router_a), ("source", router_b)],
@@ -705,7 +700,6 @@ class TestGraphFlowStateCollisions:
         edges = [("start", "writer_a"), ("start", "writer_b")]
         return GraphFlow(
             name="collision",
-            namespace="tests",
             description=".",
             nodes=nodes,
             edges=edges,
@@ -762,7 +756,6 @@ class TestGraphFlowStateCollisions:
 
         flow = GraphFlow(
             name="solo_write",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start"), "only_writer": T(only_writer, "only_writer")},
             edges=[("start", "only_writer")],
@@ -786,7 +779,6 @@ class TestGraphFlowTermination:
         nodes = {"start": T(start_fn, "start"), "slow_branch": T(slow_branch_fn, "slow_branch")}
         return GraphFlow(
             name="stop_early_flow",
-            namespace="tests",
             description=".",
             nodes=nodes,
             edges=[("start", "slow_branch")],
@@ -823,7 +815,6 @@ class TestGraphFlowTermination:
         router = T(always_loop, "always_loop")
         return GraphFlow(
             name="capped",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -923,7 +914,6 @@ class TestGraphFlowTraceAndEdgeTraversals:
         start_node = T(start_fn, "start")
         flow = GraphFlow(
             name="trace_order",
-            namespace="tests",
             description=".",
             nodes={"start": start_node},
             edges=[("start", router)],
@@ -948,7 +938,6 @@ class TestGraphFlowAsyncInvoke:
         router = T(loop_or_stop, "router")
         flow = GraphFlow(
             name="async_cycle",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -972,7 +961,6 @@ class TestGraphFlowValidationAndErrors:
 
         flow = GraphFlow(
             name="bad_output",
-            namespace="tests",
             description=".",
             nodes={"start": T(bad_fn, "start")},
             edges=[],
@@ -993,7 +981,6 @@ class TestGraphFlowValidationAndErrors:
         router = T(bad_router, "bad_router")
         flow = GraphFlow(
             name="bad_router_flow",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -1014,7 +1001,6 @@ class TestGraphFlowValidationAndErrors:
         router = T(bad_router, "bad_router")
         flow = GraphFlow(
             name="bad_target_flow",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -1031,7 +1017,6 @@ class TestGraphFlowValidationAndErrors:
 
         flow = GraphFlow(
             name="raising_flow",
-            namespace="tests",
             description=".",
             nodes={"start": T(raising_fn, "start")},
             edges=[],
@@ -1052,7 +1037,6 @@ class TestGraphFlowValidationAndErrors:
         router = T(raising_router, "raising_router")
         flow = GraphFlow(
             name="raising_router_flow",
-            namespace="tests",
             description=".",
             nodes={"start": T(start_fn, "start")},
             edges=[("start", router)],
@@ -1076,7 +1060,6 @@ class TestGraphFlowSerialization:
         nodes = {"start": T(start_fn, "start"), "next": make_node("next")}
         flow = GraphFlow(
             name="serial",
-            namespace="tests",
             description=".",
             nodes=nodes,
             edges=[("start", "next"), ("start", router)],

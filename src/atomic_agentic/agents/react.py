@@ -120,7 +120,6 @@ class ReActAgent(ToolAgent):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         record_enabled: bool = False,
@@ -159,7 +158,6 @@ class ReActAgent(ToolAgent):
         """
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             record_enabled=record_enabled,

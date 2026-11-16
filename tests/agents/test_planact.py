@@ -48,7 +48,6 @@ class TestPlanActConstruction:
         with pytest.raises(ToolAgentError):
             PlanActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 fail_fast="yes",  # type: ignore[arg-type]
@@ -68,7 +67,6 @@ class TestPlanActConstruction:
         with pytest.raises(TypeError):
             PlanActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 **removed,

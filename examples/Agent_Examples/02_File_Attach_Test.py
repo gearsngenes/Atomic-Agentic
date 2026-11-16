@@ -17,7 +17,6 @@ llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-fl
 # --- define our agent ---
 agent = BasicAgent(
     name="DocSummarizer",
-    namespace="examples",
     description="Summarizes uploaded documents.",
     llm_engine=llm,
     role_prompt="You are a concise technical summarizer.",

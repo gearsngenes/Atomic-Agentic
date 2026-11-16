@@ -37,7 +37,6 @@ def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
 
 agent = BasicAgent(
     name="Writer",
-    namespace="agent_wrapped",
     description="Helpful writing assistant.",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
@@ -63,7 +62,7 @@ def show_plan(tool: Tool) -> None:
 
     print(f"\n-- {tool.full_name} call plan --")
     print("wraps:", type(tool.function).__name__)
-    print("signature:", tool.fullname_signature)
+    print("signature:", tool.signature)
     print("parameters:")
 
     for param in tool.parameters:
@@ -75,7 +74,6 @@ def show_plan(tool: Tool) -> None:
         print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
 
     print("metadata:")
-    print("  namespace:", meta.get("namespace"))
     print("  module:", meta.get("module"))
     print("  qualname:", meta.get("qualname"))
 

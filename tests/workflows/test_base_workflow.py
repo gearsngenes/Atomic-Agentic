@@ -28,7 +28,6 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
-        namespace: str = "tests",
         description: str = "Echo workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "dict[str, Any]",
@@ -36,7 +35,6 @@ class EchoWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
@@ -57,10 +55,9 @@ class NativeAsyncEchoWorkflow(EchoWorkflow):
 class TraceEmittingWorkflow(Workflow):
     """Workflow whose ``_run``/``_async_run`` explicitly populate ``trace``."""
 
-    def __init__(self, *, name: str = "trace_workflow", namespace: str = "tests") -> None:
+    def __init__(self, *, name: str = "trace_workflow") -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description="Trace-emitting workflow.",
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
@@ -79,7 +76,6 @@ class ConfigurableWorkflow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str = "tests",
         description: str = "Configurable workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "Any",
@@ -90,7 +86,6 @@ class ConfigurableWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
@@ -110,19 +105,6 @@ class ConfigurableWorkflow(Workflow):
         return self._result, {}
 
 
-class TestWorkflowNamespace:
-    def test_workflow_namespace_default(self) -> None:
-        workflow = EchoWorkflow()
-        assert workflow.namespace == "tests"
-
-    def test_workflow_namespace_explicit(self) -> None:
-        workflow = ConfigurableWorkflow(
-            name="wf",
-            namespace="wf_ns",
-        )
-        assert workflow.namespace == "wf_ns"
-
-
 class TestWorkflowConstruction:
     def test_initializes_name_description_parameters_return_type(self) -> None:
         params = [make_value_param()]
@@ -136,7 +118,7 @@ class TestWorkflowConstruction:
         assert workflow.name == "my_workflow"
         assert workflow.description == "A workflow."
         assert workflow.parameters == params
-        assert workflow.return_type == "dict[str, Any]"
+        assert workflow.return_type == ("dict[str, Any]",)
 
     def test_include_trace_defaults_to_true(self) -> None:
         workflow = EchoWorkflow()

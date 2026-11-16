@@ -108,7 +108,6 @@ class GraphFlow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         nodes: dict[str, AtomicInvokable],
         edges: list[tuple[str, str | None | AtomicInvokable]],
@@ -309,9 +308,8 @@ class GraphFlow(Workflow):
                     # tuple, per the collision check above) into one set,
                     # drop the wildcard "Any" (adds no real information),
                     # collapse any bare-origin/parameterized-sibling
-                    # redundancy (dict + dict[str, int] -> dict), then join
-                    # what's left as a union -- same representation
-                    # convention as every other return_type in this pass.
+                    # redundancy (dict + dict[str, int] -> dict); what's left
+                    # is the return type's member set.
                     # Deliberately the full raw union, not narrowed to
                     # key_report.witness_types -- an output question needing
                     # every possibility, not an input question needing
@@ -324,7 +322,7 @@ class GraphFlow(Workflow):
                         if spec is not None:
                             flat_types.update(spec.type)
                     concrete_types = _simplify_type_set(flat_types - {"Any"})
-                    return_type = " | ".join(sorted(concrete_types)) if concrete_types else "Any"
+                    return_type = concrete_types or "Any"
                 else:
                     return_type = "Any"
             else:
@@ -334,7 +332,6 @@ class GraphFlow(Workflow):
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters,
             return_type=return_type,

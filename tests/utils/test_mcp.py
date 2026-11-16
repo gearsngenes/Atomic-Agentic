@@ -100,7 +100,7 @@ class TestPlainMcpValue:
 class TestMcpExtractionAndReturnType:
     def test_non_mapping_output_schema_uses_content_blocks(self) -> None:
         assert _infer_mcp_extraction_mode(None) == "content_blocks"
-        assert _infer_mcp_return_type(None) == "List[ContentBlock]"
+        assert _infer_mcp_return_type(None) == ("list[ContentBlock]",)
 
     def test_single_result_property_extracts_result(self) -> None:
         schema = {
@@ -111,7 +111,7 @@ class TestMcpExtractionAndReturnType:
         }
 
         assert _infer_mcp_extraction_mode(schema) == "extract_result"
-        assert _infer_mcp_return_type(schema) == "int"
+        assert _infer_mcp_return_type(schema) == ("int",)
 
     def test_object_schema_uses_structured_content_dict(self) -> None:
         schema = {
@@ -123,13 +123,39 @@ class TestMcpExtractionAndReturnType:
         }
 
         assert _infer_mcp_extraction_mode(schema) == "structured_content"
-        assert _infer_mcp_return_type(schema) == "dict[str, Any]"
+        assert _infer_mcp_return_type(schema) == ("dict[str, Any]",)
 
     def test_non_object_schema_returns_inferred_type(self) -> None:
         schema = {"type": "array", "items": {"type": "boolean"}}
 
         assert _infer_mcp_extraction_mode(schema) == "structured_content"
-        assert _infer_mcp_return_type(schema) == "list[bool]"
+        assert _infer_mcp_return_type(schema) == ("list[bool]",)
+
+    def test_any_of_result_schema_yields_multi_member_tuple(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"result": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+        }
+
+        assert _infer_mcp_return_type(schema) == ("int", "str")
+
+    def test_type_array_result_schema_yields_multi_member_tuple(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"result": {"type": ["string", "null"]}},
+        }
+
+        assert _infer_mcp_return_type(schema) == ("None", "str")
+
+    def test_one_of_top_level_schema_yields_multi_member_tuple(self) -> None:
+        schema = {"oneOf": [{"type": "boolean"}, {"type": "number"}]}
+
+        assert _infer_mcp_return_type(schema) == ("bool", "float")
+
+    def test_object_alternative_in_type_array_collapses_to_dict(self) -> None:
+        schema = {"type": ["object", "string"]}
+
+        assert _infer_mcp_return_type(schema) == ("dict[str, Any]",)
 
 
 class TestBuildMcpToolMetadata:
@@ -160,7 +186,7 @@ class TestBuildMcpToolMetadata:
         metadata = _build_mcp_tool_metadata(raw_tool)
 
         assert metadata["description"] == "Search documents."
-        assert metadata["return_type"] == "str"
+        assert metadata["return_type"] == ("str",)
         assert metadata["extraction_mode"] == "extract_result"
         assert metadata["raw_metadata"]["name"] == "search"
         assert metadata["raw_metadata"]["annotations"] == {"safe": True}

@@ -71,9 +71,8 @@ client = MCPClientHub(**CLIENT_CONFIGS[TRANSPORT_MODE])
 
 def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
-    print("from:", proxy.namespace)
     print("description:", proxy.description)
-    print("signature:", proxy.fullname_signature)
+    print("signature:", proxy.signature)
     print("parameters:")
     for param in proxy.parameters:
         default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"
@@ -96,7 +95,7 @@ def main() -> None:
     print("Discovered tools:", tool_names.keys())
 
     for name in tool_names:
-        proxy = MCPProxyTool(remote_name=name, namespace = SERVER_NAME, client_hub=client)
+        proxy = MCPProxyTool(remote_name=name, client_hub=client)
         _show_plan(proxy)
 
         inputs = EXAMPLE_INPUTS.get(name)

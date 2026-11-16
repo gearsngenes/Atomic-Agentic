@@ -23,16 +23,14 @@ not beside the importing script): each consumer adds `examples/` to
 
 Plain functions, not `Tool`-wrapped: `register_tool`/`register_tools`
 already normalize a bare callable via `toolify(name=fn.__name__,
-description=description or fn.__doc__, namespace=self.name)` -- so a
+description=description or fn.__doc__)` -- so a
 docstring alone supplies the description, and no `Tool(...)` construction
-is needed here. The one behavior difference from a pre-wrapped `Tool`:
-namespace comes from the *registering agent's own name*, not a per-category
-label like `"Basic_Math"`/`"Trig"` -- fine for these examples since no two
-functions below share a bare name, so there's no collision risk either way.
+is needed here. No two functions below share a bare name, so there's no
+collision risk.
 `Tool_Examples/a2a_sdk_atomic_host_server.py` is the one consumer that
 needs real `Tool` instances (publishes skills directly via
 `A2AtomicExecutor`, which requires `AtomicInvokable`, not a bare callable)
--- it calls `toolify(fn, namespace=...)` itself at the call site rather
+-- it calls `toolify(fn)` itself at the call site rather
 than this module pre-wrapping everything for that one special case.
 
 Example

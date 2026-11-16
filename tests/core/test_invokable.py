@@ -49,13 +49,11 @@ def make_invokable(
     parameters: list[ParamSpec] | None = None,
     *,
     name: str = "echo",
-    namespace: str = "tests",
     description: str = "Echo test invokable.",
-    return_type: str = "dict[str, Any]",
+    return_type: str | list[str] | set[str] = "dict[str, Any]",
 ) -> EchoInvokable:
     return EchoInvokable(
         name=name,
-        namespace=namespace,
         description=description,
         parameters=parameters if parameters is not None else [make_param("x", 0)],
         return_type=return_type,
@@ -68,7 +66,7 @@ class TestAtomicInvokableConstruction:
 
         assert invokable.name == "echo"
         assert invokable.description == "Echo test invokable."
-        assert invokable.return_type == "dict[str, Any]"
+        assert invokable.return_type == ("dict[str, Any]",)
 
     @pytest.mark.parametrize("bad_name", ["", "   ", "bad-name", "123bad"])
     def test_invalid_name_raises(self, bad_name: str) -> None:
@@ -84,7 +82,6 @@ class TestAtomicInvokableConstruction:
         with pytest.raises(TypeError):
             EchoInvokable(
                 name="echo",
-                namespace="tests",
                 description="Echo test invokable.",
                 parameters=("x",),  # type: ignore[arg-type]
                 return_type="dict[str, Any]",
@@ -117,6 +114,33 @@ class TestAtomicInvokableConstruction:
         with pytest.raises(TypeError):
             make_invokable(return_type=dict)  # type: ignore[arg-type]
 
+    def test_return_type_str_is_one_member_and_not_split(self) -> None:
+        assert make_invokable(return_type="int | str").return_type == ("int | str",)
+
+    @pytest.mark.parametrize(
+        "value",
+        [["str", "int", "str"], ("int", "str"), {"str", "int"}, frozenset({"int", "str"})],
+    )
+    def test_return_type_collection_is_sorted_and_deduplicated(self, value) -> None:
+        assert make_invokable(return_type=value).return_type == ("int", "str")
+
+    def test_empty_return_type_raises(self) -> None:
+        with pytest.raises(ValueError):
+            make_invokable(return_type=[])
+
+    def test_blank_return_type_member_raises(self) -> None:
+        with pytest.raises(ValueError):
+            make_invokable(return_type=["int", "  "])
+
+    def test_non_str_return_type_member_raises(self) -> None:
+        with pytest.raises(TypeError):
+            make_invokable(return_type=["int", 3])  # type: ignore[list-item]
+
+    def test_signature_joins_return_type_members_once(self) -> None:
+        invokable = make_invokable(name="echo", return_type={"str", "None"})
+
+        assert invokable.signature.endswith(") -> None | str")
+
     def test_constructor_copies_parameters_list(self) -> None:
         params = [make_param("x", 0)]
         invokable = make_invokable(parameters=params)
@@ -139,51 +163,24 @@ class TestAtomicInvokableIdentity:
     def test_full_name_uses_base_class_name_and_name(self) -> None:
         invokable = make_invokable(name="sample")
 
-        assert invokable.full_name == "EchoInvokable.tests.sample"
+        assert invokable.full_name == "EchoInvokable.sample"
 
-class TestAtomicInvokableNamespace:
-    def test_namespace_is_required(self) -> None:
+class TestAtomicInvokableIdentity:
+    def test_namespace_argument_is_rejected(self) -> None:
         with pytest.raises(TypeError):
-            EchoInvokable(
+            EchoInvokable(  # type: ignore[call-arg]
                 name="echo",
+                namespace="grp",
                 description="Echo test invokable.",
                 parameters=[make_param("x", 0)],
                 return_type="str",
             )
 
-    def test_namespace_explicit(self) -> None:
-        invokable = EchoInvokable(
-            name="foo", description="d", namespace="my_group",
-            parameters=[], return_type="str",
-        )
-        assert invokable.namespace == "my_group"
+    def test_no_namespace_attribute(self) -> None:
+        assert not hasattr(make_invokable(), "namespace")
 
-    def test_namespace_in_full_name(self) -> None:
-        invokable = EchoInvokable(
-            name="foo", description="d", namespace="grp",
-            parameters=[], return_type="str",
-        )
-        assert invokable.full_name == "EchoInvokable.grp.foo"
-
-    def test_namespace_in_to_dict(self) -> None:
-        invokable = EchoInvokable(
-            name="foo", description="d", namespace="grp",
-            parameters=[], return_type="str",
-        )
-        assert invokable.to_dict()["namespace"] == "grp"
-
-    @pytest.mark.parametrize("bad_ns", ["bad namespace", "1bad", ""])
-    def test_namespace_invalid_raises(self, bad_ns: str) -> None:
-        with pytest.raises(ValueError):
-            EchoInvokable(
-                name="foo", description="d", namespace=bad_ns,
-                parameters=[], return_type="str",
-            )
-
-    def test_namespace_is_read_only(self) -> None:
-        invokable = make_invokable()
-        with pytest.raises(AttributeError):
-            invokable.namespace = "other"  # type: ignore[misc]
+    def test_to_dict_has_no_namespace_key(self) -> None:
+        assert "namespace" not in make_invokable().to_dict()
 
 
 class TestAtomicInvokableParameterContract:
@@ -223,9 +220,9 @@ class TestAtomicInvokableParameterContract:
             make_param("extras", 2, ParamSpec.VAR_KEYWORD),
         ])
 
-        signature = invokable.fullname_signature
+        signature = invokable.signature
 
-        assert "EchoInvokable.tests.echo" in signature
+        assert signature.startswith("echo(")
         assert "x: int" in signature
         assert "*args: Any" in signature
         assert "**extras: Any" in signature
@@ -233,15 +230,13 @@ class TestAtomicInvokableParameterContract:
 
 
 class TestAtomicInvokableSignatureRendering:
-    """Covers the `/`/`*` marker logic shared verbatim by `signature` and
-    `fullname_signature` -- parametrized across both properties so a future
-    dedup of their duplicated bodies stays covered either way."""
+    """Covers the `/`/`*` marker logic of `signature`."""
 
     @staticmethod
     def _render(invokable: EchoInvokable, prop: str) -> str:
         return getattr(invokable, prop)
 
-    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    @pytest.mark.parametrize("prop", ["signature"])
     def test_bare_slash_after_positional_only_run(self, prop: str) -> None:
         invokable = make_invokable(parameters=[
             make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
@@ -253,7 +248,7 @@ class TestAtomicInvokableSignatureRendering:
 
         assert "a: int, b: int, /, c: int" in rendered
 
-    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    @pytest.mark.parametrize("prop", ["signature"])
     def test_bare_star_before_keyword_only_run(self, prop: str) -> None:
         invokable = make_invokable(parameters=[
             make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
@@ -265,7 +260,7 @@ class TestAtomicInvokableSignatureRendering:
 
         assert "a: int, *, b: int, c: int" in rendered
 
-    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    @pytest.mark.parametrize("prop", ["signature"])
     def test_var_positional_suppresses_bare_star(self, prop: str) -> None:
         invokable = make_invokable(parameters=[
             make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
@@ -279,7 +274,7 @@ class TestAtomicInvokableSignatureRendering:
         assert "*args: int, b: int" in rendered
         assert "*args: int, *, b: int" not in rendered
 
-    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    @pytest.mark.parametrize("prop", ["signature"])
     def test_all_positional_only_still_emits_closing_slash(self, prop: str) -> None:
         invokable = make_invokable(parameters=[
             make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
@@ -290,7 +285,7 @@ class TestAtomicInvokableSignatureRendering:
 
         assert "a: int, b: int, /)" in rendered
 
-    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    @pytest.mark.parametrize("prop", ["signature"])
     def test_default_value_rendered_regardless_of_kind(self, prop: str) -> None:
         invokable = make_invokable(parameters=[
             make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int", default=1),
@@ -302,17 +297,14 @@ class TestAtomicInvokableSignatureRendering:
         assert "a: int = 1" in rendered
         assert "b: int = 2" in rendered
 
-    def test_signature_omits_class_and_namespace_prefix(self) -> None:
-        invokable = make_invokable(name="echo", namespace="tests")
+    def test_signature_omits_class_prefix(self) -> None:
+        invokable = make_invokable(name="echo")
 
         assert invokable.signature.startswith("echo(")
         assert "EchoInvokable" not in invokable.signature
-        assert "tests" not in invokable.signature
 
-    def test_fullname_signature_includes_class_and_namespace_prefix(self) -> None:
-        invokable = make_invokable(name="echo", namespace="tests")
-
-        assert invokable.fullname_signature.startswith("EchoInvokable.tests.echo(")
+    def test_fullname_signature_is_removed(self) -> None:
+        assert not hasattr(make_invokable(), "fullname_signature")
 
 
 class TestAtomicInvokableFiltering:
@@ -636,7 +628,7 @@ class TestAtomicInvokableSerialization:
         assert data["type"] == "EchoInvokable"
         assert data["name"] == "echo"
         assert data["description"] == "Echo test invokable."
-        assert data["return_type"] == "dict[str, Any]"
+        assert data["return_type"] == ["dict[str, Any]"]
         assert data["parameters"] == [
             {
                 "name": "x",
@@ -718,7 +710,6 @@ class TestExtraDescriptionHook:
     def test_subclass_extra_description_appends_after_base(self) -> None:
         invokable = _ExtraDescriptionChild(
             name="child",
-            namespace="tests",
             description="Child base.",
             parameters=[make_param("x", 0)],
             return_type="Any",
@@ -729,7 +720,6 @@ class TestExtraDescriptionHook:
     def test_two_level_super_chaining_preserves_ancestor_extra(self) -> None:
         invokable = _ExtraDescriptionGrandchild(
             name="grandchild",
-            namespace="tests",
             description="GC base.",
             parameters=[make_param("x", 0)],
             return_type="Any",
@@ -740,7 +730,6 @@ class TestExtraDescriptionHook:
     def test_described_param_bullets_precede_extra_description(self) -> None:
         invokable = _ExtraDescriptionChild(
             name="child",
-            namespace="tests",
             description="Child base.",
             parameters=[make_param("x", 0, description="the x value")],
             return_type="Any",
@@ -1037,7 +1026,6 @@ class RaisingInvokable(EchoInvokable):
 def _build(cls: type[AtomicInvokable], **overrides: Any) -> Any:
     kwargs: dict[str, Any] = dict(
         name="echo",
-        namespace="tests",
         description="Test invokable.",
         parameters=[make_param("x", 0)],
         return_type="Any",

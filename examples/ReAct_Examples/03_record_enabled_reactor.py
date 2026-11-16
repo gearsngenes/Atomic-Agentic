@@ -27,7 +27,6 @@ logging.basicConfig(level=logging.INFO)
 
 reactor = ReActAgent(
     name="Record_Enabled_Reactor",
-    namespace="examples",
     description="Solves math tasks step-by-step using context memory across turns.",
     llm_engine=llm_engine,
     record_enabled=True,

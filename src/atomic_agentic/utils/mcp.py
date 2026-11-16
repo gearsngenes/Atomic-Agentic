@@ -151,49 +151,49 @@ def _infer_mcp_extraction_mode(output_schema: Any) -> MCPExtractionMode:
     return "structured_content"
 
 
-def _infer_mcp_return_type(output_schema: Any) -> str:
+def _infer_mcp_return_type(output_schema: Any) -> tuple[str, ...]:
     """
-    Infer the AA-facing return type string from an MCP output schema.
+    Infer the AA-facing return type tuple from an MCP output schema.
 
     The return type matches the final proxy behavior:
-    - content_blocks     -> List[ContentBlock]
-    - extract_result     -> inferred type of the nested "result" schema
-    - structured_content -> concrete inferred non-object type when possible,
-                            otherwise Dict[str, Any]
+    - content_blocks     -> list[ContentBlock]
+    - extract_result     -> inferred type(s) of the nested "result" schema
+    - structured_content -> concrete inferred non-object type(s) when possible,
+                            otherwise dict[str, Any]
     """
     extraction_mode = _infer_mcp_extraction_mode(output_schema)
 
     if extraction_mode == "content_blocks":
-        return "List[ContentBlock]"
+        return ("list[ContentBlock]",)
 
     if not isinstance(output_schema, Mapping):
-        return "List[ContentBlock]"
+        return ("list[ContentBlock]",)
 
     if extraction_mode == "extract_result":
         properties = output_schema.get("properties")
         if isinstance(properties, Mapping):
             result_schema = properties.get("result")
             if isinstance(result_schema, Mapping):
-                return " | ".join(_json_schema_type_to_tuple(result_schema))
-        return "Any"
+                return _json_schema_type_to_tuple(result_schema)
+        return ("Any",)
 
     output_type = output_schema.get("type")
 
     if isinstance(output_type, str):
         if output_type == "object":
-            return "dict[str, Any]"
-        return " | ".join(_json_schema_type_to_tuple(output_schema))
+            return ("dict[str, Any]",)
+        return _json_schema_type_to_tuple(output_schema)
 
     if isinstance(output_type, (list, tuple)):
         if "object" in output_type:
-            return "dict[str, Any]"
-        return " | ".join(_json_schema_type_to_tuple(output_schema))
+            return ("dict[str, Any]",)
+        return _json_schema_type_to_tuple(output_schema)
 
     properties = output_schema.get("properties")
     if isinstance(properties, Mapping):
-        return "dict[str, Any]"
+        return ("dict[str, Any]",)
 
-    return " | ".join(_json_schema_type_to_tuple(output_schema))
+    return _json_schema_type_to_tuple(output_schema)
 
 
 def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:

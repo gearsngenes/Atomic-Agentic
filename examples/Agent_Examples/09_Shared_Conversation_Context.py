@@ -52,7 +52,6 @@ def main() -> None:
 
     writer = BasicAgent(
         name="writer",
-        namespace="examples",
         description="Writes and revises a short story draft.",
         llm_engine=engine,
         role_prompt=(
@@ -64,7 +63,6 @@ def main() -> None:
     )
     reviewer = BasicAgent(
         name="reviewer",
-        namespace="examples",
         description="Critiques the latest story draft in the conversation.",
         llm_engine=engine,
         role_prompt=(

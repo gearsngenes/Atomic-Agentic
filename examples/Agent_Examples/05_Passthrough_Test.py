@@ -78,7 +78,6 @@ def main() -> None:
 
     agent = BasicAgent(
         name="AutoGraftDemoAgent",
-        namespace="examples",
         description="Demonstrates post-invoke parameter auto-grafting.",
         llm_engine=llm,
         role_prompt="You are a concise assistant.",

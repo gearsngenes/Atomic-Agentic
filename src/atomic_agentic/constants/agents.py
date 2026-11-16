@@ -152,7 +152,7 @@ RETURN_VALUE_FIELD = "val"
 # - agents/react.py: construction and registration of the executable return_tool
 #   (PlanActAgent never registers this -- its return value comes from the
 #   synthesized RETURN_ALIAS call instead)
-# - REACT_PROMPT's finalization instructions requiring Tool.ToolAgents.return
+# - REACT_PROMPT's finalization instructions requiring the `return` tool
 # - tests around planner/ReAct final return behavior
 #
 # Do not put the executable Tool instance here; only the identity literals that
@@ -160,12 +160,8 @@ RETURN_VALUE_FIELD = "val"
 
 
 RETURN_TOOL_NAME = "return"
-RETURN_TOOL_NAMESPACE = "ToolAgents"
 RETURN_TOOL_DESCRIPTION = (
     "Returns the passed-in value. Tool agents should use this to signal completion."
-)
-RETURN_TOOL_FULL_NAME = (
-    f"Tool.{RETURN_TOOL_NAMESPACE}.{RETURN_TOOL_NAME}"
 )
 
 # =============================================================================
@@ -508,9 +504,7 @@ __all__ = [
     "RETURN_VALUE_FIELD",
     # Canonical return tool
     "RETURN_TOOL_NAME",
-    "RETURN_TOOL_NAMESPACE",
     "RETURN_TOOL_DESCRIPTION",
-    "RETURN_TOOL_FULL_NAME",
     "SIGIL_REF_PATTERN",
     # PlanActAgent output_structure schema
     "PLANACT_OUTPUT_SCHEMA",

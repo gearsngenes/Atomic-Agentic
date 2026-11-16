@@ -30,7 +30,7 @@ class TestLLMEngineConstruction:
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
         )
-        assert engine.return_type == "str | int | float | bool | list[Any] | dict[str, Any] | None"
+        assert engine.return_type == ("None", "bool", "dict[str, Any]", "float", "int", "list[Any]", "str")
         assert [(param.name, param.kind, param.type) for param in engine.parameters] == [
             ("messages", "POSITIONAL_OR_KEYWORD", ("list[dict[str, str]]",)),
             ("output_structure", "KEYWORD_ONLY", ("None", "dict[str, Any]")),
@@ -69,20 +69,6 @@ class TestLLMEngineConstruction:
     def test_invalid_atomic_invokable_name_still_raises(self) -> None:
         with pytest.raises(ValueError):
             FakeLLMEngine(name="bad-name")
-
-
-class TestLLMEngineNamespace:
-    def test_llm_engine_namespace_default(self) -> None:
-        engine = FakeLLMEngine()
-        assert engine.namespace == "llm"
-
-    def test_llm_engine_namespace_explicit(self) -> None:
-        engine = FakeLLMEngine(namespace="prod_llm")
-        assert engine.namespace == "prod_llm"
-
-    def test_llm_engine_namespace_in_to_dict(self) -> None:
-        engine = FakeLLMEngine(namespace="prod_llm")
-        assert engine.to_dict()["namespace"] == "prod_llm"
 
 
 class TestLLMEngineMessagesAndInvoke:

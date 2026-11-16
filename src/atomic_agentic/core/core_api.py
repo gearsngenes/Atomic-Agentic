@@ -30,7 +30,7 @@ __all__ = ["extract_io", "parameter_overlap", "parameter_collisions"]
 
 def extract_io(
     function: AtomicInvokable | Callable[..., Any],
-) -> tuple[list[ParamSpec], str]:
+) -> tuple[list[ParamSpec], tuple[str, ...]]:
     """Extract parameter specifications and return type from a callable or
     an ``AtomicInvokable``.
 
@@ -58,9 +58,10 @@ def extract_io(
 
     Returns
     -------
-    tuple[list[ParamSpec], str]
+    tuple[list[ParamSpec], tuple[str, ...]]
         - List of ``ParamSpec`` objects in signature order.
-        - Return type as a human-readable string (``Annotated`` unwrapped).
+        - Return type as a sorted, deduplicated tuple of type strings
+          (``Annotated`` unwrapped), the same shape as ``ParamSpec.type``.
 
     Raises
     ------
@@ -112,11 +113,9 @@ def extract_io(
         ))
 
     # Return type: resolved hint > raw sig annotation; Annotated unwrapped.
-    # Stays a single joined string, not a tuple -- nothing compares it
-    # structurally the way parameter types get merged/reconciled.
     ret_ann = hints.get("return", sig.return_annotation)
     base_ret, _ = _unwrap_annotated(ret_ann)
-    return_type = " | ".join(_format_annotation_tuple(base_ret))
+    return_type = _format_annotation_tuple(base_ret)
 
     return parameters, return_type
 

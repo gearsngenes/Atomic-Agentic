@@ -193,7 +193,6 @@ class LiteLLMEngine(LLMEngine):
         model: str,
         provider: str = "litellm_proxy",
         name: str | None = None,
-        namespace: str = "llm",
         description: str = "",
         temperature: float | None = None,
         top_p: float | None = None,
@@ -227,8 +226,6 @@ class LiteLLMEngine(LLMEngine):
             Optional human-friendly engine name; defaults to
             ``{provider}_{model}`` with non-identifier characters replaced by
             underscores.
-        namespace:
-            Grouping label; defaults to ``"llm"``.
         description:
             Human-readable description for this engine instance.
         temperature, top_p, max_tokens, max_completion_tokens, stop, seed,
@@ -255,7 +252,6 @@ class LiteLLMEngine(LLMEngine):
             "-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
             name=sanitized,
-            namespace=namespace,
             description=description or "LiteLLM provider-agnostic language model engine.",
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

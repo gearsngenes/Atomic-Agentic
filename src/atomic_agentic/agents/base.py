@@ -232,7 +232,6 @@ class Agent(AtomicInvokable, ABC):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         record_enabled: bool = True,
@@ -258,12 +257,7 @@ class Agent(AtomicInvokable, ABC):
             pre_tool = toolify(
                 pre_invoke,
                 name="pre_invoke",
-                namespace=name,
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
-            )
-        if pre_tool is not None and pre_tool.return_type.lower() not in {"any", "str"}:
-            raise AgentError(
-                "Agent.pre_invoke must return a type 'str'|'any'"
             )
 
         # ── Post-invoke ──────────────────────────────────────────────────────
@@ -275,7 +269,6 @@ class Agent(AtomicInvokable, ABC):
             post_tool = toolify(
                 post_invoke,
                 name="post_invoke",
-                namespace=name,
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
 
@@ -414,7 +407,6 @@ class Agent(AtomicInvokable, ABC):
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=agent_parameters,
             return_type=(

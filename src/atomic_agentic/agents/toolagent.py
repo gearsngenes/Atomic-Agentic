@@ -132,7 +132,6 @@ class ToolAgent(Agent, ABC):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         record_enabled: bool = False,
@@ -153,7 +152,7 @@ class ToolAgent(Agent, ABC):
         """
         Parameters
         ----------
-        name, namespace, description, llm_engine, record_enabled
+        name, description, llm_engine, record_enabled
             Forwarded to ``Agent.__init__`` unchanged.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
@@ -200,7 +199,6 @@ class ToolAgent(Agent, ABC):
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             record_enabled=record_enabled,
@@ -346,10 +344,9 @@ class ToolAgent(Agent, ABC):
         ``AtomicInvokable`` inputs are stored as-is (never re-``toolify``'d);
         ``description`` is a documented no-op in that case — ``alias`` alone
         covers the "cover name" use case. Callables are normalized via
-        ``toolify(namespace=self.name)``.
+        ``toolify``.
 
-        A bare ``name`` collision across tools from different namespaces is
-        not auto-disambiguated — it's caught by the same
+        A bare ``name`` collision is caught by the same
         ``name_collision_policy`` as any other duplicate effective id; give
         one of them an explicit ``alias`` to resolve it.
 
@@ -366,7 +363,6 @@ class ToolAgent(Agent, ABC):
                     component=tool,
                     name=tool.__name__,
                     description=description or tool.__doc__,
-                    namespace=self.name,
                 )
             except Exception as exc:
                 raise ToolRegistrationError(
@@ -449,7 +445,6 @@ class ToolAgent(Agent, ABC):
                     try:
                         proxy = toolify(
                             component=item,
-                            namespace=self.name,
                             remote_name=remote_name,
                         )
                     except Exception as exc:
@@ -462,7 +457,7 @@ class ToolAgent(Agent, ABC):
 
                 if isinstance(item, A2AClientHub):
                     try:
-                        generic_proxy = toolify(component=item, namespace=self.name)
+                        generic_proxy = toolify(component=item)
                     except Exception as exc:
                         raise ToolRegistrationError(
                             f"{type(self).__name__}.{self.name}: failed to toolify "
@@ -483,7 +478,6 @@ class ToolAgent(Agent, ABC):
                         component=item,
                         name=item.__name__,
                         description=item.__doc__,
-                        namespace=self.name,
                     )
                 except Exception as exc:
                     raise ToolRegistrationError(
@@ -630,7 +624,6 @@ class ToolAgent(Agent, ABC):
                 component=tool,
                 name=name,
                 description=description or tool.__doc__,
-                namespace=self.name,
             )
         self._toolbox[name] = invokable
 

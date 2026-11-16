@@ -66,7 +66,7 @@ def _make_agent(engine: FakeLLMEngine, *, tools: list[Any] | None = None, **kwar
     """A bare agent: only the tools the test passes (the conftest maker
     pre-registers the shared math tools)."""
     return ScriptActAgent(
-        name="tests", namespace="tests", description="ScriptActAgent under test.",
+        name="tests", description="ScriptActAgent under test.",
         llm_engine=engine, tools=tools, **kwargs,
     )
 
@@ -199,7 +199,7 @@ class TestToolIdNaming:
         with pytest.raises(ToolRegistrationError, match="keyword"):
             agent.register_tools([add], aliases=["while"])
 
-        wrapped = Tool(function=add, name="import", namespace="tests", description="Adds.")
+        wrapped = Tool(function=add, name="import", description="Adds.")
         with pytest.raises(ToolRegistrationError, match="keyword"):
             _make_agent(_engine(), tools=[wrapped])
 
@@ -215,7 +215,7 @@ class TestRegistrationEdgeCases:
 
     def test_register_tool_accepts_an_already_wrapped_invokable_directly(self) -> None:
         agent = _make_agent(_engine())
-        wrapped = Tool(function=add, name="add_tool", namespace="tests", description="Adds.")
+        wrapped = Tool(function=add, name="add_tool", description="Adds.")
 
         agent.register_tool(wrapped)
 
@@ -239,7 +239,7 @@ class TestRegistrationEdgeCases:
 
     def test_register_tool_duplicate_with_replace_policy_overwrites(self) -> None:
         agent = _make_agent(_engine(), tools=[add])
-        wrapped = Tool(function=add, name="add", namespace="tests", description="A different add.")
+        wrapped = Tool(function=add, name="add", description="A different add.")
 
         assert agent.register_tool(wrapped, name_collision_policy="replace") is True
         assert agent.get_tool("add") is wrapped

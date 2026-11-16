@@ -309,7 +309,6 @@ def make_agent(
         response_to_post = "result" if "result" in names else None
     return agent_cls(
         name=name,
-        namespace="tests",
         description="Deterministic writer test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         system_prompt=system_prompt,
@@ -336,7 +335,7 @@ class TestBaseLoopOrder:
     def test_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
         agent = _LifecycleOrderAgent(
             rounds=3,
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -347,7 +346,7 @@ class TestBaseLoopOrder:
     def test_async_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
         agent = _LifecycleOrderAgent(
             rounds=2,
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -393,7 +392,6 @@ class TestAgentPipeline:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
             name="identity_agent",
-            namespace="tests",
             description="Identity agent.",
             llm_engine=engine,
             system_prompt=ROLE_PROMPT,
@@ -415,7 +413,7 @@ class TestAgentPipeline:
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
         ]
-        assert agent.return_type == "dict[str, Any]"
+        assert agent.return_type == ("dict[str, Any]",)
 
 
 class TestAgentSchemaComposition:
@@ -467,7 +465,6 @@ class TestAgentSchemaComposition:
         # KEYWORD_ONLY) like any other kind.
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=build_prompt,
@@ -1294,34 +1291,6 @@ class TestAgentValidation:
             agent.llm_engine = object()  # type: ignore[assignment]
 
 
-class TestAgentNamespace:
-    def test_namespace_is_required(self) -> None:
-        with pytest.raises(TypeError):
-            _MinimalAgent(
-                name="a",
-                description="d",
-                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            )
-
-    def test_agent_namespace_explicit(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="my_team",
-            description="d",
-            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-        )
-        assert agent.namespace == "my_team"
-
-    def test_agent_namespace_in_to_dict(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="my_team",
-            description="d",
-            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-        )
-        assert agent.to_dict()["namespace"] == "my_team"
-
-
 class TestAgentSerialization:
     def test_to_dict_includes_agent_configuration(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -1456,7 +1425,6 @@ class TestAgentFrozenRenderingProperties:
         with pytest.raises(TypeError, match="response_preview_limit"):
             _EchoAgent(
                 name="writer_agent",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 system_prompt=ROLE_PROMPT,
@@ -1506,7 +1474,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_none_produces_no_extra_schema_entries(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1517,7 +1484,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=["persona", "style"],
@@ -1536,7 +1502,6 @@ class TestExtraParametersNormalization:
         ]
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=specs,
@@ -1552,7 +1517,6 @@ class TestExtraParametersNormalization:
         with pytest.raises(AgentError, match="variadic"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=specs,
@@ -1561,7 +1525,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_values_reach_invoke_via_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -1610,7 +1573,6 @@ class TestPeerOverlapReconciliation:
         with pytest.raises(AgentError, match=r"\*\*kwargs"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_var_positional,
@@ -1654,7 +1616,6 @@ class TestBindResponseToSharedNames:
 
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             post_invoke=post_with_flag,
@@ -1728,7 +1689,6 @@ class TestCombinedVsExtraReconciliation:
         with pytest.raises(AgentError, match="no compatible reconciliation"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1741,7 +1701,6 @@ class TestCombinedVsExtraReconciliation:
         with pytest.warns(UserWarning, match="not identical"):
             agent = _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1759,7 +1718,6 @@ class TestCombinedVsExtraReconciliation:
             warnings.simplefilter("always")
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1772,7 +1730,6 @@ class TestCombinedVsExtraReconciliation:
     def test_extra_remainder_grafted_via_insert_by_category(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre_with_two_fields,
@@ -1834,7 +1791,6 @@ class TestNWayWitnessOrderIndependence:
             warnings.simplefilter("always")
             agent = _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_dict_shared,
@@ -1876,7 +1832,6 @@ class TestNWayWitnessOrderIndependence:
         with pytest.raises(AgentError, match="no compatible reconciliation"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_int_shared,
@@ -1892,7 +1847,6 @@ class TestNoSystemPromptRegistry:
     def test_agent_has_no_system_prompt_registry(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1906,7 +1860,6 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=engine,
             record_enabled=False,
@@ -1925,7 +1878,6 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=engine,
             record_enabled=True,
@@ -1946,7 +1898,6 @@ class TestAgentDescriptionOverrideRemoval:
         # ``prompt`` parameter demonstrates the description augmentation.
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="Deterministic writer test agent.",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1957,7 +1908,6 @@ class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_contains_prompt_description_text(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="Deterministic writer test agent.",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1983,7 +1933,6 @@ class TestInvocationLifecycle:
 
         agent = CapturingAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -1997,7 +1946,6 @@ class TestInvocationLifecycle:
     def test_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2011,7 +1959,6 @@ class TestInvocationLifecycle:
     def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2025,7 +1972,6 @@ class TestInvocationLifecycle:
     def test_inputs_isolated_across_invocations(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2119,7 +2065,7 @@ class TestCreateTask:
             return f"{result}{shared}{only_post}"
 
         agent = _MinimalAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre, post_invoke=post, response_to_post="result",
             extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
@@ -2691,7 +2637,6 @@ def make_value_agent(response_value: Any, **kwargs: Any) -> _ValueAgent:
     kwargs.setdefault("record_enabled", False)
     return _ValueAgent(
         name="value_agent",
-        namespace="tests",
         description="Fixed-response test agent.",
         llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         response_value=response_value,
@@ -2835,7 +2780,7 @@ class TestBindingConstruction:
         assert not hasattr(make_agent(), "post_result_key")
         with pytest.raises(TypeError):
             _EchoAgent(
-                name="a", namespace="tests", description="d",
+                name="a", description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 post_result_key="result",  # removed argument
             )
@@ -3009,7 +2954,7 @@ class TestPostStageBinding:
         result = agent.invoke({"prompt": "x"})
 
         assert result.result == payload
-        assert agent.return_type == "any"
+        assert agent.return_type == ("any",)
         assert agent.post_invoke is None
         assert agent.to_dict()["post_invoke"] is None
 
@@ -3027,7 +2972,7 @@ class TestPostStageBinding:
 
     def test_default_agent_has_no_post_stage(self) -> None:
         agent = _EchoAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -3158,7 +3103,7 @@ class TestOptionalPreInvoke:
     def test_prompt_passes_through_verbatim_sync_and_async(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=engine, system_prompt=ROLE_PROMPT,
         )
 
@@ -3770,7 +3715,6 @@ class _NoCallAgent(Agent):
 def make_no_call_agent() -> _NoCallAgent:
     return _NoCallAgent(
         name="no_call_agent",
-        namespace="tests",
         description="Agent that never calls its engine.",
         llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         record_enabled=False,

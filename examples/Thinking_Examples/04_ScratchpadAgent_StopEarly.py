@@ -19,7 +19,6 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
 #     HOW to think; the framework adds the thought/flag format itself ---
 estimator_agent = ScratchpadAgent(
     name="Quick_Estimator",
-    namespace="examples",
     llm_engine=llm,
     thinking_rounds=8,
     stop_early=True,

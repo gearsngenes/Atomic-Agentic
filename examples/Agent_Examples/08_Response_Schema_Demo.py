@@ -40,7 +40,6 @@ def main() -> None:
     print("=== 1) Object schema (the common case) ===")
     agent = BasicAgent(
         name="summarizer",
-        namespace="examples",
         description="Summarizes text into a structured verdict.",
         llm_engine=AnthropicEngine("claude-sonnet-4-5-20250929"),
         role_prompt="You are a concise technical reviewer.",
@@ -65,7 +64,6 @@ def main() -> None:
     print("\n=== 2) Bare primitive schema, Anthropic (supported) ===")
     bare_agent = BasicAgent(
         name="bare_int_agent",
-        namespace="examples",
         description="Replies with a single integer, nothing else.",
         llm_engine=AnthropicEngine("claude-sonnet-4-5-20250929"),
         role_prompt="You are terse. Answer only with the requested number.",
@@ -80,7 +78,6 @@ def main() -> None:
     print("schema fails as the provider's own native error, not an AA one.")
     openai_agent = BasicAgent(
         name="bare_int_agent_openai",
-        namespace="examples",
         description="Replies with a single integer, nothing else.",
         llm_engine=OpenAIEngine("gpt-4o-mini"),
         role_prompt="You are terse. Answer only with the requested number.",
