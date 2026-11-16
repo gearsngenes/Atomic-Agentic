@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 import pytest
 
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.models.results import AtomicResult
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import SchemaError
@@ -16,8 +19,11 @@ from atomic_agentic.exceptions import SchemaError
 class EchoInvokable(AtomicInvokable):
     """Minimal concrete AtomicInvokable used to test the base contract."""
 
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        return self.filter_inputs(inputs)
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": inputs}
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": inputs}
 
 
 def make_param(
@@ -122,22 +128,13 @@ class TestAtomicInvokableConstruction:
 
 
 class TestAtomicInvokableIdentity:
-    def test_instance_id_is_non_empty_string(self) -> None:
+    def test_repr_is_full_name_only(self) -> None:
         invokable = make_invokable()
 
-        assert isinstance(invokable.instance_id, str)
-        assert invokable.instance_id
+        assert repr(invokable) == f"<{invokable.full_name}>"
 
-    def test_instance_id_is_stable_for_same_object(self) -> None:
-        invokable = make_invokable()
-
-        assert invokable.instance_id == invokable.instance_id
-
-    def test_instance_id_differs_between_instances(self) -> None:
-        first = make_invokable()
-        second = make_invokable()
-
-        assert first.instance_id != second.instance_id
+    def test_no_instance_id_attribute(self) -> None:
+        assert not hasattr(make_invokable(), "instance_id")
 
     def test_full_name_uses_base_class_name_and_name(self) -> None:
         invokable = make_invokable(name="sample")
@@ -331,7 +328,7 @@ class TestAtomicInvokableFiltering:
             make_param("y", 1),
         ])
 
-        result = invokable.invoke({"x": 1, "y": 2})
+        result = invokable.invoke({"x": 1, "y": 2}).result
 
         assert result == {"x": 1, "y": 2}
 
@@ -340,7 +337,7 @@ class TestAtomicInvokableFiltering:
             make_param("x", 0),
         ])
 
-        result = invokable.invoke({"x": 1, "unused": 2})
+        result = invokable.invoke({"x": 1, "unused": 2}).result
 
         assert result == {"x": 1}
 
@@ -350,7 +347,7 @@ class TestAtomicInvokableFiltering:
             make_param("extras", 1, ParamSpec.VAR_KEYWORD),
         ])
 
-        result = invokable.invoke({"x": 1, "debug": True})
+        result = invokable.invoke({"x": 1, "debug": True}).result
 
         assert result == {
             "x": 1,
@@ -367,7 +364,7 @@ class TestAtomicInvokableFiltering:
             "x": 1,
             "extras": {"explicit": 2},
             "debug": True,
-        })
+        }).result
 
         assert result == {
             "x": 1,
@@ -401,7 +398,7 @@ class TestAtomicInvokableFiltering:
             make_param("args", 0, ParamSpec.VAR_POSITIONAL),
         ])
 
-        result = invokable.invoke({"args": good_value})
+        result = invokable.invoke({"args": good_value}).result
 
         assert result == {"args": good_value}
 
@@ -410,7 +407,7 @@ class TestAtomicInvokableFiltering:
             make_param("extras", 0, ParamSpec.VAR_KEYWORD),
         ])
 
-        result = invokable.invoke({"extras": {"x": 1}})
+        result = invokable.invoke({"extras": {"x": 1}}).result
 
         assert result == {"extras": {"x": 1}}
 
@@ -420,7 +417,7 @@ class TestAtomicInvokableFiltering:
             make_param("y", 1, default=42),
         ])
 
-        result = invokable.invoke({"x": 1})
+        result = invokable.invoke({"x": 1}).result
 
         assert result == {"x": 1, "y": 42}
 
@@ -429,7 +426,7 @@ class TestAtomicInvokableFiltering:
             make_param("x", 0, default=99),
         ])
 
-        result = invokable.invoke({"x": 7})
+        result = invokable.invoke({"x": 7}).result
 
         assert result == {"x": 7}
 
@@ -440,7 +437,7 @@ class TestAtomicInvokableFiltering:
             make_param("extras", 2, ParamSpec.VAR_KEYWORD),
         ])
 
-        result = invokable.invoke({"x": 1})
+        result = invokable.invoke({"x": 1}).result
 
         # VAR_POSITIONAL is absent (no injection, no empty list).
         # VAR_KEYWORD gets an empty dict from the existing varkwarg merge logic,
@@ -592,14 +589,14 @@ class TestAtomicInvokableCallBinding:
 
 
 class TestAtomicInvokableAsync:
-    def test_async_invoke_delegates_to_sync_invoke(self) -> None:
+    def test_async_invoke_runs_async_hook(self) -> None:
         invokable = make_invokable(parameters=[
             make_param("x", 0),
         ])
 
         result = asyncio.run(invokable.async_invoke({"x": 1}))
 
-        assert result == {"x": 1}
+        assert result.result == {"x": 1}
 
     def test_async_call_uses_call_binding(self) -> None:
         invokable = make_invokable(parameters=[
@@ -622,12 +619,12 @@ class TestAtomicInvokableAsync:
 
 
 class TestAtomicInvokableSerialization:
-    def test_to_dict_includes_stable_identity_fields(self) -> None:
+    def test_to_dict_has_no_instance_id(self) -> None:
         invokable = make_invokable()
 
         data = invokable.to_dict()
 
-        assert data["instance_id"] == invokable.instance_id
+        assert "instance_id" not in data
 
     def test_to_dict_includes_core_metadata(self) -> None:
         invokable = make_invokable(parameters=[
@@ -978,3 +975,296 @@ class TestAtomicInvokableDefaultMutators:
         invokable.set_defaults({"x": 1})
 
         assert taken[0].default is NO_VAL
+
+
+# ---------------------------------------------------------------- #
+# Invocation template, logging, __call__ through the template
+# ---------------------------------------------------------------- #
+class SpyInvokable(EchoInvokable):
+    """Counts filter_inputs calls and records what the hooks receive."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.filter_calls = 0
+        self.hook_inputs: list[Any] = []
+
+    def filter_inputs(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        self.filter_calls += 1
+        return super().filter_inputs(inputs)
+
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        self.hook_inputs.append(inputs)
+        return super()._invoke_impl(inputs)
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        self.hook_inputs.append(inputs)
+        return await super()._async_invoke_impl(inputs)
+
+
+@dataclass(frozen=True, slots=True)
+class ExtraResult(AtomicResult):
+    extra: str = ""
+
+
+class ExtraInvokable(EchoInvokable):
+    result_cls = ExtraResult
+
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": inputs, "extra": "e"}
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": inputs, "extra": "ae"}
+
+
+class BadPayloadInvokable(EchoInvokable):
+    payload: Any = None
+
+    def _invoke_impl(self, inputs: dict[str, Any]) -> Any:
+        return self.payload
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> Any:
+        return self.payload
+
+
+class RaisingInvokable(EchoInvokable):
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("async boom")
+
+
+def _build(cls: type[AtomicInvokable], **overrides: Any) -> Any:
+    kwargs: dict[str, Any] = dict(
+        name="echo",
+        namespace="tests",
+        description="Test invokable.",
+        parameters=[make_param("x", 0)],
+        return_type="Any",
+    )
+    kwargs.update(overrides)
+    return cls(**kwargs)
+
+
+_CORE_LOGGER = "atomic_agentic.core.atomic_invokable"
+
+
+def _records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == _CORE_LOGGER]
+
+
+class TestInvokeTemplate:
+    def test_returns_atomic_result_with_envelope(self) -> None:
+        invokable = make_invokable()
+
+        result = invokable.invoke({"x": 1})
+
+        assert isinstance(result, AtomicResult)
+        assert result.result == {"x": 1}
+        assert result.invoker_id == invokable.full_name
+        assert result.started_at.tzinfo is not None
+        assert result.ended_at.tzinfo is not None
+        assert result.started_at <= result.ended_at
+        assert result.elapsed_time >= 0
+
+    def test_filter_inputs_runs_once_and_hook_gets_filtered(self) -> None:
+        invokable = _build(SpyInvokable)
+
+        invokable.invoke({"x": 1, "unused": 2})
+
+        assert invokable.filter_calls == 1
+        assert invokable.hook_inputs == [{"x": 1}]
+
+    def test_extra_payload_keys_reach_result_cls(self) -> None:
+        result = _build(ExtraInvokable).invoke({"x": 1})
+
+        assert isinstance(result, ExtraResult)
+        assert result.extra == "e"
+        assert result.result == {"x": 1}
+
+    def test_payload_without_result_raises_type_error(self) -> None:
+        invokable = _build(BadPayloadInvokable)
+        invokable.payload = {"other": 1}
+
+        with pytest.raises(TypeError):
+            invokable.invoke({"x": 1})
+
+    def test_non_mapping_payload_raises_type_error(self) -> None:
+        invokable = _build(BadPayloadInvokable)
+        invokable.payload = "not a mapping"
+
+        with pytest.raises(TypeError):
+            invokable.invoke({"x": 1})
+
+    def test_hook_exception_propagates_without_finished_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        invokable = _build(RaisingInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(RuntimeError, match="boom"):
+                invokable.invoke({"x": 1})
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert any("started" in m for m in messages)
+        assert not any("finished" in m for m in messages)
+
+    def test_filter_failure_never_calls_hook(self) -> None:
+        invokable = _build(SpyInvokable)
+
+        with pytest.raises(TypeError):
+            invokable.invoke(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+        assert invokable.hook_inputs == []
+
+    def test_subclass_with_only_sync_hook_cannot_instantiate(self) -> None:
+        class SyncOnly(AtomicInvokable):
+            def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+                return {"result": inputs}
+
+        with pytest.raises(TypeError):
+            _build(SyncOnly)
+
+    # async mirror
+    def test_async_returns_atomic_result_with_envelope(self) -> None:
+        invokable = make_invokable()
+
+        result = asyncio.run(invokable.async_invoke({"x": 1}))
+
+        assert isinstance(result, AtomicResult)
+        assert result.result == {"x": 1}
+        assert result.invoker_id == invokable.full_name
+        assert result.started_at <= result.ended_at
+
+    def test_async_filter_runs_once_and_hook_gets_filtered(self) -> None:
+        invokable = _build(SpyInvokable)
+
+        asyncio.run(invokable.async_invoke({"x": 1, "unused": 2}))
+
+        assert invokable.filter_calls == 1
+        assert invokable.hook_inputs == [{"x": 1}]
+
+    def test_async_extra_payload_keys_reach_result_cls(self) -> None:
+        result = asyncio.run(_build(ExtraInvokable).async_invoke({"x": 1}))
+
+        assert isinstance(result, ExtraResult)
+        assert result.extra == "ae"
+
+    def test_async_hook_exception_propagates_without_finished_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        invokable = _build(RaisingInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(RuntimeError, match="async boom"):
+                asyncio.run(invokable.async_invoke({"x": 1}))
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert any("started" in m for m in messages)
+        assert not any("finished" in m for m in messages)
+
+    def test_async_filter_failure_never_calls_hook(self) -> None:
+        invokable = _build(SpyInvokable)
+
+        with pytest.raises(TypeError):
+            asyncio.run(invokable.async_invoke(["nope"]))  # type: ignore[arg-type]
+
+        assert invokable.hook_inputs == []
+
+
+class TestNoInvokeLock:
+    def test_instances_have_no_invoke_lock(self) -> None:
+        assert not hasattr(_build(EchoInvokable), "_invoke_lock")
+
+
+class TestLogLevel:
+    def test_default_is_debug(self) -> None:
+        assert make_invokable().log_level == logging.DEBUG
+
+    def test_start_and_finished_logged_at_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = make_invokable()
+
+        with caplog.at_level(logging.DEBUG):
+            invokable.invoke({"x": 1})
+
+        records = _records(caplog)
+        assert [r.levelno for r in records] == [logging.DEBUG, logging.DEBUG]
+        assert records[0].getMessage() == f"[{invokable.full_name} started]"
+        assert records[1].getMessage() == f"[{invokable.full_name} finished]"
+
+    def test_custom_level_is_used(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = make_invokable()
+        invokable.log_level = logging.INFO
+
+        with caplog.at_level(logging.DEBUG):
+            invokable.invoke({"x": 1})
+
+        records = _records(caplog)
+        assert len(records) == 2
+        assert all(r.levelno == logging.INFO for r in records)
+
+    def test_none_disables_logging(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = make_invokable()
+        invokable.log_level = None
+
+        with caplog.at_level(logging.DEBUG):
+            invokable.invoke({"x": 1})
+            asyncio.run(invokable.async_invoke({"x": 1}))
+
+        assert _records(caplog) == []
+
+    @pytest.mark.parametrize("bad", ["debug", True, 1.5])
+    def test_bad_type_raises_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError, match="log_level"):
+            make_invokable().log_level = bad
+
+    def test_async_messages_have_async_prefix(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = make_invokable()
+
+        with caplog.at_level(logging.DEBUG):
+            asyncio.run(invokable.async_invoke({"x": 1}))
+
+        assert [r.getMessage() for r in _records(caplog)] == [
+            f"[Async {invokable.full_name} started]",
+            f"[Async {invokable.full_name} finished]",
+        ]
+
+    def test_filter_failure_logs_start_but_not_finished(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = _build(SpyInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(TypeError):
+                invokable.invoke(["x"])  # type: ignore[arg-type]
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert messages == [f"[{invokable.full_name} started]"]
+
+    def test_async_filter_failure_logs_start_but_not_finished(self, caplog: pytest.LogCaptureFixture) -> None:
+        invokable = _build(SpyInvokable)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(TypeError):
+                asyncio.run(invokable.async_invoke(["x"]))  # type: ignore[arg-type]
+
+        messages = [r.getMessage() for r in _records(caplog)]
+        assert messages == [f"[Async {invokable.full_name} started]"]
+
+
+class TestCallThroughTemplate:
+    def test_call_returns_unwrapped_payload(self) -> None:
+        assert make_invokable()(1) == {"x": 1}
+
+    def test_call_can_return_atomic_result(self) -> None:
+        result = make_invokable()(1, return_atomic_result_object=True)
+
+        assert isinstance(result, AtomicResult)
+        assert result.result == {"x": 1}
+
+    def test_async_call_returns_unwrapped_payload(self) -> None:
+        assert asyncio.run(make_invokable().async_call(1)) == {"x": 1}
+
+    def test_async_call_can_return_atomic_result(self) -> None:
+        result = asyncio.run(make_invokable().async_call(1, return_atomic_result_object=True))
+
+        assert isinstance(result, AtomicResult)
+        assert result.result == {"x": 1}

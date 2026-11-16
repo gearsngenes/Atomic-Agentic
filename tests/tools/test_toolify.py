@@ -102,11 +102,11 @@ class EchoInvokable(AtomicInvokable):
             return_type="dict[str, Any]",
         )
 
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        return dict(inputs)
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": dict(inputs)}
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        return dict(inputs)
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"result": dict(inputs)}
 
 
 def mcp_metadata(

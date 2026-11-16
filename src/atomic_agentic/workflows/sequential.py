@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from ..exceptions import ValidationError
 from ..core.atomic_invokable import AtomicInvokable
@@ -55,11 +54,11 @@ class SequentialFlow(Workflow):
     - ``trace``:
         Full ordered tuple of each step's own ``AtomicResult``, in step
         order, populated when ``include_trace`` is enabled (``None``
-        otherwise). Each step's run id is available via ``trace[i].run_id``.
+        otherwise).
     - ``return_index``:
         The fixed step index whose result became the outer result payload.
-        Injected directly by ``make_result()`` as a constant fact about the
-        instance, not threaded through ``_run``/``_async_run``.
+        Included in the dict ``_run``/``_async_run`` return, a constant fact
+        about the instance.
 
     Notes
     -----
@@ -67,6 +66,8 @@ class SequentialFlow(Workflow):
     shallow graph immutability. Nested step objects may retain their own broader
     AA mutability elsewhere.
     """
+
+    result_cls: ClassVar[type[SequentialFlowResult]] = SequentialFlowResult
 
     def __init__(
         self,
@@ -141,30 +142,6 @@ class SequentialFlow(Workflow):
         return self._steps[self._return_index]._extra_description()
 
     # ------------------------------------------------------------------ #
-    # Result construction
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> SequentialFlowResult:
-        """Construct a SequentialFlowResult envelope, injecting the fixed return_index."""
-        trace = result_kwargs.pop("trace", None)
-        if trace is not None and not isinstance(trace, tuple):
-            raise TypeError(f"trace must be a tuple, got {type(trace)!r}")
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=SequentialFlowResult,
-            return_index=self._return_index,
-            trace=trace,
-            **result_kwargs,
-        )
-
-    # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -188,6 +165,7 @@ class SequentialFlow(Workflow):
 
         return step_results[self._return_index].result, {
             "trace": tuple(step_results) if self.include_trace else None,
+            "return_index": self._return_index,
         }
 
     async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -216,6 +194,7 @@ class SequentialFlow(Workflow):
 
         return step_results[self._return_index].result, {
             "trace": tuple(step_results) if self.include_trace else None,
+            "return_index": self._return_index,
         }
 
     # ------------------------------------------------------------------ #

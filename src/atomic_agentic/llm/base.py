@@ -3,13 +3,13 @@ from __future__ import annotations
 # ~~~Standard Library Imports~~~
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
 import logging
 import os
 import random
 import time
 from typing import (
     Any,
+    ClassVar,
     Dict,
     List,
     Mapping,
@@ -87,7 +87,7 @@ class LLMEngine(AtomicInvokable, ABC):
     provider error — in tension with this codebase's explicit-or-raise
     discipline). A schema keyword a given provider rejects fails as that
     provider's own native error, wrapped in ``LLMEngineError`` by
-    ``invoke``/``async_invoke`` — the same failure shape already used for
+    the engine's invoke hooks — the same failure shape already used for
     any other illegal per-provider configuration (e.g. an unsupported
     ``temperature`` value). Engines that need to gate on capability rather
     than content (e.g. ``LiteLLMEngine`` raising when a model/provider
@@ -112,15 +112,16 @@ class LLMEngine(AtomicInvokable, ABC):
 
     Engine lifecycle
     ----------------
-    The canonical result-envelope lifecycle lives in ``invoke(inputs)``:
+    The inherited ``invoke`` template filters the inputs and builds the
+    ``LLMResult``; ``_invoke_impl`` does:
 
-    1. Filter dict-first inputs.
-    2. Validate and normalize ``messages``.
-    3. Snapshot current attachments.
-    4. Ask the subclass to build a provider-specific payload.
-    5. Call the provider with retries/timeouts.
-    6. Extract assistant text, token usage, and configured model data.
-    7. Construct and return an ``LLMResult``.
+    1. Validate and normalize ``messages``.
+    2. Snapshot current attachments.
+    3. Build the provider-specific payload.
+    4. Call the provider with retries/timeouts.
+    5. Extract assistant text, token usage, and configured model data.
+
+    and returns ``{"result", "token_usage", "model_data"}``.
 
     Provider-specific behavior should normally be implemented through the
     protected template hooks:
@@ -136,6 +137,8 @@ class LLMEngine(AtomicInvokable, ABC):
     Attachments are managed separately via ``attach`` / ``detach`` /
     ``clear_attachments`` and are snapshotted for each call.
     """
+
+    result_cls: ClassVar[type[LLMResult]] = LLMResult
 
     # Attachment policy — coarse safety/robustness guard applied before
     # provider-specific checks. Sourced from constants.engines.
@@ -299,83 +302,49 @@ class LLMEngine(AtomicInvokable, ABC):
         for path in list(self._attachments.keys()):
             self.detach(path)
 
-    def invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """
-        Invoke this engine through the canonical v2 result-envelope path.
+        1. messages = inputs.get("messages"); not a list -> LLMEngineError.
+        2. output_structure = inputs.get("output_structure");
+           requested_structured = output_structure is not None.
+        3. response = self._call_model(messages, output_structure).
+        4. text, token_usage, model_data = self.extract(response, requested_structured).
+        5. Return {"result", "token_usage", "model_data"}.
 
-        Returns
-        -------
-        LLMResult
-            Result envelope whose ``.result`` field contains the generated
-            assistant text string.
+        LLMEngineError propagates; any other exception is raised as
+        LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc.
         """
-        with self._invoke_lock:
-            logger.info("[%s started]", self.full_name)
-            started_at = datetime.now(timezone.utc)
-
-            try:
-                filtered_inputs = self.filter_inputs(inputs)
-                messages = filtered_inputs.get("messages")
-                if not isinstance(messages, list):
-                    raise LLMEngineError(
-                        "LLMEngine.invoke: 'messages' input must be a list"
-                    )
-                output_structure = filtered_inputs.get("output_structure")
-                requested_structured = output_structure is not None
-
-                response = self._call_model(messages, output_structure)
-                text, token_usage, model_data = self.extract(response, requested_structured)
-                ended_at = datetime.now(timezone.utc)
-
-                result = self.make_result(
-                    result=text,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    token_usage=token_usage,
-                    model_data=model_data,
-                )
-
-                logger.info("[%s finished]", self.full_name)
-                return result
-
-            except LLMEngineError:
-                raise
-            except Exception as exc:
-                raise LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc
-
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
-        """
-        Async analog of ``invoke``. Does not acquire ``_invoke_lock``
-        (``threading.RLock`` would block the event loop).
-        """
-        logger.info("[Async %s started]", self.full_name)
-        started_at = datetime.now(timezone.utc)
-
         try:
-            filtered_inputs = self.filter_inputs(inputs)
-            messages = filtered_inputs.get("messages")
+            messages = inputs.get("messages")
+            if not isinstance(messages, list):
+                raise LLMEngineError(
+                    "LLMEngine.invoke: 'messages' input must be a list"
+                )
+            output_structure = inputs.get("output_structure")
+            requested_structured = output_structure is not None
+
+            response = self._call_model(messages, output_structure)
+            text, token_usage, model_data = self.extract(response, requested_structured)
+            return {"result": text, "token_usage": token_usage, "model_data": model_data}
+        except LLMEngineError:
+            raise
+        except Exception as exc:
+            raise LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin of ``_invoke_impl`` (awaits ``_call_model_async``)."""
+        try:
+            messages = inputs.get("messages")
             if not isinstance(messages, list):
                 raise LLMEngineError(
                     "LLMEngine.async_invoke: 'messages' input must be a list"
                 )
-            output_structure = filtered_inputs.get("output_structure")
+            output_structure = inputs.get("output_structure")
             requested_structured = output_structure is not None
 
             response = await self._call_model_async(messages, output_structure)
             text, token_usage, model_data = self.extract(response, requested_structured)
-            ended_at = datetime.now(timezone.utc)
-
-            result = self.make_result(
-                result=text,
-                started_at=started_at,
-                ended_at=ended_at,
-                token_usage=token_usage,
-                model_data=model_data,
-            )
-
-            logger.info("[Async %s finished]", self.full_name)
-            return result
-
+            return {"result": text, "token_usage": token_usage, "model_data": model_data}
         except LLMEngineError:
             raise
         except Exception as exc:
@@ -456,47 +425,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
         return (result.strip() if isinstance(result, str) else result), token_usage, model_data
 
-    def make_result(
-        self,
-        result: str,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> LLMResult:
-        """
-        Construct this engine's ``LLMResult`` envelope.
 
-        ``result`` is the caller-facing generated text payload stored in
-        ``LLMResult.result``. Token usage and configured model data are stored as
-        explicit LLM-specific result fields.
-        """
-        unexpected = set(result_kwargs) - {"token_usage", "model_data"}
-        if unexpected:
-            raise LLMEngineError(
-                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
-            )
-
-        token_usage = result_kwargs.get("token_usage")
-        model_data = result_kwargs.get("model_data")
-
-        if not isinstance(token_usage, TokenUsage):
-            raise LLMEngineError(
-                "make_result: token_usage must be a TokenUsage instance."
-            )
-
-        if not isinstance(model_data, LLMModelData):
-            raise LLMEngineError(
-                "make_result: model_data must be an LLMModelData instance."
-            )
-
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=LLMResult,
-            token_usage=token_usage,
-            model_data=model_data,
-        )
     def _normalize_messages(
         self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:

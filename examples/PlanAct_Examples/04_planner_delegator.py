@@ -136,4 +136,4 @@ super_task = f"""
     """
 
 super_result = super_planner.invoke({"prompt": super_task})
-print(f"Super Planner result: {super_result.result}\nCompleted task in {super_result.elapsed_s:.2f} seconds")
+print(f"Super Planner result: {super_result.result}\nCompleted task in {super_result.elapsed_time:.2f} seconds")

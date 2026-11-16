@@ -341,10 +341,10 @@ is explicit and there are no cross-layer back-edges.
 Tool, Agent, ToolAgent, Workflow, Engine
 — now returns a typed `AtomicResult`-family envelope from
 `invoke()`/`async_invoke()`. The `.result` field is always the
-caller-facing payload; envelope fields (`run_id`, `started_at`,
-`ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
+caller-facing payload; envelope fields (`started_at`, `ended_at`, derived `elapsed_time`,
+`invoker_id` -- the invokable's `full_name` -- and subclass-specific fields
 like token usage, step traces, and tool-call accounting) carry timing
-and provenance. Workflows return typed `*FlowResult` envelopes
+and provenance. `run_id` appears only on agent results. Workflows return typed `*FlowResult` envelopes
 (`SequentialFlowResult`, `IterativeFlowResult`, `GraphFlowResult`, etc.)
 with a per-run `trace` of the actual child results produced, opt-out via
 `include_trace=False`.

@@ -59,12 +59,11 @@ class _AddInvokable(AtomicInvokable):
             return_type="int",
         )
 
-    def invoke(self, inputs):
-        filtered = self.filter_inputs(inputs)
-        return int(filtered["a"]) + int(filtered.get("b", 0))
+    def _invoke_impl(self, inputs):
+        return {"result": int(inputs["a"]) + int(inputs.get("b", 0))}
 
-    async def async_invoke(self, inputs):
-        return self.invoke(inputs)
+    async def _async_invoke_impl(self, inputs):
+        return self._invoke_impl(inputs)
 
 
 class TestExtractIO:

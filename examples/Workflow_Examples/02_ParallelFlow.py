@@ -99,7 +99,6 @@ result = parallel.invoke({"text": sample_text})
 
 print("\n=== DICT RESULT ===")
 pprint(result.result)
-print("\nrun_id:", result.run_id)
 print("result_mode:", result.result_mode)
 print("selected_indices:", result.selected_indices)
 print("result_keys:", result.result_keys)
@@ -108,7 +107,7 @@ print("\n=== ALL BRANCH RESULTS (trace) ===")
 # trace holds every configured branch's own AtomicResult, in declaration
 # order -- ALL branches, regardless of which ones were selected/projected.
 for i, branch_result in enumerate(result.trace):
-    print(f"Branch {i}: run_id={branch_result.run_id}, result={branch_result.result}")
+    print(f"Branch {i}: result={branch_result.result}")
 
 # ──────────────────────────────────────────────────────────────
 # A second flow: list output, reordered subset of branches
@@ -132,7 +131,6 @@ list_result = parallel_subset.invoke({"text": sample_text})
 
 print("\n=== LIST RESULT (branches 2 then 0) ===")
 pprint(list_result.result)
-print("\nrun_id:", list_result.run_id)
 # LIST/TUPLE/SET modes: result_keys IS selected_indices, same tuple.
 print("result_keys:", list_result.result_keys)
 

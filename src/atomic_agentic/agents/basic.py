@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
-import logging
 
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
@@ -13,8 +12,6 @@ from ..models.agents.tasks import AgentTask
 from ..models.parameters import ParamSpec
 from ..utils.agents import normalize_prompt_config
 from .base import Agent
-
-logger = logging.getLogger(__name__)
 
 
 class BasicAgent(Agent):

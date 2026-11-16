@@ -308,7 +308,6 @@ if __name__ == "__main__":
         f.write(f"outcome: {final.result['outcome']}\n")
         f.write(f"total_revisions: {final.result['total_revisions']}\n")
         f.write(f"termination_reason: {final.termination_reason}\n")
-        f.write(f"run_id: {final.run_id}\n")
 
         f.write("\n=== SUPERSTEP-BY-SUPERSTEP TRAVERSAL (edge_traversals) ===\n")
         for i, round_nodes in enumerate(final.edge_traversals):
@@ -317,7 +316,7 @@ if __name__ == "__main__":
         # Every triage firing, found via invoker_id rather than trace
         # indexing -- robust to how many revision cycles actually ran.
         f.write("\n=== TRIAGE DECISIONS (collision resolution + routing input) ===\n")
-        triage_entries = [e for e in final.trace if e.invoker_id == triage.instance_id]
+        triage_entries = [e for e in final.trace if e.invoker_id == triage.full_name]
         for i, entry in enumerate(triage_entries):
             f.write(f"\n-- triage firing {i} -- checked_by resolved to: {entry.result['checked_by']!r}\n")
             pprint(entry.result, stream=f)

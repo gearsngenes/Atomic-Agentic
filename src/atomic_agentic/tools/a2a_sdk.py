@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, ClassVar, Dict, Mapping, Optional
 
 from ..a2a.a2a_client_hub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
@@ -43,6 +43,8 @@ class A2AProxyTool(Tool):
     same policy as ``PyA2AtomicTool``; call ``self.client_hub.refresh(...)``
     directly to pick up remote-side changes.
     """
+
+    result_cls: ClassVar[type[A2AProxyToolResult]] = A2AProxyToolResult
 
     def __init__(
         self,
@@ -212,7 +214,7 @@ class A2AProxyTool(Tool):
         except (ValueError, TypeError) as e:
             raise ToolInvocationError(f"{self.full_name}: malformed parts item: {e}") from e
 
-    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: A2A tools do not accept positional arguments; got {args!r}."
@@ -220,28 +222,35 @@ class A2AProxyTool(Tool):
 
         if self._skill_id is not None:
             try:
-                return self._function(inputs=kwargs)
+                result = self._function(inputs=kwargs)
             except ToolInvocationError:
                 raise
             except Exception as e:
                 raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+        else:
+            parts = self._normalize_parts_input(kwargs)
+            metadata = kwargs.get("metadata")
+            try:
+                result_parts = self._function(parts, metadata=metadata)
+            except ToolInvocationError:
+                raise
+            except Exception as e:
+                raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+            result = [_part_to_dict(p) for p in result_parts]
 
-        parts = self._normalize_parts_input(kwargs)
-        metadata = kwargs.get("metadata")
-        try:
-            result_parts = self._function(parts, metadata=metadata)
-        except ToolInvocationError:
-            raise
-        except Exception as e:
-            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
-
-        return [_part_to_dict(p) for p in result_parts]
+        return {
+            "transport_mode": self.transport_mode,
+            "base_url": self.base_url,
+            "persistent": self.persistent,
+            "skill_id": self.skill_id,
+            "result": result,
+        }
 
     async def async_execute(
         self,
         args: tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Any:
+    ) -> Dict[str, Any]:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: A2A tools do not accept positional arguments; got {args!r}."
@@ -249,45 +258,29 @@ class A2AProxyTool(Tool):
 
         if self._skill_id is not None:
             try:
-                return await self.client_hub.async_call_atomic_skill(self._skill_id, kwargs)
+                result = await self.client_hub.async_call_atomic_skill(self._skill_id, kwargs)
             except ToolInvocationError:
                 raise
             except Exception as e:
                 raise ToolInvocationError(f"{self.full_name}: async invocation failed: {e}") from e
+        else:
+            parts = self._normalize_parts_input(kwargs)
+            metadata = kwargs.get("metadata")
+            try:
+                result_parts = await self.client_hub.async_send_parts(parts, metadata=metadata)
+            except ToolInvocationError:
+                raise
+            except Exception as e:
+                raise ToolInvocationError(f"{self.full_name}: async invocation failed: {e}") from e
+            result = [_part_to_dict(p) for p in result_parts]
 
-        parts = self._normalize_parts_input(kwargs)
-        metadata = kwargs.get("metadata")
-        try:
-            result_parts = await self.client_hub.async_send_parts(parts, metadata=metadata)
-        except ToolInvocationError:
-            raise
-        except Exception as e:
-            raise ToolInvocationError(f"{self.full_name}: async invocation failed: {e}") from e
-
-        return [_part_to_dict(p) for p in result_parts]
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at,
-        ended_at,
-        **result_kwargs: Any,
-    ) -> A2AProxyToolResult:
-        """Construct an A2AProxyToolResult carrying this proxy's transport identity."""
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=A2AProxyToolResult,
-            transport_mode=self.transport_mode,
-            base_url=self.base_url,
-            persistent=self.persistent,
-            skill_id=self.skill_id,
-            **result_kwargs,
-        )
+        return {
+            "transport_mode": self.transport_mode,
+            "base_url": self.base_url,
+            "persistent": self.persistent,
+            "skill_id": self.skill_id,
+            "result": result,
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization

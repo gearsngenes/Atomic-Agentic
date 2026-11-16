@@ -557,3 +557,21 @@ class TestParallelFlowSerialization:
         assert data["result_keys"] == ["first", "third"]
         assert "checkpoints" not in data
         assert "output_type" not in data
+
+
+class TestParallelFlowInvokeHook:
+    def test_result_cls_and_no_make_result(self) -> None:
+        assert ParallelFlow.result_cls is ParallelFlowResult
+        assert not hasattr(ParallelFlow, "make_result")
+
+    def test_sync_and_async_results_carry_projection_fields(self) -> None:
+        flow = make_three_branch_flow()
+
+        for result in (
+            flow.invoke({"value": 1}),
+            asyncio.run(flow.async_invoke({"value": 1})),
+        ):
+            assert isinstance(result, ParallelFlowResult)
+            assert result.result_mode == flow.result_mode
+            assert result.selected_indices == flow.selected_indices
+            assert result.result_keys == flow.result_keys

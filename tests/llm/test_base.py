@@ -106,6 +106,25 @@ class TestLLMEngineMessagesAndInvoke:
             }
         ]
 
+    def test_invoke_result_carries_the_engine_full_name_as_invoker_id(self) -> None:
+        engine = FakeLLMEngine(responses=["one", "two"])
+        messages = {"messages": [{"role": "user", "content": "Hello"}]}
+
+        assert engine.invoke(messages).invoker_id == engine.full_name
+        assert run_coro_sync(engine.async_invoke(messages)).invoker_id == engine.full_name
+
+    def test_invoke_is_inherited_and_make_result_is_gone(self) -> None:
+        assert "invoke" not in LLMEngine.__dict__
+        assert "async_invoke" not in LLMEngine.__dict__
+        assert not hasattr(LLMEngine, "make_result")
+        assert LLMEngine.result_cls is LLMResult
+
+    def test_async_invoke_rejects_non_list_messages(self) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match="async_invoke"):
+            run_coro_sync(engine.async_invoke({"messages": "hello"}))
+
     def test_invoke_rejects_missing_messages(self) -> None:
         engine = FakeLLMEngine()
 

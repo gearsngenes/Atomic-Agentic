@@ -84,9 +84,7 @@ from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import PlanActTask
 from ..models.agents.records import ToolAgentRecord, LLMRecord
-from ..models.results.agents import ToolAgentResult
 from ..utils.agents import (
-    build_usage_report,
     check_call_bindings,
     compile_batches,
     extract_identifiers,
@@ -682,28 +680,5 @@ class PlanActAgent(ToolAgent):
             **self._record_base_fields(task),
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
-            regenerations_used=task.regenerations_used,
-        )
-
-    def build_result_from_task(self, task: PlanActTask, result: Any) -> ToolAgentResult:
-        """
-        Construct this agent's ``ToolAgentResult`` envelope directly from a
-        finished ``PlanActTask`` (independent of the record). Derives
-        ``usage_report`` via ``build_usage_report`` and ``failed_call_count``
-        from ``len(task.failed_statements)``.
-        """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = self._llm_engine.model_data
-
-        return self._make_result(
-            result=result,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            result_cls=ToolAgentResult,
-            run_id=task.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            usage_report=build_usage_report(task.completed, task.failed_statements),
-            failed_call_count=len(task.failed_statements),
             regenerations_used=task.regenerations_used,
         )

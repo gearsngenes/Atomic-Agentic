@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Mapping
-from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from ..exceptions import WorkflowError
 from ..core.atomic_invokable import AtomicInvokable
@@ -19,7 +17,6 @@ from ..models.results import AtomicResult
 from ..models.results.workflows import ParallelFlowResult
 from .base import Workflow
 
-logger = logging.getLogger(__name__)
 
 __all__ = ["ParallelFlow"]
 
@@ -89,10 +86,10 @@ class ParallelFlow(Workflow):
 
     - ``trace``: full ordered tuple of every branch's own ``AtomicResult``
       (all branches, declaration order), when ``include_trace`` is enabled.
-    - ``result_mode``: fixed projection mode, injected directly by
-      ``make_result()``.
+    - ``result_mode``: fixed projection mode, included in the
+      dict ``_async_run`` returns.
     - ``selected_indices``: fixed branch positions selected for
-      projection, injected directly by ``make_result()``.
+      projection, included in the dict ``_async_run`` returns.
     - ``result_keys``: single source of truth for the projection's labels,
       computed once at construction and mirrored verbatim onto the result.
       For ``DICT`` mode it's the (validated) ``result_keys`` constructor
@@ -107,6 +104,8 @@ class ParallelFlow(Workflow):
     DICT = "dict"
 
     _OUTPUT_TYPES = {SCALAR, LIST, TUPLE, SET, DICT}
+
+    result_cls: ClassVar[type[ParallelFlowResult]] = ParallelFlowResult
 
     def __init__(
         self,
@@ -318,30 +317,6 @@ class ParallelFlow(Workflow):
         return dict(zip(self._result_keys, payloads))
 
     # ------------------------------------------------------------------ #
-    # Result construction
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> ParallelFlowResult:
-        """Construct a ParallelFlowResult envelope, injecting the fixed
-        result_mode/selected_indices/result_keys directly — all constant
-        facts about this instance, not per-run data."""
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=ParallelFlowResult,
-            result_mode=self._result_mode,
-            selected_indices=self._selected_indices,
-            result_keys=self._result_keys,
-            **result_kwargs,
-        )
-
-    # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -351,10 +326,8 @@ class ParallelFlow(Workflow):
         matches the run_coro_sync(async gather) pattern this codebase's
         other batch-dispatching act() implementations already use
         (PlanActAgent, ScriptActAgent).
-        Branches without a native async_invoke override already run their
-        real .invoke() inside a background thread by default
-        (AtomicInvokable.async_invoke), so a separate thread-pool mechanism
-        here would just duplicate that.
+        Every invokable implements its own async hook, so the sync path is
+        the async path bridged rather than a separate thread-pool mechanism.
         """
         return run_coro_sync(self._async_run(inputs))
 
@@ -381,6 +354,9 @@ class ParallelFlow(Workflow):
 
         return self._project_result(branch_results), {
             "trace": tuple(branch_results) if self.include_trace else None,
+            "result_mode": self._result_mode,
+            "selected_indices": self._selected_indices,
+            "result_keys": self._result_keys,
         }
 
     # ------------------------------------------------------------------ #

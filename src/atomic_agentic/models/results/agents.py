@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .atomic import AtomicResult
@@ -128,6 +128,12 @@ class AgentResult(AtomicResult):
 
     Fields
     ------
+    run_id:
+        Identifier of this invocation, minted by the agent when it seeds the
+        task; ``None`` when the agent's ``record_enabled`` is False (nothing to
+        look up). Key for ``Agent.get_record(run_id=...)``. Not re-validated
+        here.
+
     llm_token_usage:
         Per-call token usage for every LLM generation that contributed to this
         invocation, ordered by call order. Entries where the provider did not
@@ -140,6 +146,7 @@ class AgentResult(AtomicResult):
 
     llm_token_usage: tuple[TokenUsage, ...]
     llm_model_data: LLMModelData
+    run_id: str | None = field(kw_only=True)
 
     def __post_init__(self) -> None:
         normalized = self._normalize_llm_token_usage(self.llm_token_usage)
@@ -175,6 +182,7 @@ class AgentResult(AtomicResult):
         data = AtomicResult.to_dict(self)
         data.update(
             {
+                "run_id": self.run_id,
                 "llm_token_usage": [u.to_dict() for u in self.llm_token_usage],
                 "llm_model_data": self.llm_model_data.to_dict(),
             }
@@ -197,7 +205,7 @@ class ToolAgentResult(AgentResult):
     usage_report:
         ``ToolUsageReport`` summarizing per-tool call counts plus
         ``total_dispatched``/``total_failed`` for the invocation. Re-derived
-        (by the caller, e.g. ``PlanActAgent.build_result_from_task``) via
+        (by the caller, e.g. ``PlanActAgent.result_payload_from_task``) via
         ``utils.agents.build_usage_report`` over the task's statements.
 
     failed_call_count:
@@ -238,7 +246,7 @@ class ScriptActAgentResult(ToolAgentResult):
     Successful ScriptActAgent invocation result, a ``ToolAgentResult``
     subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
     are all real, inherited, required fields -- ``agents/scriptact.py``'s
-    ``build_result_from_task`` populates ``usage_report``/
+    ``result_payload_from_task`` populates ``usage_report``/
     ``failed_call_count`` via ``build_usage_report``/
     ``len(task.failed_statements)``, mirroring ``PlanActAgent``'s/
     ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
@@ -274,7 +282,7 @@ class ScriptActAgentResult(ToolAgentResult):
 class ThinkingAgentResult(AgentResult):
     """
     Successful thinking-agent invocation result (every ``ThinkingAgent``
-    subclass), built by ``ThinkingAgent.build_result_from_task``.
+    subclass), built by ``ThinkingAgent.result_payload_from_task``.
 
     Extends ``AgentResult`` with the count of thoughts the invocation
     produced -- a derived reduction like ``llm_token_usage``, not a duplicate

@@ -169,24 +169,22 @@ for i, payload in enumerate(examples, start=1):
     result = flow.invoke(payload)
     print(f"\n=== Run {i} ===")
     print("Inputs:", payload)
-    print("Run ID:", result.run_id)
     print("Result:", result.result)
     print("Selected branch:", result.selected_branch)
     # trace is exactly 2 entries when include_trace is on (the default):
     # trace[0] is the router's own result, trace[1] is the selected branch's.
     for j, node_result in enumerate(result.trace):
-        print(f"  trace[{j}]: run_id={node_result.run_id}, result={node_result.result!r}")
+        print(f"  trace[{j}]: result={node_result.result!r}")
 
 print("\n########## Dict-configured branches (key selector) ##########")
 for i, payload in enumerate(examples, start=1):
     result = flow_by_key.invoke(payload)
     print(f"\n=== Run {i} ===")
     print("Inputs:", payload)
-    print("Run ID:", result.run_id)
     print("Result:", result.result)
     print("Selected branch:", result.selected_branch)
     for j, node_result in enumerate(result.trace):
-        print(f"  trace[{j}]: run_id={node_result.run_id}, result={node_result.result!r}")
+        print(f"  trace[{j}]: result={node_result.result!r}")
 
 # ──────────────────────────────────────────────────────────────
 # escalation_notes_tool needs `notes`, which the router never looks at and

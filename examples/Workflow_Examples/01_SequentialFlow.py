@@ -46,8 +46,6 @@ def main() -> None:
     print("\n=== Final result ===")
     pprint(final_result.result)
 
-    print("\n=== SequentialFlow run_id ===")
-    print(final_result.run_id)
 
     print("\n=== return_index ===")
     print("return_index:", final_result.return_index)
@@ -57,7 +55,7 @@ def main() -> None:
     # include_trace is enabled (the default). trace[return_index] is the
     # same result object that produced final_result.result.
     for i, step_result in enumerate(final_result.trace):
-        print(f"Step {i}: run_id={step_result.run_id}, result={step_result.result}")
+        print(f"Step {i}: result={step_result.result}")
 
     print("\n=== include_trace=False: no per-step visibility ===")
     lean_flow = SequentialFlow(

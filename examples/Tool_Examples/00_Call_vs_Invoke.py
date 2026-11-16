@@ -55,7 +55,7 @@ def run_invoke_case(label: str, fn) -> None:
 # __call__ vs invoke(...): the real distinction
 # ------------------------------------------------------------------ #
 # `.invoke(...)`/`.async_invoke(...)` always return the full AtomicResult
-# envelope (.result, .run_id, .started_at/.ended_at, ...). `sample_tool(...)`/
+# envelope (.result, .started_at/.ended_at, .elapsed_time, ...). `sample_tool(...)`/
 # `await sample_tool.async_call(...)` are the "interpreted convenience path" —
 # by default they unwrap straight to the raw .result payload, since calling
 # something like a plain function is normally not asking for provenance

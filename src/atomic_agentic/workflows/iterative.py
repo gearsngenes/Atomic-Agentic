@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from datetime import datetime
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 from ..constants.core import NO_VAL
 from ..exceptions import ValidationError
@@ -89,6 +88,8 @@ class IterativeFlow(Workflow):
 
         judge: AtomicInvokable
         approval_value: Any
+
+    result_cls: ClassVar[type[IterativeFlowResult]] = IterativeFlowResult
 
     def __init__(
         self,
@@ -356,30 +357,6 @@ class IterativeFlow(Workflow):
             raise ValueError(f"no checker is registered at index {index}")
         self._checkers[index] = IterativeFlow.Checker(
             judge=current.judge, approval_value=approval_value
-        )
-
-    # ------------------------------------------------------------------ #
-    # Result construction
-    # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> IterativeFlowResult:
-        """Construct an IterativeFlowResult envelope for this workflow's invocation.
-
-        No fixed-topology constant is injected here -- everything (including
-        the mutable checkers/max_iterations, snapshotted at call time)
-        already arrives via ``result_kwargs`` from ``_run``/``_async_run``.
-        """
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=IterativeFlowResult,
-            **result_kwargs,
         )
 
     # ------------------------------------------------------------------ #

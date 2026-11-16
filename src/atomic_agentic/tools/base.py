@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
-from datetime import datetime, timezone
 from typing import (
     Any,
     Callable,
+    ClassVar,
     Dict,
     Mapping,
     Optional,
@@ -20,9 +19,6 @@ from ..utils.core import run_coro_sync
 from ..models.results.tools import ToolResult
 
 
-logger = logging.getLogger(__name__)
-
-
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool Invokable
 # ───────────────────────────────────────────────────────────────────────────────
@@ -33,7 +29,7 @@ class Tool(AtomicInvokable):
     Python callable *or* an ``AtomicInvokable``. It implements the template
     method::
 
-        invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs) -> ToolResult
+        ``invoke(inputs)`` (inherited template) -> ``_invoke_impl`` -> ``to_arg_kwarg`` -> ``execute`` -> ``ToolResult``
 
     Schema is derived through ``extract_io(...)``, which recognizes
     ``AtomicInvokable`` inputs directly (reusing their declared
@@ -73,12 +69,16 @@ class Tool(AtomicInvokable):
     Filtered dict-first inputs are bound into ordinary Python call-style
     ``(*args, **kwargs)`` before calling the stored callable.
 
-    ``execute(...)`` and ``async_execute(...)`` return the raw execution payload.
+    ``execute(...)`` and ``async_execute(...)`` return the result payload dict
+    (``{"result": <value>}``; proxies add their fixed transport fields).
     Public ``invoke(...)`` and ``async_invoke(...)`` wrap that payload in a
     ``ToolResult`` whose ``.result`` field contains the caller-facing value.
 
-    Subclasses customize result-envelope selection by overriding ``make_result(...)``.
+    Subclasses select their result class with ``result_cls``; proxy subclasses
+    also put their fixed transport fields in the dict their ``execute`` returns.
     """
+
+    result_cls: ClassVar[type[ToolResult]] = ToolResult
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -238,8 +238,8 @@ class Tool(AtomicInvokable):
         args, kwargs = self._dict_to_args_kwargs(inputs)
         return args, kwargs
 
-    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        """Synchronously execute the underlying target.
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronously execute the underlying target; returns ``{"result": value}``.
 
         Calls the stored callable directly with ``(*args, **kwargs)``.
 
@@ -259,14 +259,14 @@ class Tool(AtomicInvokable):
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
-        return result
+        return {"result": result}
 
     async def async_execute(
         self,
         args: tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Any:
-        """Asynchronously execute the underlying target.
+    ) -> Dict[str, Any]:
+        """Asynchronously execute the underlying target; returns ``{"result": value}``.
 
         Execution dispatch:
 
@@ -291,82 +291,20 @@ class Tool(AtomicInvokable):
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
-        return result
+        return {"result": result}
 
     # ------------------------------------------------------------------ #
-    # Public API
+    # Invoke hooks
     # ------------------------------------------------------------------ #
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> ToolResult:
-        """Asynchronously invoke the tool using dict-first inputs.
-
-        Mirrors the sync ``invoke(...)`` flow:
-
-        1. Filter inputs.
-        2. Convert filtered inputs into the execution shape through
-           ``to_arg_kwarg(...)``.
-        3. Dispatch through ``async_execute(...)``.
-        4. Wrap the raw execution payload in ``ToolResult``.
-
-        ``async_execute(...)`` owns the distinction between AtomicInvokable
-        targets, native async callables, and sync callables.
-        """
-        started_at = datetime.now(timezone.utc)
-
-        logger.info(f"[Async {self.full_name} started]")
-        inputs = self.filter_inputs(inputs)
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """to_arg_kwarg -> execute; ``execute`` returns the result payload."""
         args, kwargs = self.to_arg_kwarg(inputs)
-        result = await self.async_execute(args, kwargs)
-        ended_at = datetime.now(timezone.utc)
+        return self.execute(args, kwargs)
 
-        logger.info(f"[Async {self.full_name} finished]")
-        return self.make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
-
-    def invoke(self, inputs: Mapping[str, Any]) -> ToolResult:
-        """Synchronously invoke the tool using dict-first inputs.
-
-        This is the main public execution entrypoint. Subclasses should not
-        override this method; instead, they should customize ``to_arg_kwarg()``
-        and ``execute()`` when they need different binding or transport
-        semantics.
-
-        The returned ``ToolResult.result`` contains the raw execution payload
-        that this method previously returned directly.
-        """
-        with self._invoke_lock:
-            started_at = datetime.now(timezone.utc)
-
-            logger.info(f"[{self.full_name} started]")
-            inputs = self.filter_inputs(inputs)
-            args, kwargs = self.to_arg_kwarg(inputs)
-            result = self.execute(args, kwargs)
-            ended_at = datetime.now(timezone.utc)
-
-            logger.info(f"[{self.full_name} finished]")
-            return self.make_result(
-                result=result,
-                started_at=started_at,
-                ended_at=ended_at,
-            )
-
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> ToolResult:
-        """Construct a ToolResult envelope for this tool's invocation."""
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=ToolResult,
-            **result_kwargs,
-        )
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin: awaits ``async_execute``."""
+        args, kwargs = self.to_arg_kwarg(inputs)
+        return await self.async_execute(args, kwargs)
 
     # ------------------------------------------------------------------ #
     # Serialization

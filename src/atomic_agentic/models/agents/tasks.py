@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
@@ -115,9 +114,10 @@ class AgentTask:
         the post stage declares), so afterwards it is exactly what
         ``post_invoke`` received.
 
-    run_id, started_at, ended_at : str | None, datetime | None, datetime | None
-        Identity and timing shared by the result and the record built from
-        this task. ``None`` until ``create_task`` mints them.
+    run_id : str | None
+        Identity shared by the result and the record built from this task.
+        ``None`` when the agent does not record (``record_enabled`` False).
+        Set by ``create_task``.
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
@@ -136,8 +136,6 @@ class AgentTask:
     post_inputs: dict[str, Any] = field(default_factory=dict)
     agentic_inputs: dict[str, Any] = field(default_factory=dict)
     run_id: str | None = None
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
     thinking_complete: bool = True
 
 

@@ -10,7 +10,7 @@ ceiling; those are strategy decisions made inside the hooks.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 from .basic import BasicAgent
 from ..constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
@@ -59,7 +59,7 @@ class ThinkingAgent(BasicAgent):
     ends on an assistant message).
 
     The result is ``ThinkingAgentResult`` (``thoughts_produced``), built by
-    ``build_result_from_task``.
+    ``result_payload_from_task``.
 
     Hook contracts (the strategy author's side):
       * ``_thinking_done`` -- deterministic and side-effect free; the only
@@ -69,6 +69,7 @@ class ThinkingAgent(BasicAgent):
     """
 
     _TASK_CLS = ThinkingTask
+    result_cls: ClassVar[type[ThinkingAgentResult]] = ThinkingAgentResult
 
     # ------------------------------------------------------------------ #
     # Strategy hooks
@@ -220,24 +221,8 @@ class ThinkingAgent(BasicAgent):
             thoughts=tuple(task.thoughts),
         )
 
-    def build_result_from_task(self, task: ThinkingTask, result: Any) -> ThinkingAgentResult:
-        """
-        ``Agent.build_result_from_task`` with the family result class.
-
-        1. ``llm_token_usage`` from ``task.llm_records``; ``llm_model_data`` from
-           the engine's configuration
-        2. return ``ThinkingAgentResult`` with ``thoughts_produced=len(task.thoughts)``
-        """
-        llm_token_usage = tuple(r.llm_result.token_usage for r in task.llm_records)
-        llm_model_data = self._llm_engine.model_data
-
-        return self._make_result(
-            result=result,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-            result_cls=ThinkingAgentResult,
-            run_id=task.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            thoughts_produced=len(task.thoughts),
-        )
+    def result_payload_from_task(self, task: ThinkingTask, result: Any) -> dict[str, Any]:
+        """Base payload plus ``thoughts_produced = len(task.thoughts)``."""
+        payload = super().result_payload_from_task(task, result)
+        payload["thoughts_produced"] = len(task.thoughts)
+        return payload

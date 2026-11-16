@@ -5,6 +5,51 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a34] - 2026-11-15
+
+Invocation lifecycle release. `AtomicInvokable.invoke` and `async_invoke` are now
+concrete: they log, filter inputs once, stamp timing and build the result, while
+subclasses supply only the work in `_invoke_impl` and `_async_invoke_impl`,
+which return a payload dict. Result envelopes lose `run_id` and `instance_id`,
+and `elapsed_s` becomes the derived `elapsed_time`. The release is breaking for
+anyone who subclasses `AtomicInvokable`, `Tool`, `Agent` or `Workflow`, or who
+reads `run_id`, `elapsed_s` or `instance_id` from a non-agent result.
+
+### Added
+
+- `AtomicResult.elapsed_time`, derived from `started_at` and `ended_at`.
+- A per-instance `log_level` on every invokable (default `DEBUG`, `None`
+  disables the start and finished logs).
+
+### Changed
+
+- breaking: subclasses of `AtomicInvokable` implement `_invoke_impl` and
+  `_async_invoke_impl` instead of overriding `invoke`/`async_invoke`. Each hook
+  receives already-filtered inputs and returns a payload dict with a required
+  `result` key plus any fields its result class adds.
+- breaking: the result class is a `result_cls` class attribute. `make_result`
+  is removed from every class, including the MCP and A2A proxy tools.
+- breaking: `Tool.execute` and `async_execute` return a payload dict
+  (`{"result": ...}`), not the bare value.
+- breaking: `run_id` is removed from `AtomicResult`. It exists only on agent
+  results (`AgentResult`) and agent records, where it still keys
+  `get_record(run_id=...)`.
+- breaking: `elapsed_s` is replaced by the derived `elapsed_time`.
+- breaking: `instance_id` is removed. `invoker_id` on a result is the
+  invokable's `full_name`, and `AgentRecord.agent_id` is the writing agent's
+  `full_name`.
+- breaking: `Agent.result_from_task` is renamed `result_payload_from_task` and
+  returns a payload dict instead of a result.
+- Start and finished messages are logged at `DEBUG` instead of `INFO`.
+- Workflows keep their `_run`/`_async_run` protocol and `ExecutionError`
+  wrapping; each flow's fixed result fields are now returned from those methods.
+
+### Removed
+
+- breaking: `AtomicInvokable._invoke_lock` and the agent registry locks.
+- Per-class `make_result` overrides and the default thread-offload
+  `async_invoke`.
+
 ## [2.0.0a33.post2] - 2026-11-15
 
 Invokable cleanup release. `Command` and `StructuredInvokable` are removed

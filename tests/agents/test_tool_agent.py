@@ -66,7 +66,7 @@ def _commit(agent: ToolAgent, *responses: Any) -> None:
     """Append one history record per response to the agent's active conversation."""
     conv = agent.get_conversation()
     for i, response in enumerate(responses):
-        conv.commit(AgentRecord(user_prompt=f"q{i}", generated_response=response), {})
+        conv.commit(AgentRecord(user_prompt=f"q{i}", generated_response=response, run_id=f"run-{i}"), {})
 
 
 def _new_task(agent: ToolAgent, prompt: str = "next", **extra_inputs: Any) -> Any:
@@ -956,7 +956,7 @@ class TestRenderTurn:
 
     def test_render_turn_uses_the_context_name_prefix(self) -> None:
         agent = _build(_SigilStub)
-        turn = AgentRecord(user_prompt="p", generated_response=1)
+        turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response=1)
 
         messages = agent.render_turn(turn, index=0)
 
@@ -964,7 +964,7 @@ class TestRenderTurn:
 
     def test_render_turn_requires_index(self) -> None:
         agent = make_stub_tool_agent()
-        turn = AgentRecord(user_prompt="p", generated_response=1)
+        turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response=1)
 
         with pytest.raises(KeyError):
             agent.render_turn(turn)
@@ -973,7 +973,7 @@ class TestRenderTurn:
 class TestRenderTurnMode:
     def test_render_turn_forwards_the_response_render_mode(self) -> None:
         agent = _build(_SigilStub)
-        turn = AgentRecord(user_prompt="p", generated_response={"a": 1})
+        turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response={"a": 1})
 
         as_str = agent.render_turn(turn, index=0)
         as_json = agent.render_turn(turn, index=0, render_mode="j")
@@ -986,7 +986,7 @@ class TestRenderTurnMode:
 class TestRenderTurnLimits:
     def test_render_turn_forwards_limits_and_keeps_the_label(self) -> None:
         agent = _build(_SigilStub)
-        turn = AgentRecord(user_prompt="p", generated_response="abcdefghij")
+        turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response="abcdefghij")
 
         messages = agent.render_turn(
             turn, index=0, response_preview_limit=3, prompt_preview_limit=0
@@ -1060,3 +1060,17 @@ class TestToolAgentInvokeSmoke:
         assert history == ["task_result_0: str = earlier answer"]
         assert "name: task_result_0" in agent.seen[-1]["content"]
         assert "now" in agent.seen[-1]["content"]
+
+
+class TestResultClassWiring:
+    def test_each_family_selects_its_result_class(self) -> None:
+        from atomic_agentic.models.results.agents import ScriptActAgentResult, ToolAgentResult
+
+        assert ToolAgent.result_cls is ToolAgentResult
+        assert PlanActAgent.result_cls is ToolAgentResult
+        assert ReActAgent.result_cls is ToolAgentResult
+        assert ScriptActAgent.result_cls is ScriptActAgentResult
+
+    def test_no_family_defines_build_result_from_task(self) -> None:
+        for cls in (ToolAgent, PlanActAgent, ReActAgent, ScriptActAgent):
+            assert not hasattr(cls, "build_result_from_task")

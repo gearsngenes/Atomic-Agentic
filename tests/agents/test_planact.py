@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.planact import PlanActAgent
+from atomic_agentic.models.results.agents import ToolAgentResult
 from atomic_agentic.exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
 
 from .conftest import (
@@ -579,14 +580,16 @@ class TestPlanActResultModelData:
     def test_zero_record_task_builds_result_with_engine_model_data(self) -> None:
         agent = make_planact_agent([])
         task = agent.create_task(agent.filter_inputs({"prompt": "run"}))
-        task.ended_at = task.started_at
 
-        result = agent.build_result_from_task(task, "done")
+        payload = agent.result_payload_from_task(task, "done")
 
-        assert result.llm_token_usage == ()
-        assert result.llm_model_data == agent.llm_engine.model_data
-        assert result.failed_call_count == 0
-        assert result.regenerations_used == 0
+        assert payload["result"] == "done"
+        assert payload["llm_token_usage"] == ()
+        assert payload["llm_model_data"] == agent.llm_engine.model_data
+        assert payload["run_id"] == task.run_id
+        assert payload["usage_report"].total_failed == 0
+        assert payload["failed_call_count"] == 0
+        assert payload["regenerations_used"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -674,3 +677,21 @@ class TestPlanActSentinelToolNames:
         agent = make_planact_agent([])
         with pytest.raises(ToolRegistrationError):
             agent.register_tool(custom, alias=name)
+
+
+class TestPlanActResultHook:
+    def test_result_cls_and_no_per_family_builder(self) -> None:
+        assert PlanActAgent.result_cls is ToolAgentResult
+        assert not hasattr(PlanActAgent, "build_result_from_task")
+
+    def test_scripted_run_returns_tool_agent_result_matching_record(self) -> None:
+        plan = [{"call": "add", "arguments": [arg("x", 2), arg("y", 3)], "result_name": "a"}]
+        agent = make_planact_agent([scripted(plan=plan, return_value="$a")], record_enabled=True)
+
+        result = agent.invoke({"prompt": "go"})
+
+        assert type(result) is ToolAgentResult
+        assert result.result == 5
+        assert result.failed_call_count == 0
+        assert result.regenerations_used == 0
+        assert result.run_id == agent.get_conversation().records[-1].run_id
