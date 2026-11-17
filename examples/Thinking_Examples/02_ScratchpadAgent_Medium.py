@@ -52,7 +52,6 @@ nothing decorative, nothing wasted.
 #     is a required construction argument ---
 story_agent = ScratchpadAgent(
     name="Twist_Story_Writer",
-    namespace="examples",
     llm_engine=llm,
     role_prompt=STORY_WRITER_ROLE_PROMPT,
     thinking_rounds=6,

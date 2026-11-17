@@ -67,7 +67,6 @@ def drafter_post(*, result: str, revision_count: int = 0) -> dict:
 
 drafter = BasicAgent(
     name="drafter",
-    namespace="examples",
     description="Drafts or revises the story and tracks revision_count.",
     llm_engine=engine,
     role_prompt=(
@@ -100,7 +99,6 @@ def fact_post(*, result: str) -> dict:
 
 fact_checker = BasicAgent(
     name="fact_checker",
-    namespace="examples",
     description="Checks the draft's internal consistency.",
     llm_engine=engine,
     role_prompt=(
@@ -132,7 +130,6 @@ def style_post(*, result: str) -> dict:
 
 style_editor = BasicAgent(
     name="style_editor",
-    namespace="examples",
     description="Checks the draft's prose style and pacing.",
     llm_engine=engine,
     role_prompt=(
@@ -175,7 +172,6 @@ def triage_fn(
 triage = toolify(
     triage_fn,
     name="triage",
-    namespace="examples",
     description="Combines both reviews and decides whether the draft is ready.",
 )
 
@@ -207,14 +203,12 @@ def escalate_if_stuck(*, passed: bool, revision_count: int) -> str | None:
 loop_or_finalize_router = toolify(
     loop_or_finalize,
     name="loop_or_finalize_router",
-    namespace="examples",
     description="Loops back to the drafter, or proceeds to finalize once approved.",
 )
 
 escalation_router = toolify(
     escalate_if_stuck,
     name="escalation_router",
-    namespace="examples",
     description="Escalates to a human once revisions stop converging.",
 )
 
@@ -231,7 +225,6 @@ def finalize_fn(*, draft_text: str, revision_count: int) -> dict:
 finalize = toolify(
     finalize_fn,
     name="finalize",
-    namespace="examples",
     description="Packages the approved draft as the final output.",
 )
 
@@ -251,7 +244,6 @@ def human_escalation_fn(
 human_escalation = toolify(
     human_escalation_fn,
     name="human_escalation",
-    namespace="examples",
     description="Hands a stuck draft off for human review.",
 )
 
@@ -262,7 +254,6 @@ human_escalation = toolify(
 # ---------------------------------------------------------------------
 flow = GraphFlow(
     name="editorial_pipeline",
-    namespace="examples",
     description=(
         "Drafts a story, reviews it from two angles concurrently, and either loops "
         "back for revision, finalizes, or escalates to a human."

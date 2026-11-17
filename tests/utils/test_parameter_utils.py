@@ -50,7 +50,6 @@ class _AddInvokable(AtomicInvokable):
     def __init__(self) -> None:
         super().__init__(
             name="add_invokable",
-            namespace="tests",
             description="Add invokable.",
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -77,7 +76,7 @@ class TestExtractIO:
         parameters, return_type = extract_io(invokable)
 
         assert parameters == invokable.parameters
-        assert return_type == invokable.return_type == "int"
+        assert return_type == invokable.return_type == ("int",)
 
     def test_extract_io_extracts_basic_parameters_and_return_type(self) -> None:
         def sample(x: int, y: str = "default") -> bool:
@@ -85,7 +84,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert return_type == "bool"
+        assert return_type == ("bool",)
         assert [param.name for param in parameters] == ["x", "y"]
         assert [param.kind for param in parameters] == [
             ParamSpec.POSITIONAL_OR_KEYWORD,
@@ -101,7 +100,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert return_type == "Any"
+        assert return_type == ("Any",)
         assert parameters[0].name == "limit"
         assert parameters[0].type == ("int",)
         assert parameters[0].default == 10
@@ -112,7 +111,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert return_type == "None"
+        assert return_type == ("None",)
         assert [(param.name, param.kind, param.type) for param in parameters] == [
             ("x", ParamSpec.POSITIONAL_OR_KEYWORD, ("int",)),
             ("args", ParamSpec.VAR_POSITIONAL, ("str",)),
@@ -126,7 +125,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert return_type == "int"
+        assert return_type == ("int",)
         assert [(param.name, param.kind) for param in parameters] == [
             ("x", ParamSpec.POSITIONAL_ONLY),
             ("y", ParamSpec.POSITIONAL_OR_KEYWORD),
@@ -139,7 +138,7 @@ class TestExtractIO:
         parameters, return_type = extract_io(sample)
 
         assert [param.type for param in parameters] == [("list[int]",), ("dict[str, Any]",)]
-        assert return_type == "list[str]"
+        assert return_type == ("list[str]",)
 
     def test_extract_io_preserves_string_annotations(self) -> None:
         def sample(value: "CustomType") -> "OtherType":
@@ -148,7 +147,7 @@ class TestExtractIO:
         parameters, return_type = extract_io(sample)
 
         assert parameters[0].type in {("CustomType",), ("'CustomType'",)}
-        assert return_type in {"OtherType", "'OtherType'"}
+        assert return_type in {("OtherType",), ("'OtherType'",)}
 
     def test_extract_io_formats_optional_annotation(self) -> None:
         def sample(value: Optional[int]) -> Optional[str]:
@@ -157,7 +156,7 @@ class TestExtractIO:
         parameters, return_type = extract_io(sample)
 
         assert parameters[0].type == ("None", "int")
-        assert return_type == "None | str"
+        assert return_type == ("None", "str")
 
     def test_extract_io_pep604_union_matches_typing_union(self) -> None:
         def sample(value: int | None) -> str | None:
@@ -166,7 +165,7 @@ class TestExtractIO:
         parameters, return_type = extract_io(sample)
 
         assert parameters[0].type == ("None", "int")
-        assert return_type == "None | str"
+        assert return_type == ("None", "str")
 
     def test_extract_io_literal_none_is_not_corrupted_to_any(self) -> None:
         def sample(value: Literal[None]) -> None:
@@ -481,7 +480,7 @@ class TestExtractIOAnnotated:
 
         _, return_type = extract_io(sample)
 
-        assert return_type == "str"
+        assert return_type == ("str",)
 
     def test_annotated_varargs_description_extracted(self) -> None:
         def sample(*args: Annotated[int, "positional items"]) -> None:

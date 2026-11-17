@@ -5,6 +5,69 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a34.post1] - 2026-11-16
+
+Signature sweep release (Stage 4). Every constructor now follows one rule: the
+functional core first (`llm_engine`, `function`, the hub or client, the steps),
+then the stages and bindings, then memory, then a `*` and the class-specific
+knobs. `namespace` is gone from every invokable, `return_type` is a tuple of
+type names, tool aliases are gone, and agents record by default. The release is
+breaking for anyone who passes `namespace`, relies on the old positional order
+of an agent or proxy-tool constructor, registers tools with `alias=`, or reads
+`AgentRecord.agent_id`.
+
+### Added
+
+- `("Any",)` is the `return_type` of an agent that has no post stage.
+- Auto-wrapped stages carry their agent's name: `<agent>_pre_invoke` and
+  `<agent>_post_invoke`. A stage that is already an invokable keeps its own name.
+
+### Changed
+
+- breaking: `namespace` is removed from every constructor (tools, agents,
+  engines, workflows), from `to_dict`, `toolify` and `batch_toolify`.
+  `full_name` is the derived `Type.name`, used for logs, errors and
+  `invoker_id`.
+- breaking: `return_type` is a sorted, deduplicated tuple of strings, like
+  `ParamSpec.type`. It accepts a string (one member), or a tuple, list or set of
+  strings. Remote metadata (A2A skill, PyA2A and MCP tool metadata) carries it as
+  a list. The MCP `List[ContentBlock]` return type is now `list[ContentBlock]`.
+- breaking: `MCPProxyTool` and `PyA2AtomicTool` take the hub or client first:
+  `(client_hub, remote_name, name=None, description=None)`. `name` defaults to the
+  remote name and `description` to the remote tool's own. `toolify(component,
+  name, description, *, remote_name)` takes `name` and `description` positionally.
+- breaking: agent constructors follow one order: `name, description, llm_engine`,
+  the prompt slot (`role_prompt` or `instructions`), `thinking_instructions` and
+  `tools` where they exist, `pre_invoke, post_invoke`, the three binding knobs,
+  `use_runtime_context`, `record_enabled`, `records_window`, then `*` and the
+  class-specific knobs (limits, `fail_fast`, `response_schema`, `thinking_rounds`,
+  `stop_early`). Positional callers past `llm_engine` must switch to keywords.
+- breaking: `inputs_to_context`, `response_to_context` and `response_to_post`
+  default to `()`. `None` raises `AgentError`, and an empty binding is exposed as
+  `{}` instead of `None`.
+- breaking: `record_enabled` defaults to `True` on `ToolAgent`, `PlanActAgent`,
+  `ReActAgent` and `ScriptActAgent`; pass `record_enabled=False` for the old
+  behavior.
+- breaking: `AgentRecord.agent_id` is renamed `agent_name`. It still holds the
+  writing agent's `full_name`.
+- breaking: the toolbox key is always `tool.name`. `register_tool` and
+  `register_tools` lose `alias` and `aliases`, and `register_tool` loses
+  `description`. Build a differently named tool with `toolify(fn, name=...)`.
+  The `actions_context` prompt renders each tool's own signature.
+- breaking: the subclass hook `_validate_effective_tool_id` is renamed
+  `_validate_tool_name`.
+- breaking: `IterativeFlow.max_iterations` and `Workflow.include_trace` are
+  keyword-only.
+- A duplicate tool name inside one `register_tools` batch raises "duplicate tool
+  name in incoming batch".
+
+### Removed
+
+- breaking: `AtomicInvokable.fullname_signature`. `signature` is unchanged apart
+  from rendering the tuple return type.
+- breaking: the constants `RETURN_TOOL_FULL_NAME` and `RETURN_TOOL_NAMESPACE`.
+- The construction-time check that `pre_invoke` returns a string.
+
 ## [2.0.0a34] - 2026-11-15
 
 Invocation lifecycle release. `AtomicInvokable.invoke` and `async_invoke` are now

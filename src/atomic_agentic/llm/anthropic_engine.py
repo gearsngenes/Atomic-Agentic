@@ -118,7 +118,6 @@ class AnthropicEngine(LLMEngine):
         self,
         model: str,
         name: str | None = None,
-        namespace: str = "llm",
         description: str = "Anthropic Claude language model engine.",
         client: Anthropic | AsyncAnthropic | None = None,
         max_output_tokens: int = 8192,
@@ -143,8 +142,6 @@ class AnthropicEngine(LLMEngine):
             Optional human-friendly engine name; defaults to
             ``anthropic_{model}`` with non-identifier characters replaced by
             underscores.
-        namespace:
-            Grouping label; defaults to ``"llm"``.
         description:
             Human-readable description for this engine instance.
         client:
@@ -186,7 +183,6 @@ class AnthropicEngine(LLMEngine):
             "-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
             name=sanitized,
-            namespace=namespace,
             description=description or "Anthropic Claude language model engine.",
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

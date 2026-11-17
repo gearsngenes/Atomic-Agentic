@@ -68,13 +68,13 @@ class Accumulator:
 
 # ---------- Wrap them as Tools ----------
 
-t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", namespace="local")
-t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", namespace="local")
-t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", namespace="local")
-t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", namespace="local")
+t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds")
+t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only")
+t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw")
+t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only")
 
 acc = Accumulator()
-t_add = Tool(acc.add, name="acc_add", description="Bound method add", namespace="local")
+t_add = Tool(acc.add, name="acc_add", description="Bound method add")
 
 
 # ---------- Helpers ----------
@@ -90,7 +90,7 @@ def run_case(label: str, tool: Tool, inputs: dict[str, Any]) -> None:
 
 def show_signature(tool: Tool) -> None:
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", tool.fullname_signature)
+    print("signature:", tool.signature)
     print("parameters:")
     for param in tool.parameters:
         default_str = "default=NO_VAL" if param.default is NO_VAL else f"default={param.default!r}"

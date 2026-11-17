@@ -9,7 +9,6 @@ from shared_engine import llm_engine
 # PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
 agent = PlanActAgent(
     name="Test_PlanAct",
-    namespace="examples",
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
     record_enabled=True,    # True => persists conversation history across runs
@@ -34,7 +33,7 @@ def tool_3(t2_result: str) -> str:
     return t2_result + "\n3) Result from tool_3"
 
 
-# Register tools (callables are toolified under agent.name as namespace;
+# Register tools (callables are toolified automatically;
 # each is reachable by its own bare name -- tool_1/tool_2/tool_3 -- since no
 # alias is given).
 agent.register_tools([tool_1, tool_2, tool_3])

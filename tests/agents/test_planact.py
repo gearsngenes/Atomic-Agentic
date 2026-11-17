@@ -48,7 +48,6 @@ class TestPlanActConstruction:
         with pytest.raises(ToolAgentError):
             PlanActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 fail_fast="yes",  # type: ignore[arg-type]
@@ -68,7 +67,6 @@ class TestPlanActConstruction:
         with pytest.raises(TypeError):
             PlanActAgent(
                 name="tests",
-                namespace="tests",
                 description=".",
                 llm_engine=FakeLLMEngine([]),
                 **removed,
@@ -83,9 +81,11 @@ class TestPlanActConstruction:
         def dummy() -> None:
             return None
 
+        from atomic_agentic.tools import Tool
+
         agent = make_planact_agent([])
         with pytest.raises(ToolRegistrationError):
-            agent.register_tool(dummy, alias="make_sequence")
+            agent.register_tool(Tool(function=dummy, name="make_sequence", description="d."))
 
 
 # --------------------------------------------------------------------------- #
@@ -674,9 +674,11 @@ class TestPlanActSentinelToolNames:
         def custom() -> None:
             return None
 
+        from atomic_agentic.tools import Tool
+
         agent = make_planact_agent([])
         with pytest.raises(ToolRegistrationError):
-            agent.register_tool(custom, alias=name)
+            agent.register_tool(Tool(function=custom, name=name, description="d."))
 
 
 class TestPlanActResultHook:

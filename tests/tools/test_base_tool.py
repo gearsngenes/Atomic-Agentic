@@ -118,25 +118,22 @@ class TestToolConstruction:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
         assert tool.name == "add"
-        assert tool.namespace == "tests"
         assert tool.description == "Add values."
-        assert tool.full_name == "Tool.tests.add"
+        assert tool.full_name == "Tool.add"
         assert tool.function is add
         assert tool.module == add.__module__
         assert tool.qualname == add.__qualname__
 
-    def test_default_namespace_and_inferred_metadata(self) -> None:
+    def test_inferred_metadata(self) -> None:
         tool = Tool(function=add)
 
         assert tool.name == "add"
-        assert tool.namespace == "default"
         assert tool.description == "Add two integers."
-        assert tool.full_name == "Tool.default.add"
+        assert tool.full_name == "Tool.add"
 
     def test_callable_without_docstring_uses_fallback_description(self) -> None:
         tool = Tool(function=add_no_doc)
@@ -155,19 +152,18 @@ class TestToolConstruction:
             Tool(function=123)  # type: ignore[arg-type]
 
     def test_parameters_and_return_type_are_extracted(self) -> None:
-        tool = Tool(function=greet, namespace="tests", description="Greet.")
+        tool = Tool(function=greet, description="Greet.")
 
         assert [(p.name, p.kind, p.default) for p in tool.parameters] == [
             ("name", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("punctuation", "POSITIONAL_OR_KEYWORD", "!"),
         ]
-        assert tool.return_type == "str"
+        assert tool.return_type == ("str",)
 
     def test_to_dict_includes_tool_metadata(self) -> None:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -176,24 +172,23 @@ class TestToolConstruction:
         assert data["type"] == "Tool"
         assert data["name"] == "add"
         assert data["description"] == "Add values."
-        assert data["namespace"] == "tests"
         assert data["module"] == add.__module__
         assert data["qualname"] == add.__qualname__
-        assert data["return_type"] == "int"
+        assert data["return_type"] == ["int"]
 
 
 class TestToolExtraDescription:
     def test_plain_callable_backed_tool_has_no_extra_description(self) -> None:
-        tool = Tool(function=add, name="add", namespace="tests")
+        tool = Tool(function=add, name="add")
 
         assert tool._extra_description() == ""
         assert tool.description == tool._description
 
     def test_invokable_backed_tool_chains_wrapped_extra_description(self) -> None:
         inner = _ExtraDescriptionTool(
-            function=add, name="add_extra", namespace="tests", extra="inner extra"
+            function=add, name="add_extra", extra="inner extra"
         )
-        tool = Tool(function=inner, name="chained_add", namespace="tests")
+        tool = Tool(function=inner, name="chained_add")
 
         assert tool._extra_description() == "inner extra"
 
@@ -204,7 +199,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -214,7 +208,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=greet,
             name="greet",
-            namespace="tests",
             description="Greet.",
         )
 
@@ -225,7 +218,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=keyword_only,
             name="keyword_only",
-            namespace="tests",
             description="Keyword-only text tool.",
         )
 
@@ -236,7 +228,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -247,7 +238,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -257,7 +247,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -270,7 +259,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -283,7 +271,6 @@ class TestToolBindingBasic:
         tool = Tool(
             function=greet,
             name="greet",
-            namespace="tests",
             description="Greet.",
         )
         assert tool.parameters_map["punctuation"].default == "!"
@@ -300,7 +287,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=positional_only,
             name="positional_only",
-            namespace="tests",
             description="Positional-only tool.",
         )
 
@@ -314,7 +300,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect,
             name="collect",
-            namespace="tests",
             description="Collect varargs.",
         )
 
@@ -329,7 +314,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect,
             name="collect",
-            namespace="tests",
             description="Collect varargs.",
         )
 
@@ -341,7 +325,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect,
             name="collect",
-            namespace="tests",
             description="Collect varargs.",
         )
 
@@ -352,7 +335,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect_kwargs,
             name="collect_kwargs",
-            namespace="tests",
             description="Collect kwargs.",
         )
 
@@ -369,7 +351,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect_kwargs,
             name="collect_kwargs",
-            namespace="tests",
             description="Collect kwargs.",
         )
 
@@ -380,7 +361,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect_kwargs,
             name="collect_kwargs",
-            namespace="tests",
             description="Collect kwargs.",
         )
 
@@ -391,7 +371,6 @@ class TestToolBindingPositionalKinds:
         tool = Tool(
             function=collect_kwargs,
             name="collect_kwargs",
-            namespace="tests",
             description="Collect kwargs.",
         )
 
@@ -406,7 +385,6 @@ class TestToolExecution:
         tool = Tool(
             function=fail,
             name="fail",
-            namespace="tests",
             description="Failing tool.",
         )
 
@@ -417,7 +395,6 @@ class TestToolExecution:
         tool = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -429,7 +406,6 @@ class TestToolExecution:
         tool = Tool(
             function=async_add,
             name="async_add",
-            namespace="tests",
             description="Async add values.",
         )
 
@@ -441,7 +417,6 @@ class TestToolExecution:
         tool = Tool(
             function=async_fail,
             name="async_fail",
-            namespace="tests",
             description="Async failing tool.",
         )
 
@@ -449,26 +424,11 @@ class TestToolExecution:
             asyncio.run(tool.async_invoke({}))
 
 
-class TestToolMutableMetadata:
-    def test_namespace_is_read_only(self) -> None:
-        tool = Tool(
-            function=add,
-            name="add",
-            namespace="tests",
-            description="Add values.",
-        )
-
-        assert tool.namespace == "tests"
-        assert tool.full_name == "Tool.tests.add"
-        with pytest.raises(AttributeError):
-            tool.namespace = "math"
-
 class TestToolExecutionEdgeCases:
     def test_sync_execute_runs_awaitable_result_from_sync_callable(self) -> None:
         tool = Tool(
             function=returns_coroutine,
             name="returns_coroutine",
-            namespace="tests",
             description="Sync callable returning a coroutine.",
         )
 
@@ -478,7 +438,6 @@ class TestToolExecutionEdgeCases:
         tool = Tool(
             function=raise_tool_invocation_error,
             name="raise_tool_invocation_error",
-            namespace="tests",
             description="Sync callable that raises ToolInvocationError directly.",
         )
 
@@ -491,7 +450,6 @@ class TestToolExecutionEdgeCases:
         tool = Tool(
             function=returns_awaitable,
             name="returns_awaitable",
-            namespace="tests",
             description="Async callable returning an awaitable.",
         )
 
@@ -503,7 +461,6 @@ class TestToolExecutionEdgeCases:
         tool = Tool(
             function=async_raise_tool_invocation_error,
             name="async_raise_tool_invocation_error",
-            namespace="tests",
             description="Async callable that raises ToolInvocationError directly.",
         )
 
@@ -516,10 +473,9 @@ class TestToolExecutionEdgeCases:
 class AddInvokable(AtomicInvokable):
     """Small AtomicInvokable test double for natural-callable Tool wrapping."""
 
-    def __init__(self, *, name: str = "add_invokable", namespace: str = "tests") -> None:
+    def __init__(self, *, name: str = "add_invokable") -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description="Add invokable.",
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -551,7 +507,7 @@ class TestToolNaturalAtomicInvokableWrapping:
             ("a", ParamSpec.POSITIONAL_OR_KEYWORD, NO_VAL),
             ("b", ParamSpec.POSITIONAL_OR_KEYWORD, 0),
         ]
-        assert tool.return_type == "int"
+        assert tool.return_type == ("int",)
 
     def test_sync_invoke_returns_unwrapped_result(self) -> None:
         tool = Tool(function=AddInvokable())
@@ -585,7 +541,7 @@ class TestToolNaturalAtomicInvokableWrapping:
 
 class TestToolInvokeHook:
     def test_invoke_returns_tool_result_with_invoker_id_and_value(self) -> None:
-        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+        tool = Tool(function=add, name="add", description="Add.")
 
         result = tool.invoke({"a": 2, "b": 3})
 
@@ -600,7 +556,7 @@ class TestToolInvokeHook:
             seen.append(((a,), {"flag": flag}))
             return a
 
-        tool = Tool(function=spy, name="spy", namespace="tests", description="Spy.")
+        tool = Tool(function=spy, name="spy", description="Spy.")
 
         tool.invoke({"a": 1, "flag": True, "unknown": 9})
 
@@ -608,21 +564,21 @@ class TestToolInvokeHook:
 
     def test_async_invoke_returns_tool_result_for_each_target_kind(self) -> None:
         for fn in (add, async_add, AddInvokable()):
-            tool = Tool(function=fn, name="t", namespace="tests", description="T.")
+            tool = Tool(function=fn, name="t", description="T.")
             result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
             assert isinstance(result, ToolResult)
             assert result.invoker_id == tool.full_name
             assert result.result == 5
 
     def test_tool_invocation_error_still_surfaces_from_both_paths(self) -> None:
-        tool = Tool(function=raise_tool_invocation_error, name="e", namespace="tests", description="E.")
+        tool = Tool(function=raise_tool_invocation_error, name="e", description="E.")
         with pytest.raises(ToolInvocationError, match="deliberate invocation error"):
             tool.invoke({})
         with pytest.raises(ToolInvocationError, match="deliberate invocation error"):
             asyncio.run(tool.async_invoke({}))
 
     def test_plain_tool_uses_inherited_template(self) -> None:
-        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+        tool = Tool(function=add, name="add", description="Add.")
 
         assert "invoke" not in Tool.__dict__
         assert "async_invoke" not in Tool.__dict__
@@ -630,7 +586,7 @@ class TestToolInvokeHook:
         assert Tool.result_cls is ToolResult
 
     def test_execute_returns_result_payload_dict(self) -> None:
-        tool = Tool(function=add, name="add", namespace="tests", description="Add.")
+        tool = Tool(function=add, name="add", description="Add.")
 
         assert tool.execute((2, 3), {}) == {"result": 5}
         assert asyncio.run(tool.async_execute((2, 3), {})) == {"result": 5}
@@ -649,7 +605,7 @@ class TestToolInvokeHook:
             async def async_execute(self, args, kwargs):
                 return {"tag": "t", **await super().async_execute(args, kwargs)}
 
-        tool = TaggedTool(function=add, name="add", namespace="tests", description="Add.")
+        tool = TaggedTool(function=add, name="add", description="Add.")
 
         for result in (tool.invoke({"a": 2, "b": 3}), asyncio.run(tool.async_invoke({"a": 2, "b": 3}))):
             assert type(result) is TaggedResult

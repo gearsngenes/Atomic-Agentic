@@ -29,7 +29,7 @@ A single ``output_structure`` call at the start of each ``invoke()`` produces
 non-nullable: a one-shot plan must always produce a return value,
 structurally guaranteed by the schema itself, not a separate post-hoc
 validation check). Each ``plan`` entry names a registered tool (by its
-alias/bare name, never the dotted ``full_name``), its arguments (literals or
+name, never the dotted ``full_name``), its arguments (literals or
 ``$name`` references/interpolations), and an optional ``result_name`` other
 calls may reference.
 
@@ -158,24 +158,23 @@ class PlanActAgent(ToolAgent):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        record_enabled: bool = False,
+        instructions: Optional[str | PromptConfig] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        inputs_to_context: Iterable[str] | Mapping[str, str] = (),
+        response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
+        response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
+        use_runtime_context: bool = False,
+        record_enabled: bool = True,
+        records_window: Optional[int] = None,
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
         tool_concurrency_limit: Optional[int] = None,
         fail_fast: bool = True,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
-        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        use_runtime_context: bool = False,
-        records_window: Optional[int] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Every parameter except ``fail_fast`` forwards verbatim to
@@ -190,7 +189,6 @@ class PlanActAgent(ToolAgent):
         """
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             record_enabled=record_enabled,
@@ -220,15 +218,15 @@ class PlanActAgent(ToolAgent):
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
 
-    def _validate_effective_tool_id(self, effective_id: str) -> None:
+    def _validate_tool_name(self, name: str) -> None:
         """Also rejects the sentinel call names (``return``, ``rhs_assign``):
         a user tool under either would be treated as the synthesized,
         never-dispatched sentinel call."""
-        super()._validate_effective_tool_id(effective_id)
-        if effective_id in (RETURN_ALIAS, RHS_ASSIGN_ALIAS):
+        super()._validate_tool_name(name)
+        if name in (RETURN_ALIAS, RHS_ASSIGN_ALIAS):
             raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: {effective_id!r} is a "
-                "reserved sentinel name and cannot be a registered tool id."
+                f"{type(self).__name__}.{self.name}: {name!r} is a "
+                "reserved sentinel name and cannot be a registered tool name."
             )
 
     @property

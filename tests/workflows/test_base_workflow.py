@@ -28,7 +28,6 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
-        namespace: str = "tests",
         description: str = "Echo workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "dict[str, Any]",
@@ -36,7 +35,6 @@ class EchoWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
@@ -57,10 +55,9 @@ class NativeAsyncEchoWorkflow(EchoWorkflow):
 class TraceEmittingWorkflow(Workflow):
     """Workflow whose ``_run``/``_async_run`` explicitly populate ``trace``."""
 
-    def __init__(self, *, name: str = "trace_workflow", namespace: str = "tests") -> None:
+    def __init__(self, *, name: str = "trace_workflow") -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description="Trace-emitting workflow.",
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
@@ -79,7 +76,6 @@ class ConfigurableWorkflow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str = "tests",
         description: str = "Configurable workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "Any",
@@ -90,7 +86,6 @@ class ConfigurableWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
@@ -110,19 +105,6 @@ class ConfigurableWorkflow(Workflow):
         return self._result, {}
 
 
-class TestWorkflowNamespace:
-    def test_workflow_namespace_default(self) -> None:
-        workflow = EchoWorkflow()
-        assert workflow.namespace == "tests"
-
-    def test_workflow_namespace_explicit(self) -> None:
-        workflow = ConfigurableWorkflow(
-            name="wf",
-            namespace="wf_ns",
-        )
-        assert workflow.namespace == "wf_ns"
-
-
 class TestWorkflowConstruction:
     def test_initializes_name_description_parameters_return_type(self) -> None:
         params = [make_value_param()]
@@ -136,7 +118,7 @@ class TestWorkflowConstruction:
         assert workflow.name == "my_workflow"
         assert workflow.description == "A workflow."
         assert workflow.parameters == params
-        assert workflow.return_type == "dict[str, Any]"
+        assert workflow.return_type == ("dict[str, Any]",)
 
     def test_include_trace_defaults_to_true(self) -> None:
         workflow = EchoWorkflow()
@@ -283,3 +265,40 @@ class TestWorkflowInvokeHook:
 
         with pytest.raises(TypeError):
             workflow.invoke(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+class TestWorkflowConstructorRule:
+    """Stage 4 Pass 5: name and description first; knobs after the core are keyword-only."""
+
+    @pytest.mark.parametrize("cls_name", [
+        "Workflow", "SequentialFlow", "ParallelFlow", "RoutingFlow", "IterativeFlow", "GraphFlow",
+    ])
+    def test_name_and_description_come_first(self, cls_name: str) -> None:
+        import inspect
+
+        import atomic_agentic.workflows as workflows
+        from atomic_agentic.workflows.base import Workflow as WorkflowBase
+
+        cls = WorkflowBase if cls_name == "Workflow" else getattr(workflows, cls_name)
+        assert list(inspect.signature(cls.__init__).parameters)[1:3] == ["name", "description"]
+
+    def test_include_trace_is_keyword_only_on_the_base(self) -> None:
+        import inspect
+
+        from atomic_agentic.workflows.base import Workflow as WorkflowBase
+
+        params = inspect.signature(WorkflowBase.__init__).parameters
+        assert params["include_trace"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_iterative_max_iterations_is_keyword_only(self) -> None:
+        import inspect
+
+        from atomic_agentic.workflows import IterativeFlow
+
+        params = inspect.signature(IterativeFlow.__init__).parameters
+        positional = [
+            n for n, p in params.items()
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        assert positional == ["self", "name", "description", "body_steps"]
+        assert params["max_iterations"].kind is inspect.Parameter.KEYWORD_ONLY

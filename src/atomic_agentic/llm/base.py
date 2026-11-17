@@ -57,9 +57,9 @@ class LLMEngine(AtomicInvokable, ABC):
     ordinary calls, or a ``str``/``int``/``float``/``bool``/``list``/``dict``/
     ``None`` when ``output_structure`` requested provider-native structured
     output -- whatever a conformant JSON value decodes to via ``json.loads``.
-    The declared invokable ``return_type`` is
-    ``"str | int | float | bool | list[Any] | dict[str, Any] | None"`` to
-    reflect this.
+    The declared invokable ``return_type`` is the tuple
+    ``("str", "int", "float", "bool", "list[Any]", "dict[str, Any]", "None")``
+    to reflect this.
 
     Structured-output result contract
     ----------------------------------
@@ -149,7 +149,6 @@ class LLMEngine(AtomicInvokable, ABC):
         self,
         *,
         name: Optional[str] = None,
-        namespace: str = "llm",
         description: str = "",
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
@@ -161,8 +160,6 @@ class LLMEngine(AtomicInvokable, ABC):
         ----------
         name:
             Optional human-friendly identifier for logging/introspection.
-        namespace:
-            Grouping label for this engine instance.
         timeout_seconds:
             Suggested per-call timeout; subclasses should honor this where
             their provider SDKs allow it.
@@ -178,7 +175,6 @@ class LLMEngine(AtomicInvokable, ABC):
         AtomicInvokable.__init__(
             self,
             name=name or type(self).__name__,
-            namespace=namespace,
             description=description or "LLM Engine",
             parameters=[
                 ParamSpec(name="messages",
@@ -204,7 +200,7 @@ class LLMEngine(AtomicInvokable, ABC):
                               "plain text."
                           )),
             ],
-            return_type="str | int | float | bool | list[Any] | dict[str, Any] | None",
+            return_type=("str", "int", "float", "bool", "list[Any]", "dict[str, Any]", "None"),
         )
 
         self._timeout_seconds = float(timeout_seconds)

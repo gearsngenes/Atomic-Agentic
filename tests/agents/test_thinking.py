@@ -43,7 +43,7 @@ def no_consecutive_users(messages: list[dict[str, str]]) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 def valid_kwargs() -> dict[str, Any]:
     return {
-        "name": "tests", "namespace": "tests", "description": "abstractness",
+        "name": "tests", "description": "abstractness",
         "llm_engine": FakeLLMEngine([]),
     }
 
@@ -227,7 +227,7 @@ class TestRendering:
     @pytest.mark.parametrize("with_context", [False, True])
     def test_zero_thinking_call_equals_basic_agent_call(self, with_context: bool) -> None:
         basic = BasicAgent(
-            name="tests", namespace="tests", description="basic",
+            name="tests", description="basic",
             llm_engine=FakeLLMEngine(["R"]), role_prompt="You are a careful assistant.",
         )
         thinker = make_stub_thinker(["R"], done_after=0)
@@ -257,7 +257,7 @@ class TestRendering:
                 return [{"role": "system", "content": text}]
 
         agent = StepThinker(
-            name="tests", namespace="tests", description="steps",
+            name="tests", description="steps",
             llm_engine=FakeLLMEngine(["A", "B", "R"]),
             role_prompt="Reply role.", record_enabled=True, done_after=2,
         )
@@ -362,7 +362,7 @@ class TestRenderThoughtsDefault:
             _render_thoughts = ThinkingAgent._render_thoughts
 
         agent = Plain(
-            name="tests", namespace="tests", description="plain",
+            name="tests", description="plain",
             llm_engine=FakeLLMEngine([]), done_after=1,
         )
         task = new_task(agent)
@@ -382,7 +382,7 @@ class TestNoPromptRegistry:
             _render_system_message = ThinkingAgent._render_system_message
 
         agent = Bare(
-            name="tests", namespace="tests", description="bare",
+            name="tests", description="bare",
             llm_engine=FakeLLMEngine([]), role_prompt="Reply role.", done_after=1,
         )
         task = new_task(agent)
@@ -511,7 +511,7 @@ class TestHookContracts:
                 pass
 
         agent = Stuck(
-            name="tests", namespace="tests", description="stuck",
+            name="tests", description="stuck",
             llm_engine=FakeLLMEngine([]),
         )
         task = new_task(agent)
@@ -532,7 +532,7 @@ class TestHookContracts:
                 return super()._thinking_done(task)
 
         agent = Counting(
-            name="tests", namespace="tests", description="counting",
+            name="tests", description="counting",
             llm_engine=FakeLLMEngine(["x1", "x2", "xR", "A", "B", "R"]), done_after=2,
             record_enabled=True,
         )

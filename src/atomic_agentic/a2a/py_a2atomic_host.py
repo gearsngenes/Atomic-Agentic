@@ -387,7 +387,7 @@ class PyA2AtomicHost(A2AServer):
             # `parameters` list, so sending rendered text here would double it.
             "description": invokable._description,
             "parameters": [spec.to_dict() for spec in invokable.parameters],
-            "return_type": invokable.return_type,
+            "return_type": list(invokable.return_type),
             "invokable_type": type(invokable).__name__,
             "extra_description": invokable._extra_description(),
         }

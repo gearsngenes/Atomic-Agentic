@@ -63,7 +63,6 @@ def writer_post(result: str) -> dict[str, str]:
 
 writer_agent = BasicAgent(
     name="story_writer",
-    namespace="examples",
     description="Writes and revises short stories from a request and revision notes.",
     llm_engine=engine,
     role_prompt=(
@@ -105,7 +104,6 @@ def critic_post(result: str) -> dict[str, str]:
 
 critic_agent = BasicAgent(
     name="story_critic",
-    namespace="examples",
     description="Critiques a story draft and either approves it or gives revision notes.",
     llm_engine=engine,
     role_prompt=(
@@ -134,7 +132,6 @@ def approval_judge(*, revision_notes: str) -> bool:
 judge = toolify(
     approval_judge,
     name="approval_judge",
-    namespace="workflow",
     description="Return True when the critic has approved the story draft.",
 )
 
@@ -144,7 +141,6 @@ judge = toolify(
 # ---------------------------------------------------------------------
 flow = IterativeFlow(
     name="story_writer_checker_flow",
-    namespace="examples",
     description="Iterative writer/critic loop with a checker-gated approval judge.",
     body_steps=[writer_agent, critic_agent],
     max_iterations=5,

@@ -17,7 +17,6 @@ print("Testing Task Decomposition and Printing capabilities")
 # ──────────────────────────  SET-UP  ───────────────────────────
 agent = PlanActAgent(
     name="Test_PlanAct",
-    namespace="examples",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
     record_enabled=True,

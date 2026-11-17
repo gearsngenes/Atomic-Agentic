@@ -17,7 +17,7 @@ not a copy). Consequences shown below:
   * Each agent's response lands in its own context variable via
     ``response_to_context``, so after every call the caller can read the latest
     draft, critique and verdict separately from the conversation.
-  * Each record carries the ``agent_id`` of the agent that wrote it.
+  * Each record carries the ``agent_name`` of the agent that wrote it.
 
 A bound name is a declared destination: if the conversation lacks it, the call
 creates it, and it persists. The variables are still ``remember``-ed up front
@@ -52,7 +52,6 @@ def main() -> None:
 
     writer = BasicAgent(
         name="writer",
-        namespace="examples",
         description="Writes and revises a short story draft.",
         llm_engine=engine,
         role_prompt=(
@@ -64,7 +63,6 @@ def main() -> None:
     )
     reviewer = BasicAgent(
         name="reviewer",
-        namespace="examples",
         description="Critiques the latest story draft in the conversation.",
         llm_engine=engine,
         role_prompt=(
@@ -104,7 +102,7 @@ def main() -> None:
 
     print("\n=== Shared history ===")
     for i, record in enumerate(conv.records):
-        who = record.agent_id.split(";")[0]
+        who = record.agent_name.split(";")[0]
         print(f"[{i}] {who}: {str(record.generated_response)[:90]!r}")
 
 

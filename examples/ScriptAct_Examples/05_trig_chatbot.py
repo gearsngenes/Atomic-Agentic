@@ -54,7 +54,6 @@ CORE_TRIG_TOOLS = [_trig_by_name[name] for name in ("sin", "cos", "tan", "asin",
 
 chatbot = ScriptActAgent(
     name="TrigChatbot",
-    namespace="examples",
     description="Answers trig/geometry questions conversationally, reusing prior answers when relevant.",
     llm_engine=llm_engine,
     record_enabled=True,

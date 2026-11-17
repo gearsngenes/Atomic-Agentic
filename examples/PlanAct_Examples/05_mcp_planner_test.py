@@ -18,7 +18,6 @@ from shared_engine import llm_engine
 
 planner = PlanActAgent(
     name="MCP_Agent",
-    namespace="examples",
     description="Creates plans utilizing our sample MCP server",
     llm_engine=llm_engine,
 )

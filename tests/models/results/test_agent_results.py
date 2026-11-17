@@ -48,13 +48,13 @@ def make_agent_result(*, value: Any = "output") -> AgentResult:
 
 class TestToolUsageRecord:
     def test_valid_record_stores_name_and_count(self) -> None:
-        rec = ToolUsageRecord(tool_name="Tool.math.add", call_count=3)
-        assert rec.tool_name == "Tool.math.add"
+        rec = ToolUsageRecord(tool_name="Tool.add", call_count=3)
+        assert rec.tool_name == "Tool.add"
         assert rec.call_count == 3
 
     def test_to_dict(self) -> None:
-        rec = ToolUsageRecord(tool_name="Tool.math.add", call_count=2)
-        assert rec.to_dict() == {"tool_name": "Tool.math.add", "call_count": 2}
+        rec = ToolUsageRecord(tool_name="Tool.add", call_count=2)
+        assert rec.to_dict() == {"tool_name": "Tool.add", "call_count": 2}
 
     def test_rejects_empty_tool_name(self) -> None:
         with pytest.raises(TypeError, match="tool_name"):

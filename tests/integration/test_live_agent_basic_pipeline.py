@@ -77,7 +77,6 @@ def _openai_engine() -> OpenAIEngine:
 def make_live_openai_agent() -> BasicAgent:
     return BasicAgent(
         name="live_openai_writer_agent",
-        namespace="integration",
         description="Live OpenAI writer agent for integration tests.",
         llm_engine=_openai_engine(),
         role_prompt=ROLE_PROMPT,
@@ -92,7 +91,6 @@ def make_live_openai_sequential_flow() -> tuple[BasicAgent, SequentialFlow]:
     agent = make_live_openai_agent()
     flow = SequentialFlow(
         name="live_openai_writer_sequential_flow",
-        namespace="integration",
         description="SequentialFlow wrapping a live OpenAI Agent.",
         steps=[agent],
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any, ClassVar, Dict
 
 from ..exceptions import ExecutionError
@@ -39,15 +39,14 @@ class Workflow(AtomicInvokable, ABC):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         parameters: list[ParamSpec],
-        return_type: str,
+        return_type: str | Collection[str],
+        *,
         include_trace: bool = True,
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=parameters,
             return_type=return_type,

@@ -130,7 +130,6 @@ class LlamaCppEngine(LLMEngine):
             self,
             # ── AtomicInvokable identity ──────────────────────────────────────────
             name: str | None = None,
-            namespace: str = "llm",
             description: str = "Llama.cpp LLM Engine",
             # ── Model source ──────────────────────────────────────────────────────
             model_path: str | None = None,
@@ -169,8 +168,8 @@ class LlamaCppEngine(LLMEngine):
         ----------
         name:
             Optional human-friendly engine name; defaults to ``"llama_cpp"``.
-        namespace, description:
-            Shared ``AtomicInvokable`` identity fields.
+        description:
+            Shared ``AtomicInvokable`` identity field.
         model_path:
             Direct path to a local GGUF/GGML model file.
         repo_id:
@@ -211,7 +210,6 @@ class LlamaCppEngine(LLMEngine):
         ).replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
             name=sanitized_name,
-            namespace=namespace,
             description=description or "Llama.cpp LLM Engine",
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

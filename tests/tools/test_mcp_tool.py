@@ -132,15 +132,13 @@ def make_tool(
     hub: FakeMCPClientHub | None = None,
     remote_name: str = "search",
     name: str | None = None,
-    namespace: str | None = None,
     description: str = "",
 ) -> MCPProxyTool:
     return MCPProxyTool(
-        remote_name=remote_name,
+        hub or FakeMCPClientHub(),
+        remote_name,
         name=name,
-        namespace=namespace,
         description=description,
-        client_hub=hub or FakeMCPClientHub(),
     )
 
 
@@ -152,9 +150,8 @@ class TestMCPProxyToolConstruction:
         assert tool.client_hub is hub
         assert tool.remote_name == "search"
         assert tool.name == "search"
-        assert tool.namespace == "mcp"
         assert tool.description == "Remote search tool."
-        assert tool.full_name == "MCPProxyTool.mcp.search"
+        assert tool.full_name == "MCPProxyTool.search"
         assert tool.transport_mode == "stdio"
         assert tool.command == "python"
         assert tool.args == ("fake_server.py",)
@@ -167,14 +164,12 @@ class TestMCPProxyToolConstruction:
     def test_explicit_identity_overrides_defaults(self) -> None:
         tool = make_tool(
             name="local_search",
-            namespace="remote_tools",
             description="Local description.",
         )
 
         assert tool.name == "local_search"
-        assert tool.namespace == "remote_tools"
         assert tool.description == "Local description."
-        assert tool.full_name == "MCPProxyTool.remote_tools.local_search"
+        assert tool.full_name == "MCPProxyTool.local_search"
 
     def test_description_falls_back_to_stub_when_remote_description_missing(self) -> None:
         hub = FakeMCPClientHub(
@@ -193,7 +188,17 @@ class TestMCPProxyToolConstruction:
 
     def test_non_hub_client_hub_raises(self) -> None:
         with pytest.raises(TypeError, match="client_hub"):
-            MCPProxyTool(remote_name="search", client_hub=object())  # type: ignore[arg-type]
+            MCPProxyTool(object(), "search")  # type: ignore[arg-type]
+
+    def test_positional_order_is_hub_remote_name_name_description(self) -> None:
+        hub = FakeMCPClientHub()
+
+        tool = MCPProxyTool(hub, "search", "local_search", "Local description.")
+
+        assert tool.client_hub is hub
+        assert tool.remote_name == "search"
+        assert tool.name == "local_search"
+        assert tool.description == "Local description."
 
     def test_missing_remote_tool_raises(self) -> None:
         hub = FakeMCPClientHub(tools={})
@@ -210,7 +215,7 @@ class TestMCPProxyToolSignatureAndMetadata:
             ("query", ParamSpec.KEYWORD_ONLY, ("str",), NO_VAL),
             ("top_k", ParamSpec.KEYWORD_ONLY, ("int",), 5),
         ]
-        assert tool.return_type == "str"
+        assert tool.return_type == ("str",)
 
     def test_mcpdata_property_returns_copy(self) -> None:
         tool = make_tool()
@@ -586,7 +591,6 @@ class TestMCPProxyToolHeadersAndSerialization:
 
         assert data["type"] == "MCPProxyTool"
         assert data["name"] == "search"
-        assert data["namespace"] == "mcp"
         assert data["remote_name"] == "search"
         assert data["raw_metadata"] == {"title": "Search"}
         assert data["client_hub"]["transport_mode"] == "stdio"

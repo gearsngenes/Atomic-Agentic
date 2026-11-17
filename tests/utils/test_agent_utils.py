@@ -26,7 +26,7 @@ def _add(a: int, b: int = 0) -> int:
     return a + b
 
 
-_TOOLBOX = {"add": Tool(function=_add, name="add", namespace="tests", description="Adds.")}
+_TOOLBOX = {"add": Tool(function=_add, name="add", description="Adds.")}
 
 
 class TestCheckCallBindings:

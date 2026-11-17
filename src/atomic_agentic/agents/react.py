@@ -120,23 +120,22 @@ class ReActAgent(ToolAgent):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        record_enabled: bool = False,
+        instructions: Optional[str | PromptConfig] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        inputs_to_context: Iterable[str] | Mapping[str, str] = (),
+        response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
+        response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
+        use_runtime_context: bool = False,
+        record_enabled: bool = True,
+        records_window: Optional[int] = None,
         *,
         tool_calls_limit: Optional[int] = 25,
         regeneration_limit: int = 5,
         fail_fast: bool = False,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
-        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        use_runtime_context: bool = False,
-        records_window: Optional[int] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        instructions: Optional[str | PromptConfig] = None,
     ) -> None:
         """
         Every parameter except ``fail_fast`` forwards verbatim to
@@ -159,7 +158,6 @@ class ReActAgent(ToolAgent):
         """
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             record_enabled=record_enabled,

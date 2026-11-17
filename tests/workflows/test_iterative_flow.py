@@ -30,7 +30,6 @@ class CounterStepWorkflow(Workflow):
     def __init__(self, *, name: str = "counter_step") -> None:
         super().__init__(
             name=name,
-            namespace="tests",
             description="Increment count by 1.",
             parameters=[make_count_param()],
             return_type="dict[str, Any]",
@@ -46,7 +45,6 @@ class ScalarStepWorkflow(Workflow):
     def __init__(self, *, name: str = "scalar_step") -> None:
         super().__init__(
             name=name,
-            namespace="tests",
             description="Return count as a raw scalar.",
             parameters=[make_count_param()],
             return_type="int",
@@ -65,7 +63,6 @@ def make_threshold_judge(threshold: int) -> Tool:
     return Tool(
         function=at_least,
         name="threshold_judge",
-        namespace="tests",
         description="Return whether count has reached the threshold.",
     )
 
@@ -77,7 +74,6 @@ def make_raising_judge() -> Tool:
     return Tool(
         function=raise_judge,
         name="raising_judge",
-        namespace="tests",
         description="Always raises.",
     )
 
@@ -98,7 +94,6 @@ def make_iterative_flow(
     )
     return IterativeFlow(
         name=name,
-        namespace="tests",
         description="Iterative test flow.",
         body_steps=resolved_body_steps,
         max_iterations=max_iterations,
@@ -114,7 +109,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(TypeError, match="body_steps must be a list"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=(CounterStepWorkflow(),),  # type: ignore[arg-type]
                 result_setting_indices=[0],
@@ -124,7 +118,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(ValueError, match="body_steps must not be empty"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[],
             )
@@ -133,7 +126,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(TypeError, match="body_steps items must be AtomicInvokable"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[object()],  # type: ignore[list-item]
             )
@@ -142,13 +134,11 @@ class TestIterativeFlowConstruction:
         component = Tool(
             function=lambda count: {"count": count + 1},
             name="raw_increment",
-            namespace="tests",
             description="Increment count.",
         )
 
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[component],
             result_setting_indices=[0],
@@ -168,7 +158,6 @@ class TestIterativeFlowConstruction:
     def test_result_setting_indices_default_empty(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow()],
             fallback_value=0,
@@ -179,7 +168,6 @@ class TestIterativeFlowConstruction:
     def test_result_setting_indices_resolve_negative_and_reject_out_of_range(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
             result_setting_indices=[-1],
@@ -189,7 +177,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(IndexError, match="out of range"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
                 result_setting_indices=[5],
@@ -199,7 +186,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(TypeError, match="result_setting_indices items must be int"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[CounterStepWorkflow()],
                 result_setting_indices=["0"],  # type: ignore[list-item]
@@ -208,7 +194,6 @@ class TestIterativeFlowConstruction:
     def test_handoff_index_defaults_to_last_step(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
             result_setting_indices=[0],
@@ -218,7 +203,6 @@ class TestIterativeFlowConstruction:
     def test_handoff_index_accepts_negative_resolution(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
             result_setting_indices=[0],
@@ -230,7 +214,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(TypeError, match="step index must be an int"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
                 result_setting_indices=[0],
@@ -241,7 +224,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(IndexError, match="out of range"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
                 result_setting_indices=[0],
@@ -252,7 +234,6 @@ class TestIterativeFlowConstruction:
         with pytest.raises(ValueError, match="fallback_value is NO_VAL"):
             IterativeFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 body_steps=[CounterStepWorkflow()],
             )
@@ -260,28 +241,26 @@ class TestIterativeFlowConstruction:
     def test_empty_result_setting_indices_with_fallback_constructs_ok(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow()],
             fallback_value=0,
         )
         assert flow.fallback_value == 0
-        assert flow.return_type == "int"
+        assert flow.return_type == ("int",)
 
     def test_return_type_from_single_result_setting_step(self) -> None:
         flow = make_iterative_flow(result_setting_indices=[0])
-        assert flow.return_type == "dict[str, Any]"
+        assert flow.return_type == ("dict[str, Any]",)
 
     def test_return_type_union_when_result_setting_steps_differ(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), ScalarStepWorkflow(name="second")],
             result_setting_indices=[0, 1],
             handoff_index=0,
         )
-        assert flow.return_type == "dict[str, Any] | int"
+        assert flow.return_type == ("dict[str, Any]", "int")
 
     def test_checkers_bulk_construction_replays_add_checker(self) -> None:
         judge = make_threshold_judge(3)
@@ -381,7 +360,6 @@ def make_described_step(name: str) -> _ExtraDescriptionTool:
     return _ExtraDescriptionTool(
         function=step,
         name=name,
-        namespace="tests",
         description=f"Step {name}.",
         extra="counter extra",
     )
@@ -488,7 +466,6 @@ class TestIterativeFlowValidationAndErrors:
     def test_checker_step_non_mapping_result_raises_validation_error(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[ScalarStepWorkflow()],
             max_iterations=1,
@@ -507,7 +484,6 @@ class TestIterativeFlowValidationAndErrors:
     def test_handoff_step_non_mapping_result_raises_validation_error_when_continuing(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[ScalarStepWorkflow()],
             max_iterations=2,
@@ -525,7 +501,6 @@ class TestIterativeFlowValidationAndErrors:
     def test_non_final_step_non_mapping_result_raises_validation_error_when_chaining(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
-            namespace="tests",
             description="Iterative test flow.",
             body_steps=[ScalarStepWorkflow(), CounterStepWorkflow()],
             max_iterations=1,

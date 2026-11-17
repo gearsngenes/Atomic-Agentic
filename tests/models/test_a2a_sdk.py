@@ -24,7 +24,7 @@ class TestConstruction:
         assert meta.remote_name == "add"
         assert meta.description == "Adds two numbers."
         assert meta.params == (param(),)
-        assert meta.return_type == "int"
+        assert meta.return_type == ("int",)
 
     def test_remote_name_and_return_type_are_stripped(self) -> None:
         meta = A2AtomicSkillMetadata(
@@ -36,7 +36,7 @@ class TestConstruction:
         )
 
         assert meta.remote_name == "add"
-        assert meta.return_type == "int"
+        assert meta.return_type == ("int",)
 
     def test_blank_description_normalizes_to_none(self) -> None:
         meta = A2AtomicSkillMetadata(
@@ -105,7 +105,7 @@ class TestToDict:
             "description": "Adds two numbers.",
             "extra_description": "extra",
             "params": [param(name="a", index=0).to_dict(), param(name="b", index=1).to_dict()],
-            "return_type": "int",
+            "return_type": ["int"],
         }
 
         rebuilt = A2AtomicSkillMetadata.from_dict(d)
@@ -134,6 +134,13 @@ class TestFromDict:
     def test_missing_return_type_raises(self) -> None:
         with pytest.raises(TypeError, match="return_type"):
             A2AtomicSkillMetadata.from_dict({"remote_name": "add", "params": []})
+
+    def test_return_type_list_is_accepted_and_normalized(self) -> None:
+        meta = A2AtomicSkillMetadata.from_dict(
+            {"remote_name": "add", "return_type": ["str", "int", "str"], "params": []}
+        )
+        assert meta.return_type == ("int", "str")
+        assert meta.to_dict()["return_type"] == ["int", "str"]
 
     def test_params_not_list_raises(self) -> None:
         with pytest.raises(TypeError, match="params"):

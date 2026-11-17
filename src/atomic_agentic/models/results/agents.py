@@ -25,7 +25,7 @@ class ToolUsageRecord:
     Fields
     ------
     tool_name:
-        Full registered tool name (e.g. ``"Tool.math.add"``).
+        Full registered tool name (e.g. ``"Tool.add"``).
     call_count:
         Number of non-return executions of this tool during the invocation.
         Always >= 1 for any entry present in a ToolAgentResult.

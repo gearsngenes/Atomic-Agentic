@@ -91,42 +91,36 @@ def handle_escalation_with_notes(topic: str, notes: str, urgency: int = 0) -> st
 router_tool = Tool(
     function=choose_branch,
     name="choose_branch",
-    namespace="support",
     description="Return the branch index for the incoming support request.",
 )
 
 router_tool_by_key = Tool(
     function=choose_branch_key,
     name="choose_branch_key",
-    namespace="support",
     description="Return the branch key for the incoming support request.",
 )
 
 billing_tool = Tool(
     function=handle_billing,
     name="handle_billing",
-    namespace="support",
     description="Handle billing-related issues.",
 )
 
 general_tool = Tool(
     function=handle_general_support,
     name="handle_general_support",
-    namespace="support",
     description="Handle general support issues.",
 )
 
 escalation_tool = Tool(
     function=handle_escalation,
     name="handle_escalation",
-    namespace="support",
     description="Handle urgent escalations.",
 )
 
 escalation_notes_tool = Tool(
     function=handle_escalation_with_notes,
     name="handle_escalation_with_notes",
-    namespace="support",
     description="Handle urgent escalations with handoff notes.",
 )
 
@@ -136,7 +130,6 @@ escalation_notes_tool = Tool(
 # List-configured branches: router returns an int index into branches.
 flow = RoutingFlow(
     name="support_router",
-    namespace="examples",
     description="Route support requests to one fixed branch based on router output.",
     router=router_tool,
     branches=[billing_tool, general_tool, escalation_tool],
@@ -145,7 +138,6 @@ flow = RoutingFlow(
 # Dict-configured branches: router returns a key into branches.
 flow_by_key = RoutingFlow(
     name="support_router_by_key",
-    namespace="examples",
     description="Route support requests to one fixed branch keyed by router output.",
     router=router_tool_by_key,
     branches={
@@ -194,7 +186,6 @@ for i, payload in enumerate(examples, start=1):
 print("\n########## A branch needing more than the router ##########")
 open_flow = RoutingFlow(
     name="support_router_open",
-    namespace="examples",
     description="Escalation branch needs handoff notes the router doesn't use.",
     router=router_tool,
     branches=[billing_tool, general_tool, escalation_notes_tool],

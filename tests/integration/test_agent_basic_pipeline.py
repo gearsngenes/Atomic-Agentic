@@ -55,7 +55,6 @@ def make_agent(
 ) -> BasicAgent:
     return BasicAgent(
         name="writer_agent",
-        namespace="integration",
         description="Deterministic writer integration-test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=ROLE_PROMPT,
@@ -81,7 +80,6 @@ def make_agent_sequential_flow(
     )
     flow = SequentialFlow(
         name="writer_agent_sequential_flow",
-        namespace="integration",
         description="SequentialFlow wrapping an Agent.",
         steps=[agent],
     )
@@ -92,7 +90,6 @@ def make_summary_step() -> Tool:
     return Tool(
         function=summarize_agent_result,
         name="summarize_agent_result",
-        namespace="integration",
         description="Summarize the agent result.",
     )
 
@@ -138,7 +135,6 @@ class TestAgentBasicPipeline:
         summary_step = make_summary_step()
         flow = SequentialFlow(
             name="agent_summary_sequence",
-            namespace="integration",
             description="Agent result feeding a downstream summary step.",
             steps=[agent, summary_step],
         )
@@ -230,8 +226,8 @@ class TestAgentBasicPipeline:
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT
         assert agent_snapshot["record_enabled"] is True
         assert agent_snapshot["records_window"] == 1
-        assert agent_snapshot["pre_invoke"]["name"] == "pre_invoke"
-        assert agent_snapshot["post_invoke"]["name"] == "post_invoke"
+        assert agent_snapshot["pre_invoke"]["name"] == f"{agent.name}_pre_invoke"
+        assert agent_snapshot["post_invoke"]["name"] == f"{agent.name}_post_invoke"
         assert agent_snapshot["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data).lower()
         assert "api_key" not in str(data).lower()

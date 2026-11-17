@@ -87,9 +87,7 @@ class RoutingFlow(Workflow):
       naming every router-shared name that reconciled but wasn't identical
       to the router's own declaration (not one warning per name or per
       branch).
-    - ``return_type`` is the shared branch return type if all branches agree,
-      otherwise a ``" | "``-joined union of each unique branch return type,
-      in branch order.
+    - ``return_type`` is the sorted union of every branch's return type members.
     - ``include_trace`` controls whether invocation results populate
       ``trace`` with the router's and selected branch's own ``AtomicResult``
       objects. Defaults to ``True``; mutable post-construction via the
@@ -120,7 +118,6 @@ class RoutingFlow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         branches: tuple[AtomicInvokable, ...] | list[AtomicInvokable] | dict[Hashable, AtomicInvokable],
         router: AtomicInvokable,
@@ -166,18 +163,11 @@ class RoutingFlow(Workflow):
         declared_parameters = self._reconcile_parameters(normalized_router, branch_values)
 
         # 4. return_type reflects every branch that could be selected at runtime:
-        #    the shared type if all branches agree, otherwise a "|"-joined union
-        #    of each unique branch return type, in branch order.
-        unique_return_types = list(dict.fromkeys(branch.return_type for branch in branch_values))
-        resolved_return_type = (
-            unique_return_types[0]
-            if len(unique_return_types) == 1
-            else " | ".join(unique_return_types)
-        )
+        #    the sorted union of every branch's return type members.
+        resolved_return_type = {t for branch in branch_values for t in branch.return_type}
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=declared_parameters,
             return_type=resolved_return_type,

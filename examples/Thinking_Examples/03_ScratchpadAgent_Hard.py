@@ -63,7 +63,6 @@ Verification style: {verification_style}
 
 puzzle_agent = ScratchpadAgent(
     name="Branching_Puzzle_Solver",
-    namespace="examples",
     llm_engine=llm,
     thinking_rounds=3,
     role_prompt="You are a meticulous puzzle solver who shows its work clearly.",

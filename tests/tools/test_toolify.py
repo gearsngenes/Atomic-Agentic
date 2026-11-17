@@ -89,13 +89,11 @@ class EchoInvokable(AtomicInvokable):
         self,
         *,
         name: str = "echo_invokable",
-        namespace: str = "default",
         description: str = "Echo invokable.",
     ) -> None:
         super().__init__(
             name=name,
             description=description,
-            namespace=namespace,
             parameters=[
                 make_param("value", 0, type_="Any"),
             ],
@@ -347,18 +345,17 @@ class FakeA2AClientHub(A2AClientHub):
 
 class TestToolifyCallable:
     def test_toolify_callable_returns_tool(self) -> None:
-        tool = toolify(add, namespace="tests", description="Add values.")
+        tool = toolify(add, description="Add values.")
 
         assert isinstance(tool, Tool)
         assert type(tool) is Tool
         assert tool.name == "add"
-        assert tool.namespace == "tests"
         assert tool.description == "Add values."
-        assert tool.full_name == "Tool.tests.add"
+        assert tool.full_name == "Tool.add"
         assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_toolify_callable_uses_inferred_name_when_name_missing(self) -> None:
-        tool = toolify(add, namespace="tests", description="Add values.")
+        tool = toolify(add, description="Add values.")
 
         assert tool.name == "add"
 
@@ -366,22 +363,20 @@ class TestToolifyCallable:
         tool = toolify(
             add,
             name="sum_values",
-            namespace="math",
             description="Sum values.",
         )
 
         assert tool.name == "sum_values"
-        assert tool.namespace == "math"
         assert tool.description == "Sum values."
-        assert tool.full_name == "Tool.math.sum_values"
+        assert tool.full_name == "Tool.sum_values"
 
     def test_toolify_callable_uses_docstring_description(self) -> None:
-        tool = toolify(add, namespace="tests")
+        tool = toolify(add)
 
         assert tool.description == "Add two integers."
 
     def test_toolify_callable_uses_undescribed_fallback_description(self) -> None:
-        tool = toolify(undocumented, namespace="tests")
+        tool = toolify(undocumented)
 
         assert tool.description == "undescribed"
 
@@ -407,7 +402,6 @@ class TestToolifyExistingTool:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -419,14 +413,12 @@ class TestToolifyExistingTool:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
         result = toolify(
             original,
             name="sum_values",
-            namespace="math",
             description="Sum values.",
         )
 
@@ -435,14 +427,12 @@ class TestToolifyExistingTool:
         assert result.function is original
 
         assert result.name == "sum_values"
-        assert result.namespace == "math"
         assert result.description == "Sum values."
-        assert result.full_name == "Tool.math.sum_values"
+        assert result.full_name == "Tool.sum_values"
 
         assert original.name == "add"
-        assert original.namespace == "tests"
         assert original.description == "Add values."
-        assert original.full_name == "Tool.tests.add"
+        assert original.full_name == "Tool.add"
 
         assert result.invoke({"a": 2, "b": 3}).result == 5
 
@@ -450,7 +440,6 @@ class TestToolifyExistingTool:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -458,14 +447,12 @@ class TestToolifyExistingTool:
 
         assert result is original
         assert original.name == "add"
-        assert original.namespace == "tests"
         assert original.description == "Add values."
 
     def test_existing_tool_wrapper_preserves_omitted_metadata(self) -> None:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
@@ -474,23 +461,50 @@ class TestToolifyExistingTool:
         assert result is not original
         assert result.function is original
         assert result.name == "sum_values"
-        assert result.namespace == "tests"
         assert result.description == "Add values."
 
         assert original.name == "add"
-        assert original.namespace == "tests"
         assert original.description == "Add values."
 
     def test_existing_tool_rejects_remote_name(self) -> None:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
         with pytest.raises(ToolDefinitionError, match="remote_name"):
             toolify(original, remote_name="remote_add")
+
+
+class TestToolifyPositionalOverrides:
+    """`name` and `description` are positional-or-keyword; `remote_name` stays
+    keyword-only."""
+
+    def test_callable_accepts_positional_name_and_description(self) -> None:
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        tool = toolify(add, "adder", "Adds two ints.")
+
+        assert tool.name == "adder"
+        assert tool.description == "Adds two ints."
+
+    def test_existing_tool_accepts_positional_name(self) -> None:
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        original = toolify(add)
+
+        renamed = toolify(original, "renamed")
+
+        assert renamed is not original
+        assert renamed.name == "renamed"
+        assert renamed.function is original
+
+    def test_remote_name_is_keyword_only(self) -> None:
+        with pytest.raises(TypeError):
+            toolify(FakeMCPClientHub(), None, None, "search")  # type: ignore[misc]
 
 
 class TestToolifyExistingProxyTool:
@@ -500,41 +514,39 @@ class TestToolifyExistingProxyTool:
     an explicit Pass 4 checklist item that was previously unverified."""
 
     def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
-        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+        original = MCPProxyTool(FakeMCPClientHub(), "search")
 
         result = toolify(original)
 
         assert result is original
 
     def test_mcp_proxy_tool_with_overrides_wraps_by_reference(self) -> None:
-        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+        original = MCPProxyTool(FakeMCPClientHub(), "search")
 
-        result = toolify(original, name="local_search", namespace="wrapped")
+        result = toolify(original, name="local_search")
 
         assert result is not original
         assert type(result) is Tool
         assert result.function is original
         assert result.name == "local_search"
-        assert result.namespace == "wrapped"
         assert result.invoke({"query": "hello"}).result == "mcp result"
 
     def test_pya2atomic_tool_without_overrides_returned_unchanged(self) -> None:
-        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
 
         result = toolify(original)
 
         assert result is original
 
     def test_pya2atomic_tool_with_overrides_wraps_by_reference(self) -> None:
-        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
 
-        result = toolify(original, name="local_echo", namespace="wrapped")
+        result = toolify(original, name="local_echo")
 
         assert result is not original
         assert type(result) is Tool
         assert result.function is original
         assert result.name == "local_echo"
-        assert result.namespace == "wrapped"
         assert result.invoke({"value": "hi"}).result == {"a2a": True}
 
     def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
@@ -547,13 +559,12 @@ class TestToolifyExistingProxyTool:
     def test_a2a_proxy_tool_skill_mode_with_overrides_wraps_by_reference(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
 
-        result = toolify(original, name="local_add", namespace="wrapped")
+        result = toolify(original, name="local_add")
 
         assert result is not original
         assert type(result) is Tool
         assert result.function is original
         assert result.name == "local_add"
-        assert result.namespace == "wrapped"
         assert result.invoke({"a": 1, "b": 2}).result == 42
 
     def test_a2a_proxy_tool_generic_mode_without_overrides_returned_unchanged(self) -> None:
@@ -566,13 +577,12 @@ class TestToolifyExistingProxyTool:
     def test_a2a_proxy_tool_generic_mode_with_overrides_wraps_by_reference(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub())
 
-        result = toolify(original, name="local_send", namespace="wrapped")
+        result = toolify(original, name="local_send")
 
         assert result is not original
         assert type(result) is Tool
         assert result.function is original
         assert result.name == "local_send"
-        assert result.namespace == "wrapped"
 
 
 class TestToolifyAtomicInvokableWrapping:
@@ -597,13 +607,6 @@ class TestToolifyReturnToolIdentity:
         assert result.name == "alias"
 
 
-class TestToolifyAtomicInvokableNamespace:
-    def test_route1_existing_tool_returned_unchanged(self) -> None:
-        t = Tool(function=add, name="add", namespace="ns", description="d")
-        result = toolify(t)
-        assert result is t
-
-
 class TestToolifyMCPClientHub:
     def test_mcp_client_hub_requires_remote_name(self) -> None:
         with pytest.raises(ToolDefinitionError, match="remote_name"):
@@ -617,7 +620,6 @@ class TestToolifyMCPClientHub:
         assert isinstance(tool, MCPProxyTool)
         assert tool.remote_name == "search"
         assert tool.name == "search"
-        assert tool.namespace == "mcp"
 
     def test_mcp_client_hub_applies_overrides(self) -> None:
         hub = FakeMCPClientHub()
@@ -626,13 +628,11 @@ class TestToolifyMCPClientHub:
             hub,
             remote_name="search",
             name="local_search",
-            namespace="remote",
             description="Local search.",
         )
 
         assert isinstance(tool, MCPProxyTool)
         assert tool.name == "local_search"
-        assert tool.namespace == "remote"
         assert tool.description == "Local search."
 
     def test_mcp_proxy_tool_invokes_fake_hub(self) -> None:
@@ -656,7 +656,6 @@ class TestToolifyPyA2AtomicClient:
         assert isinstance(tool, PyA2AtomicTool)
         assert tool.remote_name == "echo"
         assert tool.name == "echo"
-        assert tool.namespace == "fake_agent"
 
     def test_a2a_client_applies_overrides(self) -> None:
         client = FakePyA2AtomicClient()
@@ -665,13 +664,11 @@ class TestToolifyPyA2AtomicClient:
             client,
             remote_name="echo",
             name="local_echo",
-            namespace="a2a_tools",
             description="Local echo.",
         )
 
         assert isinstance(tool, PyA2AtomicTool)
         assert tool.name == "local_echo"
-        assert tool.namespace == "a2a_tools"
         assert tool.description == "Local echo."
 
     def test_a2a_tool_invokes_fake_client(self) -> None:
@@ -721,37 +718,15 @@ class TestToolifyA2AClientHub:
             hub,
             remote_name="add",
             name="local_add",
-            namespace="a2a_tools",
             description="Local add.",
         )
 
         assert isinstance(tool, A2AProxyTool)
         assert tool.name == "local_add"
-        assert tool.namespace == "a2a_tools"
         assert tool.description == "Local add."
 
-    def test_namespace_falls_back_to_sanitized_card_name(self) -> None:
-        hub = FakeA2AClientHub(card_name="My Cool Agent")
 
-        tool = toolify(hub, remote_name="add")
 
-        assert tool.namespace == "My_Cool_Agent"
-
-    def test_namespace_falls_back_to_a2a_when_card_name_unusable(self) -> None:
-        # "123 Agent" sanitizes to "123_Agent" -- starts with a digit, so it
-        # never becomes a valid identifier.
-        hub = FakeA2AClientHub(card_name="123 Agent")
-
-        tool = toolify(hub, remote_name="add")
-
-        assert tool.namespace == "a2a"
-
-    def test_explicit_namespace_wins_over_card_name(self) -> None:
-        hub = FakeA2AClientHub(card_name="My Cool Agent")
-
-        tool = toolify(hub, remote_name="add", namespace="explicit_ns")
-
-        assert tool.namespace == "explicit_ns"
 
     def test_skill_mode_invokes_fake_hub(self) -> None:
         hub = FakeA2AClientHub(result=17)
@@ -776,41 +751,37 @@ class TestBatchToolifyLocalSources:
         assert batch_toolify([]) == []
         assert batch_toolify(None) == []
 
-    def test_batch_toolify_applies_batch_namespace_to_local_tools(self) -> None:
-        tools = batch_toolify([add, multiply], batch_namespace="math")
+    def test_batch_toolify_names_local_tools(self) -> None:
+        tools = batch_toolify([add, multiply])
 
         assert [tool.full_name for tool in tools] == [
-            "Tool.math.add",
-            "Tool.math.multiply",
+            "Tool.add",
+            "Tool.multiply",
         ]
 
     def test_batch_toolify_wraps_non_tool_atomic_invokable(self) -> None:
         invokable = EchoInvokable()
 
-        tools = batch_toolify([add, invokable], batch_namespace="batch")
+        tools = batch_toolify([add, invokable])
 
         assert len(tools) == 2
         assert type(tools[0]) is Tool
         assert type(tools[1]) is Tool
         assert tools[1].function is invokable
-        assert tools[0].full_name == "Tool.batch.add"
-        assert tools[1].full_name == "Tool.batch.echo_invokable"
+        assert tools[0].full_name == "Tool.add"
+        assert tools[1].full_name == "Tool.echo_invokable"
 
-    def test_batch_toolify_existing_tool_namespace_override_wraps_without_mutating_original(self) -> None:
+    def test_batch_toolify_returns_existing_tool_unchanged(self) -> None:
         original = Tool(
             function=add,
             name="add",
-            namespace="tests",
             description="Add values.",
         )
 
-        tools = batch_toolify([original], batch_namespace="batch")
+        tools = batch_toolify([original])
 
-        assert len(tools) == 1
-        assert tools[0] is not original
-        assert tools[0].function is original
-        assert tools[0].full_name == "Tool.batch.add"
-        assert original.full_name == "Tool.tests.add"
+        assert tools == [original]
+        assert tools[0] is original
 
 
 class TestBatchToolifyRemoteExpansion:
@@ -836,7 +807,7 @@ class TestBatchToolifyRemoteExpansion:
         hub = FakeMCPClientHub()
         client = FakePyA2AtomicClient()
 
-        tools = batch_toolify([add, hub, client, multiply], batch_namespace="batch")
+        tools = batch_toolify([add, hub, client, multiply])
 
         assert [type(tool) for tool in tools] == [
             Tool,
@@ -855,21 +826,6 @@ class TestBatchToolifyRemoteExpansion:
             "multiply",
         ]
 
-    def test_batch_toolify_applies_batch_namespace_to_remote_tools(self) -> None:
-        tools = batch_toolify(
-            [
-                FakeMCPClientHub(),
-                FakePyA2AtomicClient(),
-            ],
-            batch_namespace="remote_batch",
-        )
-
-        assert [tool.namespace for tool in tools] == [
-            "remote_batch",
-            "remote_batch",
-            "remote_batch",
-            "remote_batch",
-        ]
 
     def test_batch_toolify_remote_tools_can_invoke_fake_backends(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "mcp ok"}})
@@ -910,21 +866,13 @@ class TestBatchToolifyA2AClientHub:
         assert len(tools) == 1
         assert tools[0].skill_id is None
 
-    def test_applies_batch_namespace_to_all_produced_tools(self) -> None:
-        hub = FakeA2AClientHub(
-            skills={"add": a2a_sdk_skill_metadata(remote_name="add")}
-        )
-
-        tools = batch_toolify([hub], batch_namespace="batch_ns")
-
-        assert [tool.namespace for tool in tools] == ["batch_ns", "batch_ns"]
 
     def test_mixed_sources_preserves_expanded_order(self) -> None:
         hub = FakeA2AClientHub(
             skills={"add": a2a_sdk_skill_metadata(remote_name="add")}
         )
 
-        tools = batch_toolify([add, hub], batch_namespace="batch")
+        tools = batch_toolify([add, hub])
 
         assert [type(tool) for tool in tools] == [Tool, A2AProxyTool, A2AProxyTool]
         assert [tool.name for tool in tools] == ["add", "add", "send_parts"]

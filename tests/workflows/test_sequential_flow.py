@@ -23,12 +23,10 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
-        namespace: str = "tests",
         description: str = "Echo workflow.",
     ) -> None:
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=[
                 ParamSpec(
@@ -64,7 +62,6 @@ def make_step(function: Any, *, name: str) -> Tool:
     return Tool(
         function=function,
         name=name,
-        namespace="tests",
         description=f"Test tool {name}.",
     )
 
@@ -85,7 +82,6 @@ def make_three_step_flow(
 ) -> SequentialFlow:
     return SequentialFlow(
         name="sequential_flow",
-        namespace="tests",
         description="Sequential test flow.",
         steps=[
             make_step(first_step, name="first_step"),
@@ -101,7 +97,6 @@ class TestSequentialFlowConstruction:
         with pytest.raises(TypeError, match="steps must be"):
             SequentialFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 steps=(EchoWorkflow(),),  # type: ignore[arg-type]
             )
@@ -110,7 +105,6 @@ class TestSequentialFlowConstruction:
         with pytest.raises(ValueError, match="steps must not be empty"):
             SequentialFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 steps=[],
             )
@@ -119,7 +113,6 @@ class TestSequentialFlowConstruction:
         with pytest.raises(TypeError, match="AtomicInvokable"):
             SequentialFlow(
                 name="bad_flow",
-                namespace="tests",
                 description="Bad flow.",
                 steps=[object()],  # type: ignore[list-item]
             )
@@ -129,7 +122,6 @@ class TestSequentialFlowConstruction:
 
         flow = SequentialFlow(
             name="sequential_flow",
-            namespace="tests",
             description="Sequential test flow.",
             steps=[child],
         )
@@ -142,7 +134,6 @@ class TestSequentialFlowConstruction:
 
         flow = SequentialFlow(
             name="sequential_flow",
-            namespace="tests",
             description="Sequential test flow.",
             steps=[component],
         )
@@ -192,7 +183,6 @@ class TestSequentialFlowExtraDescription:
         second = _ExtraDescriptionTool(
             function=second_step,
             name="second_step",
-            namespace="tests",
             description="Test tool second_step.",
             extra="second step extra",
         )
@@ -204,7 +194,6 @@ class TestSequentialFlowExtraDescription:
     def test_empty_when_return_index_step_has_no_extra_description(self) -> None:
         flow = SequentialFlow(
             name="sequential_flow",
-            namespace="tests",
             description="Sequential test flow.",
             steps=[EchoWorkflow()],
         )

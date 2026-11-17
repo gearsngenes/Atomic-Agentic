@@ -110,7 +110,6 @@ class ParallelFlow(Workflow):
     def __init__(
         self,
         name: str,
-        namespace: str,
         description: str,
         branches: list[AtomicInvokable] | tuple[AtomicInvokable, ...],
         *,
@@ -235,7 +234,6 @@ class ParallelFlow(Workflow):
 
         super().__init__(
             name=name,
-            namespace=namespace,
             description=description,
             parameters=declared_parameters,
             return_type=resolved_return_type,
@@ -290,7 +288,7 @@ class ParallelFlow(Workflow):
 
         if self._result_mode == self.DICT:
             entries = ", ".join(
-                f"{name} ({self._branches[index].return_type})"
+                f"{name} ({' | '.join(self._branches[index].return_type)})"
                 for name, index in zip(self._result_keys, self._selected_indices)
             )
             return f"Returns a dict of {len(self._selected_indices)} keys: {entries}"

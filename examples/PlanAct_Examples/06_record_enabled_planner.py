@@ -21,7 +21,6 @@ logging.basicConfig(level=logging.INFO)
 
 my_planner = PlanActAgent(
     name="Record_Enabled_Planner",
-    namespace="examples",
     description="Creates plans utilizing context memory",
     llm_engine=llm_engine,
     record_enabled=True,

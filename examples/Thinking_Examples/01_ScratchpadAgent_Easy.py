@@ -17,7 +17,6 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
 #     argument: the agent always runs exactly this many rounds ---
 trivia_agent = ScratchpadAgent(
     name="Trivia_Thinker",
-    namespace="examples",
     llm_engine=llm,
     thinking_rounds=6,
     role_prompt="You are a careful trivia assistant. Answer concisely, in one or two sentences.",

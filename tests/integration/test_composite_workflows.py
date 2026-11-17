@@ -25,7 +25,6 @@ def make_step(function: Any, *, name: str) -> Tool:
     return Tool(
         function=function,
         name=name,
-        namespace="integration",
         description=f"Integration test tool: {name}.",
     )
 
@@ -69,7 +68,6 @@ def make_mode_router() -> Tool:
     return Tool(
         function=route_by_mode,
         name="route_by_mode",
-        namespace="integration",
         description="Route text mode to branch 0 and all other modes to branch 1.",
     )
 
@@ -118,7 +116,6 @@ def merge_report(
 def make_parallel_enrichment_flow() -> ParallelFlow:
     return ParallelFlow(
         name="parallel_enrichment",
-        namespace="integration",
         description="Enrich a normalized topic in parallel.",
         branches=[
             make_step(title_branch, name="title_branch"),
@@ -134,7 +131,6 @@ def make_parallel_enrichment_flow() -> ParallelFlow:
 def make_sequential_parallel_report_flow() -> SequentialFlow:
     return SequentialFlow(
         name="sequential_parallel_report",
-        namespace="integration",
         description="Normalize a topic, enrich it in parallel, then merge a report.",
         steps=[
             make_step(normalize_topic, name="normalize_topic"),
@@ -174,7 +170,6 @@ def square_number(number: int) -> dict[str, int]:
 def make_text_sequence_branch() -> SequentialFlow:
     return SequentialFlow(
         name="text_sequence_branch",
-        namespace="integration",
         description="Text processing sequence branch.",
         steps=[
             make_step(extract_text_payload, name="extract_text_payload"),
@@ -186,7 +181,6 @@ def make_text_sequence_branch() -> SequentialFlow:
 def make_number_sequence_branch() -> SequentialFlow:
     return SequentialFlow(
         name="number_sequence_branch",
-        namespace="integration",
         description="Number processing sequence branch.",
         steps=[
             make_step(increment_number, name="increment_number"),
@@ -198,7 +192,6 @@ def make_number_sequence_branch() -> SequentialFlow:
 def make_routing_between_sequences_flow() -> RoutingFlow:
     return RoutingFlow(
         name="routing_between_sequences",
-        namespace="integration",
         description="Route to either a text sequence or number sequence.",
         router=make_mode_router(),
         branches=[
@@ -241,7 +234,6 @@ def score_tags(tags: list[str]) -> dict[str, Any]:
 def make_title_sequence_branch() -> SequentialFlow:
     return SequentialFlow(
         name="title_sequence_branch",
-        namespace="integration",
         description="Extract and score an article title.",
         steps=[
             make_step(extract_title, name="extract_title"),
@@ -253,7 +245,6 @@ def make_title_sequence_branch() -> SequentialFlow:
 def make_tag_sequence_branch() -> SequentialFlow:
     return SequentialFlow(
         name="tag_sequence_branch",
-        namespace="integration",
         description="Extract and score article tags.",
         steps=[
             make_step(extract_tags, name="extract_tags"),
@@ -265,7 +256,6 @@ def make_tag_sequence_branch() -> SequentialFlow:
 def make_parallel_sequence_branches_flow() -> ParallelFlow:
     return ParallelFlow(
         name="parallel_sequence_branches",
-        namespace="integration",
         description="Run two sequential analysis branches in parallel.",
         branches=[
             make_title_sequence_branch(),
@@ -305,13 +295,11 @@ def make_iterative_score_flow() -> IterativeFlow:
     judge = Tool(
         function=approve_score_at_three,
         name="approve_score_at_three",
-        namespace="integration",
         description="Approve once score is at least 3.",
     )
 
     return IterativeFlow(
         name="iterative_score_refinement",
-        namespace="integration",
         description="Improve a score until the judge approves it.",
         body_steps=[
             make_step(improve_score, name="improve_score")
@@ -326,7 +314,6 @@ def make_iterative_score_flow() -> IterativeFlow:
 def make_sequential_iterative_score_flow() -> SequentialFlow:
     return SequentialFlow(
         name="sequential_iterative_score",
-        namespace="integration",
         description="Initialize, iteratively improve, then finalize a score.",
         steps=[
             make_step(initialize_score, name="initialize_score"),
@@ -340,7 +327,6 @@ class TestCompositeWorkflows:
     def test_sequential_routes_then_finalizes_selected_branch(self) -> None:
         routing_flow = RoutingFlow(
             name="mode_router_flow",
-            namespace="integration",
             description="Route normalized input to a mode-specific branch.",
             router=make_mode_router(),
             branches=[
@@ -350,7 +336,6 @@ class TestCompositeWorkflows:
         )
         flow = SequentialFlow(
             name="sequential_routing_finalizer",
-            namespace="integration",
             description="Route an input and finalize the selected branch result.",
             steps=[
                 routing_flow,

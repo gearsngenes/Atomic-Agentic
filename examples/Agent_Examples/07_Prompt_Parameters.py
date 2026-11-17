@@ -93,7 +93,6 @@ def main() -> None:
         role_config = build_persona_prompt(augmentation)
         agent = BasicAgent(
             name=f"tutor_{suffix}",
-            namespace="examples",
             description=f"{label}-style tutor persona demo agent.",
             llm_engine=engine,
             role_prompt=role_config,

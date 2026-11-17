@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .parameters import ParamSpec
+from .parameters import ParamSpec, normalize_type_tuple
 
 __all__ = ["A2AtomicSkillMetadata"]
 
@@ -39,7 +39,7 @@ class A2AtomicSkillMetadata:
     description: str | None
     extra_description: str
     params: tuple[ParamSpec, ...]
-    return_type: str
+    return_type: tuple[str, ...]
 
     def __post_init__(self) -> None:
         """Validate and normalize dataclass fields after initialization."""
@@ -67,12 +67,13 @@ class A2AtomicSkillMetadata:
         if not isinstance(self.params, tuple) or not all(isinstance(p, ParamSpec) for p in self.params):
             raise TypeError("A2AtomicSkillMetadata.params must be a tuple[ParamSpec, ...]")
 
-        if not isinstance(self.return_type, str) or not self.return_type.strip():
-            raise ValueError("A2AtomicSkillMetadata.return_type must be a non-empty string")
+        cleaned_return_type = normalize_type_tuple(
+            self.return_type, label="A2AtomicSkillMetadata.return_type"
+        )
 
         object.__setattr__(self, "remote_name", cleaned_remote_name)
         object.__setattr__(self, "description", cleaned_description)
-        object.__setattr__(self, "return_type", self.return_type.strip())
+        object.__setattr__(self, "return_type", cleaned_return_type)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -80,7 +81,7 @@ class A2AtomicSkillMetadata:
             "remote_name": self.remote_name,
             "extra_description": self.extra_description,
             "params": [p.to_dict() for p in self.params],
-            "return_type": self.return_type,
+            "return_type": list(self.return_type),
         }
         if self.description is not None:
             d["description"] = self.description
@@ -98,10 +99,10 @@ class A2AtomicSkillMetadata:
         params = d.get("params")
         return_type = d.get("return_type")
 
-        if not isinstance(remote_name, str) or not isinstance(return_type, str) or not isinstance(params, list):
+        if not isinstance(remote_name, str) or return_type is None or not isinstance(params, list):
             raise TypeError(
                 "A2AtomicSkillMetadata.from_dict expects 'remote_name' (str), "
-                "'return_type' (str), and 'params' (list of ParamSpec mappings)"
+                "'return_type' (str or list of str), and 'params' (list of ParamSpec mappings)"
             )
 
         # A2A-sdk wire boundary quirk, not a ParamSpec.from_dict contract

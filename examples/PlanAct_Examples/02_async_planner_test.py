@@ -2,6 +2,7 @@ import logging
 import time
 
 from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.tools import toolify
 
 import sys
 from pathlib import Path
@@ -19,17 +20,14 @@ def testDelayPrint() -> None:
 
 async_tester = PlanActAgent(
     name="Async_Delay_Tester",
-    namespace="examples",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
     record_enabled=False,
 )
 
-# Register the callable under an explicit alias.
+# Build the tool under an explicit name, then register it.
 async_tester.register_tool(
-    testDelayPrint,
-    alias="DelayPrint",
-    description="delay for 3 seconds.",
+    toolify(testDelayPrint, name="DelayPrint", description="delay for 3 seconds.")
 )
 
 if __name__ == "__main__":

@@ -50,7 +50,6 @@ class FailingInvokable(AtomicInvokable):
 def make_add_invokable(name: str = "add") -> AddInvokable:
     return AddInvokable(
         name=name,
-        namespace="tests",
         description="Adds two numbers.",
         parameters=[make_param("a", 0), make_param("b", 1)],
         return_type="int",
@@ -59,7 +58,7 @@ def make_add_invokable(name: str = "add") -> AddInvokable:
 
 def make_failing_invokable(name: str = "boom") -> FailingInvokable:
     return FailingInvokable(
-        name=name, namespace="tests", description="Always raises.", parameters=[], return_type="Any"
+        name=name, description="Always raises.", parameters=[], return_type="Any"
     )
 
 
@@ -142,7 +141,7 @@ class TestToAgentCard:
         assert raw["add"]["remote_name"] == "add"
         assert raw["add"]["description"] == "Adds two numbers."
         assert len(raw["add"]["params"]) == 2
-        assert raw["add"]["return_type"] == "int"
+        assert raw["add"]["return_type"] == ["int"]
 
     def test_builds_fresh_card_every_call_no_stale_caching(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable()])

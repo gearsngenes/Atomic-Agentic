@@ -5,8 +5,48 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec, normalize_type_tuple
 from atomic_agentic.constants.core import NO_VAL
+
+
+class TestNormalizeTypeTuple:
+    def test_str_is_one_member_and_not_split(self) -> None:
+        assert normalize_type_tuple("int | str", label="t") == ("int | str",)
+
+    @pytest.mark.parametrize(
+        "value",
+        [["str", "int", "str"], ("int", "str"), {"str", "int"}, frozenset({"int", "str"})],
+    )
+    def test_collections_are_sorted_and_deduplicated(self, value) -> None:
+        assert normalize_type_tuple(value, label="t") == ("int", "str")
+
+    def test_members_are_stripped(self) -> None:
+        assert normalize_type_tuple(["  int ", "str"], label="t") == ("int", "str")
+
+    def test_empty_collection_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="t must be non-empty"):
+            normalize_type_tuple([], label="t")
+
+    def test_blank_member_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="non-empty strings"):
+            normalize_type_tuple(["int", "   "], label="t")
+
+    def test_non_str_member_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="members must be str"):
+            normalize_type_tuple(["int", 3], label="t")  # type: ignore[list-item]
+
+    @pytest.mark.parametrize("value", [3, None, {"a": 1}, iter(["int"])])
+    def test_wrong_container_raises_type_error(self, value) -> None:
+        with pytest.raises(TypeError, match="must be a str, tuple, list or set"):
+            normalize_type_tuple(value, label="t")
+
+    def test_label_names_the_field_in_messages(self) -> None:
+        with pytest.raises(TypeError, match="my_field"):
+            normalize_type_tuple(3, label="my_field")  # type: ignore[arg-type]
+
+    def test_param_spec_type_accepts_a_set(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type={"str", "int"})
+        assert spec.type == ("int", "str")
 
 
 def make_param(

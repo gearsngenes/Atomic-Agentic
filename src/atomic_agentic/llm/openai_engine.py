@@ -125,7 +125,6 @@ class OpenAIEngine(LLMEngine):
             self,
             model: str,
             name: str | None = None,
-            namespace: str = "llm",
             description: str = "OpenAI LLM Engine",
             client: OpenAI | AsyncOpenAI | None = None,
             temperature: float | None = None,
@@ -149,8 +148,6 @@ class OpenAIEngine(LLMEngine):
         name:
             Optional human-friendly engine name; defaults to ``openai_{model}``
             with non-identifier characters replaced by underscores.
-        namespace:
-            Grouping label; inherited by the base engine as ``"llm"`` by default.
         description:
             Human-readable description for this engine instance.
         client:
@@ -196,7 +193,6 @@ class OpenAIEngine(LLMEngine):
         )
         super().__init__(
             name=sanitized_name,
-            namespace=namespace,
             description=description or "OpenAI LLM Engine",
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

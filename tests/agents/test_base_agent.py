@@ -287,8 +287,8 @@ def make_agent(
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
     response_to_post: Any = _DEFAULT_POST_BINDING,
-    response_to_context: Any = None,
-    inputs_to_context: Any = None,
+    response_to_context: Any = (),
+    inputs_to_context: Any = (),
     system_prompt: str = ROLE_PROMPT,
     agent_cls: type[_EchoAgent] = _EchoAgent,
     name: str = "writer_agent",
@@ -306,10 +306,9 @@ def make_agent(
             if hasattr(post_invoke, "parameters")
             else set(inspect.signature(post_invoke).parameters)
         )
-        response_to_post = "result" if "result" in names else None
+        response_to_post = "result" if "result" in names else ()
     return agent_cls(
         name=name,
-        namespace="tests",
         description="Deterministic writer test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         system_prompt=system_prompt,
@@ -336,7 +335,7 @@ class TestBaseLoopOrder:
     def test_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
         agent = _LifecycleOrderAgent(
             rounds=3,
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -347,7 +346,7 @@ class TestBaseLoopOrder:
     def test_async_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
         agent = _LifecycleOrderAgent(
             rounds=2,
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -393,7 +392,6 @@ class TestAgentPipeline:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
             name="identity_agent",
-            namespace="tests",
             description="Identity agent.",
             llm_engine=engine,
             system_prompt=ROLE_PROMPT,
@@ -415,7 +413,7 @@ class TestAgentPipeline:
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
         ]
-        assert agent.return_type == "dict[str, Any]"
+        assert agent.return_type == ("dict[str, Any]",)
 
 
 class TestAgentSchemaComposition:
@@ -467,7 +465,6 @@ class TestAgentSchemaComposition:
         # KEYWORD_ONLY) like any other kind.
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=build_prompt,
@@ -1108,7 +1105,7 @@ class TestSharedConversation:
         assert shared.records[1].prev is shared.records[0]
         assert shared.records[2].prev is shared.records[1]
 
-    def test_agent_id_differs_per_writer(self) -> None:
+    def test_agent_name_differs_per_writer(self) -> None:
         a = make_agent(record_enabled=True, name="first_writer")
         b = make_agent(record_enabled=True, name="second_writer")
         b.import_conversation(a.get_conversation(), name="default_alias")
@@ -1118,9 +1115,9 @@ class TestSharedConversation:
         b.invoke(_INPUTS)
 
         first, second = a.get_conversation().records
-        assert first.agent_id == a.full_name
-        assert second.agent_id == b.full_name
-        assert first.agent_id != second.agent_id
+        assert first.agent_name == a.full_name
+        assert second.agent_name == b.full_name
+        assert first.agent_name != second.agent_name
 
     def test_context_is_shared(self) -> None:
         a, b = self._pair()
@@ -1159,15 +1156,15 @@ class TestSharedConversation:
         assert len(a.get_conversation().records) == 1
 
 
-class TestAgentId:
+class TestAgentName:
     def test_format_and_serialization(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke(_INPUTS)
 
         record = agent.get_conversation().records[0]
 
-        assert record.agent_id == agent.full_name
-        assert record.to_dict()["agent_id"] == record.agent_id
+        assert record.agent_name == agent.full_name
+        assert record.to_dict()["agent_name"] == record.agent_name
 
     def test_distinct_names_get_distinct_ids(self) -> None:
         a = make_agent(record_enabled=True, name="agent_a")
@@ -1175,7 +1172,7 @@ class TestAgentId:
         a.invoke(_INPUTS)
         b.invoke(_INPUTS)
 
-        assert a.get_conversation().records[0].agent_id != b.get_conversation().records[0].agent_id
+        assert a.get_conversation().records[0].agent_name != b.get_conversation().records[0].agent_name
 
 
 class TestGetRecord:
@@ -1294,34 +1291,6 @@ class TestAgentValidation:
             agent.llm_engine = object()  # type: ignore[assignment]
 
 
-class TestAgentNamespace:
-    def test_namespace_is_required(self) -> None:
-        with pytest.raises(TypeError):
-            _MinimalAgent(
-                name="a",
-                description="d",
-                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            )
-
-    def test_agent_namespace_explicit(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="my_team",
-            description="d",
-            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-        )
-        assert agent.namespace == "my_team"
-
-    def test_agent_namespace_in_to_dict(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="my_team",
-            description="d",
-            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-        )
-        assert agent.to_dict()["namespace"] == "my_team"
-
-
 class TestAgentSerialization:
     def test_to_dict_includes_agent_configuration(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -1342,8 +1311,8 @@ class TestAgentSerialization:
         assert data["records_window"] == 1
         assert "conversations" not in data
         assert "system_prompts" not in data
-        assert data["pre_invoke"]["name"] == "pre_invoke"
-        assert data["post_invoke"]["name"] == "post_invoke"
+        assert data["pre_invoke"]["name"] == "writer_agent_pre_invoke"
+        assert data["post_invoke"]["name"] == "writer_agent_post_invoke"
         assert data["response_to_post"] == agent._response_to_post == "result"
         assert "post_result_key" not in data
         assert data["llm"]["type"] == "FakeLLMEngine"
@@ -1456,7 +1425,6 @@ class TestAgentFrozenRenderingProperties:
         with pytest.raises(TypeError, match="response_preview_limit"):
             _EchoAgent(
                 name="writer_agent",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 system_prompt=ROLE_PROMPT,
@@ -1506,7 +1474,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_none_produces_no_extra_schema_entries(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1517,7 +1484,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=["persona", "style"],
@@ -1536,7 +1502,6 @@ class TestExtraParametersNormalization:
         ]
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=specs,
@@ -1552,7 +1517,6 @@ class TestExtraParametersNormalization:
         with pytest.raises(AgentError, match="variadic"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=specs,
@@ -1561,7 +1525,6 @@ class TestExtraParametersNormalization:
     def test_extra_parameters_values_reach_invoke_via_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -1610,7 +1573,6 @@ class TestPeerOverlapReconciliation:
         with pytest.raises(AgentError, match=r"\*\*kwargs"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_var_positional,
@@ -1654,7 +1616,6 @@ class TestBindResponseToSharedNames:
 
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             post_invoke=post_with_flag,
@@ -1728,7 +1689,6 @@ class TestCombinedVsExtraReconciliation:
         with pytest.raises(AgentError, match="no compatible reconciliation"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1741,7 +1701,6 @@ class TestCombinedVsExtraReconciliation:
         with pytest.warns(UserWarning, match="not identical"):
             agent = _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1759,7 +1718,6 @@ class TestCombinedVsExtraReconciliation:
             warnings.simplefilter("always")
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
@@ -1772,7 +1730,6 @@ class TestCombinedVsExtraReconciliation:
     def test_extra_remainder_grafted_via_insert_by_category(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre_with_two_fields,
@@ -1834,7 +1791,6 @@ class TestNWayWitnessOrderIndependence:
             warnings.simplefilter("always")
             agent = _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_dict_shared,
@@ -1876,7 +1832,6 @@ class TestNWayWitnessOrderIndependence:
         with pytest.raises(AgentError, match="no compatible reconciliation"):
             _MinimalAgent(
                 name="a",
-                namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_int_shared,
@@ -1892,7 +1847,6 @@ class TestNoSystemPromptRegistry:
     def test_agent_has_no_system_prompt_registry(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1906,7 +1860,6 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=engine,
             record_enabled=False,
@@ -1925,7 +1878,6 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=engine,
             record_enabled=True,
@@ -1946,7 +1898,6 @@ class TestAgentDescriptionOverrideRemoval:
         # ``prompt`` parameter demonstrates the description augmentation.
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="Deterministic writer test agent.",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1957,7 +1908,6 @@ class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_contains_prompt_description_text(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="Deterministic writer test agent.",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
@@ -1983,7 +1933,6 @@ class TestInvocationLifecycle:
 
         agent = CapturingAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -1997,7 +1946,6 @@ class TestInvocationLifecycle:
     def test_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2011,7 +1959,6 @@ class TestInvocationLifecycle:
     def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2025,7 +1972,6 @@ class TestInvocationLifecycle:
     def test_inputs_isolated_across_invocations(self) -> None:
         agent = _MinimalAgent(
             name="a",
-            namespace="tests",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
@@ -2119,7 +2065,7 @@ class TestCreateTask:
             return f"{result}{shared}{only_post}"
 
         agent = _MinimalAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre, post_invoke=post, response_to_post="result",
             extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
@@ -2691,7 +2637,6 @@ def make_value_agent(response_value: Any, **kwargs: Any) -> _ValueAgent:
     kwargs.setdefault("record_enabled", False)
     return _ValueAgent(
         name="value_agent",
-        namespace="tests",
         description="Fixed-response test agent.",
         llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         response_value=response_value,
@@ -2714,7 +2659,7 @@ class TestBindingConstruction:
 
         assert agent._context_destinations == frozenset({"ask", "x", "y"})
 
-    @pytest.mark.parametrize("value, expected", [("n", {"n"}), (None, set())])
+    @pytest.mark.parametrize("value, expected", [("n", {"n"}), ((), set())])
     def test_context_destinations_str_and_none(self, value: Any, expected: set) -> None:
         assert make_agent(response_to_context=value)._context_destinations == expected
 
@@ -2773,12 +2718,13 @@ class TestBindingConstruction:
 
         assert list(agent._response_to_context) == ["a", "b", "c"]
 
-    def test_none_is_none(self) -> None:
-        assert make_agent(response_to_context=None)._response_to_context is None
+    def test_none_is_rejected(self) -> None:
+        with pytest.raises(AgentError, match="response_to_context must not be None"):
+            make_agent(response_to_context=None)
 
     @pytest.mark.parametrize("value", [[], (), set(), {}])
-    def test_empty_collection_or_dict_is_none(self, value: Any) -> None:
-        assert make_agent(response_to_context=value)._response_to_context is None
+    def test_empty_collection_or_dict_is_empty_dict(self, value: Any) -> None:
+        assert make_agent(response_to_context=value)._response_to_context == {}
 
     @pytest.mark.parametrize("value", [5, b"ab", [["a"]], 1.5, object()])
     def test_bad_type_raises(self, value: Any) -> None:
@@ -2835,7 +2781,7 @@ class TestBindingConstruction:
         assert not hasattr(make_agent(), "post_result_key")
         with pytest.raises(TypeError):
             _EchoAgent(
-                name="a", namespace="tests", description="d",
+                name="a", description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 post_result_key="result",  # removed argument
             )
@@ -2995,7 +2941,7 @@ class TestPostStageBinding:
 
         assert task.post_inputs == {}
 
-    @pytest.mark.parametrize("binding", [None, "resp"])
+    @pytest.mark.parametrize("binding", [(), "resp"])
     def test_zero_parameter_post_runs_and_leaves_signature_alone(self, binding: Any) -> None:
         agent = make_value_agent("response", post_invoke=post_zero_args, response_to_context=binding)
 
@@ -3009,7 +2955,7 @@ class TestPostStageBinding:
         result = agent.invoke({"prompt": "x"})
 
         assert result.result == payload
-        assert agent.return_type == "any"
+        assert agent.return_type == ("Any",)
         assert agent.post_invoke is None
         assert agent.to_dict()["post_invoke"] is None
 
@@ -3027,12 +2973,12 @@ class TestPostStageBinding:
 
     def test_default_agent_has_no_post_stage(self) -> None:
         agent = _EchoAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
         assert agent.post_invoke is None
-        assert agent._response_to_post is None
+        assert agent._response_to_post == {}
         assert _names(agent) == ["prompt"]
 
     def test_args_parameter_bound_with_list_response_expands_positionally(self) -> None:
@@ -3158,7 +3104,7 @@ class TestOptionalPreInvoke:
     def test_prompt_passes_through_verbatim_sync_and_async(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
-            name="a", namespace="tests", description="d",
+            name="a", description="d",
             llm_engine=engine, system_prompt=ROLE_PROMPT,
         )
 
@@ -3290,7 +3236,7 @@ class TestContextSink:
         assert agent.get_conversation().context["notes"].value == "new"
 
     def test_no_binding_writes_nothing(self) -> None:
-        agent = make_value_agent("new", response_to_context=None)
+        agent = make_value_agent("new", response_to_context=())
         agent.get_conversation().remember("notes", "old")
 
         task, _ = self._run(agent)
@@ -3382,8 +3328,12 @@ class TestInputsToContext:
         assert make_agent(inputs_to_context={"topic": "ask"}).inputs_to_context == {
             "topic": "ask"
         }
-        assert make_agent(inputs_to_context=None).inputs_to_context is None
-        assert make_agent(inputs_to_context=[]).inputs_to_context is None
+        assert make_agent(inputs_to_context=()).inputs_to_context == {}
+        assert make_agent(inputs_to_context=[]).inputs_to_context == {}
+
+    def test_none_is_rejected(self) -> None:
+        with pytest.raises(AgentError, match="inputs_to_context must not be None"):
+            make_agent(inputs_to_context=None)
 
     def test_bare_str_is_rejected(self) -> None:
         with pytest.raises(AgentError, match="bare str"):
@@ -3770,7 +3720,6 @@ class _NoCallAgent(Agent):
 def make_no_call_agent() -> _NoCallAgent:
     return _NoCallAgent(
         name="no_call_agent",
-        namespace="tests",
         description="Agent that never calls its engine.",
         llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         record_enabled=False,
@@ -3948,3 +3897,62 @@ class TestNewConversationHook:
         assert popped.render_mode == "r"
         assert _HookAgent.hook_calls == before
         assert "x" not in agent.conversation_names
+
+
+class TestConstructorRule:
+    """Stage 4 Pass 3: the agent constructor order, binding defaults and stage names."""
+
+    def _bare(self, **kwargs: Any) -> _EchoAgent:
+        return _EchoAgent(
+            name="rule_agent",
+            description="Rule test agent.",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            **kwargs,
+        )
+
+    def test_parameter_order_is_the_agreed_rule(self) -> None:
+        sig = inspect.signature(Agent.__init__)
+
+        assert list(sig.parameters)[1:] == [
+            "name", "description", "llm_engine",
+            "pre_invoke", "post_invoke",
+            "inputs_to_context", "response_to_context", "response_to_post",
+            "use_runtime_context", "extra_parameters",
+            "record_enabled", "records_window",
+        ]
+        assert all(
+            p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            for p in list(sig.parameters.values())[1:]
+        )
+        assert sig.parameters["record_enabled"].default is True
+
+    @pytest.mark.parametrize(
+        "knob", ["inputs_to_context", "response_to_context", "response_to_post"]
+    )
+    def test_binding_knobs_default_to_empty_tuple_and_expose_empty_dict(self, knob: str) -> None:
+        assert inspect.signature(Agent.__init__).parameters[knob].default == ()
+        assert getattr(self._bare(), knob) == {}
+        assert self._bare().to_dict()[knob] == {}
+
+    @pytest.mark.parametrize(
+        "knob", ["inputs_to_context", "response_to_context", "response_to_post"]
+    )
+    def test_none_binding_is_rejected(self, knob: str) -> None:
+        with pytest.raises(AgentError, match=f"{knob} must not be None"):
+            self._bare(**{knob: None})
+
+    def test_callable_stages_are_named_after_the_agent(self) -> None:
+        agent = self._bare(pre_invoke=build_prompt, post_invoke=package_response)
+
+        assert agent.pre_invoke.name == "rule_agent_pre_invoke"
+        assert agent.post_invoke.name == "rule_agent_post_invoke"
+
+    def test_invokable_stage_keeps_its_own_name(self) -> None:
+        from atomic_agentic.tools import toolify
+
+        pre = toolify(build_prompt, name="my_pre")
+
+        assert self._bare(pre_invoke=pre).pre_invoke.name == "my_pre"
+
+    def test_no_post_stage_return_type_is_any(self) -> None:
+        assert self._bare().return_type == ("Any",)
