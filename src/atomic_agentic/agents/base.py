@@ -20,7 +20,6 @@ from ..exceptions import (
     AgentInvocationError,
 )
 from ..core.atomic_invokable import AtomicInvokable
-from ..models.binding import Binding
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
@@ -38,7 +37,7 @@ from ..constants.agents import (
     PROMPT_PARAM,
     RUNTIME_PARAM,
 )
-from ..utils.binding import normalize_binding, slice_response
+from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
@@ -188,10 +187,12 @@ class Agent(AtomicInvokable, ABC):
     call time -- always its own current tail, never an arbitrary earlier
     record. Retargeting to an earlier point requires an explicit
     ``import_conversation`` (of a ``Conversation.slice``) or
-    ``switch_conversation`` call before invoking (``create_conversation``/
-    ``get_record``/``remove_conversation`` round out the rest of the explicit
-    conversation-management API). Context mutation goes through the
-    conversation itself (``agent.get_conversation(name).remember(...)``).
+    ``switch_conversation`` call before invoking (``get_conversation``/
+    ``remove_conversation`` round out the rest of the explicit
+    conversation-management API; a named conversation is built as
+    ``Conversation(...)`` and registered with ``import_conversation``; records
+    are looked up with ``agent.get_conversation().get_record(...)``).
+    Context mutation goes through the conversation itself (``agent.get_conversation(name).remember(...)``).
     There is no implicit forking: two invocations racing to extend the same
     tail both append to their bound conversation in commit order
     (``Conversation.commit`` serializes the commits), each with ``prev`` set
@@ -926,7 +927,7 @@ class Agent(AtomicInvokable, ABC):
 
         1. Both routes are sliced first (``slice_response``, skipping missing
            selectors), so a bad response shape raises before anything runs or
-           is written. A ``str``/``bytes`` response with selectors raises
+           is written. A ``str``/``bytes``/``bytearray`` response with selectors raises
            ``AgentInvocationError``; any other ``TypeError`` propagates.
         2. The ``response_to_post`` pieces overwrite those entries of
            ``task.post_inputs`` (every destination is a post parameter, checked
@@ -944,7 +945,7 @@ class Agent(AtomicInvokable, ABC):
                 response, self._response_to_context, label="response_to_context", on_missing="skip"
             )
         except TypeError as exc:
-            if isinstance(response, (str, bytes)):
+            if isinstance(response, (str, bytes, bytearray)):
                 raise AgentInvocationError(str(exc)) from exc
             raise
         task.post_inputs.update(post_bound)
@@ -1109,7 +1110,9 @@ class Agent(AtomicInvokable, ABC):
         context and preview limits (a conversation shared with another agent
         stays intact there); ``self._conversations`` becomes a single fresh
         ``"default"`` built by ``_new_conversation()`` and the active
-        conversation resets to ``"default"``.
+        conversation resets to ``"default"``. It differs from
+        ``remove_conversation("default")`` by also resetting the active
+        pointer and dropping every other conversation.
         Not synchronized: an in-flight call whose ``record`` looks up a key
         this reset removed raises ``KeyError``.
         """
@@ -1130,22 +1133,23 @@ class Agent(AtomicInvokable, ABC):
 
         The single source of every default conversation this agent builds: the
         initial ``"default"``, the one rebuilt by ``clear_memory()``, the one
-        rebuilt by ``remove_conversation("default")``, and the starting point
-        ``create_conversation`` overlays its arguments onto. A subclass
+        rebuilt by ``remove_conversation("default")``. A subclass
         overrides it to give its conversations different defaults
         (``BasicAgent``: render_mode ``"j"`` when it has a response_schema).
         """
         return Conversation()
 
-    def _check_new_conversation_name(self, name: str, caller: str) -> None:
+    def _check_new_conversation_name(self, name: str) -> None:
         """Raise ``ValueError`` if ``name`` is badly shaped or already taken."""
         if not CONVERSATION_NAME_PATTERN.fullmatch(name):
             raise ValueError(
-                f"{caller}: invalid conversation name {name!r} (must be "
+                f"import_conversation: invalid conversation name {name!r} (must be "
                 "alphanumeric/underscore)."
             )
         if name in self._conversations:
-            raise ValueError(f"{caller}: conversation {name!r} already exists.")
+            raise ValueError(
+                f"import_conversation: conversation {name!r} already exists."
+            )
 
     def get_conversation(self, conversation_id: str | None = None) -> Conversation:
         """Return the stored conversation itself (not a snapshot).
@@ -1167,86 +1171,6 @@ class Agent(AtomicInvokable, ABC):
             raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
         return self._conversations[key]
 
-    def create_conversation(
-        self,
-        name: str,
-        *,
-        response_preview_limit: int | None = None,
-        prompt_preview_limit: int | None = None,
-        context_preview_limit: int | None = None,
-        render_mode: str | None = None,
-    ) -> Conversation:
-        """Create a new, empty conversation and return the stored object.
-
-        ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
-        that already exists raises ``ValueError`` with a specific message.
-
-        1. check the name.
-        2. start from ``self._new_conversation()``.
-        3. assign each argument that is not ``None`` onto it. The three
-           preview limits (``None`` unlimited, ``0`` hidden, else
-           ``int > 0``) and ``render_mode`` (how prior responses are formatted
-           in history; omitted -> the agent's default) are validated by
-           ``Conversation`` (``ValueError``); a failure leaves nothing
-           registered.
-        4. register and return it. Never auto-activates.
-
-        ``None`` means "not given" for every argument, so a limit cannot be
-        set back to ``None`` over a default the agent's hook already set.
-        """
-        self._check_new_conversation_name(name, "create_conversation")
-        conv = self._new_conversation()
-        given = {
-            "response_preview_limit": response_preview_limit,
-            "prompt_preview_limit": prompt_preview_limit,
-            "context_preview_limit": context_preview_limit,
-            "render_mode": render_mode,
-        }
-        for field, value in given.items():
-            if value is not None:
-                setattr(conv, field, value)
-        self._conversations[name] = conv
-        return conv
-
-    def get_record(
-        self,
-        *,
-        run_id: str | None = None,
-        conversation: str | None = None,
-        index: int | None = None,
-    ) -> AgentRecord:
-        """Single-record lookup. Valid combinations:
-
-        - ``run_id`` alone: first match scanning every conversation.
-        - ``run_id`` + ``conversation``: first match in that conversation.
-        - ``conversation`` + ``index``: ``records[index]``.
-        - ``index`` alone: index into the active conversation.
-
-        Anything else (``run_id`` + ``index``, ``conversation`` alone,
-        nothing) raises ``ValueError``. An unknown ``conversation`` raises
-        ``AgentInvocationError``; no record with the ``run_id`` raises
-        ``ValueError``; an out-of-range ``index`` raises the natural
-        ``IndexError``.
-        """
-        if run_id is not None:
-            if index is not None:
-                raise ValueError("get_record: run_id may not be combined with index.")
-            if conversation is None:
-                convs = list(self._conversations.values())
-            else:
-                convs = [self.get_conversation(conversation)]
-            for conv in convs:
-                found = next((r for r in conv.records if r.run_id == run_id), None)
-                if found is not None:
-                    return found
-            raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
-
-        if index is None:
-            raise ValueError(
-                "get_record: must supply run_id, conversation + index, or index."
-            )
-        return self.get_conversation(conversation).records[index]
-
     def import_conversation(self, conversation: Conversation, *, name: str) -> None:
         """Register ``conversation`` (the SAME object, shared) under ``name``.
 
@@ -1257,8 +1181,8 @@ class Agent(AtomicInvokable, ABC):
         Never activates; returns ``None``.
 
         Not a ``Conversation`` raises ``TypeError`` (before anything is
-        registered). ``name`` is validated/collision-checked exactly like
-        ``create_conversation``'s (``ValueError``); the same object already
+        registered). ``name`` is validated and collision-checked
+        (``ValueError``); the same object already
         registered under another key of this agent also raises ``ValueError``.
         """
         if not isinstance(conversation, Conversation):
@@ -1267,7 +1191,7 @@ class Agent(AtomicInvokable, ABC):
                 f"got {type(conversation)!r}."
             )
 
-        self._check_new_conversation_name(name, "import_conversation")
+        self._check_new_conversation_name(name)
         if any(c is conversation for c in self._conversations.values()):
             raise ValueError(
                 "import_conversation: conversation is already registered here."

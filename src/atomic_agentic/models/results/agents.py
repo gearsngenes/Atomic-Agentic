@@ -131,7 +131,7 @@ class AgentResult(AtomicResult):
     run_id:
         Identifier of this invocation, minted by the agent when it seeds the
         task; ``None`` when the agent's ``record_enabled`` is False (nothing to
-        look up). Key for ``Agent.get_record(run_id=...)``. Not re-validated
+        look up). Key for ``Conversation.get_record(run_id=...)``. Not re-validated
         here.
 
     llm_token_usage:
@@ -287,7 +287,7 @@ class ThinkingAgentResult(AgentResult):
     Extends ``AgentResult`` with the count of thoughts the invocation
     produced -- a derived reduction like ``llm_token_usage``, not a duplicate
     of the record. A caller needing the thought content reads it off the
-    record (``agent.get_record(run_id=result.run_id).thoughts``); with
+    record (``agent.get_conversation().get_record(run_id=result.run_id).thoughts``); with
     ``record_enabled=False`` this count is the only trace of the thinking.
 
     No ``__post_init__`` override needed -- plain ``int`` field, no

@@ -142,9 +142,8 @@ class BasicAgent(Agent):
            repr.
 
         Applies to every default conversation this agent builds, including
-        those after ``clear_memory()`` and ``remove_conversation("default")``,
-        and to ``create_conversation()`` calls that omit ``render_mode``.
-        Conversations imported from elsewhere keep their own settings.
+        those after ``clear_memory()`` and ``remove_conversation("default")``.
+        A conversation built by hand and imported keeps its own settings.
         """
         new_convo = super()._new_conversation()
         if self._response_schema is not None:

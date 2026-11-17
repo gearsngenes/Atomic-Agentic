@@ -482,6 +482,62 @@ class TestSlice:
         assert copy._lock is not conv._lock
 
 
+class TestGetRecord:
+    def test_run_id_returns_matching_record_by_identity(self) -> None:
+        a, b = rec(run_id="a"), rec(run_id="b")
+        conv = Conversation(records=[a, b])
+
+        assert conv.get_record(run_id="b") is b
+        assert conv.get_record(run_id="a") is a
+
+    def test_run_id_first_match_when_ids_repeat_across_a_slice(self) -> None:
+        a, b = rec(run_id="a"), rec(run_id="b")
+        conv = Conversation(records=[a, b])
+        doubled = Conversation(records=[*conv.records, *conv.slice().records])
+
+        assert doubled.get_record(run_id="a") is a
+
+    def test_unknown_run_id_raises(self) -> None:
+        conv = Conversation(records=[rec(run_id="a")])
+
+        with pytest.raises(ValueError, match="no record"):
+            conv.get_record(run_id="zzz")
+
+    def test_index_positive_zero_and_negative(self) -> None:
+        a, b, c = rec(), rec(), rec()
+        conv = Conversation(records=[a, b, c])
+
+        assert conv.get_record(index=0) is a
+        assert conv.get_record(index=1) is b
+        assert conv.get_record(index=-1) is c
+
+    def test_index_out_of_range_raises(self) -> None:
+        conv = Conversation(records=[rec()])
+
+        with pytest.raises(IndexError):
+            conv.get_record(index=1)
+        with pytest.raises(IndexError):
+            conv.get_record(index=-2)
+
+    def test_empty_conversation_index_raises(self) -> None:
+        with pytest.raises(IndexError):
+            Conversation().get_record(index=0)
+
+    def test_both_or_neither_raises(self) -> None:
+        conv = Conversation(records=[rec(run_id="a")])
+
+        with pytest.raises(ValueError, match="exactly one"):
+            conv.get_record(run_id="a", index=0)
+        with pytest.raises(ValueError, match="exactly one"):
+            conv.get_record()
+
+    def test_arguments_are_keyword_only(self) -> None:
+        conv = Conversation(records=[rec()])
+
+        with pytest.raises(TypeError):
+            conv.get_record(0)  # type: ignore[misc]
+
+
 class TestCommit:
     def test_appends_record(self) -> None:
         conv = Conversation()

@@ -721,39 +721,39 @@ class TestConversationManagement:
         assert agent.active_conversation == "default"
         assert agent.get_conversation().records == []
 
-    def test_create_conversation_returns_conversation_on_fresh_name(self) -> None:
+    def test_import_conversation_registers_on_fresh_name(self) -> None:
         agent = make_agent()
+        created = Conversation()
 
-        created = agent.create_conversation("scratch")
+        assert agent.import_conversation(created, name="scratch") is None
 
-        assert isinstance(created, Conversation)
-        assert created.records == []
         assert "scratch" in agent.conversation_names
+        assert agent.get_conversation("scratch") is created
         assert agent.get_conversation("scratch").records == []
-        # create_conversation never auto-activates.
+        # import_conversation never auto-activates.
         assert agent.active_conversation == "default"
 
-    def test_create_conversation_raises_on_existing_name_no_mutation(self) -> None:
+    def test_import_conversation_raises_on_existing_name_no_mutation(self) -> None:
         agent = make_agent(record_enabled=True)
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         with pytest.raises(ValueError, match="conversation 'scratch' already exists"):
-            agent.create_conversation("scratch")
+            agent.import_conversation(Conversation(), name="scratch")
         # The existing conversation's history survives the rejected collision.
         assert len(agent.get_conversation("scratch").records) == 1
 
     @pytest.mark.parametrize("bad_name", ["bad name", "1bad", ""])
-    def test_create_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
+    def test_import_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
         agent = make_agent()
 
         with pytest.raises(ValueError):
-            agent.create_conversation(bad_name)
+            agent.import_conversation(Conversation(), name=bad_name)
 
     def test_switch_conversation_switches_active(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
 
         agent.switch_conversation("scratch")
 
@@ -793,15 +793,15 @@ class TestConversationManagement:
         assert len(stored.records) == 1
         assert "x" in agent.get_conversation().context
 
-    def test_create_conversation_returns_the_stored_object_with_limits(self) -> None:
+    def test_imported_conversation_keeps_its_limits(self) -> None:
         agent = make_agent()
 
-        conv = agent.create_conversation(
-            "scratch",
+        conv = Conversation(
             response_preview_limit=5,
             prompt_preview_limit=0,
             context_preview_limit=9,
         )
+        agent.import_conversation(conv, name="scratch")
 
         assert agent.get_conversation("scratch") is conv
         assert (
@@ -811,39 +811,20 @@ class TestConversationManagement:
         ) == (5, 0, 9)
         assert agent.active_conversation == "default"
 
-    def test_create_conversation_defaults_limits_to_none(self) -> None:
-        conv = make_agent().create_conversation("scratch")
-
-        assert conv.response_preview_limit is None
-        assert conv.prompt_preview_limit is None
-        assert conv.context_preview_limit is None
-
-    @pytest.mark.parametrize("bad", [-1, True, 1.5, "5"])
-    def test_create_conversation_rejects_bad_limits_and_stores_nothing(
-        self, bad: object
-    ) -> None:
-        agent = make_agent()
-
-        with pytest.raises(ValueError, match="response_preview_limit"):
-            agent.create_conversation("scratch", response_preview_limit=bad)  # type: ignore[arg-type]
-        assert agent.conversation_names == ["default"]
-
-    def test_create_conversation_bad_shape_message(self) -> None:
+    def test_import_conversation_bad_shape_message(self) -> None:
         with pytest.raises(ValueError, match="invalid conversation name"):
-            make_agent().create_conversation("bad name")
+            make_agent().import_conversation(Conversation(), name="bad name")
 
     def test_trailing_digits_names_are_valid(self) -> None:
         agent = make_agent()
 
-        agent.create_conversation("branch_5")
+        agent.import_conversation(Conversation(), name="branch_5")
 
         assert "branch_5" in agent.conversation_names
 
     def test_name_is_required(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(TypeError):
-            agent.create_conversation()  # type: ignore[call-arg]
         with pytest.raises(TypeError):
             agent.import_conversation(agent.get_conversation())  # type: ignore[call-arg]
 
@@ -869,7 +850,7 @@ class TestConversationManagement:
 
     def test_remove_conversation_refuses_active_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
 
         with pytest.raises(AgentInvocationError):
@@ -878,7 +859,8 @@ class TestConversationManagement:
 
     def test_remove_conversation_returns_the_popped_non_active_conversation(self) -> None:
         agent = make_agent(record_enabled=True)
-        scratch = agent.create_conversation("scratch")
+        scratch = Conversation()
+        agent.import_conversation(scratch, name="scratch")
         agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
         agent.switch_conversation("default")
@@ -907,7 +889,7 @@ class TestConversationManagement:
 
     def test_remove_default_while_another_is_active_keeps_active_key(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
 
         agent.remove_conversation("default")
@@ -925,7 +907,7 @@ class TestConversationContext:
 
     def test_mutators_through_get_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         scratch = agent.get_conversation("scratch")
 
         scratch.remember("x", 1, "one")
@@ -1025,7 +1007,7 @@ class TestImportConversation:
         source, _ = self._source()
         conv = source.get_conversation()
         target = make_agent()
-        target.create_conversation("taken")
+        target.import_conversation(Conversation(), name="taken")
 
         with pytest.raises(ValueError, match="invalid conversation name 'bad name'"):
             target.import_conversation(conv, name="bad name")
@@ -1175,70 +1157,10 @@ class TestAgentName:
         assert a.get_conversation().records[0].agent_name != b.get_conversation().records[0].agent_name
 
 
-class TestGetRecord:
-    def _agent(self) -> tuple[_EchoAgent, list[str]]:
-        agent = make_agent(record_enabled=True)
-        ids = [agent.invoke({"topic": t, "tone": "strict"}).run_id for t in ("a", "b")]
-        agent.create_conversation("other")
-        agent.switch_conversation("other")
-        ids.append(agent.invoke({"topic": "c", "tone": "strict"}).run_id)
-        return agent, ids
-
-    def test_run_id_alone_scans_every_conversation(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(run_id=ids[0]).run_id == ids[0]
-        assert agent.get_record(run_id=ids[2]).run_id == ids[2]
-
-    def test_run_id_with_conversation_is_scoped(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(run_id=ids[2], conversation="other").run_id == ids[2]
-        with pytest.raises(ValueError, match="no record"):
-            agent.get_record(run_id=ids[0], conversation="other")
-
-    def test_conversation_and_index(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(conversation="default", index=1).run_id == ids[1]
-        assert agent.get_record(conversation="default", index=-1).run_id == ids[1]
-
-    def test_index_alone_uses_the_active_conversation(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(index=0).run_id == ids[2]
-
-    def test_unknown_run_id_raises_value_error(self) -> None:
-        agent, _ = self._agent()
-
-        with pytest.raises(ValueError, match="no record"):
-            agent.get_record(run_id="nope")
-
-    def test_unknown_conversation_raises(self) -> None:
-        agent, ids = self._agent()
-
-        with pytest.raises(AgentInvocationError):
-            agent.get_record(conversation="nope", index=0)
-        with pytest.raises(AgentInvocationError):
-            agent.get_record(run_id=ids[0], conversation="nope")
-
-    def test_out_of_range_index_raises_index_error(self) -> None:
-        agent, _ = self._agent()
-
-        with pytest.raises(IndexError):
-            agent.get_record(conversation="default", index=9)
-
-    def test_invalid_combinations_raise_value_error(self) -> None:
-        agent, ids = self._agent()
-
-        with pytest.raises(ValueError):
-            agent.get_record()
-        with pytest.raises(ValueError):
-            agent.get_record(conversation="default")
-        with pytest.raises(ValueError):
-            agent.get_record(run_id=ids[0], index=0)
-        with pytest.raises(ValueError):
-            agent.get_record(run_id=ids[0], conversation="default", index=0)
+class TestRemovedConversationHelpers:
+    def test_create_conversation_and_get_record_are_gone_from_agent(self) -> None:
+        assert not hasattr(Agent, "create_conversation")
+        assert not hasattr(Agent, "get_record")
 
 
 class TestAgentValidation:
@@ -2006,7 +1928,7 @@ def _run_until_post(agent: Agent, inputs: Mapping[str, Any]) -> tuple[AgentTask,
 class TestCreateTask:
     def test_binds_conversation_and_mints_identity(self) -> None:
         agent = make_agent(record_enabled=True)
-        agent.create_conversation("side")
+        agent.import_conversation(Conversation(), name="side")
         agent.switch_conversation("side")
 
         task = agent.create_task(agent.filter_inputs(_INPUTS))
@@ -2129,7 +2051,7 @@ class TestPreviewLimitRendering:
 
     def test_limits_come_from_the_task_conversation_not_the_active_one(self) -> None:
         agent = self._agent(response_preview_limit=3)
-        agent.create_conversation("other")
+        agent.import_conversation(Conversation(), name="other")
         task = agent.create_task(agent.filter_inputs(_INPUTS))
         agent.switch_conversation("other")
         agent.get_conversation("other").response_preview_limit = 0
@@ -2180,13 +2102,14 @@ class TestHistoryRenderMode:
 
     def test_create_import_and_slice_carry_the_mode(self) -> None:
         agent = make_agent(record_enabled=True)
-        created = agent.create_conversation("scratch", render_mode="p")
-        assert created.render_mode == "p"
+        created = Conversation(render_mode="p")
+        agent.import_conversation(created, name="scratch")
+        assert agent.get_conversation("scratch").render_mode == "p"
 
         sliced = created.slice()
         assert sliced.render_mode == "p"
         target = make_agent()
-        target.import_conversation(created, name="imp")
+        target.import_conversation(sliced, name="imp")
         assert target.get_conversation("imp").render_mode == "p"
 
     def test_factory_reset_restores_the_default(self) -> None:
@@ -2201,7 +2124,7 @@ class TestHistoryRenderMode:
         agent = make_agent()
 
         with pytest.raises(ValueError, match="render_mode"):
-            agent.create_conversation("scratch", render_mode="nope")
+            Conversation(render_mode="nope")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="render_mode"):
             agent.get_conversation().render_mode = None  # type: ignore[assignment]
         assert agent.get_conversation().render_mode == "s"
@@ -2218,7 +2141,7 @@ class TestFactoryReset:
 
     def test_clear_memory_resets_default_limits_to_none(self) -> None:
         agent = self._with_limits()
-        agent.create_conversation("scratch", response_preview_limit=1)
+        agent.import_conversation(Conversation(response_preview_limit=1), name="scratch")
 
         agent.clear_memory()
 
@@ -2266,7 +2189,7 @@ class TestRememberRenderOptions:
 
     def test_remember_targets_a_named_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
 
         agent.get_conversation("scratch").remember("k", 1, render_mode="a")
 
@@ -2540,7 +2463,7 @@ class TestContextLifecycle:
         agent = make_agent(record_enabled=True)
         agent.get_conversation().remember("k", 1)
         task, _ = _run_until_post(agent, _INPUTS)
-        agent.create_conversation("side")
+        agent.import_conversation(Conversation(), name="side")
         agent.switch_conversation("side")  # active changes mid-call
         self._bump(task, "k", 9)
 
@@ -3019,7 +2942,7 @@ class TestPostStageBinding:
 
         assert agent.get_conversation().records == []
 
-    @pytest.mark.parametrize("response", ["text", b"bytes"])
+    @pytest.mark.parametrize("response", ["text", b"bytes", bytearray(b"bytes")])
     def test_str_or_bytes_response_with_selectors_raises(self, response: Any) -> None:
         agent = make_value_agent(
             response, post_invoke=post_zero_args, response_to_context={0: "first"}
@@ -3818,14 +3741,14 @@ class TestInvokeHook:
 
         assert result.run_id
         assert agent.get_conversation().records[0].run_id == result.run_id
-        assert agent.get_record(run_id=result.run_id) is agent.get_conversation().records[0]
+        assert agent.get_conversation().get_record(run_id=result.run_id) is agent.get_conversation().records[0]
 
     def test_async_run_id_matches_the_stored_record(self) -> None:
         agent = make_agent(record_enabled=True)
 
         result = asyncio.run(agent.async_invoke(_INPUTS))
 
-        assert agent.get_record(run_id=result.run_id).run_id == result.run_id
+        assert agent.get_conversation().get_record(run_id=result.run_id).run_id == result.run_id
         assert make_agent(record_enabled=False).invoke(_INPUTS).run_id is None
 
     def test_result_timing_and_identity_come_from_the_template(self) -> None:
@@ -3890,18 +3813,15 @@ class TestNewConversationHook:
 
         assert agent.get_conversation().render_mode == "r"
 
-    def test_create_conversation_overlays_given_arguments(self) -> None:
+    def test_imported_hand_built_conversation_ignores_the_hook(self) -> None:
         agent = make_agent(agent_cls=_HookAgent)
+        built = Conversation()
 
-        given = agent.create_conversation(
-            "a", response_preview_limit=3, render_mode="a"
-        )
-        omitted = agent.create_conversation("b", prompt_preview_limit=4)
+        agent.import_conversation(built, name="a")
 
-        assert (given.response_preview_limit, given.render_mode) == (3, "a")
-        assert omitted.render_mode == "r"
-        assert omitted.prompt_preview_limit == 4
-        assert omitted.response_preview_limit is None
+        assert agent.get_conversation("a") is built
+        assert built.render_mode == "s"
+        assert agent.get_conversation().render_mode == "r"
 
     def test_base_hook_returns_a_new_default_conversation_each_call(self) -> None:
         agent = make_agent()
@@ -3915,12 +3835,13 @@ class TestNewConversationHook:
 
     def test_removing_a_non_default_conversation_does_not_use_the_hook(self) -> None:
         agent = make_agent(agent_cls=_HookAgent)
-        agent.create_conversation("x")
+        imported = Conversation()
+        agent.import_conversation(imported, name="x")
         before = _HookAgent.hook_calls
 
         popped = agent.remove_conversation("x")
 
-        assert popped.render_mode == "r"
+        assert popped is imported
         assert _HookAgent.hook_calls == before
         assert "x" not in agent.conversation_names
 

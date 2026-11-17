@@ -10,9 +10,15 @@ binding ``{}``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Set as AbstractSet
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
-from ..models.binding import Binding, MissingPolicy
+# A normalized binding: a ``str`` is the whole response under one name; a dict is
+# ``{selector: destination}``; ``{}`` means no binding.
+Binding: TypeAlias = str | dict[Any, str]
+
+# What slicing does when a selector is absent from the response. The caller
+# chooses; there is no default.
+MissingPolicy: TypeAlias = Literal["skip", "raise"]
 
 
 def normalize_binding(
@@ -109,4 +115,4 @@ def slice_response(
     return bound
 
 
-__all__ = ["normalize_binding", "slice_response"]
+__all__ = ["Binding", "MissingPolicy", "normalize_binding", "slice_response"]

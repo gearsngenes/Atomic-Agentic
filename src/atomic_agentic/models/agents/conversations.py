@@ -257,6 +257,26 @@ class Conversation:
                 render_mode=self.render_mode,
             )
 
+    def get_record(
+        self, *, run_id: str | None = None, index: int | None = None
+    ) -> AgentRecord:
+        """One record, by ``run_id`` or by ``index`` (exactly one).
+
+        ``run_id``: the first record in ``records`` with that id; none raises
+        ``ValueError``. ``index``: ``records[index]`` (negatives allowed; out of
+        range raises the natural ``IndexError``). Both given, or neither, raises
+        ``ValueError``.
+        """
+        if (run_id is None) == (index is None):
+            raise ValueError("get_record: supply exactly one of run_id or index.")
+        with self._lock:
+            if index is not None:
+                return self.records[index]
+            found = next((r for r in self.records if r.run_id == run_id), None)
+        if found is None:
+            raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
+        return found
+
     def commit(
         self, record: AgentRecord, task_context: Mapping[str, ContextVariable]
     ) -> None:

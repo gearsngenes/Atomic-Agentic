@@ -633,32 +633,15 @@ class TestBasicAgentDefaultRenderMode:
 
         assert agent.get_conversation("default").render_mode == "j"
 
-    def test_create_conversation_uses_the_agent_default(self) -> None:
+    def test_hand_built_conversation_keeps_its_own_default(self) -> None:
         schema_agent = make_basic_agent(response_schema=self.SCHEMA)
-        plain_agent = make_basic_agent()
+        built = Conversation()
 
-        assert schema_agent.create_conversation("x").render_mode == "j"
-        assert plain_agent.create_conversation("x").render_mode == "s"
+        schema_agent.import_conversation(built, name="x")
 
-    def test_explicit_render_mode_wins(self) -> None:
-        schema_agent = make_basic_agent(response_schema=self.SCHEMA)
-        plain_agent = make_basic_agent()
-
-        assert schema_agent.create_conversation("x", render_mode="s").render_mode == "s"
-        assert plain_agent.create_conversation("x", render_mode="p").render_mode == "p"
-
-    def test_render_mode_none_is_accepted(self) -> None:
-        agent = make_basic_agent(response_schema=self.SCHEMA)
-
-        assert agent.create_conversation("x", render_mode=None).render_mode == "j"
-
-    def test_bad_limit_raises_and_registers_nothing(self) -> None:
-        agent = make_basic_agent()
-
-        with pytest.raises(ValueError):
-            agent.create_conversation("x", response_preview_limit=-1)
-
-        assert "x" not in agent.conversation_names
+        assert schema_agent.get_conversation("x") is built
+        assert built.render_mode == "s"
+        assert schema_agent.get_conversation().render_mode == "j"
 
     def test_import_conversation_keeps_its_own_mode(self) -> None:
         agent = make_basic_agent(response_schema=self.SCHEMA)

@@ -10,7 +10,7 @@ from ..constants.core import IDENTIFIER_PATTERN_TEXT
 # =============================================================================
 # Used by:
 # - agents/base.py: Agent's per-conversation storage (_conversations dict,
-#   create_conversation, import_conversation) and its name-shape validation.
+#   import_conversation) and its name-shape validation.
 #
 # "default" is the always-present conversation key -- Agent seeds a fresh
 # empty Conversation under it at construction and remove_conversation
