@@ -272,14 +272,14 @@ class TestAgentRecord:
         record = AgentRecord(user_prompt="run", generated_response="raw", run_id="abc123")
         assert record.run_id == "abc123"
 
-    def test_agent_id_defaults_to_none(self) -> None:
+    def test_agent_name_defaults_to_none(self) -> None:
         record = AgentRecord(run_id="run-3", user_prompt="x", generated_response="y")
-        assert record.agent_id is None
+        assert record.agent_name is None
 
-    def test_agent_id_is_keyword_only_and_serialized(self) -> None:
-        record = AgentRecord(run_id="run-4", user_prompt="x", generated_response="y", agent_id="ns.a;123")
-        assert record.agent_id == "ns.a;123"
-        assert record.to_dict()["agent_id"] == "ns.a;123"
+    def test_agent_name_is_keyword_only_and_serialized(self) -> None:
+        record = AgentRecord(run_id="run-4", user_prompt="x", generated_response="y", agent_name="ns.a;123")
+        assert record.agent_name == "ns.a;123"
+        assert record.to_dict()["agent_name"] == "ns.a;123"
 
     def test_llm_records_rejects_str(self) -> None:
         with pytest.raises(TypeError, match="llm_records"):
@@ -298,7 +298,7 @@ class TestAgentRecord:
             "inputs": {},
             "generated_response": "raw",
             "run_id": record.run_id,
-            "agent_id": None,
+            "agent_name": None,
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
@@ -589,7 +589,7 @@ class TestThinkingAgentRecord:
             "inputs": {},
             "generated_response": "a poem",
             "run_id": record.run_id,
-            "agent_id": None,
+            "agent_name": None,
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],

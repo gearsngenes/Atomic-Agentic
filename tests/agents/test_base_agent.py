@@ -287,8 +287,8 @@ def make_agent(
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
     response_to_post: Any = _DEFAULT_POST_BINDING,
-    response_to_context: Any = None,
-    inputs_to_context: Any = None,
+    response_to_context: Any = (),
+    inputs_to_context: Any = (),
     system_prompt: str = ROLE_PROMPT,
     agent_cls: type[_EchoAgent] = _EchoAgent,
     name: str = "writer_agent",
@@ -306,7 +306,7 @@ def make_agent(
             if hasattr(post_invoke, "parameters")
             else set(inspect.signature(post_invoke).parameters)
         )
-        response_to_post = "result" if "result" in names else None
+        response_to_post = "result" if "result" in names else ()
     return agent_cls(
         name=name,
         description="Deterministic writer test agent.",
@@ -1105,7 +1105,7 @@ class TestSharedConversation:
         assert shared.records[1].prev is shared.records[0]
         assert shared.records[2].prev is shared.records[1]
 
-    def test_agent_id_differs_per_writer(self) -> None:
+    def test_agent_name_differs_per_writer(self) -> None:
         a = make_agent(record_enabled=True, name="first_writer")
         b = make_agent(record_enabled=True, name="second_writer")
         b.import_conversation(a.get_conversation(), name="default_alias")
@@ -1115,9 +1115,9 @@ class TestSharedConversation:
         b.invoke(_INPUTS)
 
         first, second = a.get_conversation().records
-        assert first.agent_id == a.full_name
-        assert second.agent_id == b.full_name
-        assert first.agent_id != second.agent_id
+        assert first.agent_name == a.full_name
+        assert second.agent_name == b.full_name
+        assert first.agent_name != second.agent_name
 
     def test_context_is_shared(self) -> None:
         a, b = self._pair()
@@ -1156,15 +1156,15 @@ class TestSharedConversation:
         assert len(a.get_conversation().records) == 1
 
 
-class TestAgentId:
+class TestAgentName:
     def test_format_and_serialization(self) -> None:
         agent = make_agent(record_enabled=True)
         agent.invoke(_INPUTS)
 
         record = agent.get_conversation().records[0]
 
-        assert record.agent_id == agent.full_name
-        assert record.to_dict()["agent_id"] == record.agent_id
+        assert record.agent_name == agent.full_name
+        assert record.to_dict()["agent_name"] == record.agent_name
 
     def test_distinct_names_get_distinct_ids(self) -> None:
         a = make_agent(record_enabled=True, name="agent_a")
@@ -1172,7 +1172,7 @@ class TestAgentId:
         a.invoke(_INPUTS)
         b.invoke(_INPUTS)
 
-        assert a.get_conversation().records[0].agent_id != b.get_conversation().records[0].agent_id
+        assert a.get_conversation().records[0].agent_name != b.get_conversation().records[0].agent_name
 
 
 class TestGetRecord:
@@ -1311,8 +1311,8 @@ class TestAgentSerialization:
         assert data["records_window"] == 1
         assert "conversations" not in data
         assert "system_prompts" not in data
-        assert data["pre_invoke"]["name"] == "pre_invoke"
-        assert data["post_invoke"]["name"] == "post_invoke"
+        assert data["pre_invoke"]["name"] == "writer_agent_pre_invoke"
+        assert data["post_invoke"]["name"] == "writer_agent_post_invoke"
         assert data["response_to_post"] == agent._response_to_post == "result"
         assert "post_result_key" not in data
         assert data["llm"]["type"] == "FakeLLMEngine"
@@ -2659,7 +2659,7 @@ class TestBindingConstruction:
 
         assert agent._context_destinations == frozenset({"ask", "x", "y"})
 
-    @pytest.mark.parametrize("value, expected", [("n", {"n"}), (None, set())])
+    @pytest.mark.parametrize("value, expected", [("n", {"n"}), ((), set())])
     def test_context_destinations_str_and_none(self, value: Any, expected: set) -> None:
         assert make_agent(response_to_context=value)._context_destinations == expected
 
@@ -2718,12 +2718,13 @@ class TestBindingConstruction:
 
         assert list(agent._response_to_context) == ["a", "b", "c"]
 
-    def test_none_is_none(self) -> None:
-        assert make_agent(response_to_context=None)._response_to_context is None
+    def test_none_is_rejected(self) -> None:
+        with pytest.raises(AgentError, match="response_to_context must not be None"):
+            make_agent(response_to_context=None)
 
     @pytest.mark.parametrize("value", [[], (), set(), {}])
-    def test_empty_collection_or_dict_is_none(self, value: Any) -> None:
-        assert make_agent(response_to_context=value)._response_to_context is None
+    def test_empty_collection_or_dict_is_empty_dict(self, value: Any) -> None:
+        assert make_agent(response_to_context=value)._response_to_context == {}
 
     @pytest.mark.parametrize("value", [5, b"ab", [["a"]], 1.5, object()])
     def test_bad_type_raises(self, value: Any) -> None:
@@ -2940,7 +2941,7 @@ class TestPostStageBinding:
 
         assert task.post_inputs == {}
 
-    @pytest.mark.parametrize("binding", [None, "resp"])
+    @pytest.mark.parametrize("binding", [(), "resp"])
     def test_zero_parameter_post_runs_and_leaves_signature_alone(self, binding: Any) -> None:
         agent = make_value_agent("response", post_invoke=post_zero_args, response_to_context=binding)
 
@@ -2954,7 +2955,7 @@ class TestPostStageBinding:
         result = agent.invoke({"prompt": "x"})
 
         assert result.result == payload
-        assert agent.return_type == ("any",)
+        assert agent.return_type == ("Any",)
         assert agent.post_invoke is None
         assert agent.to_dict()["post_invoke"] is None
 
@@ -2977,7 +2978,7 @@ class TestPostStageBinding:
         )
 
         assert agent.post_invoke is None
-        assert agent._response_to_post is None
+        assert agent._response_to_post == {}
         assert _names(agent) == ["prompt"]
 
     def test_args_parameter_bound_with_list_response_expands_positionally(self) -> None:
@@ -3235,7 +3236,7 @@ class TestContextSink:
         assert agent.get_conversation().context["notes"].value == "new"
 
     def test_no_binding_writes_nothing(self) -> None:
-        agent = make_value_agent("new", response_to_context=None)
+        agent = make_value_agent("new", response_to_context=())
         agent.get_conversation().remember("notes", "old")
 
         task, _ = self._run(agent)
@@ -3327,8 +3328,12 @@ class TestInputsToContext:
         assert make_agent(inputs_to_context={"topic": "ask"}).inputs_to_context == {
             "topic": "ask"
         }
-        assert make_agent(inputs_to_context=None).inputs_to_context is None
-        assert make_agent(inputs_to_context=[]).inputs_to_context is None
+        assert make_agent(inputs_to_context=()).inputs_to_context == {}
+        assert make_agent(inputs_to_context=[]).inputs_to_context == {}
+
+    def test_none_is_rejected(self) -> None:
+        with pytest.raises(AgentError, match="inputs_to_context must not be None"):
+            make_agent(inputs_to_context=None)
 
     def test_bare_str_is_rejected(self) -> None:
         with pytest.raises(AgentError, match="bare str"):
@@ -3892,3 +3897,62 @@ class TestNewConversationHook:
         assert popped.render_mode == "r"
         assert _HookAgent.hook_calls == before
         assert "x" not in agent.conversation_names
+
+
+class TestConstructorRule:
+    """Stage 4 Pass 3: the agent constructor order, binding defaults and stage names."""
+
+    def _bare(self, **kwargs: Any) -> _EchoAgent:
+        return _EchoAgent(
+            name="rule_agent",
+            description="Rule test agent.",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            **kwargs,
+        )
+
+    def test_parameter_order_is_the_agreed_rule(self) -> None:
+        sig = inspect.signature(Agent.__init__)
+
+        assert list(sig.parameters)[1:] == [
+            "name", "description", "llm_engine",
+            "pre_invoke", "post_invoke",
+            "inputs_to_context", "response_to_context", "response_to_post",
+            "use_runtime_context", "extra_parameters",
+            "record_enabled", "records_window",
+        ]
+        assert all(
+            p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            for p in list(sig.parameters.values())[1:]
+        )
+        assert sig.parameters["record_enabled"].default is True
+
+    @pytest.mark.parametrize(
+        "knob", ["inputs_to_context", "response_to_context", "response_to_post"]
+    )
+    def test_binding_knobs_default_to_empty_tuple_and_expose_empty_dict(self, knob: str) -> None:
+        assert inspect.signature(Agent.__init__).parameters[knob].default == ()
+        assert getattr(self._bare(), knob) == {}
+        assert self._bare().to_dict()[knob] == {}
+
+    @pytest.mark.parametrize(
+        "knob", ["inputs_to_context", "response_to_context", "response_to_post"]
+    )
+    def test_none_binding_is_rejected(self, knob: str) -> None:
+        with pytest.raises(AgentError, match=f"{knob} must not be None"):
+            self._bare(**{knob: None})
+
+    def test_callable_stages_are_named_after_the_agent(self) -> None:
+        agent = self._bare(pre_invoke=build_prompt, post_invoke=package_response)
+
+        assert agent.pre_invoke.name == "rule_agent_pre_invoke"
+        assert agent.post_invoke.name == "rule_agent_post_invoke"
+
+    def test_invokable_stage_keeps_its_own_name(self) -> None:
+        from atomic_agentic.tools import toolify
+
+        pre = toolify(build_prompt, name="my_pre")
+
+        assert self._bare(pre_invoke=pre).pre_invoke.name == "my_pre"
+
+    def test_no_post_stage_return_type_is_any(self) -> None:
+        assert self._bare().return_type == ("Any",)

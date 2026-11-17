@@ -53,7 +53,7 @@ def make_planact_agent(
     regeneration_limit: int = 5,
     fail_fast: bool = True,
     post_invoke: Any = None,
-    response_to_post: Any = None,
+    response_to_post: Any = (),
     instructions: str | PromptConfig | None = None,
     **overrides: Any,
 ) -> PlanActAgent:
@@ -82,7 +82,7 @@ def make_react_agent(
     regeneration_limit: int = 5,
     fail_fast: bool = False,
     post_invoke: Any = None,
-    response_to_post: Any = None,
+    response_to_post: Any = (),
     instructions: str | PromptConfig | None = None,
     **overrides: Any,
 ) -> ReActAgent:

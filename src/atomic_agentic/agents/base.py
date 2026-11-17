@@ -234,15 +234,14 @@ class Agent(AtomicInvokable, ABC):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        record_enabled: bool = True,
-        *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
-        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
-        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        inputs_to_context: Iterable[str] | Mapping[str, str] = (),
+        response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
+        response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
         extra_parameters: list[str] | list[ParamSpec] | None = None,
+        record_enabled: bool = True,
         records_window: Optional[int] = None,
     ) -> None:
         if type(use_runtime_context) is not bool:
@@ -256,7 +255,7 @@ class Agent(AtomicInvokable, ABC):
         else:
             pre_tool = toolify(
                 pre_invoke,
-                name="pre_invoke",
+                name=f"{name}_pre_invoke",
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
 
@@ -268,7 +267,7 @@ class Agent(AtomicInvokable, ABC):
         else:
             post_tool = toolify(
                 post_invoke,
-                name="post_invoke",
+                name=f"{name}_post_invoke",
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
 
@@ -322,8 +321,7 @@ class Agent(AtomicInvokable, ABC):
         )
         post_binding = self._normalize_binding(response_to_post, route="response_to_post")
         bound_post = (
-            set() if post_binding is None
-            else {post_binding} if isinstance(post_binding, str)
+            {post_binding} if isinstance(post_binding, str)
             else set(post_binding.values())
         )
         not_post = bound_post - {p.name for p in post_params}
@@ -362,26 +360,25 @@ class Agent(AtomicInvokable, ABC):
         agent_parameters = insert_by_category([], constructed)
 
         # Input sources must be names the constructed agent accepts.
-        if inputs_binding is not None:
-            accepted = {
-                p.name for p in agent_parameters
-                if p.kind not in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
-            }
-            unknown = sorted(set(inputs_binding) - accepted)
-            if unknown:
-                raise AgentError(
-                    f"inputs_to_context sources {unknown} are not non-variadic parameters "
-                    "of this agent (a post parameter filled only by response_to_post is not one)."
-                )
+        accepted = {
+            p.name for p in agent_parameters
+            if p.kind not in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+        }
+        unknown = sorted(set(inputs_binding) - accepted)
+        if unknown:
+            raise AgentError(
+                f"inputs_to_context sources {unknown} are not non-variadic parameters "
+                "of this agent (a post parameter filled only by response_to_post is not one)."
+            )
 
         # Lifecycle components and the per-consumer name sets create_task slices by.
         self._pre_invoke: Optional[AtomicInvokable] = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
-        self._inputs_to_context = inputs_binding  # None | dict[str, str]
-        self._response_to_context = context_binding  # None | str | dict[Any, str]
-        self._response_to_post = post_binding  # None | str | dict[Any, str]
+        self._inputs_to_context = inputs_binding  # dict[str, str]; {} when unbound
+        self._response_to_context = context_binding  # str | dict[Any, str]; {} when unbound
+        self._response_to_post = post_binding  # str | dict[Any, str]; {} when unbound
         # Declared destinations: the only names record() may create in a conversation.
-        destinations = set(inputs_binding.values()) if inputs_binding else set()
+        destinations = set(inputs_binding.values())
         if isinstance(context_binding, str):
             destinations.add(context_binding)
         elif context_binding:
@@ -410,7 +407,7 @@ class Agent(AtomicInvokable, ABC):
             description=description,
             parameters=agent_parameters,
             return_type=(
-                self._post_invoke.return_type if self._post_invoke is not None else "any"
+                self._post_invoke.return_type if self._post_invoke is not None else ("Any",)
             ),
         )
 
@@ -423,15 +420,15 @@ class Agent(AtomicInvokable, ABC):
         *,
         route: str,
         allow_str: bool = True,
-    ) -> Optional[str | dict[Any, str]]:
+    ) -> str | dict[Any, str]:
         """Validate one binding knob and return its normalized form.
 
-        1. ``None`` -> ``None``; ``str`` -> the str itself (whole response;
-           raises when ``allow_str`` is false); ``Mapping`` -> ``dict(value)``;
-           any other non-bytes iterable of names (list, tuple, set, dict view,
-           generator...) -> ``{d: d}``, sorted when unordered; anything else
-           raises.
-        2. An empty collection/mapping normalizes to ``None``.
+        1. ``None`` raises (pass an empty collection for no binding); ``str`` ->
+           the str itself (whole response; raises when ``allow_str`` is false);
+           ``Mapping`` -> ``dict(value)``; any other non-bytes iterable of names
+           (list, tuple, set, dict view, generator...) -> ``{d: d}``, sorted when
+           unordered; anything else raises.
+        2. An empty collection/mapping normalizes to ``{}``.
         3. Destinations are stripped of surrounding whitespace (as
            ``ContextVariable``/``ParamSpec`` names are), then each must be an
            identifier string and must not start with ``TASK_RESULT_PREFIX``.
@@ -442,7 +439,9 @@ class Agent(AtomicInvokable, ABC):
            checked by ``__init__``.
         """
         if value is None:
-            return None
+            raise AgentError(
+                f"{route} must not be None; pass an empty collection for no binding."
+            )
 
         if isinstance(value, str):
             if not allow_str:
@@ -467,7 +466,7 @@ class Agent(AtomicInvokable, ABC):
             )
 
         if not names:
-            return None
+            return {}
 
         names = [n.strip() if isinstance(n, str) else n for n in names]
         for n in names:
@@ -563,19 +562,19 @@ class Agent(AtomicInvokable, ABC):
         return self._post_invoke
 
     @property
-    def inputs_to_context(self) -> Optional[dict[str, str]]:
-        """Normalized ``{input name: context name}`` mapping, or ``None``."""
-        return None if self._inputs_to_context is None else dict(self._inputs_to_context)
+    def inputs_to_context(self) -> dict[str, str]:
+        """Normalized ``{input name: context name}`` mapping; ``{}`` when unbound."""
+        return dict(self._inputs_to_context)
 
     @property
-    def response_to_context(self) -> Optional[str | dict[Any, str]]:
-        """Normalized response -> context binding (``None``, a name, or ``{selector: name}``)."""
+    def response_to_context(self) -> str | dict[Any, str]:
+        """Normalized response -> context binding (a name, or ``{selector: name}``; ``{}`` when unbound)."""
         spec = self._response_to_context
         return dict(spec) if isinstance(spec, dict) else spec
 
     @property
-    def response_to_post(self) -> Optional[str | dict[Any, str]]:
-        """Normalized response -> ``post_invoke`` binding (``None``, a name, or ``{selector: name}``)."""
+    def response_to_post(self) -> str | dict[Any, str]:
+        """Normalized response -> ``post_invoke`` binding (a name, or ``{selector: name}``; ``{}`` when unbound)."""
         spec = self._response_to_post
         return dict(spec) if isinstance(spec, dict) else spec
 
@@ -727,11 +726,10 @@ class Agent(AtomicInvokable, ABC):
                         f"not starting with {TASK_RESULT_PREFIX!r}."
                     )
             bound.update(runtime)
-        if self._inputs_to_context is not None:
-            bound.update(
-                {dest: task.inputs[src] for src, dest in self._inputs_to_context.items()
-                 if src in task.inputs}
-            )
+        bound.update(
+            {dest: task.inputs[src] for src, dest in self._inputs_to_context.items()
+             if src in task.inputs}
+        )
         self._write_context(task, bound, create=True)
 
     def _seed_task(self, task: AgentTask) -> None:
@@ -967,21 +965,21 @@ class Agent(AtomicInvokable, ABC):
 
     @staticmethod
     def _slice_response(
-        task: AgentTask, spec: Optional[str | dict[Any, str]], route: str
+        task: AgentTask, spec: str | dict[Any, str], route: str
     ) -> dict[str, Any]:
         """Resolve one response binding against ``task.generated_response``.
 
-        ``None`` -> ``{}``. A ``str`` binds the whole response; a mapping
+        An empty mapping -> ``{}``. A ``str`` binds the whole response; a mapping
         indexes each selector out of it (a missing key/index is skipped, a
         present ``None`` is bound, other errors propagate; a ``str``/``bytes``
         response raises ``AgentInvocationError`` since it would index
         characters).
         """
-        if spec is None:
-            return {}
         response = task.generated_response
         if isinstance(spec, str):
             return {spec: response}
+        if not spec:
+            return {}
         if isinstance(response, (str, bytes)):
             raise AgentInvocationError(
                 f"{route} selectors cannot index a str/bytes response; "
@@ -1059,7 +1057,7 @@ class Agent(AtomicInvokable, ABC):
 
         Identity comes from the task; ``prev`` is the last turn this
         call read (``task.turns[-1]``), ``None`` when it read none;
-        ``agent_id`` names this agent as the writer. Family overrides of
+        ``agent_name`` names this agent as the writer. Family overrides of
         ``_build_record_from_task`` splat this and add their own fields.
         """
         return {
@@ -1069,7 +1067,7 @@ class Agent(AtomicInvokable, ABC):
             "inputs": task.inputs,
             "llm_records": tuple(task.llm_records),
             "prev": task.turns[-1] if task.turns else None,
-            "agent_id": self.full_name,
+            "agent_name": self.full_name,
         }
 
     def _build_record_from_task(self, task: AgentTask) -> AgentRecord:

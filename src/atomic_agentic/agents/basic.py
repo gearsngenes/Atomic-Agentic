@@ -49,16 +49,15 @@ class BasicAgent(Agent):
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str | PromptConfig | None = None,
-        record_enabled: bool = True,
-        *,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
-        inputs_to_context: Optional[Iterable[str] | Mapping[str, str]] = None,
-        response_to_context: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
-        response_to_post: Optional[str | Iterable[str] | Mapping[Any, str]] = None,
+        inputs_to_context: Iterable[str] | Mapping[str, str] = (),
+        response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
+        response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
+        record_enabled: bool = True,
         records_window: Optional[int] = None,
-
+        *,
         response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.

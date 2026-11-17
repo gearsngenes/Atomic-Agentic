@@ -226,8 +226,8 @@ class TestAgentBasicPipeline:
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT
         assert agent_snapshot["record_enabled"] is True
         assert agent_snapshot["records_window"] == 1
-        assert agent_snapshot["pre_invoke"]["name"] == "pre_invoke"
-        assert agent_snapshot["post_invoke"]["name"] == "post_invoke"
+        assert agent_snapshot["pre_invoke"]["name"] == f"{agent.name}_pre_invoke"
+        assert agent_snapshot["post_invoke"]["name"] == f"{agent.name}_post_invoke"
         assert agent_snapshot["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data).lower()
         assert "api_key" not in str(data).lower()

@@ -162,7 +162,7 @@ class AgentRecord:
         This record's identity; required. Minted by ``Agent.create_task``
         (records exist only when the agent records).
 
-    agent_id:
+    agent_name:
         The writing agent's ``full_name``; ``None`` for bare construction.
         Provenance only -- history replay does not distinguish writers.
 
@@ -191,7 +191,7 @@ class AgentRecord:
     user_prompt: str
     generated_response: Any
     run_id: str = field(kw_only=True)
-    agent_id: str | None = field(default=None, kw_only=True)
+    agent_name: str | None = field(default=None, kw_only=True)
     inputs: dict = field(default_factory=dict, hash=False, compare=False)
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
@@ -219,7 +219,7 @@ class AgentRecord:
             "inputs": self.inputs,
             "generated_response": self.generated_response,
             "run_id": self.run_id,
-            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
             "llm_records": [r.to_dict() for r in self.llm_records],
             "prev_run_id": self.prev.run_id if self.prev is not None else None,
             "child_ids": [c.run_id for c in self.children],
