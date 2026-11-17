@@ -2881,6 +2881,27 @@ class TestPostStageBinding:
 
         assert agent.invoke({"topic": "caller"}).result == "from-response"
 
+    def test_shared_name_with_incompatible_type_raises_at_construction(self) -> None:
+        def post(topic: int) -> int:
+            return topic
+
+        with pytest.raises(AgentError, match="(?i)compatible"):
+            make_value_agent(
+                {"topic": 1}, pre_invoke=build_prompt, post_invoke=post, response_to_post=["topic"]
+            )
+
+    def test_response_only_post_parameter_is_absent_from_parameters(self) -> None:
+        def post(topic: str, extra: str = "e") -> str:
+            return f"{topic}{extra}"
+
+        agent = make_value_agent(
+            {"t": "x"}, post_invoke=post, response_to_post={"t": "topic"}
+        )
+
+        assert "topic" not in _names(agent)
+        assert "extra" in _names(agent)
+        assert agent.invoke({"prompt": "q"}).result == "xe"
+
     def test_no_binding_required_post_parameter_is_caller_driven_and_fails_when_missing(self) -> None:
         def post(resp: Any) -> Any:
             return resp
@@ -3083,6 +3104,11 @@ class TestPostStageBinding:
 class TestBuildMessagesRemoved:
     def test_agent_has_no_build_messages(self) -> None:
         assert not hasattr(Agent, "build_messages")
+
+
+class TestSliceResponseRemoved:
+    def test_agent_has_no_slice_response(self) -> None:
+        assert not hasattr(Agent, "_slice_response")
 
 
 class TestOptionalPreInvoke:

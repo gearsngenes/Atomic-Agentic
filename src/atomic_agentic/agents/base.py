@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Set as AbstractSet
+from collections.abc import Iterable
 from typing import (
     Any,
     Callable,
@@ -20,6 +20,7 @@ from ..exceptions import (
     AgentInvocationError,
 )
 from ..core.atomic_invokable import AtomicInvokable
+from ..models.binding import Binding
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
@@ -37,6 +38,7 @@ from ..constants.agents import (
     PROMPT_PARAM,
     RUNTIME_PARAM,
 )
+from ..utils.binding import normalize_binding, slice_response
 from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
@@ -420,21 +422,16 @@ class Agent(AtomicInvokable, ABC):
         *,
         route: str,
         allow_str: bool = True,
-    ) -> str | dict[Any, str]:
+    ) -> Binding:
         """Validate one binding knob and return its normalized form.
 
-        1. ``None`` raises (pass an empty collection for no binding); ``str`` ->
-           the str itself (whole response; raises when ``allow_str`` is false);
-           ``Mapping`` -> ``dict(value)``; any other non-bytes iterable of names
-           (list, tuple, set, dict view, generator...) -> ``{d: d}``, sorted when
-           unordered; anything else raises.
-        2. An empty collection/mapping normalizes to ``{}``.
-        3. Destinations are stripped of surrounding whitespace (as
-           ``ContextVariable``/``ParamSpec`` names are), then each must be an
-           identifier string and must not start with ``TASK_RESULT_PREFIX``.
-        4. Duplicate destinations within this route raise (checked before
-           collapsing to a dict); the same name across routes is legal.
-        5. ``inputs_to_context`` only: the selectors (sources) are stripped and
+        1. ``None`` raises (pass an empty collection for no binding).
+        2. The shape rules (str / iterable of names / mapping, empty, stripping,
+           duplicates) are ``normalize_binding``'s; its ``TypeError``/``ValueError``
+           surface here as ``AgentError``.
+        3. Each destination must be an identifier string and must not start with
+           ``TASK_RESULT_PREFIX``.
+        4. ``inputs_to_context`` only: the selectors (sources) are stripped and
            must be identifier strings; membership in the agent's schema is
            checked by ``__init__``.
         """
@@ -443,32 +440,15 @@ class Agent(AtomicInvokable, ABC):
                 f"{route} must not be None; pass an empty collection for no binding."
             )
 
-        if isinstance(value, str):
-            if not allow_str:
-                raise AgentError(
-                    f"{route} does not accept a bare str; pass a collection of "
-                    "input names or a {input: destination} mapping."
-                )
-            selectors, names = None, [value]
-        elif isinstance(value, Mapping):
-            selectors, names = list(value), list(value.values())
-        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
-            selectors, names = None, list(value)
-            if isinstance(value, AbstractSet) and all(isinstance(n, str) for n in names):
-                names.sort()  # unordered: store deterministically
-        else:
-            raise AgentError(
-                f"{route} must be None, "
-                + ("a str, " if allow_str else "")
-                + "a collection of str, or a mapping of "
-                + ("selector" if allow_str else "input name")
-                + f" -> str; got {type(value).__name__}."
-            )
+        try:
+            binding = normalize_binding(value, label=route, allow_str=allow_str)
+        except (TypeError, ValueError) as exc:
+            raise AgentError(str(exc)) from exc
 
-        if not names:
-            return {}
+        if binding == {}:
+            return binding
 
-        names = [n.strip() if isinstance(n, str) else n for n in names]
+        names = [binding] if isinstance(binding, str) else list(binding.values())
         for n in names:
             if not (isinstance(n, str) and IDENTIFIER_PATTERN.fullmatch(n)):
                 raise AgentError(
@@ -479,20 +459,17 @@ class Agent(AtomicInvokable, ABC):
                     f"{route} destination {n!r} is reserved (a "
                     f"{TASK_RESULT_PREFIX!r} name)."
                 )
-        if len(set(names)) != len(names):
-            raise AgentError(f"{route} has duplicate destinations.")
 
-        if selectors is not None and route == "inputs_to_context":
-            selectors = [s.strip() if isinstance(s, str) else s for s in selectors]
+        if route == "inputs_to_context":
+            selectors = [s.strip() if isinstance(s, str) else s for s in binding]
             for s in selectors:
                 if not (isinstance(s, str) and IDENTIFIER_PATTERN.fullmatch(s)):
                     raise AgentError(
                         f"{route} source {s!r} must be a valid identifier string."
                     )
+            binding = dict(zip(selectors, names))
 
-        if isinstance(value, str):
-            return names[0]
-        return dict(zip(names if selectors is None else selectors, names))
+        return binding
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -947,8 +924,10 @@ class Agent(AtomicInvokable, ABC):
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
         """Slice the generated response per the two response routes.
 
-        1. Both routes are sliced first (``_slice_response``), so a bad
-           response shape raises before anything runs or is written.
+        1. Both routes are sliced first (``slice_response``, skipping missing
+           selectors), so a bad response shape raises before anything runs or
+           is written. A ``str``/``bytes`` response with selectors raises
+           ``AgentInvocationError``; any other ``TypeError`` propagates.
         2. The ``response_to_post`` pieces overwrite those entries of
            ``task.post_inputs`` (every destination is a post parameter, checked
            at construction).
@@ -956,42 +935,20 @@ class Agent(AtomicInvokable, ABC):
         Returns the ``response_to_context`` pieces (a skipped selector has no
         entry), which ``post_process`` hands to the context sink.
         """
-        post_bound = self._slice_response(task, self._response_to_post, "response_to_post")
-        context_bound = self._slice_response(
-            task, self._response_to_context, "response_to_context"
-        )
+        response = task.generated_response
+        try:
+            post_bound = slice_response(
+                response, self._response_to_post, label="response_to_post", on_missing="skip"
+            )
+            context_bound = slice_response(
+                response, self._response_to_context, label="response_to_context", on_missing="skip"
+            )
+        except TypeError as exc:
+            if isinstance(response, (str, bytes)):
+                raise AgentInvocationError(str(exc)) from exc
+            raise
         task.post_inputs.update(post_bound)
         return context_bound
-
-    @staticmethod
-    def _slice_response(
-        task: AgentTask, spec: str | dict[Any, str], route: str
-    ) -> dict[str, Any]:
-        """Resolve one response binding against ``task.generated_response``.
-
-        An empty mapping -> ``{}``. A ``str`` binds the whole response; a mapping
-        indexes each selector out of it (a missing key/index is skipped, a
-        present ``None`` is bound, other errors propagate; a ``str``/``bytes``
-        response raises ``AgentInvocationError`` since it would index
-        characters).
-        """
-        response = task.generated_response
-        if isinstance(spec, str):
-            return {spec: response}
-        if not spec:
-            return {}
-        if isinstance(response, (str, bytes)):
-            raise AgentInvocationError(
-                f"{route} selectors cannot index a str/bytes response; "
-                "use the str form to bind the whole response."
-            )
-        bound = {}
-        for selector, destination in spec.items():
-            try:
-                bound[destination] = response[selector]
-            except (KeyError, IndexError):
-                continue
-        return bound
 
     @staticmethod
     def _write_context(
