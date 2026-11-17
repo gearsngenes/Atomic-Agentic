@@ -49,7 +49,6 @@ from ..exceptions import (
     ToolRegistrationError,
 )
 from ..constants.agents import INSTRUCTIONS_PRECEDENCE, TASK_RESULT_PREFIX, TOOLS_PREAMBLE
-from ..constants.core import IDENTIFIER_PATTERN
 from ..core.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools import toolify
