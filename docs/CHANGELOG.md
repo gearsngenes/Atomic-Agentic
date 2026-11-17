@@ -5,6 +5,44 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a34.post2] - 2026-11-17
+
+Agent binding and conversation API release (Stage 5). The response-binding
+grammar that `Agent` used internally is now one shared helper, and the missing-
+selector rule is explicit: agents skip a selector their response lacks, so the
+caller's value stays as the fallback. Conversation management gets smaller:
+`Agent.create_conversation` and `Agent.get_record` are removed, and a record is
+looked up on the `Conversation` itself. The release is breaking for anyone who
+calls either removed method.
+
+### Added
+
+- `Conversation.get_record(*, run_id=None, index=None)` returns one record by
+  `run_id` (first match; none raises `ValueError`) or by `index` (negative
+  indexes work; out of range raises `IndexError`). Exactly one argument is
+  required.
+- `atomic_agentic.utils.binding` holds the shared binding grammar:
+  `normalize_binding` and `slice_response`. `slice_response` takes a required
+  `on_missing` of `"skip"` or `"raise"`. `Agent` uses it with `"skip"`; workflows
+  and graph nodes reuse it in a later release.
+
+### Changed
+
+- A conversation built by hand (`Conversation(...)`) and registered with
+  `import_conversation` keeps `Conversation`'s own defaults. A `BasicAgent` with
+  a `response_schema` still defaults its own conversations to `render_mode="j"`,
+  but that default no longer reaches hand-built ones.
+
+### Removed
+
+- breaking: `Agent.create_conversation` is removed. Build the conversation and
+  register it: `agent.import_conversation(Conversation(...), name=...)`. The
+  preview limits and `render_mode` are `Conversation` constructor arguments.
+- breaking: `Agent.get_record` is removed, along with its `conversation=` and
+  `index=` forms and the scan across every conversation. Use
+  `agent.get_conversation(name).get_record(run_id=...)` or `index=...`;
+  `get_conversation()` with no name is the active conversation.
+
 ## [2.0.0a34.post1] - 2026-11-16
 
 Signature sweep release (Stage 4). Every constructor now follows one rule: the
