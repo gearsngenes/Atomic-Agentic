@@ -192,7 +192,8 @@ class Agent(AtomicInvokable, ABC):
     conversation-management API; a named conversation is built as
     ``Conversation(...)`` and registered with ``import_conversation``; records
     are looked up with ``agent.get_conversation().get_record(...)``).
-    Context mutation goes through the conversation itself (``agent.get_conversation(name).remember(...)``).
+    Context mutation goes through the conversation itself
+    (``agent.get_conversation(name).remember(...)``).
     There is no implicit forking: two invocations racing to extend the same
     tail both append to their bound conversation in commit order
     (``Conversation.commit`` serializes the commits), each with ``prev`` set

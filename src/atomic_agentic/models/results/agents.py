@@ -287,8 +287,9 @@ class ThinkingAgentResult(AgentResult):
     Extends ``AgentResult`` with the count of thoughts the invocation
     produced -- a derived reduction like ``llm_token_usage``, not a duplicate
     of the record. A caller needing the thought content reads it off the
-    record (``agent.get_conversation().get_record(run_id=result.run_id).thoughts``); with
-    ``record_enabled=False`` this count is the only trace of the thinking.
+    record
+    (``agent.get_conversation().get_record(run_id=result.run_id).thoughts``);
+    with ``record_enabled=False`` this count is the only trace of the thinking.
 
     No ``__post_init__`` override needed -- plain ``int`` field, no
     cross-field validation, matching this class's existing precedent (the
