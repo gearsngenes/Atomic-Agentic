@@ -177,27 +177,29 @@ class TestConstruction:
 class TestToolIdNaming:
     def test_registering_tool_colliding_with_a_real_builtin_raises(self) -> None:
         with pytest.raises(ToolRegistrationError):
-            _make_agent(_engine()).register_tool(add, alias="len")
+            _make_agent(_engine()).register_tool(Tool(function=add, name="len", description="Adds."))
 
     @pytest.mark.parametrize(
         "sentinel", [RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS],
     )
     def test_registering_tool_under_reserved_sentinel_raises(self, sentinel: str) -> None:
         with pytest.raises(ToolRegistrationError):
-            _make_agent(_engine()).register_tool(add, alias=sentinel)
+            _make_agent(_engine()).register_tool(
+                Tool(function=add, name=sentinel, description="Adds.")
+            )
 
-    @pytest.mark.parametrize("alias", ["for", "class", "lambda", "while"])
-    def test_keyword_alias_is_rejected(self, alias: str) -> None:
+    @pytest.mark.parametrize("name", ["for", "class", "lambda", "while"])
+    def test_keyword_name_is_rejected(self, name: str) -> None:
         agent = _make_agent(_engine())
 
         with pytest.raises(ToolRegistrationError, match="keyword"):
-            agent.register_tool(add, alias=alias)
-        assert not agent.has_tool(alias)
+            agent.register_tool(Tool(function=add, name=name, description="Adds."))
+        assert not agent.has_tool(name)
 
-    def test_keyword_alias_rejected_through_register_tools_and_constructor(self) -> None:
+    def test_keyword_name_rejected_through_register_tools_and_constructor(self) -> None:
         agent = _make_agent(_engine())
         with pytest.raises(ToolRegistrationError, match="keyword"):
-            agent.register_tools([add], aliases=["while"])
+            agent.register_tools([Tool(function=add, name="while", description="Adds.")])
 
         wrapped = Tool(function=add, name="import", description="Adds.")
         with pytest.raises(ToolRegistrationError, match="keyword"):
@@ -208,10 +210,6 @@ class TestRegistrationEdgeCases:
     def test_unknown_collision_policy_raises(self) -> None:
         with pytest.raises(ToolRegistrationError):
             _make_agent(_engine()).register_tool(add, name_collision_policy="bogus")  # type: ignore[arg-type]
-
-    def test_non_identifier_alias_raises(self) -> None:
-        with pytest.raises(ToolRegistrationError):
-            _make_agent(_engine()).register_tool(add, alias="not valid!")
 
     def test_register_tool_accepts_an_already_wrapped_invokable_directly(self) -> None:
         agent = _make_agent(_engine())
@@ -244,10 +242,6 @@ class TestRegistrationEdgeCases:
         assert agent.register_tool(wrapped, name_collision_policy="replace") is True
         assert agent.get_tool("add") is wrapped
 
-    def test_register_tools_alias_length_mismatch_raises(self) -> None:
-        with pytest.raises(ValueError):
-            _make_agent(_engine()).register_tools([add], aliases=["a", "b"])
-
     def test_register_tools_intra_batch_duplicate_raises(self) -> None:
         with pytest.raises(ToolRegistrationError):
             _make_agent(_engine()).register_tools([add, add])
@@ -278,9 +272,9 @@ class TestRegistrationEdgeCases:
 
 
 class TestPromptContextRendering:
-    def test_actions_context_renders_alias_distinct_from_the_tool_name(self) -> None:
+    def test_actions_context_renders_the_tools_own_name(self) -> None:
         agent = _make_agent(_engine())
-        agent.register_tool(add, alias="plus")
+        agent.register_tool(Tool(function=add, name="plus", description="Adds."))
 
         rendered = agent.actions_context()
 
@@ -1168,7 +1162,9 @@ class TestPersistence:
         assert variable.description == "Running total"
 
     def test_a_held_variable_is_not_persisted_without_recording(self) -> None:
-        agent = make_script_agent(_engine("total = add(x=2, y=3)\nreturn total"))
+        agent = make_script_agent(
+            _engine("total = add(x=2, y=3)\nreturn total"), record_enabled=False,
+        )
         agent.get_conversation().remember("total", 0)
 
         agent.invoke({"prompt": "go"})

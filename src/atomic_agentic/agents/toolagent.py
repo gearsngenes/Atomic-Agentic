@@ -2,7 +2,7 @@
 ToolAgent: shared ancestor for every tool-registering Agent family.
 
 Owns the surface that ``PlanActAgent``/``ReActAgent`` and ``ScriptActAgent``
-share: tool registration (alias-based, ``register_tool``/``register_tools``),
+share: tool registration (keyed by tool name, ``register_tool``/``register_tools``),
 the optional user-defined ``instructions``, the execution knobs common to every
 grammar (``tool_calls_limit``, ``regeneration_limit``,
 ``tool_concurrency_limit``), and the context-native task frame. There are no
@@ -69,10 +69,10 @@ class ToolAgent(Agent, ABC):
 
     What this class owns:
 
-    - Tool registration (``register_tool``/``register_tools``, alias-based,
-      never the dotted ``full_name``) and the read accessors
+    - Tool registration (``register_tool``/``register_tools``, keyed by the
+      tool's ``name``, never the dotted ``full_name``) and the read accessors
       (``list_tools``/``has_tool``/``get_tool``/``remove_tool``/
-      ``clear_tools``/``actions_context``), plus a ``_validate_effective_tool_id``
+      ``clear_tools``/``actions_context``), plus a ``_validate_tool_name``
       hook (default: reserved-name check only) a subclass with its own
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
@@ -142,7 +142,7 @@ class ToolAgent(Agent, ABC):
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
-        record_enabled: bool = False,
+        record_enabled: bool = True,
         records_window: Optional[int] = None,
         *,
         tool_calls_limit: Optional[int] = None,
@@ -152,24 +152,8 @@ class ToolAgent(Agent, ABC):
         """
         Parameters
         ----------
-        name, description, llm_engine, record_enabled
+        name, description, llm_engine
             Forwarded to ``Agent.__init__`` unchanged.
-        tool_calls_limit : int | None
-            Maximum number of non-return action calls per invoke run.
-            ``None`` means unlimited. Must be ``>= 0`` if set.
-        regeneration_limit : int
-            Bounded-attempts ceiling for regenerating one generation's
-            malformed/invalid draft before raising. Always a plain ``int``,
-            never ``None``. Defaults to ``5``.
-        tool_concurrency_limit : int | None
-            Max dispatched calls allowed in a single concurrently-executed
-            batch. ``None`` means unlimited (default).
-        pre_invoke, post_invoke, inputs_to_context, response_to_context,
-            response_to_post, use_runtime_context, records_window
-            Forwarded to ``Agent.__init__`` unchanged.
-        tools : list | None
-            Construction-time convenience: registered via ``register_tools()``
-            if given.
         instructions : str | PromptConfig | None
             Optional standing user guidance (e.g. "always call the outliner
             first"), rendered after the family prompt inside a
@@ -181,6 +165,24 @@ class ToolAgent(Agent, ABC):
             validated/defaulted by the normal ``invoke(inputs)`` pipeline --
             and is rendered against ``task.inputs``. Frozen at construction --
             read-only via the ``instructions`` property.
+        tools : list | None
+            Construction-time convenience: registered via ``register_tools()``
+            if given.
+        pre_invoke, post_invoke, inputs_to_context, response_to_context,
+            response_to_post, use_runtime_context, record_enabled,
+            records_window
+            Forwarded to ``Agent.__init__`` unchanged (``record_enabled``
+            defaults to ``True``).
+        tool_calls_limit : int | None
+            Maximum number of non-return action calls per invoke run.
+            ``None`` means unlimited. Must be ``>= 0`` if set.
+        regeneration_limit : int
+            Bounded-attempts ceiling for regenerating one generation's
+            malformed/invalid draft before raising. Always a plain ``int``,
+            never ``None``. Defaults to ``5``.
+        tool_concurrency_limit : int | None
+            Max dispatched calls allowed in a single concurrently-executed
+            batch. ``None`` means unlimited (default).
 
         ``fail_fast`` is intentionally not a parameter here -- each concrete
         subclass that needs it declares and validates its own. A removed
@@ -295,34 +297,21 @@ class ToolAgent(Agent, ABC):
             )
         return policy
 
-    @staticmethod
-    def _validate_tool_alias(alias: Optional[str]) -> None:
-        """Shape-only check on an explicit ``alias`` -- ``None`` (no alias
-        given) always passes; a given alias must be a Python-identifier-
-        legal string."""
-        if alias is not None and (
-            not isinstance(alias, str) or not IDENTIFIER_PATTERN.fullmatch(alias)
-        ):
-            raise ToolRegistrationError(
-                f"alias must be None or a Python-identifier-legal string; got {alias!r}."
-            )
-
-    def _validate_effective_tool_id(self, effective_id: str) -> None:
+    def _validate_tool_name(self, name: str) -> None:
         """
-        Validate a tool's final effective id (an explicit alias, or the
-        bare ``name``/``invokable.name`` fallback when none is given) --
-        called from ``register_tool``/``register_tools`` for every
-        candidate, before it's ever added to the toolbox.
+        Validate a tool's name -- the toolbox key -- before it is ever added
+        (called from ``register_tool``/``register_tools`` for every
+        candidate).
 
-        Default body: reject only a real reserved-tool-id collision
+        Default body: reject only a real reserved-tool-name collision
         (``self._RESERVED_TOOL_NAMES``). A subclass with additional naming
         constraints (e.g. parser sentinels or real-builtin-name collisions)
-        overrides this, calling ``super()._validate_effective_tool_id(...)``
+        overrides this, calling ``super()._validate_tool_name(...)``
         first and adding its own checks after.
         """
-        if effective_id in self._RESERVED_TOOL_NAMES:
+        if name in self._RESERVED_TOOL_NAMES:
             raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: {effective_id!r} is "
+                f"{type(self).__name__}.{self.name}: {name!r} is "
                 "reserved and cannot be registered through this API."
             )
 
@@ -332,26 +321,22 @@ class ToolAgent(Agent, ABC):
     def register_tool(
         self,
         tool: AtomicInvokable | Callable,
-        alias: Optional[str] = None,
-        description: Optional[str] = None,
         *,
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
     ) -> bool:
         """
-        Register one invokable under an alias (sole effective identity) or,
-        absent one, its own bare ``name`` — never the dotted ``full_name``,
-        which only confuses an LLM asked to copy a tool id verbatim.
-        ``AtomicInvokable`` inputs are stored as-is (never re-``toolify``'d);
-        ``description`` is a documented no-op in that case — ``alias`` alone
-        covers the "cover name" use case. Callables are normalized via
-        ``toolify``.
+        Register one invokable under its own ``name`` -- never the dotted
+        ``full_name``, which only confuses an LLM asked to copy a tool id
+        verbatim. An ``AtomicInvokable`` is stored as-is (never wrapped or
+        renamed; build a differently named tool with ``toolify`` first). A
+        callable (function or bound method) goes through ``toolify``: its
+        name comes from ``__name__``, its description from its docstring and
+        its parameters from its signature.
 
-        A bare ``name`` collision is caught by the same
-        ``name_collision_policy`` as any other duplicate effective id; give
-        one of them an explicit ``alias`` to resolve it.
+        A name collision follows ``name_collision_policy``.
 
         Returns whether the tool was newly registered (``False`` only when
-        ``name_collision_policy="skip"`` hits an existing effective id).
+        ``name_collision_policy="skip"`` hits an existing name).
         """
         policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
@@ -362,7 +347,7 @@ class ToolAgent(Agent, ABC):
                 invokable = toolify(
                     component=tool,
                     name=tool.__name__,
-                    description=description or tool.__doc__,
+                    description=tool.__doc__,
                 )
             except Exception as exc:
                 raise ToolRegistrationError(
@@ -374,25 +359,22 @@ class ToolAgent(Agent, ABC):
                 f"{type(tool).__name__!r}. Expected AtomicInvokable or Callable."
             )
 
-        self._validate_tool_alias(alias)
-        effective_id = alias if alias is not None else invokable.name
-        self._validate_effective_tool_id(effective_id)
+        self._validate_tool_name(invokable.name)
 
-        if effective_id in self._toolbox:
+        if invokable.name in self._toolbox:
             if policy == "raise":
                 raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: tool already registered: {effective_id!r}."
+                    f"{type(self).__name__}.{self.name}: tool already registered: {invokable.name!r}."
                 )
             if policy == "skip":
                 return False
 
-        self._toolbox[effective_id] = invokable
+        self._toolbox[invokable.name] = invokable
         return True
 
     def register_tools(
         self,
         tools: list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient],
-        aliases: Optional[list[Optional[str]]] = None,
         *,
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
     ) -> bool:
@@ -400,13 +382,12 @@ class ToolAgent(Agent, ABC):
         Register a mixed batch of plain invokables/callables and
         hub/client objects (``MCPClientHub``/``A2AClientHub``/
         ``PyA2AtomicClient``) in one pass. A hub/client entry expands into
-        every tool it exposes, each under its own intrinsic bare ``name`` —
-        never the dotted ``full_name`` — and no aliasing possible for
-        hub-expanded entries. Every candidate's effective id is validated
-        via ``_validate_effective_tool_id`` as soon as it's computed, during
-        this same expansion pass -- not a second, separate pass afterward.
+        every tool it exposes, each under its own intrinsic bare ``name`` --
+        never the dotted ``full_name``. Every candidate's name is validated
+        via ``_validate_tool_name`` as soon as it's computed, during this
+        same expansion pass -- not a second, separate pass afterward.
         Whole-batch validation happens before any toolbox mutation;
-        intra-batch duplicate effective ids always raise regardless of
+        intra-batch duplicate names always raise regardless of
         ``name_collision_policy``.
 
         Returns ``True`` iff every item was newly registered (only ``"skip"``
@@ -415,25 +396,11 @@ class ToolAgent(Agent, ABC):
         """
         policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
-        if aliases is not None and len(aliases) != len(tools):
-            raise ValueError(
-                f"{type(self).__name__}.{self.name}: aliases must be the same "
-                f"length as tools; got {len(aliases)} vs {len(tools)}."
-            )
-
-        # Expand every entry into (effective_id, invokable) candidates
-        # without mutating self._toolbox yet.
+        # Expand every entry into (name, invokable) candidates without
+        # mutating self._toolbox yet.
         candidates: list[tuple[str, AtomicInvokable]] = []
         for index, item in enumerate(tools):
-            item_alias = aliases[index] if aliases is not None else None
-
             if isinstance(item, (MCPClientHub, A2AClientHub, PyA2AtomicClient)):
-                if item_alias is not None:
-                    raise ValueError(
-                        f"{type(self).__name__}.{self.name}: a hub/client entry at "
-                        f"index {index} cannot take an alias (it expands into "
-                        "multiple tools)."
-                    )
                 if isinstance(item, MCPClientHub):
                     remote_names = item.list_tools()
                 elif isinstance(item, A2AClientHub):
@@ -452,7 +419,7 @@ class ToolAgent(Agent, ABC):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"remote {remote_name!r}: {exc}"
                         ) from exc
-                    self._validate_effective_tool_id(proxy.name)
+                    self._validate_tool_name(proxy.name)
                     candidates.append((proxy.name, proxy))
 
                 if isinstance(item, A2AClientHub):
@@ -463,14 +430,12 @@ class ToolAgent(Agent, ABC):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"generic A2A tool: {exc}"
                         ) from exc
-                    self._validate_effective_tool_id(generic_proxy.name)
+                    self._validate_tool_name(generic_proxy.name)
                     candidates.append((generic_proxy.name, generic_proxy))
 
             elif isinstance(item, AtomicInvokable):
-                self._validate_tool_alias(item_alias)
-                effective_id = item_alias if item_alias is not None else item.name
-                self._validate_effective_tool_id(effective_id)
-                candidates.append((effective_id, item))
+                self._validate_tool_name(item.name)
+                candidates.append((item.name, item))
 
             elif callable(item):
                 try:
@@ -484,10 +449,8 @@ class ToolAgent(Agent, ABC):
                         f"{type(self).__name__}.{self.name}: failed to toolify "
                         f"{item!r}: {exc}"
                     ) from exc
-                self._validate_tool_alias(item_alias)
-                effective_id = item_alias if item_alias is not None else invokable.name
-                self._validate_effective_tool_id(effective_id)
-                candidates.append((effective_id, invokable))
+                self._validate_tool_name(invokable.name)
+                candidates.append((invokable.name, invokable))
 
             else:
                 raise ToolRegistrationError(
@@ -495,33 +458,33 @@ class ToolAgent(Agent, ABC):
                     f"{type(item).__name__!r} at index {index}."
                 )
 
-        # Intra-batch dedup — always raises regardless of name_collision_policy.
+        # Intra-batch dedup -- always raises regardless of name_collision_policy.
         seen: set[str] = set()
-        for effective_id, _ in candidates:
-            if effective_id in seen:
+        for tool_name, _ in candidates:
+            if tool_name in seen:
                 raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: duplicate effective id in "
-                    f"incoming batch: {effective_id!r}."
+                    f"{type(self).__name__}.{self.name}: duplicate tool name in "
+                    f"incoming batch: {tool_name!r}."
                 )
-            seen.add(effective_id)
+            seen.add(tool_name)
 
         # Cross-check against the existing toolbox per name_collision_policy.
         any_skipped = False
         vetted: list[tuple[str, AtomicInvokable]] = []
-        for effective_id, invokable in candidates:
-            if effective_id in self._toolbox:
+        for tool_name, invokable in candidates:
+            if tool_name in self._toolbox:
                 if policy == "raise":
                     raise ToolRegistrationError(
                         f"{type(self).__name__}.{self.name}: tool already registered: "
-                        f"{effective_id!r}."
+                        f"{tool_name!r}."
                     )
                 if policy == "skip":
                     any_skipped = True
                     continue
-            vetted.append((effective_id, invokable))
+            vetted.append((tool_name, invokable))
 
-        for effective_id, invokable in vetted:
-            self._toolbox[effective_id] = invokable
+        for tool_name, invokable in vetted:
+            self._toolbox[tool_name] = invokable
 
         return not any_skipped
 
@@ -531,31 +494,22 @@ class ToolAgent(Agent, ABC):
     def actions_context(self) -> str:
         """
         Render every registered tool for prompt injection, one block per
-        tool (signature line + a 4-space-indented triple-quoted docstring
-        description, via ``_render_docstring_block``), joined by
-        ``"\\n---\\n"``. Every rendered id is bare, never dotted: when
-        ``tid`` is the tool's own ``name`` this is just ``tool.signature``
-        verbatim; when ``tid`` is a distinct alias, only the leading
-        identity token of ``tool.signature`` is swapped for the alias — the
-        ``(args) -> ReturnType`` portion renders unchanged.
+        tool (its ``signature`` line + a 4-space-indented triple-quoted
+        docstring description, via ``_render_docstring_block``), joined by a
+        ``---`` line. Every rendered name is bare, never dotted.
         """
-        blocks: list[str] = []
-        for tid, tool in self._toolbox.items():
-            if tid == tool.name:
-                rendered_signature = tool.signature
-            else:
-                rendered_signature = tid + tool.signature[len(tool.name):]
-
-            blocks.append(f"{rendered_signature}\n{self._render_docstring_block(tool.description)}")
-
+        blocks = [
+            f"{tool.signature}\n{self._render_docstring_block(tool.description)}"
+            for tool in self._toolbox.values()
+        ]
         return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:
-        """Shallow copy of the toolbox, keyed by effective id (alias or bare name)."""
+        """Shallow copy of the toolbox, keyed by tool name."""
         return dict(self._toolbox)
 
     def has_tool(self, tool_id: str) -> bool:
-        """Return ``True`` if ``tool_id`` (an alias or the tool's own bare ``name``) is registered."""
+        """Return ``True`` if ``tool_id`` (a tool name) is registered."""
         return tool_id in self._toolbox
 
     def get_tool(self, tool_id: str) -> AtomicInvokable:
@@ -609,8 +563,8 @@ class ToolAgent(Agent, ABC):
         """
         Directly insert ``tool`` into the toolbox under ``name``, bypassing
         ``register_tool`` entirely — the one sanctioned way to populate a
-        reserved effective id (``register_tool``/``register_tools`` reject
-        any id in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
+        reserved tool name (``register_tool``/``register_tools`` reject
+        any name in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
         toolified first, exactly like ``register_tool``'s own callable
         branch; ``AtomicInvokable`` instances are stored as-is. Intended to
         be called from a subclass's own ``__init__``, after

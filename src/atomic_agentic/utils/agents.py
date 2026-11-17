@@ -243,7 +243,7 @@ def tool_identity(call: ToolStatement) -> str:
     node). An ``ATTR_CALL_ALIAS`` call's real method name lives in
     ``call.args[1]`` (also a plain ``str``, from ``_build_call_slot``'s own
     ``args=(obj_expr, method_name, *positional)`` construction). Any other
-    call (a real registered tool's alias/full_name, or ``RETURN_ALIAS``)
+    call (a real registered tool's name, or ``RETURN_ALIAS``)
     returns ``call.tool`` directly -- callers are expected to have already
     filtered to ``is_dispatched(call)`` before calling this, so
     ``RETURN_ALIAS``/``RHS_ASSIGN_ALIAS`` never actually reach this function

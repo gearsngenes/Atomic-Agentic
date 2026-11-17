@@ -130,7 +130,7 @@ class ReActAgent(ToolAgent):
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
-        record_enabled: bool = False,
+        record_enabled: bool = True,
         records_window: Optional[int] = None,
         *,
         tool_calls_limit: Optional[int] = 25,

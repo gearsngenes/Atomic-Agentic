@@ -176,7 +176,7 @@ RETURN_TOOL_DESCRIPTION = (
 #   seeds the same addressing as task_result_i context entries
 #
 # Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/
-# ATTR_CALL_ALIAS can never be real registered tool aliases; SUB_NAME_PREFIX/
+# ATTR_CALL_ALIAS can never be real registered tool names; SUB_NAME_PREFIX/
 # TASK_RESULT_PREFIX can never be a model-chosen identifier. Enforcement
 # points live outside this file's scope.
 
@@ -188,8 +188,8 @@ TASK_RESULT_PREFIX = "task_result_"
 PY_BUILTIN_ALIAS = "py_builtin"
 """Reserved ToolStatement.tool sentinel for a rewritten Python builtin call
 -- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
-alias may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_alias,
-extended by agents/scriptact.py's ScriptActAgent._validate_effective_tool_id).
+name may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_name,
+extended by agents/scriptact.py's ScriptActAgent._validate_tool_name).
 Unlike
 those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
@@ -197,7 +197,7 @@ those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 ATTR_CALL_ALIAS = "attr_call"
 """Reserved ToolStatement.tool sentinel for an attribute/method call
 (`obj.method(...)`) on a value the plan already holds -- same treatment as
-PY_BUILTIN_ALIAS: reserved from real tool aliases, dispatches through a real
+PY_BUILTIN_ALIAS: reserved from real tool names, dispatches through a real
 Tool (agents.tools.attr_call_tool), counts toward tool-call budget
 accounting identically to a registered-tool call."""
 

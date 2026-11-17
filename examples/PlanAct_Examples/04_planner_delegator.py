@@ -46,7 +46,7 @@ batch_haiku_planner = PlanActAgent(
     llm_engine=sub_agent_llm,
 )
 batch_haiku_planner.register_tool(haiku_agent)
-haiku_tool_id = haiku_agent.name  # effective id defaults to the bare agent name
+haiku_tool_id = haiku_agent.name  # the tool name is the bare agent name
 
 
 def print_haiku(haiku_topic: str, haiku: str) -> None:
@@ -57,7 +57,7 @@ batch_haiku_planner.register_tool(
     print_haiku,
     description="Print a haiku with its topic as the title.",
 )
-print_haiku_tool_id = "print_haiku"  # effective id defaults to the bare function name
+print_haiku_tool_id = "print_haiku"  # the tool name is the bare function name
 
 # ----- Batch Math PlanAct Agent -----
 batch_math_planner = PlanActAgent(
@@ -77,7 +77,7 @@ batch_math_planner.register_tool(
     print_math_solution,
     description="Print the math problem and its computed solution.",
 )
-print_math_tool_id = "print_math_solution"  # effective id defaults to the bare function name
+print_math_tool_id = "print_math_solution"  # the tool name is the bare function name
 
 # ----- Super Planner (delegates to both planners) -----
 super_planner = PlanActAgent(

@@ -2,6 +2,7 @@ import logging
 import time
 
 from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.tools import toolify
 
 import sys
 from pathlib import Path
@@ -24,11 +25,9 @@ async_tester = PlanActAgent(
     record_enabled=False,
 )
 
-# Register the callable under an explicit alias.
+# Build the tool under an explicit name, then register it.
 async_tester.register_tool(
-    testDelayPrint,
-    alias="DelayPrint",
-    description="delay for 3 seconds.",
+    toolify(testDelayPrint, name="DelayPrint", description="delay for 3 seconds.")
 )
 
 if __name__ == "__main__":

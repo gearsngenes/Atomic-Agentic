@@ -296,10 +296,10 @@ class TestToolRegistration:
         assert registered is True
         assert agent.get_tool("adder") is tool
 
-    def test_register_callable_with_alias_uses_alias_as_effective_id(self) -> None:
+    def test_register_renamed_tool_uses_its_name_as_the_key(self) -> None:
         agent = make_stub_tool_agent()
 
-        agent.register_tool(add, alias="plus")
+        agent.register_tool(Tool(function=add, name="plus", description="Adds."))
 
         assert agent.has_tool("plus")
         assert not agent.has_tool("add")
@@ -313,18 +313,24 @@ class TestToolRegistration:
 
     def test_register_duplicate_skip_returns_false_and_keeps_original(self) -> None:
         agent = make_stub_tool_agent()
-        agent.register_tool(add, alias="calc")
+        agent.register_tool(Tool(function=add, name="calc", description="Adds."))
 
-        result = agent.register_tool(multiply, alias="calc", name_collision_policy="skip")
+        result = agent.register_tool(
+            Tool(function=multiply, name="calc", description="Multiplies."),
+            name_collision_policy="skip",
+        )
 
         assert result is False
         assert agent.get_tool("calc").invoke({"x": 2, "y": 3}).result == 5
 
     def test_register_duplicate_replace_replaces_tool(self) -> None:
         agent = make_stub_tool_agent()
-        agent.register_tool(add, alias="calc")
+        agent.register_tool(Tool(function=add, name="calc", description="Adds."))
 
-        result = agent.register_tool(multiply, alias="calc", name_collision_policy="replace")
+        result = agent.register_tool(
+            Tool(function=multiply, name="calc", description="Multiplies."),
+            name_collision_policy="replace",
+        )
 
         assert result is True
         assert agent.get_tool("calc").invoke({"x": 3, "y": 4}).result == 12
@@ -334,12 +340,6 @@ class TestToolRegistration:
 
         with pytest.raises(ToolRegistrationError, match="name_collision_policy"):
             agent.register_tool(add, name_collision_policy="bogus")  # type: ignore[arg-type]
-
-    def test_register_invalid_alias_raises(self) -> None:
-        agent = make_stub_tool_agent()
-
-        with pytest.raises(ToolRegistrationError, match="alias"):
-            agent.register_tool(add, alias="not a valid alias!")
 
     def test_register_unsupported_type_raises(self) -> None:
         agent = make_stub_tool_agent()
@@ -366,7 +366,7 @@ class TestToolRegistration:
     def test_register_reserved_tool_name_raises(self) -> None:
         agent = _build(_ReservedStub)
         with pytest.raises(ToolRegistrationError, match="reserved"):
-            agent.register_tool(add, alias="locked")
+            agent.register_tool(Tool(function=add, name="locked", description="Adds."))
 
     def test_clear_tools_keeps_reserved_tools_only(self) -> None:
         agent = _build(_ReservedStub)
@@ -400,9 +400,9 @@ class TestToolRegistration:
 
         assert "add(" in context
 
-    def test_actions_context_renders_alias_in_place_of_bare_name(self) -> None:
+    def test_actions_context_renders_the_tools_own_name(self) -> None:
         agent = make_stub_tool_agent()
-        agent.register_tool(add, alias="plus")
+        agent.register_tool(Tool(function=add, name="plus", description="Adds."))
 
         context = agent.actions_context()
 
@@ -418,14 +418,9 @@ class TestToolRegistration:
         assert agent.has_tool("add")
         assert agent.has_tool("multiply")
 
-    def test_register_tools_aliases_length_mismatch_raises(self) -> None:
-        agent = make_stub_tool_agent()
-        with pytest.raises(ValueError, match="aliases must be the same length"):
-            agent.register_tools([add, multiply], aliases=["only_one"])
-
     def test_register_tools_intra_batch_duplicate_raises(self) -> None:
         agent = make_stub_tool_agent()
-        with pytest.raises(ToolRegistrationError, match="duplicate effective id"):
+        with pytest.raises(ToolRegistrationError, match="duplicate tool name"):
             agent.register_tools([add, add])
 
     def test_register_tools_skip_mode_excludes_existing_from_outcome(self) -> None:
@@ -439,9 +434,12 @@ class TestToolRegistration:
 
     def test_register_tools_replace_mode_overwrites_existing(self) -> None:
         agent = make_stub_tool_agent()
-        agent.register_tool(add, alias="calc")
+        agent.register_tool(Tool(function=add, name="calc", description="Adds."))
 
-        result = agent.register_tools([multiply], aliases=["calc"], name_collision_policy="replace")
+        result = agent.register_tools(
+            [Tool(function=multiply, name="calc", description="Multiplies.")],
+            name_collision_policy="replace",
+        )
 
         assert result is True
         assert agent.get_tool("calc").invoke({"x": 3, "y": 4}).result == 12
@@ -530,13 +528,6 @@ class TestA2AHubRegistration:
 
         assert tool.invoke({"a": 3, "b": 4}).result == 17
         assert hub.skill_calls == [("add", {"a": 3, "b": 4})]
-
-    def test_register_tools_hub_entry_cannot_take_alias(self) -> None:
-        agent = make_stub_tool_agent()
-        hub = FakeA2AClientHub()
-
-        with pytest.raises(ValueError, match="cannot take an alias"):
-            agent.register_tools([hub], aliases=["custom"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1058,3 +1049,50 @@ class TestResultClassWiring:
     def test_no_family_defines_build_result_from_task(self) -> None:
         for cls in (ToolAgent, PlanActAgent, ReActAgent, ScriptActAgent):
             assert not hasattr(cls, "build_result_from_task")
+
+
+class TestRegistrationKeyIsToolName:
+    """Stage 4 Pass 4: aliases are gone; the toolbox key is always ``tool.name``."""
+
+    def test_registration_apis_have_no_alias_or_description_parameters(self) -> None:
+        import inspect
+
+        register_tool = inspect.signature(ToolAgent.register_tool).parameters
+        register_tools = inspect.signature(ToolAgent.register_tools).parameters
+
+        assert list(register_tool) == ["self", "tool", "name_collision_policy"]
+        assert register_tool["name_collision_policy"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert list(register_tools) == ["self", "tools", "name_collision_policy"]
+        assert register_tools["name_collision_policy"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_a_bound_method_registers_with_its_name_docstring_and_parameters(self) -> None:
+        class Calculator:
+            def total(self, x: int, y: int) -> int:
+                """Add two numbers."""
+                return x + y
+
+        agent = make_stub_tool_agent()
+        agent.register_tool(Calculator().total)
+
+        tool = agent.get_tool("total")
+        assert "Add two numbers." in tool.description
+        assert [p.name for p in tool.parameters] == ["x", "y"]
+        assert tool.invoke({"x": 2, "y": 3}).result == 5
+
+    def test_the_toolbox_key_is_always_the_tool_name(self) -> None:
+        agent = make_stub_tool_agent()
+        agent.register_tools([Tool(function=add, name="plus", description="Adds."), multiply])
+
+        assert set(agent.list_tools()) == {"plus", "multiply"}
+        assert all(key == tool.name for key, tool in agent.list_tools().items())
+
+    @pytest.mark.parametrize(
+        "agent_cls", ["ToolAgent", "PlanActAgent", "ReActAgent", "ScriptActAgent"]
+    )
+    def test_record_enabled_defaults_to_true(self, agent_cls: str) -> None:
+        import inspect
+
+        import atomic_agentic.agents as agents
+
+        cls = getattr(agents, agent_cls)
+        assert inspect.signature(cls.__init__).parameters["record_enabled"].default is True

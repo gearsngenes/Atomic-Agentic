@@ -24,6 +24,7 @@ import logging
 import time
 
 from atomic_agentic.agents import ScriptActAgent
+from atomic_agentic.tools import toolify
 
 import sys
 from pathlib import Path
@@ -48,9 +49,7 @@ async_tester = ScriptActAgent(
 )
 
 async_tester.register_tool(
-    testDelayPrint,
-    alias="DelayPrint",
-    description="Delay for 5 seconds.",
+    toolify(testDelayPrint, name="DelayPrint", description="Delay for 5 seconds.")
 )
 
 if __name__ == "__main__":

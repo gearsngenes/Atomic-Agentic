@@ -53,7 +53,7 @@ class ToolStatement:
 
     tool : str
         The call's identity -- a dotted call name, a registered tool's
-        alias/``full_name``, or a grammar-specific sentinel (``RHS_ASSIGN_
+        name, or a grammar-specific sentinel (``RHS_ASSIGN_
         ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` for
         a ``ScriptActAgent``-sourced statement; ``RETURN_ALIAS`` is the only
         sentinel a ``PlanActAgent``/``ReActAgent``-sourced statement ever

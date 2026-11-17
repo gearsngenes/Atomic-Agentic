@@ -116,7 +116,7 @@ class ScriptActAgent(ToolAgent):
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
-        record_enabled: bool = False,
+        record_enabled: bool = True,
         records_window: Optional[int] = None,
         *,
         tool_calls_limit: Optional[int] = None,
@@ -220,7 +220,7 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Tool registration -- naming-constraint hook override only
     # ------------------------------------------------------------------ #
-    def _validate_effective_tool_id(self, effective_id: str) -> None:
+    def _validate_tool_name(self, name: str) -> None:
         """
         Extends ``ToolAgent``'s default reserved-name check with this
         family's own sentinel/real-Python-builtin collision rules. Never a
@@ -232,25 +232,26 @@ class ScriptActAgent(ToolAgent):
         unreachable rather than raising here. Nor a Python keyword: a script
         could never call it.
         """
-        super()._validate_effective_tool_id(effective_id)
+        super()._validate_tool_name(name)
 
-        if effective_id in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS):
+        if name in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS):
             raise ToolRegistrationError(
-                f"effective id {effective_id!r} is reserved for the parser's "
-                "own sentinel tool names and cannot be used as a registered "
-                "tool alias or name."
+                f"tool name {name!r} is reserved for the parser's own "
+                "sentinel tool names and cannot be used as a registered "
+                "tool name."
             )
-        if effective_id in ALLOWED_PY_BUILTINS:
+        if name in ALLOWED_PY_BUILTINS:
             raise ToolRegistrationError(
-                f"effective id {effective_id!r} collides with a real Python "
-                "builtin of the same name -- registering a tool under this "
-                "name would make it permanently unreachable (the builtin "
-                "always resolves first). Choose a different alias."
+                f"tool name {name!r} collides with a real Python builtin "
+                "of the same name -- a tool with this name would be "
+                "permanently unreachable (the builtin always resolves "
+                "first). Build the tool with a different name via toolify."
             )
-        if keyword.iskeyword(effective_id):
+        if keyword.iskeyword(name):
             raise ToolRegistrationError(
-                f"effective id {effective_id!r} is a Python keyword; a "
-                "script could never call it. Choose a different alias."
+                f"tool name {name!r} is a Python keyword; a script could "
+                "never call it. Build the tool with a different name via "
+                "toolify."
             )
 
     def _seed_task(self, task: ScriptActAgentTask) -> None:
@@ -273,7 +274,7 @@ class ScriptActAgent(ToolAgent):
             raise AgentInvocationError(
                 f"{type(self).__name__}.{self.name}: context variable name(s) "
                 f"unusable in a script: {detail}. Rename or forget the "
-                "variable, or re-alias the tool."
+                "variable, or rename the tool with toolify."
             )
 
     # ------------------------------------------------------------------ #

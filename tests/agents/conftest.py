@@ -37,9 +37,8 @@ def package_tool_result(result: Any, label: str) -> dict[str, Any]:
 
 
 def register_math_tools(agent: PlanActAgent | ReActAgent | ScriptActAgent) -> dict[str, str]:
-    """Register add/multiply/join_text/fail_tool and return their effective
-    (bare, unaliased) ids -- the effective id (no alias given) is just the
-    function's own __name__."""
+    """Register add/multiply/join_text/fail_tool and return their tool names --
+    each is just the function's own __name__."""
     for tool in (add, multiply, join_text, fail_tool):
         agent.register_tool(tool)
     return {"add": "add", "multiply": "multiply", "join_text": "join_text", "fail_tool": "fail_tool"}

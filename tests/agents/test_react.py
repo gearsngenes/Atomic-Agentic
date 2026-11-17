@@ -111,11 +111,13 @@ class TestReActConstruction:
         def dummy() -> None:
             return None
 
+        from atomic_agentic.tools import Tool
+
         agent = make_react_agent([])
         with pytest.raises(ToolRegistrationError):
-            agent.register_tool(dummy, alias="return")
+            agent.register_tool(Tool(function=dummy, name="return", description="d."))
         with pytest.raises(ToolRegistrationError):
-            agent.register_tool(dummy, alias="make_sequence")
+            agent.register_tool(Tool(function=dummy, name="make_sequence", description="d."))
 
 
 # --------------------------------------------------------------------------- #
