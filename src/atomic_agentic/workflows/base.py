@@ -42,6 +42,7 @@ class Workflow(AtomicInvokable, ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str | Collection[str],
+        *,
         include_trace: bool = True,
     ) -> None:
         super().__init__(

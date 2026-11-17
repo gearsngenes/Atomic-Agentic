@@ -265,3 +265,40 @@ class TestWorkflowInvokeHook:
 
         with pytest.raises(TypeError):
             workflow.invoke(["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+class TestWorkflowConstructorRule:
+    """Stage 4 Pass 5: name and description first; knobs after the core are keyword-only."""
+
+    @pytest.mark.parametrize("cls_name", [
+        "Workflow", "SequentialFlow", "ParallelFlow", "RoutingFlow", "IterativeFlow", "GraphFlow",
+    ])
+    def test_name_and_description_come_first(self, cls_name: str) -> None:
+        import inspect
+
+        import atomic_agentic.workflows as workflows
+        from atomic_agentic.workflows.base import Workflow as WorkflowBase
+
+        cls = WorkflowBase if cls_name == "Workflow" else getattr(workflows, cls_name)
+        assert list(inspect.signature(cls.__init__).parameters)[1:3] == ["name", "description"]
+
+    def test_include_trace_is_keyword_only_on_the_base(self) -> None:
+        import inspect
+
+        from atomic_agentic.workflows.base import Workflow as WorkflowBase
+
+        params = inspect.signature(WorkflowBase.__init__).parameters
+        assert params["include_trace"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_iterative_max_iterations_is_keyword_only(self) -> None:
+        import inspect
+
+        from atomic_agentic.workflows import IterativeFlow
+
+        params = inspect.signature(IterativeFlow.__init__).parameters
+        positional = [
+            n for n, p in params.items()
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        assert positional == ["self", "name", "description", "body_steps"]
+        assert params["max_iterations"].kind is inspect.Parameter.KEYWORD_ONLY
