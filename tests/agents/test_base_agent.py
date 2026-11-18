@@ -12,6 +12,7 @@ import asyncio
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.results import AgentResult
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
@@ -1188,7 +1189,7 @@ class TestAgentValidation:
     def test_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*dict"):
             agent.invoke({"topic": "pytest"})
 
     def test_post_invoke_with_one_defaulted_parameter_is_allowed(self) -> None:
@@ -1334,7 +1335,7 @@ class TestAgentAsyncInvoke:
     def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*dict"):
             asyncio.run(agent.async_invoke({"topic": "pytest"}))
 
     def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
@@ -1414,7 +1415,7 @@ class TestParameterSources:
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
-        # "prompt" comes from the built-in PROMPT_PARAM; no sources
+        # "prompt" comes from the default "{prompt}" pre template; no sources
         # means nothing else is grafted.
         assert [p.name for p in agent.parameters] == ["prompt"]
 
@@ -1898,13 +1899,20 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         assert len(second_call) == 2  # just system + user from _MinimalAgent
 
 
+def _described_prompt_pre(
+    prompt: Annotated[str, "The prompt to send to the agent."],
+) -> str:
+    return prompt
+
+
 class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_follows_base_getter(self) -> None:
-        # Built on _MinimalAgent (no pre_invoke) so the built-in, described
-        # ``prompt`` parameter demonstrates the description augmentation.
+        # A pre stage with a described ``prompt`` parameter demonstrates the
+        # description augmentation (the default template's parameter has none).
         agent = _MinimalAgent(
             name="a",
             description="Deterministic writer test agent.",
+            pre_invoke=_described_prompt_pre,
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -1915,6 +1923,7 @@ class TestAgentDescriptionOverrideRemoval:
         agent = _MinimalAgent(
             name="a",
             description="Deterministic writer test agent.",
+            pre_invoke=_described_prompt_pre,
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -2331,7 +2340,7 @@ class TestSummarizeAndPreProcess:
 
         agent = make_agent(pre_invoke=pre_any)
         task = agent.create_task(agent.filter_inputs({"prompt": "x"}))
-        with pytest.raises(AgentInvocationError, match="non-string"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*int"):
             agent.pre_process(task)
 
     def test_async_pre_process_matches_sync(self) -> None:
@@ -3122,21 +3131,19 @@ class TestSliceResponseRemoved:
         assert not hasattr(Agent, "_slice_response")
 
 
-class TestOptionalPreInvoke:
-    def test_default_agent_has_no_pre_stage(self) -> None:
-        agent = make_value_agent("r")
-
-        assert agent.pre_invoke is None
-        assert agent.to_dict()["pre_invoke"] is None
-
-    def test_default_signature_is_the_built_in_prompt_parameter(self) -> None:
+class TestPreInvokeStage:
+    def test_default_pre_is_the_identity_template(self) -> None:
         agent = make_value_agent("r")
         prompt = agent.parameters[0]
 
+        assert isinstance(agent.pre_invoke, PromptTemplate)
+        assert agent.pre_invoke.name == "value_agent_pre_invoke"
+        assert isinstance(agent.to_dict()["pre_invoke"], dict)
         assert _names(agent) == ["prompt"]
         assert prompt.kind == ParamSpec.POSITIONAL_OR_KEYWORD
-        assert prompt.type == ("str",)
+        assert prompt.type == ("Any",)
         assert prompt.default is NO_VAL
+        assert prompt.description is None
 
     def test_prompt_passes_through_verbatim_sync_and_async(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -3151,29 +3158,42 @@ class TestOptionalPreInvoke:
 
         assert [c[-1] for c in engine.calls] == [{"role": "user", "content": "hello"}] * 3
 
-    def test_non_str_prompt_raises_agent_invocation_error(self) -> None:
+    def test_non_str_prompt_is_stringified_by_the_template(self) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = _EchoAgent(name="a", description="d", llm_engine=engine)
+
+        agent.invoke({"prompt": 5})
+
+        assert engine.calls[-1][-1] == {"role": "user", "content": "5"}
+
+    def test_missing_prompt_raises_key_error(self) -> None:
         agent = make_value_agent("r")
 
-        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
-            agent.invoke({"prompt": 5})
-        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
-            asyncio.run(agent.async_invoke({"prompt": 5}))
+        with pytest.raises(KeyError):
+            agent.invoke({})
 
-    def test_post_parameter_named_prompt_shares_the_built_in_parameter(self) -> None:
+    def test_post_parameter_named_prompt_shares_the_pre_parameter(self) -> None:
         def post(prompt: str, resp: Any) -> str:
             return f"{prompt}->{resp}"
 
-        agent = make_value_agent("r", post_invoke=post, response_to_post="resp")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            agent = make_value_agent("r", post_invoke=post, response_to_post="resp")
 
         assert _names(agent).count("prompt") == 1
+        # The reconciled type narrows to the post parameter's ``str``.
+        assert agent.parameters[0].type == ("str",)
         assert agent.invoke({"prompt": "q"}).result == "q->r"
 
     def test_incompatible_post_prompt_type_raises_at_construction(self) -> None:
+        def pre(prompt: str) -> str:
+            return prompt
+
         def post(prompt: int, resp: Any) -> Any:
             return resp
 
         with pytest.raises(AgentError, match="(?i)compatible"):
-            make_value_agent("r", post_invoke=post, response_to_post="resp")
+            make_value_agent("r", pre_invoke=pre, post_invoke=post, response_to_post="resp")
 
     def test_custom_pre_invoke_with_its_own_prompt_parameter_still_works(self) -> None:
         def pre(prompt: str, tone: str = "calm") -> str:
@@ -3181,9 +3201,95 @@ class TestOptionalPreInvoke:
 
         agent = make_value_agent("r", pre_invoke=pre)
 
-        assert agent.pre_invoke is not None
+        assert isinstance(agent.pre_invoke, Tool)
         assert set(_names(agent)) == {"prompt", "tone"}
         assert agent.invoke({"prompt": "go"}).result == "r"
+
+    @pytest.mark.parametrize("bad", [None, 5, {"a": 1}])
+    def test_wrong_pre_types_raise_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError):
+            make_value_agent("r", pre_invoke=bad)
+
+    @pytest.mark.parametrize("bad", ["", "   "])
+    def test_blank_pre_string_raises_value_error(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            make_value_agent("r", pre_invoke=bad)
+
+    def test_str_pre_with_placeholders_exposes_each_in_order(self) -> None:
+        agent = make_value_agent("r", pre_invoke="{topic}: {prompt}")
+
+        assert _names(agent) == ["topic", "prompt"]
+        assert agent.invoke({"topic": "t", "prompt": "p"}).result == "r"
+
+    def test_callable_pre_returning_non_str_raises_and_skips_engine(self) -> None:
+        def pre(prompt: str) -> Any:
+            return 7
+
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = _EchoAgent(name="a", description="d", llm_engine=engine, pre_invoke=pre)
+
+        with pytest.raises(TypeError, match=r"a_pre_invoke.*int"):
+            agent.invoke({"prompt": "x"})
+        with pytest.raises(TypeError, match=r"a_pre_invoke.*int"):
+            asyncio.run(agent.async_invoke({"prompt": "x"}))
+        assert engine.calls == []
+
+    def test_atomic_invokable_pre_is_used_as_is(self) -> None:
+        tool = Tool(function=lambda prompt: prompt.upper(), name="shout", description="d")
+
+        agent = make_value_agent("r", pre_invoke=tool)
+
+        assert agent.pre_invoke is tool
+
+    def test_agent_as_pre_stage_sync_and_async(self) -> None:
+        inner = _EchoAgent(
+            name="inner", description="d",
+            llm_engine=FakeLLMEngine(response_fn=lambda m: "inner-reply"),
+        )
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        outer = _EchoAgent(name="outer", description="d", llm_engine=engine, pre_invoke=inner)
+
+        outer.invoke({"prompt": "q"})
+        asyncio.run(outer.async_invoke({"prompt": "q"}))
+
+        assert [c[-1]["content"] for c in engine.calls] == ["inner-reply"] * 2
+
+
+class TestPostInvokeStage:
+    def test_str_post_becomes_a_template(self) -> None:
+        agent = make_value_agent("r", post_invoke="<<{resp}>>", response_to_post="resp")
+
+        assert isinstance(agent.post_invoke, PromptTemplate)
+        assert agent.post_invoke.name == "value_agent_post_invoke"
+        assert agent.return_type == ("str",)
+        assert agent.invoke({"prompt": "q"}).result == "<<r>>"
+
+    def test_bound_placeholder_leaves_signature_rest_stay_public(self) -> None:
+        agent = make_value_agent("r", post_invoke="{resp} / {extra}", response_to_post="resp")
+
+        assert _names(agent) == ["prompt", "extra"]
+        assert agent.invoke({"prompt": "q", "extra": "e"}).result == "r / e"
+
+    def test_none_post_means_no_stage(self) -> None:
+        agent = make_value_agent("r")
+
+        assert agent.post_invoke is None
+        assert agent.return_type == ("Any",)
+
+    def test_agent_as_post_stage_sync_and_async(self) -> None:
+        inner = _EchoAgent(
+            name="inner", description="d",
+            llm_engine=FakeLLMEngine(response_fn=lambda m: "post-reply"),
+        )
+        agent = make_value_agent("r", post_invoke=inner, response_to_post="prompt")
+
+        assert agent.invoke({"prompt": "q"}).result == "post-reply"
+        assert asyncio.run(agent.async_invoke({"prompt": "q"})).result == "post-reply"
+
+    @pytest.mark.parametrize("bad", [5, {"a": 1}])
+    def test_wrong_post_types_raise_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError):
+            make_value_agent("r", post_invoke=bad)
 
 
 class TestContextSink:

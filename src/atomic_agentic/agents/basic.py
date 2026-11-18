@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 
-from ..constants.agents import DEFAULT_INSTRUCTIONS
+from ..constants.agents import DEFAULT_INSTRUCTIONS, DEFAULT_PRE_INVOKE
 from ..core.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
@@ -51,8 +51,8 @@ class BasicAgent(Agent):
         description: str,
         llm_engine: LLMEngine,
         instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_INSTRUCTIONS,
-        pre_invoke: Optional[Callable | Any] = None,
-        post_invoke: Optional[Callable | Any] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),

@@ -124,6 +124,8 @@ STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
 # Used by: agents/basic.py (``instructions``), agents/scratchpad.py
 # (``instructions``, ``thinking_instructions``).
 DEFAULT_INSTRUCTIONS: str = "You are a helpful AI assistant"
+# The identity pre stage; a template, so ``prompt`` is an ordinary discovered parameter.
+DEFAULT_PRE_INVOKE: str = "{prompt}"
 DEFAULT_THINKING_INSTRUCTIONS: str = (
     "You are a thinking assistant that produces various thoughts, "
     "questions, and task-enhancement clarifications to describe or "
@@ -133,16 +135,6 @@ DEFAULT_THINKING_INSTRUCTIONS: str = (
 # =============================================================================
 # Built-in agent parameters
 # =============================================================================
-# The built-in pre source: with no ``pre_invoke`` the caller's prompt is read
-# straight from this parameter. It takes the pre_invoke slot in schema
-# composition and reconciles with post/extra declarations like any pre_invoke
-# parameter.
-PROMPT_PARAM: ParamSpec = ParamSpec(
-    name="prompt", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-    type=("str",),
-    description="The prompt to send to the agent.",
-)
-
 # The per-invocation runtime-variables channel. ``description`` is None on
 # purpose: any declaration of this name must be ``semantically_identical`` to
 # this spec, and that comparison includes descriptions.
@@ -500,7 +492,6 @@ __all__ = [
     "DEFAULT_INSTRUCTIONS",
     "DEFAULT_THINKING_INSTRUCTIONS",
     # Built-in agent parameters
-    "PROMPT_PARAM",
     "RUNTIME_PARAM",
     # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",

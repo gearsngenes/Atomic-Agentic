@@ -23,7 +23,7 @@ from ..core.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
-from ..tools import toolify
+from ..tools import to_invokable
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask
@@ -34,7 +34,7 @@ from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TASK_RESULT_PREFIX,
-    PROMPT_PARAM,
+    DEFAULT_PRE_INVOKE,
     RUNTIME_PARAM,
 )
 from ..utils.binding import Binding, normalize_binding, slice_response
@@ -94,8 +94,9 @@ class Agent(AtomicInvokable, ABC):
     The agent's parameter schema is composed at construction time from these
     flat sources:
 
-    - All ``pre_invoke`` parameters (the built-in ``prompt`` parameter when
-      there is no ``pre_invoke``).
+    - All ``pre_invoke`` parameters (``pre_invoke`` is always present; it
+      defaults to the identity template ``"{prompt}"``, which contributes the
+      single ``prompt`` parameter).
     - Post-only parameters not filled by a ``response_to_post`` destination
       (those leave the public signature unless pre_invoke or a parameter
       source also declares them), preserving their original declared kind (no
@@ -144,7 +145,9 @@ class Agent(AtomicInvokable, ABC):
     if absent -- and writes back any other changed variable only if the
     conversation still holds it. See ``record``.
 
-    ``post_invoke=None`` means no post stage.
+    ``post_invoke=None`` means no post stage. Either stage may be a ``str``
+    (a ``PromptTemplate``), a callable, or any ``AtomicInvokable``, agents
+    included (recursion is allowed and unguarded).
 
     Runtime context
     ---------------
@@ -238,8 +241,8 @@ class Agent(AtomicInvokable, ABC):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        pre_invoke: Optional[AtomicInvokable | Callable] = None,
-        post_invoke: Optional[AtomicInvokable | Callable] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
@@ -250,29 +253,22 @@ class Agent(AtomicInvokable, ABC):
         if type(use_runtime_context) is not bool:
             raise ValueError("use_runtime_context must be a bool.")
 
-        # ── Pre-invoke ───────────────────────────────────────────────────────
-        if pre_invoke is None:
-            pre_tool = None  # no pre stage: the caller's prompt passes straight through
-        elif isinstance(pre_invoke, AtomicInvokable):
-            pre_tool = pre_invoke
-        else:
-            pre_tool = toolify(
-                pre_invoke,
-                name=f"{name}_pre_invoke",
-                description=f"The tool that preprocesses inputs into a string for Agent {name}",
-            )
-
-        # ── Post-invoke ──────────────────────────────────────────────────────
-        if post_invoke is None:
-            post_tool = None  # no post stage: the response is returned as-is
-        elif isinstance(post_invoke, AtomicInvokable):
-            post_tool = post_invoke
-        else:
-            post_tool = toolify(
+        # ── Pre and post stages ──────────────────────────────────────────────
+        # A str becomes a PromptTemplate, a callable a Tool, an invokable (a
+        # sub-agent included) is used as is; anything else raises TypeError.
+        pre_tool = to_invokable(
+            pre_invoke,
+            name=f"{name}_pre_invoke",
+            description=f"The tool that preprocesses inputs into a string for Agent {name}",
+        )
+        post_tool = (
+            None if post_invoke is None
+            else to_invokable(
                 post_invoke,
                 name=f"{name}_post_invoke",
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
+        )
 
         # ── Parameter sources ────────────────────────────────────────────────
         # Called once; subclasses have already set their slot attributes.
@@ -333,7 +329,7 @@ class Agent(AtomicInvokable, ABC):
                 "caller's runtime context channel, not a post parameter the "
                 "response may fill."
             )
-        pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
+        pre_declared = list(pre_tool.parameters)
         source_params = [list(src.parameters) for src in sources]
         declared_elsewhere = {p.name for p in pre_declared} | {
             p.name for ps in source_params for p in ps
@@ -370,7 +366,7 @@ class Agent(AtomicInvokable, ABC):
             )
 
         # Lifecycle components and the per-consumer name sets create_task slices by.
-        self._pre_invoke: Optional[AtomicInvokable] = pre_tool
+        self._pre_invoke: AtomicInvokable = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
         self._inputs_to_context = inputs_binding  # dict[str, str]; {} when unbound
         self._response_to_context = context_binding  # str | dict[Any, str]; {} when unbound
@@ -546,9 +542,9 @@ class Agent(AtomicInvokable, ABC):
         return list(self._conversations.keys())
 
     @property
-    def pre_invoke(self) -> Optional[AtomicInvokable]:
-        """Invokable that converts the input mapping into a prompt string, or
-        ``None`` when there is no pre stage (the caller's ``prompt`` is used as-is)."""
+    def pre_invoke(self) -> AtomicInvokable:
+        """Invokable that converts the input mapping into the prompt string.
+        Never ``None``; the default is the identity template ``"{prompt}"``."""
         return self._pre_invoke
 
     @property
@@ -773,22 +769,21 @@ class Agent(AtomicInvokable, ABC):
         """Produce the prompt, then render the prompt slots.
 
         1. Run ``pre_invoke`` over ``task.pre_inputs``; always overwrites
-           ``task.user_prompt``. With no ``pre_invoke`` the prompt is
-           ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
-           propagate unchanged. A non-``str`` prompt raises
-           ``AgentInvocationError`` -- a prompt string is required.
+           ``task.user_prompt``. A non-``str`` result raises ``TypeError``
+           naming the stage; errors the stage raises propagate unchanged.
         2. Last step: ``_render_instructions(task)`` renders the agent's prompt
            slots into the task's flat fields (a no-op without slots).
 
         Returns ``task``.
         """
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-        if self._pre_invoke is None:
-            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
-        else:
-            raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
-            subject = "pre_invoke returned a non-string result"
-        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
+        if not isinstance(raw_prompt, str):
+            raise TypeError(
+                f"{self._pre_invoke.name!r} returned {type(raw_prompt).__name__}; "
+                "the user prompt must be a string."
+            )
+        task.user_prompt = raw_prompt
         self._render_instructions(task)
         return task
 
@@ -796,22 +791,15 @@ class Agent(AtomicInvokable, ABC):
         """Async mirror of ``pre_process``; ends with
         ``_async_render_instructions(task)``."""
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-        if self._pre_invoke is None:
-            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
-        else:
-            raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
-            subject = "pre_invoke returned a non-string result"
-        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
+        if not isinstance(raw_prompt, str):
+            raise TypeError(
+                f"{self._pre_invoke.name!r} returned {type(raw_prompt).__name__}; "
+                "the user prompt must be a string."
+            )
+        task.user_prompt = raw_prompt
         await self._async_render_instructions(task)
         return task
-
-    @staticmethod
-    def _require_prompt_str(raw_prompt: Any, subject: str) -> str:
-        if not isinstance(raw_prompt, str):
-            raise AgentInvocationError(
-                f"{subject} (type={type(raw_prompt)!r}); a prompt string is required"
-            )
-        return raw_prompt
 
     def think(self, task: AgentTask) -> AgentTask:
         """Advance ``task``'s reasoning phase by one round.
@@ -1303,7 +1291,7 @@ class Agent(AtomicInvokable, ABC):
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
         d.update({
-            "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
+            "pre_invoke": self.pre_invoke.to_dict(),
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
             "inputs_to_context": self.inputs_to_context,
             "response_to_context": self.response_to_context,

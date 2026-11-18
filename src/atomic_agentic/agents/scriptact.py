@@ -22,6 +22,7 @@ from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     BUILTINS_PREAMBLE,
+    DEFAULT_PRE_INVOKE,
     ALLOWED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
@@ -109,8 +110,8 @@ class ScriptActAgent(ToolAgent):
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),

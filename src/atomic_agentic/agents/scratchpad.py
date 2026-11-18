@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping, Optional
 from .thinking import ThinkingAgent
 from ..constants.agents import (
     DEFAULT_INSTRUCTIONS,
+    DEFAULT_PRE_INVOKE,
     DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
@@ -69,8 +70,8 @@ class ScratchpadAgent(ThinkingAgent):
         llm_engine: LLMEngine,
         instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_INSTRUCTIONS,
         thinking_instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_THINKING_INSTRUCTIONS,
-        pre_invoke: Optional[Callable | Any] = None,
-        post_invoke: Optional[Callable | Any] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),

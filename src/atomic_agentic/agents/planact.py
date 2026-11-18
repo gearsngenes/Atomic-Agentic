@@ -74,7 +74,7 @@ from typing import Any, Callable, ClassVar, Mapping, Optional
 from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
-from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
+from ..constants.agents import DEFAULT_PRE_INVOKE, RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
@@ -161,8 +161,8 @@ class PlanActAgent(ToolAgent):
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
