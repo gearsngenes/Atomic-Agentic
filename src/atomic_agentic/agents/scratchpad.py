@@ -38,15 +38,15 @@ class ScratchpadAgent(ThinkingAgent):
     message) then reply (the ``instructions``). The thinker does not
     see the instructions; an author who wants the persona there writes it into
     ``thinking_instructions``, ideally through a placeholder shared with
-    ``instructions``. Both slots accept a string, a callable or any
+    ``instructions``. Both accept a string, a callable or any
     ``AtomicInvokable`` and are coerced through ``to_invokable``; their
     placeholders join the agent's signature through the parameter sources
-    (``[instructions, thinking_instructions]``: the instructions slot wins on a
+    (``[instructions, thinking_instructions]``: the instructions win on a
     compatible-but-not-identical overlap, a true collision raises).
 
-    Each slot is rendered once per invoke, at the end of ``pre_process``, into
+    Each is rendered once per invoke, at the end of ``pre_process``, into
     ``task.instructions`` and ``task.thinking_instructions``; the system message
-    reads those. The thinking slot is skipped when ``thinking_rounds`` is 0 at
+    reads those. The thinking instructions are skipped when ``thinking_rounds`` is 0 at
     pre-process time, so raising ``thinking_rounds`` from 0 during that same run
     leaves the thinking message empty.
 
@@ -91,7 +91,8 @@ class ScratchpadAgent(ThinkingAgent):
             followed by a format section when ``stop_early`` is on). Defaults
             to ``DEFAULT_THINKING_INSTRUCTIONS``; ``None`` raises ``TypeError``
             and a blank string ``ValueError``. Its parameters (a string's
-            ``{placeholder}``s) become agent inputs.
+            ``{placeholder}``s) become agent inputs. A string, a callable or any
+            ``AtomicInvokable``, agents included; there is no cycle guard.
         thinking_rounds : int
             Required. Exact thinking-call count, or the cap under
             ``stop_early``; ``0`` skips thinking.
@@ -99,10 +100,10 @@ class ScratchpadAgent(ThinkingAgent):
             Let the model end thinking before the cap.
 
         1. validate ``stop_early`` and set ``thinking_rounds``.
-        2. coerce the thinking slot, set before ``super().__init__`` because
+        2. coerce the thinking instructions, set before ``super().__init__`` because
            ``_extra_parameter_sources``, called inside it, reads it.
         3. ``super().__init__`` forwards ``instructions`` (``BasicAgent`` builds
-           that slot).
+           the instructions).
         """
         # 1. Validate construction knobs (thinking_rounds through its setter).
         if type(stop_early) is not bool:
@@ -165,15 +166,15 @@ class ScratchpadAgent(ThinkingAgent):
 
     @property
     def thinking_instructions(self) -> AtomicInvokable:
-        """The thinking instructions slot invokable."""
+        """The thinking instructions invokable."""
         return self._thinking_instructions
 
     # ------------------------------------------------------------------ #
     # Parameter sources
     # ------------------------------------------------------------------ #
     def _extra_parameter_sources(self) -> list[AtomicInvokable]:
-        """``[instructions, thinking_instructions]``: the instructions slot
-        wins an overlap."""
+        """``[instructions, thinking_instructions]``: the instructions
+        win an overlap."""
         return [*super()._extra_parameter_sources(), self._thinking_instructions]
 
     # ------------------------------------------------------------------ #
@@ -252,26 +253,26 @@ class ScratchpadAgent(ThinkingAgent):
     # Rendering
     # ------------------------------------------------------------------ #
     def _render_instructions(self, task: ScratchpadTask) -> None:
-        """Render both slots into the task.
+        """Render both instructions into the task.
 
         1. ``super()._render_instructions(task)`` (the main instructions).
         2. ``thinking_rounds == 0``: return (thinking never runs).
-        3. Invoke the thinking slot once with only its own parameter names;
+        3. Invoke the thinking instructions once with only its own parameter names;
            a non-``str`` result raises ``TypeError``; store the text in
            ``task.thinking_instructions``.
         """
         super()._render_instructions(task)
         if self._thinking_rounds == 0:
             return
-        slot = self._thinking_instructions
+        thinking_instructions = self._thinking_instructions
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in thinking_instructions.parameters if p.name in task.agentic_inputs
         }
-        text = slot.invoke(inputs).result
+        text = thinking_instructions.invoke(inputs).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: thinking instructions ({slot.name!r}) returned "
+                f"{self.full_name}: thinking instructions ({thinking_instructions.name!r}) returned "
                 f"{type(text).__name__}; thinking instructions must render to a str."
             )
         task.thinking_instructions = text
@@ -281,15 +282,15 @@ class ScratchpadAgent(ThinkingAgent):
         await super()._async_render_instructions(task)
         if self._thinking_rounds == 0:
             return
-        slot = self._thinking_instructions
+        thinking_instructions = self._thinking_instructions
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in thinking_instructions.parameters if p.name in task.agentic_inputs
         }
-        text = (await slot.async_invoke(inputs)).result
+        text = (await thinking_instructions.async_invoke(inputs)).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: thinking instructions ({slot.name!r}) returned "
+                f"{self.full_name}: thinking instructions ({thinking_instructions.name!r}) returned "
                 f"{type(text).__name__}; thinking instructions must render to a str."
             )
         task.thinking_instructions = text

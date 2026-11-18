@@ -31,8 +31,8 @@ class ThinkingAgent(BasicAgent):
     none. The reply phase uses the instructions, rendered by ``BasicAgent``
     into ``task.instructions``. A thinking prompt a subclass renders itself sees
     ``task.inputs`` only: a ``{placeholder}`` in it is not wired into the
-    agent's parameters by this base (only the instructions slot's are); a
-    subclass that wants its thinking slot's placeholders in the signature
+    agent's parameters by this base (only the instructions' are); a
+    subclass that wants its thinking instructions' placeholders in the signature
     extends ``_extra_parameter_sources()``.
 
     Phase: ``task.thinking_complete``. False means thinking, True means reply (the

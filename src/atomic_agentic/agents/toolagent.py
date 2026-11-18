@@ -76,9 +76,9 @@ class ToolAgent(Agent, ABC):
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
     - ``instructions`` (construction-time only, read-only property returning
-      the slot invokable or ``None``): standing user guidance rendered once per
+      the instructions invokable or ``None``): standing user guidance rendered once per
       invoke into ``task.instructions`` and placed after the tools frame inside
-      a ``USER-DEFINED INSTRUCTIONS`` frame, only when a slot is set.
+      a ``USER-DEFINED INSTRUCTIONS`` frame, only when instructions are set.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
     - ``_seed_task``: one read-only ``task_result_i`` context entry per
@@ -273,51 +273,51 @@ class ToolAgent(Agent, ABC):
 
     @property
     def instructions(self) -> Optional[AtomicInvokable]:
-        """The user instructions slot, or ``None``. Read-only."""
+        """The user instructions, or ``None``. Read-only."""
         return self._instructions
 
     def _extra_parameter_sources(self) -> list[AtomicInvokable]:
-        """The instructions slot joins the signature when there is one."""
+        """The instructions join the signature when there are any."""
         sources = super()._extra_parameter_sources()
         if self._instructions is not None:
             sources.append(self._instructions)
         return sources
 
     def _render_instructions(self, task: AgentTask) -> None:
-        """Render the user instructions slot into ``task.instructions``.
+        """Render the user instructions into ``task.instructions``.
 
-        1. No slot: return.
+        1. No instructions: return.
         2. Invoke it once with only its own parameter names from
            ``task.agentic_inputs``; a non-``str`` result raises ``TypeError``.
         """
-        slot = self._instructions
-        if slot is None:
+        instructions = self._instructions
+        if instructions is None:
             return
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in instructions.parameters if p.name in task.agentic_inputs
         }
-        text = slot.invoke(inputs).result
+        text = instructions.invoke(inputs).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
                 f"{type(text).__name__}; instructions must render to a str."
             )
         task.instructions = text
 
     async def _async_render_instructions(self, task: AgentTask) -> None:
         """Async twin of ``_render_instructions`` (awaits ``async_invoke``)."""
-        slot = self._instructions
-        if slot is None:
+        instructions = self._instructions
+        if instructions is None:
             return
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in instructions.parameters if p.name in task.agentic_inputs
         }
-        text = (await slot.async_invoke(inputs)).result
+        text = (await instructions.async_invoke(inputs)).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
                 f"{type(text).__name__}; instructions must render to a str."
             )
         task.instructions = text
@@ -684,7 +684,7 @@ class ToolAgent(Agent, ABC):
 
         1. ``TOOL-CALLING INSTRUCTIONS``: the family's ``TOOL_INSTRUCTIONS``.
         2. ``AVAILABLE TOOLS``: ``_render_actions()``.
-        3. With an instructions slot: ``INSTRUCTIONS_PRECEDENCE``, then
+        3. With instructions: ``INSTRUCTIONS_PRECEDENCE``, then
            ``task.instructions`` (rendered by ``pre_process``) in its
            ``USER-DEFINED INSTRUCTIONS`` frame.
 

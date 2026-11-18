@@ -73,9 +73,9 @@ STOP_EARLY_PROMPT_SECTION = (
 )
 
 # =============================================================================
-# Prompt slot defaults
+# Instruction defaults
 # =============================================================================
-# Defaults for the required prompt slots. Module constants, not class
+# Defaults for the required instructions. Module constants, not class
 # attributes, because a constructor default cannot read ``self``.
 # Used by: agents/basic.py (``instructions``), agents/scratchpad.py
 # (``instructions``, ``thinking_instructions``).
@@ -562,7 +562,7 @@ __all__ = [
     "THINKING_DIRECTIVE",
     "REPLY_DIRECTIVE",
     "STOP_EARLY_PROMPT_SECTION",
-    # Prompt slot defaults
+    # Instruction defaults
     "DEFAULT_INSTRUCTIONS",
     "DEFAULT_THINKING_INSTRUCTIONS",
     "DEFAULT_PRE_INVOKE",

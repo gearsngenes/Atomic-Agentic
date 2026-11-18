@@ -102,7 +102,7 @@ class Agent(AtomicInvokable, ABC):
       source also declares them), preserving their original declared kind (no
       forced ``KEYWORD_ONLY`` coercion).
     - The parameter sources ``_extra_parameter_sources()`` returns, in list
-      order (e.g. ``BasicAgent`` returns its instructions slot, so the slot's
+      order (e.g. ``BasicAgent`` returns its instructions, so their
       placeholders become agent inputs).
     - The runtime context parameter (``**runtime_context``), when
       ``use_runtime_context`` is set at construction.
@@ -271,7 +271,7 @@ class Agent(AtomicInvokable, ABC):
         )
 
         # ── Parameter sources ────────────────────────────────────────────────
-        # Called once; subclasses have already set their slot attributes.
+        # Called once; subclasses have already set their instructions attributes.
         sources = self._extra_parameter_sources()
 
         # ── Variadic keywords and the runtime name ───────────────────────────
@@ -416,17 +416,18 @@ class Agent(AtomicInvokable, ABC):
         return []
 
     def _render_instructions(self, task: AgentTask) -> None:
-        """Render this agent's prompt slots into ``task`` fields.
+        """Render this agent's instructions into ``task`` fields.
 
-        Called as the last step of ``pre_process``. A subclass with a slot
-        overrides it (and its async twin), invoking each slot once per invoke.
-        The base has no slot, so this is a no-op.
+        Called as the last step of ``pre_process``. A subclass with
+        instructions overrides it (and its async twin), invoking each
+        instructions invokable once per invoke. The base has none, so this is
+        a no-op.
         """
 
     async def _async_render_instructions(self, task: AgentTask) -> None:
         """Async twin of ``_render_instructions``; the default is a no-op, so
         it runs inline. A subclass that overrides the sync hook must override
-        this too (it awaits ``slot.async_invoke``)."""
+        this too (it awaits the instructions' ``async_invoke``)."""
 
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
@@ -658,7 +659,7 @@ class Agent(AtomicInvokable, ABC):
         receives the caller inputs for its declared parameters, with bound
         values overlaid by ``post_process``; pre/post see ``runtime_context``
         only if they declare it. ``agentic_inputs`` holds the
-        names the agent's parameter sources declare (the prompt slots); it is
+        names the agent's parameter sources declare (the instructions); it is
         the union over all sources, and each source takes only its own names
         from it (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
@@ -766,13 +767,13 @@ class Agent(AtomicInvokable, ABC):
         return self.summarize(task)
 
     def pre_process(self, task: AgentTask) -> AgentTask:
-        """Produce the prompt, then render the prompt slots.
+        """Produce the prompt, then render the instructions.
 
         1. Run ``pre_invoke`` over ``task.pre_inputs``; always overwrites
            ``task.user_prompt``. A non-``str`` result raises ``TypeError``
            naming the stage; errors the stage raises propagate unchanged.
-        2. Last step: ``_render_instructions(task)`` renders the agent's prompt
-           slots into the task's flat fields (a no-op without slots).
+        2. Last step: ``_render_instructions(task)`` renders the agent's
+           instructions into the task's flat fields (a no-op without any).
 
         Returns ``task``.
         """

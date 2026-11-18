@@ -16,21 +16,21 @@ from .base import Agent
 
 class BasicAgent(Agent):
     """
-    Concrete single-turn LLM agent with an instructions slot.
+    Concrete single-turn LLM agent with instructions.
 
-    ``BasicAgent`` is the simplest ``Agent`` subclass: one instructions slot,
-    one LLM call per invocation. The slot is a string, a callable or any
+    ``BasicAgent`` is the simplest ``Agent`` subclass: one instructions
+    parameter, one LLM call per invocation. The instructions are a string, a callable or any
     ``AtomicInvokable`` (an agent included), coerced through ``to_invokable``;
     a string becomes a ``PromptTemplate`` and its ``{placeholder}``s are
-    auto-discovered. The slot's parameters join the agent's flat parameter
+    auto-discovered. The instructions' parameters join the agent's flat parameter
     schema through the parameter-source hook -- callers supply them as
     ordinary top-level ``inputs`` keys, exactly like ``pre_invoke``/
-    ``post_invoke`` parameters. Recursion (an agent as the slot) is allowed and
+    ``post_invoke`` parameters. Recursion (an agent as the instructions) is allowed and
     unguarded.
 
-    The slot is rendered once per invoke, as the last step of ``pre_process``,
-    into ``task.instructions`` (it is invoked with only its own parameters);
-    the system message is that text, unframed. The slot is fixed at
+    The instructions are rendered once per invoke, as the last step of ``pre_process``,
+    into ``task.instructions`` (they are invoked with only their own parameters);
+    the system message is that text, unframed. The instructions are fixed at
     construction -- there is no mutation API for it, matching the
     fixed-topology invariant every other ``AtomicInvokable`` in this codebase
     follows.
@@ -62,7 +62,7 @@ class BasicAgent(Agent):
         *,
         response_schema: dict[str, Any] | None = None,
     ) -> None:
-        # 1. Coerce the instructions slot. Set before the base init because
+        # 1. Coerce the instructions. Set before the base init because
         # _extra_parameter_sources reads it there.
         self._instructions = to_invokable(
             instructions,
@@ -98,11 +98,11 @@ class BasicAgent(Agent):
         )
 
     # ------------------------------------------------------------------ #
-    # Instructions slot API
+    # Instructions API
     # ------------------------------------------------------------------ #
     @property
     def instructions(self) -> AtomicInvokable:
-        """The instructions slot invokable (a ``PromptTemplate`` for a ``str``)."""
+        """The instructions invokable (a ``PromptTemplate`` for a ``str``)."""
         return self._instructions
 
     @property
@@ -112,7 +112,7 @@ class BasicAgent(Agent):
         return self._response_schema
 
     def _extra_parameter_sources(self) -> list[AtomicInvokable]:
-        """The instructions slot joins the agent's signature."""
+        """The instructions join the agent's signature."""
         return [*super()._extra_parameter_sources(), self._instructions]
 
     # ------------------------------------------------------------------ #
@@ -139,37 +139,37 @@ class BasicAgent(Agent):
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     def _render_instructions(self, task: AgentTask) -> None:
-        """Render the instructions slot into ``task.instructions``.
+        """Render the instructions into ``task.instructions``.
 
-        1. Take only the slot's own parameter names from ``task.agentic_inputs``.
-        2. Invoke the slot once; errors from it propagate unwrapped.
-        3. A non-``str`` result raises ``TypeError`` naming the slot.
+        1. Take only the instructions' own parameter names from ``task.agentic_inputs``.
+        2. Invoke the instructions once; errors from it propagate unwrapped.
+        3. A non-``str`` result raises ``TypeError`` naming the instructions.
         """
-        slot = self._instructions
+        instructions = self._instructions
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in instructions.parameters if p.name in task.agentic_inputs
         }
-        text = slot.invoke(inputs).result
+        text = instructions.invoke(inputs).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
                 f"{type(text).__name__}; instructions must render to a str."
             )
         task.instructions = text
 
     async def _async_render_instructions(self, task: AgentTask) -> None:
-        """Async twin of ``_render_instructions``; awaits ``slot.async_invoke``
-        so an agent used as the slot never has its sync ``invoke`` called."""
-        slot = self._instructions
+        """Async twin of ``_render_instructions``; awaits the instructions' ``async_invoke``
+        so an agent used as the instructions never has its sync ``invoke`` called."""
+        instructions = self._instructions
         inputs = {
             p.name: task.agentic_inputs[p.name]
-            for p in slot.parameters if p.name in task.agentic_inputs
+            for p in instructions.parameters if p.name in task.agentic_inputs
         }
-        text = (await slot.async_invoke(inputs)).result
+        text = (await instructions.async_invoke(inputs)).result
         if not isinstance(text, str):
             raise TypeError(
-                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
                 f"{type(text).__name__}; instructions must render to a str."
             )
         task.instructions = text
@@ -240,7 +240,7 @@ class BasicAgent(Agent):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict:
-        """Return a diagnostic snapshot including the instructions slot."""
+        """Return a diagnostic snapshot including the instructions."""
         d = super().to_dict()
         d["instructions"] = self._instructions.to_dict()
         d["response_schema"] = self.response_schema

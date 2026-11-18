@@ -55,7 +55,7 @@ class AgentTask:
     instructions : str
         The main instructions rendered once per invoke by the agent's
         ``_render_instructions`` hook (the last step of ``pre_process``).
-        Empty until then, and empty for an agent with no instructions slot.
+        Empty until then, and empty for an agent with no instructions.
         The system message reads it; nothing else writes it.
 
     llm_records : list[LLMRecord]
@@ -114,7 +114,7 @@ class AgentTask:
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
         agent-specific -- the names the agent's parameter sources declare,
-        i.e. the prompt slots). ``agentic_inputs`` is the union over all
+        i.e. the instructions). ``agentic_inputs`` is the union over all
         sources; each source takes only its own names from it. A name
         consumed by more than one goes into every
         bucket that declares it. ``post_process`` then overlays the response
