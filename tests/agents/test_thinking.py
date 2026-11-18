@@ -228,7 +228,7 @@ class TestRendering:
     def test_zero_thinking_call_equals_basic_agent_call(self, with_context: bool) -> None:
         basic = BasicAgent(
             name="tests", description="basic",
-            llm_engine=FakeLLMEngine(["R"]), role_prompt="You are a careful assistant.",
+            llm_engine=FakeLLMEngine(["R"]), instructions="You are a careful assistant.",
         )
         thinker = make_stub_thinker(["R"], done_after=0)
         if with_context:
@@ -259,7 +259,7 @@ class TestRendering:
         agent = StepThinker(
             name="tests", description="steps",
             llm_engine=FakeLLMEngine(["A", "B", "R"]),
-            role_prompt="Reply role.", record_enabled=True, done_after=2,
+            instructions="Reply role.", record_enabled=True, done_after=2,
         )
 
         agent.invoke({"prompt": "hi"})
@@ -334,7 +334,7 @@ class TestRendering:
         assert "[marker elided]" in agent._llm_engine.calls[1][2]["content"]
 
     def test_system_message_follows_prompt_name(self) -> None:
-        agent = make_stub_thinker(["T", "R"], done_after=1, role_prompt="Reply role.")
+        agent = make_stub_thinker(["T", "R"], done_after=1, instructions="Reply role.")
 
         agent.invoke({"prompt": "hi"})
 
@@ -383,7 +383,7 @@ class TestNoPromptRegistry:
 
         agent = Bare(
             name="tests", description="bare",
-            llm_engine=FakeLLMEngine([]), role_prompt="Reply role.", done_after=1,
+            llm_engine=FakeLLMEngine([]), instructions="Reply role.", done_after=1,
         )
         task = new_task(agent)
 

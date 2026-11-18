@@ -1,13 +1,13 @@
 # 07_Prompt_Parameters.py
 """
-Isolates role_prompt as the single variable under test: three BasicAgent
+Isolates instructions as the single variable under test: three BasicAgent
 instances share one PromptTemplate shape — a fixed behavioral base
 clause plus one required {domain} placeholder — but each has a distinct
-literal style clause baked into its role_prompt at construction time. All
+literal style clause baked into its instructions at construction time. All
 three are invoked once with byte-identical inputs (same task prompt, same
-domain value); any difference in output is attributable only to role_prompt.
+domain value); any difference in output is attributable only to instructions.
 
-role_prompt is fixed at construction with no mutator (matches every other
+The instructions slot is fixed at construction with no mutator (matches every other
 AtomicInvokable's fixed-topology/immutability invariant) — so "swap the
 persona" now means "construct a different agent," not "mutate this one."
 
@@ -66,7 +66,7 @@ TASK = "Please explain this to me."
 
 
 def build_persona_prompt(augmentation: str) -> PromptTemplate:
-    """Compose one persona's role_prompt: shared base clause + its style clause.
+    """Compose one persona's instructions: shared base clause + its style clause.
 
     {domain} is the only live placeholder in the resulting template — the
     f-string substitutes BASE_CLAUSE/augmentation by name, not their
@@ -100,13 +100,13 @@ def main() -> None:
             name=f"tutor_{suffix}",
             description=f"{label}-style tutor persona demo agent.",
             llm_engine=engine,
-            role_prompt=role_config,
+            instructions=role_config,
             record_enabled=False,
         )
         agents.append((label, agent))
 
     # All three agents share the same parameter shape (base clause + style
-    # differ only in role_prompt text, not in declared schema) — print one
+    # differ only in instructions text, not in declared schema) — print one
     # to show the auto-grafted, required `domain` parameter.
     print("\n=== Agent schema (shared across all three personas) ===\n")
     for param in agents[0][1].parameters:

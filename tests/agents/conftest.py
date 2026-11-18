@@ -9,11 +9,57 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.agents.toolagent import ToolAgent
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.tools import toolify
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask, ToolAgentTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from ..fake_engines import FakeLLMEngine
+
+
+def param_source(name: str, params: list[str | ParamSpec]) -> AtomicInvokable:
+    """A parameter source (an invokable whose declared parameters join an
+    agent's signature) named ``name``, for tests that override
+    ``_extra_parameter_sources``.
+
+    ``params`` holds names and/or ``ParamSpec`` objects. Returns a
+    ``PromptTemplate`` whose template is one ``{n}`` placeholder per name. A
+    variadic ``ParamSpec`` is not allowed in a ``PromptTemplate``, so then a
+    ``Tool`` over a generated function with that signature is returned (names
+    and kinds only; the types are not carried over).
+    """
+    names = [p if isinstance(p, str) else p.name for p in params]
+    if not any(
+        isinstance(p, ParamSpec)
+        and p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD)
+        for p in params
+    ):
+        return PromptTemplate(
+            template=" ".join(f"{{{n}}}" for n in names),
+            name=name,
+            description=f"Parameter source {name}",
+            parameters=params,
+        )
+    pieces: list[str] = []
+    keyword_only_open = False
+    for p in params:
+        if isinstance(p, str):
+            pieces.append(p)
+        elif p.kind == ParamSpec.VAR_POSITIONAL:
+            pieces.append(f"*{p.name}")
+            keyword_only_open = True
+        elif p.kind == ParamSpec.VAR_KEYWORD:
+            pieces.append(f"**{p.name}")
+        else:
+            if p.kind == ParamSpec.KEYWORD_ONLY and not keyword_only_open:
+                pieces.append("*")
+                keyword_only_open = True
+            pieces.append(p.name)
+    namespace: dict[str, Any] = {}
+    exec(f"def _source({', '.join(pieces)}):\n    return ''\n", namespace)
+    return toolify(namespace["_source"], name=name, description=f"Parameter source {name}")
 
 
 def add(x: int, y: int) -> int:
@@ -53,7 +99,7 @@ def make_planact_agent(
     fail_fast: bool = True,
     post_invoke: Any = None,
     response_to_post: Any = (),
-    instructions: str | PromptTemplate | None = None,
+    instructions: Any = None,
     **overrides: Any,
 ) -> PlanActAgent:
     agent = PlanActAgent(
@@ -82,7 +128,7 @@ def make_react_agent(
     fail_fast: bool = False,
     post_invoke: Any = None,
     response_to_post: Any = (),
-    instructions: str | PromptTemplate | None = None,
+    instructions: Any = None,
     **overrides: Any,
 ) -> ReActAgent:
     agent = ReActAgent(
@@ -236,7 +282,7 @@ def make_stub_thinker(
     responses: list[Any],
     *,
     done_after: int = 1,
-    role_prompt: str | PromptTemplate | None = "You are a careful assistant.",
+    instructions: Any = "You are a careful assistant.",
     record_enabled: bool = False,
     **kwargs: Any,
 ) -> StubThinker:
@@ -246,7 +292,7 @@ def make_stub_thinker(
         name="tests",
         description="StubThinker under test.",
         llm_engine=FakeLLMEngine(responses),
-        role_prompt=role_prompt,
+        instructions=instructions,
         record_enabled=record_enabled,
         done_after=done_after,
         **kwargs,

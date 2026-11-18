@@ -65,7 +65,7 @@ writer_agent = BasicAgent(
     name="story_writer",
     description="Writes and revises short stories from a request and revision notes.",
     llm_engine=engine,
-    role_prompt=(
+    instructions=(
         "You are a strong short-fiction writer with a gift for clear storytelling, "
         "memorable imagery, emotional momentum, and satisfying endings. "
         "When given a fresh story request, write a complete short story rather than an outline. "
@@ -106,7 +106,7 @@ critic_agent = BasicAgent(
     name="story_critic",
     description="Critiques a story draft and either approves it or gives revision notes.",
     llm_engine=engine,
-    role_prompt=(
+    instructions=(
         "You are a demanding but constructive fiction editor. "
         "Your job is to inspect a story draft and decide whether it is publication-worthy for its intended scope. "
         "You care about coherence, specificity, pacing, atmosphere, character motivation, and the strength of the ending. "

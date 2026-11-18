@@ -19,7 +19,7 @@ trivia_agent = ScratchpadAgent(
     name="Trivia_Thinker",
     llm_engine=llm,
     thinking_rounds=6,
-    role_prompt="You are a careful trivia assistant. Answer concisely, in one or two sentences.",
+    instructions="You are a careful trivia assistant. Answer concisely, in one or two sentences.",
     thinking_instructions=(
         "You answer multi-hop questions -- they depend on a chain of "
         "intermediate facts you don't yet have. Each round, produce exactly "

@@ -23,7 +23,7 @@ def main() -> None:
         name="TriviaAgent",
         description="A concise trivia agent that returns one interesting fact about the user's topic.",
         llm_engine=llm,
-        role_prompt=(
+        instructions=(
             "You are a concise trivia specialist. "
             "When given a prompt or topic, return one accurate and interesting trivia fact "
             "in 2-4 sentences."

@@ -19,9 +19,11 @@ from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.tasks import AgentTask
+from atomic_agentic.constants.agents import RUNTIME_PARAM
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import to_paramspec_list
 from ..fake_engines import FakeLLMEngine, echo_latest_user
+from .conftest import param_source
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -37,6 +39,13 @@ class _MinimalAgent(Agent):
     override -- Agent's concrete base implementation (bare AgentTask) is
     sufficient. ``think``/``prepare`` stay inherited no-ops.
     """
+
+    def __init__(self, *, sources: Any = (), **kwargs: Any) -> None:
+        self._test_sources = list(sources)
+        super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return [{"role": "system", "content": "minimal"}]
@@ -92,9 +101,13 @@ class _EchoAgent(Agent):
     contract.
     """
 
-    def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
+    def __init__(self, *, system_prompt: str = ROLE_PROMPT, sources: Any = (), **kwargs: Any) -> None:
         self._echo_system_prompt = system_prompt
+        self._test_sources = list(sources)
         super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return [{"role": "system", "content": self._echo_system_prompt}]
@@ -292,6 +305,7 @@ def make_agent(
     system_prompt: str = ROLE_PROMPT,
     agent_cls: type[_EchoAgent] = _EchoAgent,
     name: str = "writer_agent",
+    sources: Any = (),
 ) -> _EchoAgent:
     # Default binding "result" matches the first parameter of the default
     # post (package_response) and most helper posts below; it applies only
@@ -319,6 +333,7 @@ def make_agent(
         response_to_post=response_to_post,
         response_to_context=response_to_context,
         inputs_to_context=inputs_to_context,
+        sources=sources,
     )
 
 
@@ -1390,35 +1405,35 @@ class TestAgentMutableRuntimeProperties:
         }
 
 
-class TestExtraParametersNormalization:
-    """Coverage for extra_parameters normalization via to_paramspec_list."""
+class TestParameterSources:
+    """Coverage for the parameter-source hook (``_extra_parameter_sources``)."""
 
-    def test_extra_parameters_none_produces_no_extra_schema_entries(self) -> None:
+    def test_no_sources_produces_no_extra_schema_entries(self) -> None:
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
-        # "prompt" comes from the built-in PROMPT_PARAM; no extra_parameters
+        # "prompt" comes from the built-in PROMPT_PARAM; no sources
         # means nothing else is grafted.
         assert [p.name for p in agent.parameters] == ["prompt"]
 
-    def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
+    def test_source_name_list_preserves_declared_kind(self) -> None:
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=["persona", "style"],
+            sources=[param_source("extras", ["persona", "style"])],
         )
         names = [p.name for p in agent.parameters]
         assert "persona" in names
         assert "style" in names
-        # to_paramspec_list default for a bare string list is POSITIONAL_OR_KEYWORD,
-        # not force-coerced to KEYWORD_ONLY (unlike the retired Graft-D behavior).
+        # A bare name is a POSITIONAL_OR_KEYWORD placeholder, not force-coerced
+        # to KEYWORD_ONLY (unlike the retired Graft-D behavior).
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.kind == "POSITIONAL_OR_KEYWORD"
 
-    def test_extra_parameters_paramspec_list_preserves_declared_kind(self) -> None:
+    def test_source_paramspec_list_preserves_declared_kind(self) -> None:
         specs = [
             ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
         ]
@@ -1426,36 +1441,105 @@ class TestExtraParametersNormalization:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=specs,
+            sources=[param_source("extras", specs)],
         )
         lang_param = next(p for p in agent.parameters if p.name == "lang")
         assert lang_param.kind == "KEYWORD_ONLY"
         assert lang_param.default == "English"
 
-    def test_extra_parameters_rejects_variadic_paramspec(self) -> None:
+    def test_source_var_keyword_that_is_not_runtime_context_raises(self) -> None:
         specs = [
-            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
+            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_KEYWORD, type="Any", default=NO_VAL),
         ]
-        with pytest.raises(AgentError, match="variadic"):
+        with pytest.raises(AgentError, match="extras"):
             _MinimalAgent(
                 name="a",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                extra_parameters=specs,
+                sources=[param_source("extras", specs)],
             )
 
-    def test_extra_parameters_values_reach_invoke_via_inputs(self) -> None:
+    def test_source_var_positional_is_accepted(self) -> None:
+        specs = [
+            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
+        ]
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", specs)],
+        )
+        items = next(p for p in agent.parameters if p.name == "items")
+        assert items.kind == ParamSpec.VAR_POSITIONAL
+
+    def test_source_runtime_context_identical_to_runtime_param_is_accepted(self) -> None:
+        agent = make_value_agent(
+            "r", sources=[param_source("extras", [RUNTIME_PARAM])]
+        )
+        assert _names(agent) == ["prompt", "runtime_context"]
+        task = agent.create_task(
+            agent.filter_inputs({"prompt": "p", "runtime_context": {"a": 1}})
+        )
+        # The source declared **runtime_context, so the dict rides in its slice.
+        assert task.agentic_inputs == {"runtime_context": {"a": 1}}
+        assert task.pre_inputs == {"prompt": "p"}
+
+    def test_sources_are_listed_in_priority_order_and_earlier_wins_an_overlap(self) -> None:
+        first = param_source("first", [ParamSpec(
+            name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="a")])
+        second = param_source("second", [ParamSpec(
+            name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="b")])
+        with pytest.warns(UserWarning, match="second"):
+            agent = _MinimalAgent(
+                name="a",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                sources=[first, second],
+            )
+        assert next(p for p in agent.parameters if p.name == "x").default == "a"
+
+    def test_pre_beats_post_beats_sources(self) -> None:
+        def pre(topic: str = "pre") -> str:
+            return topic
+
+        def post(result: str, topic: str = "post") -> str:
+            return result
+
+        source = param_source("src", [ParamSpec(
+            name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="src")])
+        with pytest.warns(UserWarning, match="not identical"):
+            agent = _MinimalAgent(
+                name="a",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre,
+                post_invoke=post,
+                response_to_post="result",
+                sources=[source],
+            )
+        assert next(p for p in agent.parameters if p.name == "topic").default == "pre"
+
+    def test_hook_default_is_empty_and_render_hooks_are_no_ops(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs({"topic": "t", "tone": "x"}))
+
+        assert Agent._extra_parameter_sources(agent) == []
+        agent.pre_process(task)
+        asyncio.run(agent.async_pre_process(task))
+        assert task.instructions == ""
+
+    def test_source_values_reach_invoke_via_inputs(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         # _MinimalAgent ignores extra inputs entirely, but invoke() must
-        # accept the extra top-level key without complaint (no more "context"
-        # dict wrapper -- extra_parameters values are flat top-level keys now).
+        # accept the extra top-level key without complaint (source values are
+        # flat top-level keys).
         result = agent.invoke({"prompt": "hi", "lang": "French"})
         assert result is not None
 
@@ -1504,7 +1588,7 @@ class TestPeerOverlapReconciliation:
 
 
 class TestBindResponseToSharedNames:
-    """A destination that another source (pre_invoke / extra_parameters) also
+    """A destination that another source (pre_invoke / a parameter source) also
     declares."""
 
     def test_bound_name_declared_by_pre_must_be_type_compatible(self) -> None:
@@ -1532,7 +1616,7 @@ class TestBindResponseToSharedNames:
         )
         assert agent._response_to_post == "topic"
 
-    def test_collision_with_extra_parameters_name_is_allowed(self) -> None:
+    def test_collision_with_parameter_source_name_is_allowed(self) -> None:
         def post_with_flag(result: str, flag: str = "x") -> str:
             return result
 
@@ -1542,7 +1626,7 @@ class TestBindResponseToSharedNames:
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             post_invoke=post_with_flag,
             response_to_post="flag",
-            extra_parameters=["flag"],
+            sources=[param_source("extras", ["flag"])],
         )
         assert agent._response_to_post == "flag"
 
@@ -1603,7 +1687,7 @@ class TestPreVsPostReconciliation:
 
 class TestCombinedVsExtraReconciliation:
     """Named for the overlap it exercises (pre_invoke/post_invoke's combined
-    schema vs. extra_parameters); the underlying mechanism is now the same
+    schema vs. a parameter source); the underlying mechanism is now the same
     single unified N-way peer report described in TestPreVsPostReconciliation,
     not a distinct second fold stage."""
 
@@ -1614,9 +1698,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="int", default=NO_VAL),
-                ],
+                ])],
             )
 
     def test_compatible_but_not_identical_overlap_warns_and_combined_wins(self) -> None:
@@ -1626,9 +1710,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="fallback"),
-                ],
+                ])],
             )
         topic_param = next(p for p in agent.parameters if p.name == "topic")
         # combined (pre_invoke's) declaration wins: required, no default.
@@ -1643,9 +1727,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
-                ],
+                ])],
             )
         assert not any("topic" in str(w.message) for w in caught)
 
@@ -1655,9 +1739,9 @@ class TestCombinedVsExtraReconciliation:
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre_with_two_fields,
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="flag", index=0, kind=ParamSpec.KEYWORD_ONLY, type="bool", default=False),
-            ],
+            ])],
         )
         names = [p.name for p in agent.parameters]
         assert names == ["subject", "style", "flag"]
@@ -1678,7 +1762,7 @@ class TestNWayWitnessOrderIndependence:
     unmodified as the fold "winner" and discarded post_invoke's full type
     declaration for any overlapping name -- meaning the old fold's final
     verdict for a name shared by all three sources reduced to a bare
-    pre_invoke-vs-extra_parameters pairwise check, silently blind to
+    pre_invoke-vs-parameter-source pairwise check, silently blind to
     whatever bridging information only post_invoke held.
 
     NOTE ON THE BRAINSTORM DOC'S OWN WORKED EXAMPLE: the brainstorm doc's
@@ -1718,12 +1802,12 @@ class TestNWayWitnessOrderIndependence:
                 pre_invoke=pre_with_dict_shared,
                 post_invoke=post_with_bare_dict_shared,
                 response_to_post="result",
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(
                         name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
                         type="dict[str, str]", default=NO_VAL,
                     ),
-                ],
+                ])],
             )
 
         shared_param = next(p for p in agent.parameters if p.name == "shared")
@@ -1759,9 +1843,9 @@ class TestNWayWitnessOrderIndependence:
                 pre_invoke=pre_int_shared,
                 post_invoke=post_int_or_str_shared,
                 response_to_post="result",
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
-                ],
+                ])],
             )
 
 
@@ -1857,9 +1941,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
@@ -1870,9 +1954,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
@@ -1883,9 +1967,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
 
@@ -1896,9 +1980,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi"})
         agent.invoke({"prompt": "yo"})
@@ -1990,7 +2074,7 @@ class TestCreateTask:
             name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre, post_invoke=post, response_to_post="result",
-            extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
+            sources=[param_source("extras", [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")])],
         )
         inputs = agent.filter_inputs(
             {"subject": "s", "shared": "x", "only_post": "y", "lang": "fr"}
@@ -2000,7 +2084,7 @@ class TestCreateTask:
 
         assert task.pre_inputs == {"subject": "s", "shared": "x"}
         assert task.post_inputs == {"shared": "x", "only_post": "y"}
-        # extra_parameters names only; "lang" is in no other view.
+        # source names only; "lang" is in no other view.
         assert task.agentic_inputs == {"lang": "fr"}
         assert "lang" not in task.pre_inputs
         assert "lang" not in task.post_inputs
@@ -2522,9 +2606,13 @@ class _ValueAgent(Agent):
     the str responses ``_EchoAgent`` requires. It still makes one real
     engine call so ``result_payload_from_task`` has an LLM record to read."""
 
-    def __init__(self, *, response_value: Any, **kwargs: Any) -> None:
+    def __init__(self, *, response_value: Any, sources: Any = (), **kwargs: Any) -> None:
         self._response_value = response_value
+        self._test_sources = list(sources)
         super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return []
@@ -3612,9 +3700,9 @@ class TestRuntimeContext:
             make_value_agent(
                 "r", post_invoke=post_plain, response_to_post="resp", use_runtime_context=knob
             )
-        with pytest.raises(AgentError, match="runtime context parameter's name"):
+        with pytest.raises(AgentError, match="runtime context"):
             make_value_agent(
-                "r", extra_parameters=["runtime_context"], use_runtime_context=knob
+                "r", sources=[param_source("extras", ["runtime_context"])], use_runtime_context=knob
             )
 
     @pytest.mark.parametrize("binding", ["runtime_context", {"k": "runtime_context"}])
@@ -3864,7 +3952,7 @@ class TestConstructorRule:
             "name", "description", "llm_engine",
             "pre_invoke", "post_invoke",
             "inputs_to_context", "response_to_context", "response_to_post",
-            "use_runtime_context", "extra_parameters",
+            "use_runtime_context",
             "record_enabled", "records_window",
         ]
         assert all(

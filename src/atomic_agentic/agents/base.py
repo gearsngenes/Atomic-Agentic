@@ -20,7 +20,6 @@ from ..exceptions import (
     AgentInvocationError,
 )
 from ..core.atomic_invokable import AtomicInvokable
-from ..core.prompt_template import PromptTemplate
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
@@ -43,7 +42,6 @@ from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
     insert_by_category,
-    to_paramspec_list,
     build_parameter_reports,
     apply_parameter_reports,
 )
@@ -54,45 +52,6 @@ from ..utils.rendering import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def normalize_prompt_config(
-    value: str | PromptTemplate | None,
-    *,
-    name: str,
-    default_template: str | None,
-    provided_description: str,
-    error_label: str,
-    default_description: str | None = None,
-) -> PromptTemplate | None:
-    """Pass 1 shim (Pass 2 deletes it): coerce a prompt-shaped construction
-    value to a ``PromptTemplate``, or ``None``.
-
-    1. ``None`` or a blank ``str``: ``None`` when ``default_template`` is
-       ``None``, else a ``PromptTemplate`` of ``default_template``.
-    2. A non-blank ``str``: a ``PromptTemplate`` of ``value.strip()``.
-    3. A ``PromptTemplate``: returned unchanged.
-    4. Anything else: ``TypeError``.
-    """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        if default_template is None:
-            return None
-        return PromptTemplate(
-            template=default_template,
-            name=name,
-            description=default_description,
-        )
-    if isinstance(value, str):
-        return PromptTemplate(
-            template=value.strip(),
-            name=name,
-            description=provided_description,
-        )
-    if isinstance(value, PromptTemplate):
-        return value
-    raise TypeError(
-        f"{error_label} must be str, PromptTemplate, or None; got {type(value).__name__}."
-    )
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -132,18 +91,18 @@ class Agent(AtomicInvokable, ABC):
 
     Schema composition
     -------------------
-    The agent's parameter schema is composed at construction time from four
+    The agent's parameter schema is composed at construction time from these
     flat sources:
 
     - All ``pre_invoke`` parameters (the built-in ``prompt`` parameter when
       there is no ``pre_invoke``).
     - Post-only parameters not filled by a ``response_to_post`` destination
-      (those leave the public signature unless pre_invoke/extra_parameters
-      also declares them), preserving their original declared kind (no
+      (those leave the public signature unless pre_invoke or a parameter
+      source also declares them), preserving their original declared kind (no
       forced ``KEYWORD_ONLY`` coercion).
-    - ``extra_parameters`` — a flat, subclass-computed source (e.g.
-      ``BasicAgent`` passes its role-prompt placeholders as this agent's
-      sole ``extra_parameters`` source).
+    - The parameter sources ``_extra_parameter_sources()`` returns, in list
+      order (e.g. ``BasicAgent`` returns its instructions slot, so the slot's
+      placeholders become agent inputs).
     - The runtime context parameter (``**runtime_context``), when
       ``use_runtime_context`` is set at construction.
 
@@ -154,7 +113,7 @@ class Agent(AtomicInvokable, ABC):
     compatible-but-not-identical overlap warns once per construction call,
     grouped across every such name — not one warning per name. The
     highest-priority declaring source (``pre_invoke`` > ``post_invoke`` >
-    ``extra_parameters`` > runtime) supplies ``kind``/``default``/``description``
+    parameter sources in order > runtime) supplies ``kind``/``default``/``description``
     together; the constructed ``type`` is the full witness set of compatible
     type tokens, not just the winning source's own declared type. An
     identical overlap is silent. Grafting uses ``insert_by_category`` so every
@@ -192,11 +151,11 @@ class Agent(AtomicInvokable, ABC):
     ``**runtime_context`` carries improvised per-call variables that have no
     explicit conversation mapping. The parameter exists iff
     ``use_runtime_context`` is set at construction or ``pre_invoke``/
-    ``post_invoke`` declares it; a declaration (or any parameter named
-    ``runtime_context``) must be semantically identical to ``RUNTIME_PARAM``,
-    knob on or off, and that is the only ``**kwargs`` allowed in pre/post
-    (anything else raises ``AgentError``). Pre/post receive the dict only if
-    they declare it. With ``use_runtime_context`` set, ``create_task``
+    ``post_invoke`` or a parameter source declares it. One rule for every
+    source: a declaration (or any parameter named ``runtime_context``) must be
+    semantically identical to ``RUNTIME_PARAM``, knob on or off, and that is
+    the only ``**kwargs`` allowed (anything else raises ``AgentError``);
+    ``*args`` is allowed. Each declarer receives the dict. With ``use_runtime_context`` set, ``create_task``
     flattens the dict into ``task.context`` by its own keys -- before
     ``inputs_to_context``, so an explicit mapping wins a name clash --
     replacing a writable variable, skipping a readonly one and creating an
@@ -285,7 +244,6 @@ class Agent(AtomicInvokable, ABC):
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
-        extra_parameters: list[str] | list[ParamSpec] | None = None,
         record_enabled: bool = True,
         records_window: Optional[int] = None,
     ) -> None:
@@ -316,12 +274,21 @@ class Agent(AtomicInvokable, ABC):
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
 
+        # ── Parameter sources ────────────────────────────────────────────────
+        # Called once; subclasses have already set their slot attributes.
+        sources = self._extra_parameter_sources()
+
         # ── Variadic keywords and the runtime name ───────────────────────────
-        # Independent of the knob: a **kwargs parameter must BE the runtime
-        # parameter (every name pre/post consume must be enumerable at
-        # construction), and any parameter NAMED runtime_context must be
-        # identical to it.
-        for tool, label in ((pre_tool, "pre_invoke"), (post_tool, "post_invoke")):
+        # One rule for every source, independent of the knob: a **kwargs
+        # parameter must BE the runtime parameter (every name a source
+        # consumes must be enumerable at construction), and any parameter NAMED
+        # runtime_context must be identical to it.
+        checked = [
+            (pre_tool, "pre_invoke"),
+            (post_tool, "post_invoke"),
+            *((src, src.name) for src in sources),
+        ]
+        for tool, label in checked:
             for p in () if tool is None else tool.parameters:
                 if (
                     p.kind == ParamSpec.VAR_KEYWORD or p.name == RUNTIME_PARAM.name
@@ -335,25 +302,10 @@ class Agent(AtomicInvokable, ABC):
                         "callable to drop it."
                     )
 
-        # ── Extra parameters ─────────────────────────────────────────────────
-        extra_raw = to_paramspec_list(extra_parameters)
-        for p in extra_raw:
-            if p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
-                raise AgentError(
-                    f"extra_parameters entry {p.name!r} must not be variadic; "
-                    f"got kind {p.kind!r}."
-                )
-            if p.name == RUNTIME_PARAM.name:
-                raise AgentError(
-                    f"extra_parameters entry {p.name!r} is the runtime context "
-                    "parameter's name; extras cannot be variadic, so it can never "
-                    "match it."
-                )
-
         # ── Bindings ─────────────────────────────────────────────────────────
         # A post parameter filled by response_to_post that no other source
         # declares is fed by the response alone, so it leaves the public
-        # signature. One that pre_invoke/extra_parameters also declares stays in
+        # signature. One that pre_invoke or a source also declares stays in
         # the reconciliation below: when the response lacks its key, the
         # caller's value is what the post receives, so the declarations must be
         # compatible.
@@ -382,23 +334,24 @@ class Agent(AtomicInvokable, ABC):
                 "response may fill."
             )
         pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
+        source_params = [list(src.parameters) for src in sources]
         declared_elsewhere = {p.name for p in pre_declared} | {
-            p.name for p in extra_raw
+            p.name for ps in source_params for p in ps
         }
         response_filled = bound_post - declared_elsewhere
 
         # ── Schema composition ───────────────────────────────────────────────
         # The sources are reconciled N-way (pre_invoke > post_invoke >
-        # extra_parameters > runtime), raising on the first genuine conflict and
+        # parameter sources in order > runtime), raising on the first genuine conflict and
         # warning once for compatible-but-not-identical names. Any runtime_context
         # declaration reaching this point is already identical to RUNTIME_PARAM.
         post_only = [p for p in post_params if p.name not in response_filled]
-        sources = [pre_declared, post_only, extra_raw]
-        labels = ["pre_invoke", "post_invoke", "extra_parameters"]
+        report_sources = [pre_declared, post_only, *source_params]
+        labels = ["pre_invoke", "post_invoke", *(src.name for src in sources)]
         if use_runtime_context:
-            sources.append([RUNTIME_PARAM])
+            report_sources.append([RUNTIME_PARAM])
             labels.append("use_runtime_context")
-        reports = build_parameter_reports(sources)
+        reports = build_parameter_reports(report_sources)
         constructed = apply_parameter_reports(
             reports, tuple(labels), error_cls=AgentError, stacklevel=4
         )
@@ -431,7 +384,7 @@ class Agent(AtomicInvokable, ABC):
         self._context_destinations: frozenset[str] = frozenset(destinations)
         self._pre_names = frozenset(p.name for p in pre_declared)
         self._post_names = frozenset(p.name for p in post_params)
-        self._agentic_names = frozenset(p.name for p in extra_raw)
+        self._agentic_names = frozenset(p.name for ps in source_params for p in ps)
         self._use_runtime_context: bool = use_runtime_context
 
         # Store Agent runtime configuration.
@@ -455,6 +408,29 @@ class Agent(AtomicInvokable, ABC):
                 self._post_invoke.return_type if self._post_invoke is not None else ("Any",)
             ),
         )
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        """Invokables whose declared parameters join this agent's signature,
+        in priority order (an earlier one wins an overlap).
+
+        Called once, from ``Agent.__init__``, so a subclass must set the
+        attributes it reads before calling ``super().__init__()``. Subclasses
+        extend the base list through ``super()``. The base has none.
+        """
+        return []
+
+    def _render_instructions(self, task: AgentTask) -> None:
+        """Render this agent's prompt slots into ``task`` fields.
+
+        Called as the last step of ``pre_process``. A subclass with a slot
+        overrides it (and its async twin), invoking each slot once per invoke.
+        The base has no slot, so this is a no-op.
+        """
+
+    async def _async_render_instructions(self, task: AgentTask) -> None:
+        """Async twin of ``_render_instructions``; the default is a no-op, so
+        it runs inline. A subclass that overrides the sync hook must override
+        this too (it awaits ``slot.async_invoke``)."""
 
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
@@ -686,8 +662,9 @@ class Agent(AtomicInvokable, ABC):
         receives the caller inputs for its declared parameters, with bound
         values overlaid by ``post_process``; pre/post see ``runtime_context``
         only if they declare it. ``agentic_inputs`` holds the
-        ``extra_parameters``-sourced names
-        (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
+        names the agent's parameter sources declare (the prompt slots); it is
+        the union over all sources, and each source takes only its own names
+        from it (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
 
         The task class comes from ``_TASK_CLS``; ``_seed_task`` then does any
@@ -793,13 +770,17 @@ class Agent(AtomicInvokable, ABC):
         return self.summarize(task)
 
     def pre_process(self, task: AgentTask) -> AgentTask:
-        """Run ``pre_invoke`` over ``task.pre_inputs`` to produce the prompt.
+        """Produce the prompt, then render the prompt slots.
 
-        Reads ``task.pre_inputs``; always overwrites ``task.user_prompt``;
-        returns ``task``. With no ``pre_invoke`` the prompt is
-        ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
-        propagate unchanged. A non-``str`` prompt raises
-        ``AgentInvocationError`` -- a prompt string is required.
+        1. Run ``pre_invoke`` over ``task.pre_inputs``; always overwrites
+           ``task.user_prompt``. With no ``pre_invoke`` the prompt is
+           ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
+           propagate unchanged. A non-``str`` prompt raises
+           ``AgentInvocationError`` -- a prompt string is required.
+        2. Last step: ``_render_instructions(task)`` renders the agent's prompt
+           slots into the task's flat fields (a no-op without slots).
+
+        Returns ``task``.
         """
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
         if self._pre_invoke is None:
@@ -808,10 +789,12 @@ class Agent(AtomicInvokable, ABC):
             raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
             subject = "pre_invoke returned a non-string result"
         task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        self._render_instructions(task)
         return task
 
     async def async_pre_process(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``pre_process``."""
+        """Async mirror of ``pre_process``; ends with
+        ``_async_render_instructions(task)``."""
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
         if self._pre_invoke is None:
             raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
@@ -819,6 +802,7 @@ class Agent(AtomicInvokable, ABC):
             raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
             subject = "pre_invoke returned a non-string result"
         task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        await self._async_render_instructions(task)
         return task
 
     @staticmethod
@@ -910,7 +894,8 @@ class Agent(AtomicInvokable, ABC):
         single ``{"role": "system", "content": ...}`` dict.
 
         Hard-abstract: the base has no prompt of its own. A pure function of
-        the agent and the task.
+        the agent and the task. Reads fields the pre stage rendered; valid only
+        after ``pre_process``.
         """
         ...
 

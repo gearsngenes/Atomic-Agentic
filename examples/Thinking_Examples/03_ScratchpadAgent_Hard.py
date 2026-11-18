@@ -22,9 +22,9 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 
 # --- thinking_instructions is the parameterized side of this example
 #     (Example 1 used plain prompts and example 2 a parameterized
-#     role_prompt -- this one shows a plain string role_prompt paired with a
+#     instructions -- this one shows a plain string instructions slot paired with a
 #     thinking_instructions PromptTemplate contributing its OWN
-#     {verification_style} placeholder, reconciled against role_prompt's own
+#     {verification_style} placeholder, reconciled against the instructions slot's own
 #     params the same way at construction time).
 #
 #     Thoughts are free text, so the instructions below carry the whole
@@ -70,7 +70,7 @@ puzzle_agent = ScratchpadAgent(
     name="Branching_Puzzle_Solver",
     llm_engine=llm,
     thinking_rounds=3,
-    role_prompt="You are a meticulous puzzle solver who shows its work clearly.",
+    instructions="You are a meticulous puzzle solver who shows its work clearly.",
     thinking_instructions=PUZZLE_THINKING_INSTRUCTIONS,
     description="A puzzle solver that explores multiple candidate leads per stage before committing, via multi-round labelled thinking.",
 )

@@ -49,7 +49,7 @@ class TestReActConstruction:
 
     def test_instructions_forwarded(self) -> None:
         agent = make_react_agent([], instructions="Be terse.")
-        assert agent.instructions == "Be terse."
+        assert agent.instructions.template == "Be terse."
 
     @pytest.mark.parametrize("removed", [{"constants": [1]}, {"tool_instructions": "x"}])
     def test_removed_constructor_arguments_raise_type_error(self, removed: dict[str, Any]) -> None:
@@ -796,6 +796,30 @@ class TestReActRendering:
         assert "AVAILABLE TOOLS" in system
         assert "USER-DEFINED INSTRUCTIONS" in system
         assert "Be terse." in system
+
+    def test_instructions_slot_runs_once_across_a_multi_round_run(self) -> None:
+        calls: list[str] = []
+
+        def guidance() -> str:
+            calls.append("called")
+            return "Be terse."
+
+        agent = make_react_agent(
+            [
+                rstep(call="add", arguments=[arg("x", 2), arg("y", 3)], result_name="a"),
+                rstep(call="add", arguments=[arg("x", 1), arg("y", 1)], result_name="b"),
+                rstep(call="return", arguments=[arg("val", 1)]),
+            ],
+            instructions=guidance,
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        assert len(agent._llm_engine.calls) == 3
+        assert calls == ["called"]
+        for call in agent._llm_engine.calls:
+            system = next(m["content"] for m in call if m["role"] == "system")
+            assert "Be terse." in system
 
 
 # --------------------------------------------------------------------------- #

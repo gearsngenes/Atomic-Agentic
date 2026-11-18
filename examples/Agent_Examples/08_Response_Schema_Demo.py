@@ -42,7 +42,7 @@ def main() -> None:
         name="summarizer",
         description="Summarizes text into a structured verdict.",
         llm_engine=AnthropicEngine("claude-sonnet-4-5-20250929"),
-        role_prompt="You are a concise technical reviewer.",
+        instructions="You are a concise technical reviewer.",
         response_schema={
             "type": "object",
             "properties": {
@@ -66,7 +66,7 @@ def main() -> None:
         name="bare_int_agent",
         description="Replies with a single integer, nothing else.",
         llm_engine=AnthropicEngine("claude-sonnet-4-5-20250929"),
-        role_prompt="You are terse. Answer only with the requested number.",
+        instructions="You are terse. Answer only with the requested number.",
         response_schema={"type": "integer"},
     )
     bare_result = bare_agent.invoke({"prompt": "How many continents are there?"})
@@ -80,7 +80,7 @@ def main() -> None:
         name="bare_int_agent_openai",
         description="Replies with a single integer, nothing else.",
         llm_engine=OpenAIEngine("gpt-4o-mini"),
-        role_prompt="You are terse. Answer only with the requested number.",
+        instructions="You are terse. Answer only with the requested number.",
         response_schema={"type": "integer"},
     )
     try:

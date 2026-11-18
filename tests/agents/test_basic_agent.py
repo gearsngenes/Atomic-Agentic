@@ -6,10 +6,13 @@ import pytest
 import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.exceptions import AgentError
+from atomic_agentic.constants.agents import DEFAULT_INSTRUCTIONS
+from atomic_agentic.exceptions import AgentError, ToolInvocationError
 from atomic_agentic.models.agents.conversations import Conversation
+from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.tools import Tool
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 CONTEXT_START = "==== RUNTIME CONTEXT [START] ===="
@@ -21,7 +24,7 @@ TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
 def make_basic_agent(
     *,
     engine: FakeLLMEngine | None = None,
-    role_prompt: str | PromptTemplate | None = None,
+    instructions: Any = DEFAULT_INSTRUCTIONS,
     record_enabled: bool = False,
     **kwargs: Any,
 ) -> BasicAgent:
@@ -29,7 +32,7 @@ def make_basic_agent(
         name="basic_agent",
         description="BasicAgent under test.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
-        role_prompt=role_prompt,
+        instructions=instructions,
         record_enabled=record_enabled,
         **kwargs,
     )
@@ -43,32 +46,212 @@ def wrap(prompt: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
-class TestBasicAgentRolePrompt:
-    def test_none_role_prompt_uses_default(self) -> None:
-        agent = make_basic_agent(role_prompt=None)
-        assert agent.role_prompt == BasicAgent.DEFAULT_ROLE_PROMPT
+class TestBasicAgentInstructions:
+    def test_omitted_instructions_use_the_default_constant(self) -> None:
+        agent = make_basic_agent()
+        assert agent.instructions.template == DEFAULT_INSTRUCTIONS
 
-    def test_empty_string_role_prompt_uses_default(self) -> None:
-        agent = make_basic_agent(role_prompt="   ")
-        assert agent.role_prompt == BasicAgent.DEFAULT_ROLE_PROMPT
+    def test_none_instructions_raise_type_error(self) -> None:
+        with pytest.raises(TypeError, match="instructions"):
+            make_basic_agent(instructions=None)
 
-    def test_string_role_prompt_stored_stripped(self) -> None:
-        agent = make_basic_agent(role_prompt="  You are a poet.  ")
-        assert agent.role_prompt == "You are a poet."
+    def test_blank_instructions_raise_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            make_basic_agent(instructions="   ")
 
-    def test_prompt_template_role_prompt_stored_as_is(self) -> None:
+    def test_string_instructions_are_kept_verbatim(self) -> None:
+        agent = make_basic_agent(instructions="  You are a poet.  ")
+        assert agent.instructions.template == "  You are a poet.  "
+
+    def test_prompt_template_instructions_used_as_is(self) -> None:
         config = PromptTemplate(template="Act like {role}.", name="t", description="Custom role")
-        agent = make_basic_agent(role_prompt=config)
-        assert agent.role_prompt == "Act like {role}."
+        agent = make_basic_agent(instructions=config)
+        assert agent.instructions is config
+        assert agent.instructions.template == "Act like {role}."
 
-    def test_invalid_role_prompt_type_raises_type_error(self) -> None:
-        with pytest.raises(TypeError, match="role_prompt"):
-            make_basic_agent(role_prompt=123)  # type: ignore[arg-type]
+    def test_invalid_instructions_type_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="instructions"):
+            make_basic_agent(instructions=123)
 
-    def test_role_prompt_has_no_setter(self) -> None:
-        agent = make_basic_agent(role_prompt="You are a poet.")
+    def test_instructions_have_no_setter(self) -> None:
+        agent = make_basic_agent(instructions="You are a poet.")
         with pytest.raises(AttributeError):
-            agent.role_prompt = "You are a chef."  # type: ignore[misc]
+            agent.instructions = "You are a chef."  # type: ignore[misc]
+
+    def test_role_prompt_is_gone(self) -> None:
+        with pytest.raises(TypeError):
+            make_basic_agent(role_prompt="x")  # type: ignore[call-arg]
+        assert not hasattr(make_basic_agent(), "role_prompt")
+        assert not hasattr(BasicAgent, "DEFAULT_ROLE_PROMPT")
+
+
+def _persona_slot(persona: str) -> str:
+    return f"You are a {persona}."
+
+
+class TestBasicAgentSlotTypes:
+    def test_callable_slot_is_wrapped_and_named(self) -> None:
+        agent = make_basic_agent(instructions=_persona_slot)
+
+        assert isinstance(agent.instructions, Tool)
+        assert agent.instructions.name == "basic_agent_instructions"
+        assert [p.name for p in agent.parameters] == ["prompt", "persona"]
+
+    def test_string_slot_is_a_prompt_template_with_the_coerced_name(self) -> None:
+        agent = make_basic_agent(instructions="You are a {persona}.")
+
+        assert isinstance(agent.instructions, PromptTemplate)
+        assert agent.instructions.name == "basic_agent_instructions"
+
+    def test_tool_slot_is_used_as_is(self) -> None:
+        tool = Tool(_persona_slot, name="my_slot", description="d")
+        agent = make_basic_agent(instructions=tool)
+
+        assert agent.instructions is tool
+        assert agent.instructions.name == "my_slot"
+
+    @pytest.mark.parametrize("slot", ["string", "callable", "tool", "template"])
+    def test_every_slot_type_renders_the_system_message(self, slot: str) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        instructions = {
+            "string": "You are a {persona}.",
+            "callable": _persona_slot,
+            "tool": Tool(_persona_slot, name="slot", description="d"),
+            "template": PromptTemplate(template="You are a {persona}.", name="t", description="d"),
+        }[slot]
+        agent = make_basic_agent(engine=engine, instructions=instructions)
+
+        agent.invoke({"prompt": "hi", "persona": "pirate"})
+
+        assert engine.calls[0][0] == {"role": "system", "content": "You are a pirate."}
+
+    def test_agent_slot_renders_its_reply_as_the_system_message(self) -> None:
+        inner = make_basic_agent(instructions="inner")
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = make_basic_agent(engine=engine, instructions=inner)
+
+        agent.invoke({"prompt": "hi"})
+
+        assert engine.calls[0][0]["content"] == f"ECHO: {wrap('hi')}"
+
+    def test_async_agent_slot_uses_async_invoke_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        inner = make_basic_agent(instructions="inner")
+        calls = {"async": 0}
+        real_async = inner.async_invoke
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("sync invoke must not be called on an async path")
+
+        async def counted(*args: Any, **kwargs: Any) -> Any:
+            calls["async"] += 1
+            return await real_async(*args, **kwargs)
+
+        monkeypatch.setattr(inner, "invoke", boom)
+        monkeypatch.setattr(inner, "async_invoke", counted)
+        agent = make_basic_agent(instructions=inner)
+
+        result = asyncio.run(agent.async_invoke({"prompt": "hi"}))
+
+        assert calls["async"] == 1
+        assert result.result.startswith("ECHO: ")
+
+
+class TestBasicAgentSlotRendering:
+    def test_slot_runs_exactly_once_per_invoke(self) -> None:
+        calls: list[str] = []
+
+        def slot(persona: str) -> str:
+            calls.append(persona)
+            return f"You are a {persona}."
+
+        agent = make_basic_agent(instructions=slot)
+
+        agent.invoke({"prompt": "a", "persona": "x"})
+        agent.invoke({"prompt": "b", "persona": "y"})
+
+        assert calls == ["x", "y"]
+
+    def test_non_str_slot_result_raises_type_error_naming_slot_and_type(self) -> None:
+        def slot() -> int:
+            return 5
+
+        agent = make_basic_agent(instructions=slot)
+
+        with pytest.raises(TypeError, match=r"basic_agent_instructions.*int"):
+            agent.invoke({"prompt": "hi"})
+        with pytest.raises(TypeError, match=r"basic_agent_instructions.*int"):
+            asyncio.run(agent.async_invoke({"prompt": "hi"}))
+
+    def test_slot_errors_are_not_rewrapped_by_the_agent(self) -> None:
+        def slot() -> str:
+            raise RuntimeError("slot blew up")
+
+        agent = make_basic_agent(instructions=slot)
+
+        # A toolified callable surfaces as the Tool's own ToolInvocationError.
+        with pytest.raises(ToolInvocationError, match="slot blew up"):
+            agent.invoke({"prompt": "hi"})
+
+    def test_system_message_is_unframed_task_instructions(self) -> None:
+        agent = make_basic_agent(instructions="You are a {persona}.")
+        task = agent.create_task(agent.filter_inputs({"prompt": "hi", "persona": "pirate"}))
+
+        assert task.instructions == ""
+        agent.pre_process(task)
+
+        assert task.instructions == "You are a pirate."
+        assert agent._render_system_message(task) == [
+            {"role": "system", "content": "You are a pirate."}
+        ]
+
+    def test_async_pre_process_fills_the_same_field(self) -> None:
+        agent = make_basic_agent(instructions="You are a {persona}.")
+        task = agent.create_task(agent.filter_inputs({"prompt": "hi", "persona": "pirate"}))
+
+        asyncio.run(agent.async_pre_process(task))
+
+        assert task.instructions == "You are a pirate."
+
+    def test_slot_receives_only_its_own_names(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def slot(persona: str) -> str:
+            seen["persona"] = persona
+            return persona
+
+        def pre(prompt: str, topic: str = "t") -> str:
+            return prompt
+
+        agent = make_basic_agent(instructions=slot, pre_invoke=pre)
+        task = agent.create_task(
+            agent.filter_inputs({"prompt": "hi", "persona": "x", "topic": "y"})
+        )
+
+        assert task.agentic_inputs == {"persona": "x"}
+        agent.pre_process(task)
+        assert seen == {"persona": "x"}
+
+    def test_slot_declaring_runtime_context_receives_exactly_the_runtime_dict(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def slot(persona: str, **runtime_context: Any) -> str:
+            seen["runtime"] = dict(runtime_context)
+            return persona
+
+        agent = make_basic_agent(instructions=slot, use_runtime_context=True)
+
+        agent.invoke({"prompt": "hi", "persona": "x", "runtime_context": {"a": 1}})
+
+        assert seen["runtime"] == {"a": 1}
+
+    def test_slot_placeholder_overlapping_pre_invoke_warns_and_pre_wins(self) -> None:
+        def pre(prompt: str, persona: str = "pre") -> str:
+            return prompt
+
+        with pytest.warns(UserWarning, match="persona"):
+            agent = make_basic_agent(instructions="You are a {persona}.", pre_invoke=pre)
+
+        assert next(p for p in agent.parameters if p.name == "persona").default == "pre"
 
 
 class TestBasicAgentRemovedAPISurfaces:
@@ -92,17 +275,17 @@ class TestBasicAgentRemovedAPISurfaces:
 
 
 class TestBasicAgentSchemaComposition:
-    """Role-prompt placeholders are now a flat extra_parameters source."""
+    """Instructions placeholders join the signature as a parameter source."""
 
-    def test_role_prompt_placeholder_becomes_top_level_param(self) -> None:
+    def test_instructions_placeholder_becomes_top_level_param(self) -> None:
         config = PromptTemplate(template="You are a {persona} assistant.", name="t", description="d")
-        agent = make_basic_agent(role_prompt=config)
+        agent = make_basic_agent(instructions=config)
 
         names = [p.name for p in agent.parameters]
         assert names == ["prompt", "persona"]
 
-    def test_static_role_prompt_produces_no_extra_params(self) -> None:
-        agent = make_basic_agent(role_prompt="You are a generic assistant.")
+    def test_static_instructions_produce_no_extra_params(self) -> None:
+        agent = make_basic_agent(instructions="You are a generic assistant.")
 
         names = [p.name for p in agent.parameters]
         assert names == ["prompt"]
@@ -122,14 +305,14 @@ class TestBasicAgentSchemaComposition:
                 )
             ],
         )
-        agent = make_basic_agent(role_prompt=config)
+        agent = make_basic_agent(instructions=config)
 
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.default == "a helper"
 
     def test_role_placeholder_is_positional_or_keyword(self) -> None:
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(role_prompt=config)
+        agent = make_basic_agent(instructions=config)
 
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.kind == ParamSpec.POSITIONAL_OR_KEYWORD
@@ -139,7 +322,7 @@ class TestBasicAgentSchemaComposition:
             return persona
 
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
+        agent = make_basic_agent(instructions=config, pre_invoke=custom_pre)
 
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.kind == ParamSpec.KEYWORD_ONLY
@@ -147,7 +330,7 @@ class TestBasicAgentSchemaComposition:
     def test_placeholder_can_be_passed_by_keyword_through_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(engine=engine, role_prompt=config)
+        agent = make_basic_agent(engine=engine, instructions=config)
 
         agent("hi", persona="x")
 
@@ -166,44 +349,43 @@ class TestBasicAgentSchemaComposition:
             ],
         )
         with pytest.raises(AgentError):
-            make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
+            make_basic_agent(instructions=config, pre_invoke=custom_pre)
 
 
-class _MergingAgent(BasicAgent):
-    """Test-only subclass whose override adds one prompt-derived parameter."""
+class _SourcingAgent(BasicAgent):
+    """Test-only subclass whose override adds one more parameter source."""
 
-    def __init__(self, *, extra: list[ParamSpec], **kwargs: Any) -> None:
+    def __init__(self, *, extra: AtomicInvokable, **kwargs: Any) -> None:
         self._extra = extra  # read by the hook, so set before super().__init__
         super().__init__(**kwargs)
 
-    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
-        return role_params + self._extra
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), self._extra]
 
 
-class TestBasicAgentMergePromptParameters:
-    def test_default_is_identity(self) -> None:
+class TestBasicAgentParameterSources:
+    def test_sources_are_the_instructions_slot(self) -> None:
         agent = make_basic_agent()
-        params = [ParamSpec(name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("str",))]
 
-        assert agent._merge_prompt_parameters(params) is params
+        assert agent._extra_parameter_sources() == [agent.instructions]
 
-    def test_default_leaves_the_signature_to_the_role_prompt(self) -> None:
+    def test_default_leaves_the_signature_to_the_instructions(self) -> None:
         config = PromptTemplate(template="You are {persona}.", name="t", description="d")
 
-        agent = make_basic_agent(role_prompt=config)
+        agent = make_basic_agent(instructions=config)
 
         assert [p.name for p in agent.parameters] == ["prompt", "persona"]
 
-    def test_override_adds_parameters_to_the_signature(self) -> None:
-        tone = ParamSpec(name="tone", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("str",))
+    def test_override_adds_parameters_after_the_instructions_slot(self) -> None:
+        tone = PromptTemplate(template="{tone}", name="tone_src", description="d")
         config = PromptTemplate(template="You are {persona}.", name="t", description="d")
 
-        agent = _MergingAgent(
-            extra=[tone],
-            name="merging",
+        agent = _SourcingAgent(
+            extra=tone,
+            name="sourcing",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            role_prompt=config,
+            instructions=config,
         )
 
         assert [p.name for p in agent.parameters] == ["prompt", "persona", "tone"]
@@ -214,7 +396,7 @@ class TestBasicAgentInvoke:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(
             engine=engine,
-            role_prompt="You are a poet.",
+            instructions="You are a poet.",
         )
 
         agent.invoke({"prompt": "Write a haiku."})
@@ -224,7 +406,7 @@ class TestBasicAgentInvoke:
     def test_invoke_renders_placeholder_in_system_prompt(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(engine=engine, role_prompt=config)
+        agent = make_basic_agent(engine=engine, instructions=config)
 
         agent.invoke({"prompt": "Speak.", "persona": "pirate"})
 
@@ -246,7 +428,7 @@ class TestBasicAgentInvoke:
                 )
             ],
         )
-        agent = make_basic_agent(engine=engine, role_prompt=config)
+        agent = make_basic_agent(engine=engine, instructions=config)
 
         agent.invoke({"prompt": "Speak."})
 
@@ -254,7 +436,7 @@ class TestBasicAgentInvoke:
 
     def test_invoke_missing_required_placeholder_raises(self) -> None:
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(role_prompt=config)
+        agent = make_basic_agent(instructions=config)
 
         with pytest.raises(KeyError, match="persona"):
             agent.invoke({"prompt": "Speak."})
@@ -303,7 +485,7 @@ class TestBasicAgentInvoke:
 class TestBasicAgentAsyncInvoke:
     def test_async_invoke_result_matches_sync(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_basic_agent(engine=engine, role_prompt="You are helpful.")
+        agent = make_basic_agent(engine=engine, instructions="You are helpful.")
 
         result = asyncio.run(agent.async_invoke({"prompt": "Hi."}))
 
@@ -311,7 +493,7 @@ class TestBasicAgentAsyncInvoke:
 
     def test_async_invoke_system_prompt_passed_to_engine(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_basic_agent(engine=engine, role_prompt="Async role.")
+        agent = make_basic_agent(engine=engine, instructions="Async role.")
 
         asyncio.run(agent.async_invoke({"prompt": "Test."}))
 
@@ -320,7 +502,7 @@ class TestBasicAgentAsyncInvoke:
     def test_async_invoke_renders_placeholder_in_system_prompt(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
-        agent = make_basic_agent(engine=engine, role_prompt=config)
+        agent = make_basic_agent(engine=engine, instructions=config)
 
         asyncio.run(agent.async_invoke({"prompt": "Speak.", "persona": "pirate"}))
 
@@ -429,24 +611,26 @@ class TestBasicAgentResponseSchema:
 
 
 class TestBasicAgentSerialization:
-    def test_to_dict_includes_role_prompt_convenience_key(self) -> None:
-        agent = make_basic_agent(role_prompt="Custom.")
+    def test_to_dict_nests_the_instructions_slot_dict(self) -> None:
+        agent = make_basic_agent(instructions="Custom.")
 
         data = agent.to_dict()
 
-        assert data["role_prompt"] == "Custom."
+        assert data["instructions"] == agent.instructions.to_dict()
+        assert data["instructions"]["template"] == "Custom."
+        assert "role_prompt" not in data
 
     def test_to_dict_type_is_basic_agent(self) -> None:
         agent = make_basic_agent()
 
         assert agent.to_dict()["type"] == "BasicAgent"
 
-    def test_to_dict_reports_role_prompt_not_a_prompt_registry(self) -> None:
-        agent = make_basic_agent(role_prompt="My role.")
+    def test_to_dict_reports_instructions_not_a_prompt_registry(self) -> None:
+        agent = make_basic_agent(instructions="My role.")
 
         data = agent.to_dict()
 
-        assert data["role_prompt"] == "My role."
+        assert data["instructions"]["template"] == "My role."
         assert "system_prompts" not in data
 
     def test_to_dict_omits_extra_context_properties_key(self) -> None:
@@ -474,7 +658,7 @@ class TestBasicAgentTaskBlock:
         assert CONTEXT_START not in _user_message(engine)
 
     def test_messages_are_system_then_single_user_message(self) -> None:
-        engine, agent = _echo_agent(role_prompt="Be brief.")
+        engine, agent = _echo_agent(instructions="Be brief.")
 
         agent.invoke({"prompt": "hello"})
 

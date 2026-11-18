@@ -15,7 +15,6 @@ from .tools import attr_call_tool, builtin_call_tool
 from ..core.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
-from ..core.prompt_template import PromptTemplate
 from ..models.agents.records import LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
@@ -108,7 +107,7 @@ class ScriptActAgent(ToolAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptTemplate] = None,
+        instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,

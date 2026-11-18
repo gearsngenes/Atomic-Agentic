@@ -180,7 +180,7 @@ advisor = BasicAgent(
     name="finance_advisor",
     description="Investment advisor.",
     llm_engine=engine,
-    role_prompt="""You are an expert financial advisor at a bank. 
+    instructions="""You are an expert financial advisor at a bank. 
 When you receive customer banking data and a desired sector,
 provide a bulleted list of relevant investment tickers.""",
     pre_invoke=format_finance_request,

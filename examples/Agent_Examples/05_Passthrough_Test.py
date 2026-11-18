@@ -80,7 +80,7 @@ def main() -> None:
         name="AutoGraftDemoAgent",
         description="Demonstrates post-invoke parameter auto-grafting.",
         llm_engine=llm,
-        role_prompt="You are a concise assistant.",
+        instructions="You are a concise assistant.",
         record_enabled=False,
         pre_invoke=build_prompt,
         post_invoke=package_response,

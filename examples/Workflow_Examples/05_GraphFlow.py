@@ -69,7 +69,7 @@ drafter = BasicAgent(
     name="drafter",
     description="Drafts or revises the story and tracks revision_count.",
     llm_engine=engine,
-    role_prompt=(
+    instructions=(
         "You are a strong short-fiction writer with a gift for clear storytelling, "
         "memorable imagery, and satisfying endings. Return only the story text -- "
         "no commentary, no bullet points, no explanations."
@@ -101,7 +101,7 @@ fact_checker = BasicAgent(
     name="fact_checker",
     description="Checks the draft's internal consistency.",
     llm_engine=engine,
-    role_prompt=(
+    instructions=(
         "You are a meticulous continuity checker for fiction. You care about internal "
         "consistency only -- timeline, character details, and established rules of the "
         "story's own world -- never real-world fact-checking. If the draft is internally "
@@ -132,7 +132,7 @@ style_editor = BasicAgent(
     name="style_editor",
     description="Checks the draft's prose style and pacing.",
     llm_engine=engine,
-    role_prompt=(
+    instructions=(
         "You are a discerning prose editor. You care about pacing, voice, imagery, and "
         "whether the ending feels earned. If the draft is publication-ready, respond with "
         "exactly APPROVED and nothing else. Otherwise, give concise, concrete style notes."

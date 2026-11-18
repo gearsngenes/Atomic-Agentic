@@ -117,6 +117,20 @@ STOP_EARLY_SCHEMA_TEMPLATE: dict[str, Any] = {
 }
 
 # =============================================================================
+# Prompt slot defaults
+# =============================================================================
+# Defaults for the required prompt slots. Module constants, not class
+# attributes, because a constructor default cannot read ``self``.
+# Used by: agents/basic.py (``instructions``), agents/scratchpad.py
+# (``instructions``, ``thinking_instructions``).
+DEFAULT_INSTRUCTIONS: str = "You are a helpful AI assistant"
+DEFAULT_THINKING_INSTRUCTIONS: str = (
+    "You are a thinking assistant that produces various thoughts, "
+    "questions, and task-enhancement clarifications to describe or "
+    "enhance a user task prompt"
+)
+
+# =============================================================================
 # Built-in agent parameters
 # =============================================================================
 # The built-in pre source: with no ``pre_invoke`` the caller's prompt is read
@@ -482,6 +496,9 @@ __all__ = [
     "REPLY_DIRECTIVE",
     "STOP_EARLY_PROMPT_SECTION",
     "STOP_EARLY_SCHEMA_TEMPLATE",
+    # Prompt slot defaults
+    "DEFAULT_INSTRUCTIONS",
+    "DEFAULT_THINKING_INSTRUCTIONS",
     # Built-in agent parameters
     "PROMPT_PARAM",
     "RUNTIME_PARAM",

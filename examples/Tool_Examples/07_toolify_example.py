@@ -53,7 +53,7 @@ agent = BasicAgent(
     name="Writer",
     description="Concise writing assistant.",
     llm_engine=OpenAIEngine("gpt-4o-mini"),
-    role_prompt="You are a concise writing assistant.",
+    instructions="You are a concise writing assistant.",
     pre_invoke=pre_invoke_tool,
 )
 

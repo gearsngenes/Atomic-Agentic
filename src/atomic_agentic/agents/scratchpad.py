@@ -13,24 +13,20 @@ import copy
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
-from .base import normalize_prompt_config
 from .thinking import ThinkingAgent
 from ..constants.agents import (
+    DEFAULT_INSTRUCTIONS,
+    DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
 )
+from ..core.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
-from ..core.prompt_template import PromptTemplate
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
-from ..models.parameters import ParamSpec
+from ..tools import to_invokable
 from ..utils.rendering import frame_content
-from ..utils.parameters import (
-    apply_parameter_reports,
-    build_parameter_reports,
-    insert_by_category,
-)
 
 
 class ScratchpadAgent(ThinkingAgent):
@@ -38,12 +34,20 @@ class ScratchpadAgent(ThinkingAgent):
     N rounds of notes, then the reply.
 
     Two phases: thinking (the author's ``thinking_instructions`` as the system
-    message) then reply (the role prompt). The thinker does not
-    see the role prompt; an author who wants the persona there writes it into
+    message) then reply (the ``instructions``). The thinker does not
+    see the instructions; an author who wants the persona there writes it into
     ``thinking_instructions``, ideally through a placeholder shared with
-    ``role_prompt``. ``thinking_instructions`` placeholders join the agent's
-    signature, reconciled with ``role_prompt``'s (role wins on a
-    compatible-but-not-identical overlap; a true collision raises).
+    ``instructions``. Both slots accept a string, a callable or any
+    ``AtomicInvokable`` and are coerced through ``to_invokable``; their
+    placeholders join the agent's signature through the parameter sources
+    (``[instructions, thinking_instructions]``: the instructions slot wins on a
+    compatible-but-not-identical overlap, a true collision raises).
+
+    Each slot is rendered once per invoke, at the end of ``pre_process``, into
+    ``task.instructions`` and ``task.thinking_instructions``; the system message
+    reads those. The thinking slot is skipped when ``thinking_rounds`` is 0 at
+    pre-process time, so raising ``thinking_rounds`` from 0 during that same run
+    leaves the thinking message empty.
 
     ``thinking_rounds`` is the exact number of thinking calls, or the cap when
     ``stop_early`` is on. ``stop_early`` makes every thinking call return
@@ -58,19 +62,13 @@ class ScratchpadAgent(ThinkingAgent):
 
     _TASK_CLS = ScratchpadTask
 
-    DEFAULT_THINKING_PROMPT: str = (
-        "You are a thinking assistant that produces various thoughts, "
-        "questions, and task-enhancement clarifications to describe or "
-        "enhance a user task prompt"
-    )
-
     def __init__(
         self,
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: str | PromptTemplate | None = None,
-        thinking_instructions: str | PromptTemplate | None = None,
+        instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_INSTRUCTIONS,
+        thinking_instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_THINKING_INSTRUCTIONS,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -87,20 +85,23 @@ class ScratchpadAgent(ThinkingAgent):
         """
         Parameters
         ----------
-        thinking_instructions : str | PromptTemplate | None
+        thinking_instructions : str | Callable | AtomicInvokable
             The thinking phase's entire system message (framed by markers and
             followed by a format section when ``stop_early`` is on). Defaults
-            to ``DEFAULT_THINKING_PROMPT`` when omitted or blank. Its
-            ``{placeholder}``s become agent inputs.
+            to ``DEFAULT_THINKING_INSTRUCTIONS``; ``None`` raises ``TypeError``
+            and a blank string ``ValueError``. Its parameters (a string's
+            ``{placeholder}``s) become agent inputs.
         thinking_rounds : int
             Required. Exact thinking-call count, or the cap under
             ``stop_early``; ``0`` skips thinking.
         stop_early : bool
             Let the model end thinking before the cap.
 
-        State is set before ``super().__init__`` because
-        ``_merge_prompt_parameters``, called inside it, reads
-        ``self._thinking_config``.
+        1. validate ``stop_early`` and set ``thinking_rounds``.
+        2. coerce the thinking slot, set before ``super().__init__`` because
+           ``_extra_parameter_sources``, called inside it, reads it.
+        3. ``super().__init__`` forwards ``instructions`` (``BasicAgent`` builds
+           that slot).
         """
         # 1. Validate construction knobs (thinking_rounds through its setter).
         if type(stop_early) is not bool:
@@ -110,14 +111,11 @@ class ScratchpadAgent(ThinkingAgent):
             )
         self.thinking_rounds = thinking_rounds
 
-        # 2. Store the thinking state the merge hook and hooks read.
-        self._thinking_config = normalize_prompt_config(
+        # 2. Store the thinking state the parameter-source hook and hooks read.
+        self._thinking_instructions = to_invokable(
             thinking_instructions,
             name=f"{name}_thinking_instructions",
-            default_template=self.DEFAULT_THINKING_PROMPT,
-            provided_description="Thinking instructions",
-            default_description="Default thinking instructions.",
-            error_label="thinking_instructions",
+            description=f"Thinking instructions of agent {name}",
         )
         self._stop_early = stop_early
         # Built once; the wrapper is the only structured thinking output.
@@ -130,7 +128,7 @@ class ScratchpadAgent(ThinkingAgent):
             name=name,
             description=description,
             llm_engine=llm_engine,
-            role_prompt=role_prompt,
+            instructions=instructions,
             record_enabled=record_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
@@ -164,34 +162,18 @@ class ScratchpadAgent(ThinkingAgent):
         """Whether the model may end thinking before ``thinking_rounds``."""
         return self._stop_early
 
-    # ------------------------------------------------------------------ #
-    # Signature seam
-    # ------------------------------------------------------------------ #
-    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
-        """
-        Reconcile the role prompt's placeholders with the thinking prompt's.
+    @property
+    def thinking_instructions(self) -> AtomicInvokable:
+        """The thinking instructions slot invokable."""
+        return self._thinking_instructions
 
-        1. build reports with the role prompt as the priority source
-        2. raise on a true collision, warn on a compatible-but-not-identical
-           overlap (role wins)
-        3. return the reconciled parameters in signature order
-
-        Known limit: the overlap warning's ``stacklevel`` (and ``Agent``'s own
-        overlap warning) assume a direct ``ScratchpadAgent(...)`` call; through a
-        user subclass they point one frame short.
-        """
-        reports = build_parameter_reports(
-            [role_params, list(self._thinking_config.parameters)]
-        )
-        # stacklevel 5: apply_parameter_reports <- here <- BasicAgent.__init__
-        # <- ScratchpadAgent.__init__ <- the code constructing the agent.
-        constructed = apply_parameter_reports(
-            reports,
-            ("role_prompt", "thinking_instructions"),
-            error_cls=AgentError,
-            stacklevel=5,
-        )
-        return insert_by_category([], constructed)
+    # ------------------------------------------------------------------ #
+    # Parameter sources
+    # ------------------------------------------------------------------ #
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        """``[instructions, thinking_instructions]``: the instructions slot
+        wins an overlap."""
+        return [*super()._extra_parameter_sources(), self._thinking_instructions]
 
     # ------------------------------------------------------------------ #
     # Strategy hooks
@@ -268,10 +250,53 @@ class ScratchpadAgent(ThinkingAgent):
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
+    def _render_instructions(self, task: ScratchpadTask) -> None:
+        """Render both slots into the task.
+
+        1. ``super()._render_instructions(task)`` (the main instructions).
+        2. ``thinking_rounds == 0``: return (thinking never runs).
+        3. Invoke the thinking slot once with only its own parameter names;
+           a non-``str`` result raises ``TypeError``; store the text in
+           ``task.thinking_instructions``.
+        """
+        super()._render_instructions(task)
+        if self._thinking_rounds == 0:
+            return
+        slot = self._thinking_instructions
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in slot.parameters if p.name in task.agentic_inputs
+        }
+        text = slot.invoke(inputs).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: thinking instructions ({slot.name!r}) returned "
+                f"{type(text).__name__}; thinking instructions must render to a str."
+            )
+        task.thinking_instructions = text
+
+    async def _async_render_instructions(self, task: ScratchpadTask) -> None:
+        """Async twin of ``_render_instructions`` (awaits ``async_invoke``)."""
+        await super()._async_render_instructions(task)
+        if self._thinking_rounds == 0:
+            return
+        slot = self._thinking_instructions
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in slot.parameters if p.name in task.agentic_inputs
+        }
+        text = (await slot.async_invoke(inputs)).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: thinking instructions ({slot.name!r}) returned "
+                f"{type(text).__name__}; thinking instructions must render to a str."
+            )
+        task.thinking_instructions = text
+
     def _render_system_message(self, task: ScratchpadTask) -> list[dict[str, str]]:
         """
-        1. thinking finished: the inherited (role) message
-        2. otherwise the thinking instructions rendered against ``task.inputs``
+        1. thinking finished: the inherited (instructions) message
+        2. otherwise ``task.thinking_instructions``
         3. with ``stop_early``: those between the instruction markers, followed
            by the early-stop format section
 
@@ -280,7 +305,7 @@ class ScratchpadAgent(ThinkingAgent):
         """
         if task.thinking_complete:
             return super()._render_system_message(task)
-        content = self._thinking_config.invoke(task.inputs).result
+        content = task.thinking_instructions
         if self._stop_early:
             content = (
                 frame_content(content, "USER-DEFINED THINKING INSTRUCTIONS")
@@ -295,7 +320,7 @@ class ScratchpadAgent(ThinkingAgent):
     def to_dict(self) -> dict:
         """Diagnostic snapshot including this agent's thinking knobs."""
         d = super().to_dict()
-        d["thinking_instructions"] = self._thinking_config.template
+        d["thinking_instructions"] = self._thinking_instructions.to_dict()
         d["thinking_rounds"] = self._thinking_rounds
         d["stop_early"] = self._stop_early
         return d

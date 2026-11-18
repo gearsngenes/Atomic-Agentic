@@ -28,11 +28,12 @@ class ThinkingAgent(BasicAgent):
     thinking-specific parameter). A concrete subclass implements the three
     abstract hooks and supplies its thinking-phase system message by
     overriding ``_render_system_message``; while thinking, this base renders
-    none. The reply phase uses the role prompt, rendered by ``BasicAgent``. A
-    thinking prompt a subclass renders itself sees ``task.inputs`` only: a
-    ``{placeholder}`` in it is not wired into the agent's parameters by this base
-    (only role-prompt placeholders are); a subclass that wants them in the
-    signature does so through ``_merge_prompt_parameters``.
+    none. The reply phase uses the instructions, rendered by ``BasicAgent``
+    into ``task.instructions``. A thinking prompt a subclass renders itself sees
+    ``task.inputs`` only: a ``{placeholder}`` in it is not wired into the
+    agent's parameters by this base (only the instructions slot's are); a
+    subclass that wants its thinking slot's placeholders in the signature
+    extends ``_extra_parameter_sources()``.
 
     Phase: ``task.thinking_complete``. False means thinking, True means reply (the
     "reply phase" below). ``think`` is its only writer.

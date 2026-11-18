@@ -149,7 +149,7 @@ def main() -> None:
         name="branching_demo_agent",
         description="Conversational agent for branching context demonstration.",
         llm_engine=engine,
-        role_prompt=(
+        instructions=(
             "You are a helpful assistant in a conversation with the user. "
             "You only know what has been said in this conversation. "
             "When asked about something that has not been mentioned, "

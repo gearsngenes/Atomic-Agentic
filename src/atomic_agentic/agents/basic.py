@@ -4,31 +4,36 @@ from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 
+from ..constants.agents import DEFAULT_INSTRUCTIONS
+from ..core.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
-from ..core.prompt_template import PromptTemplate
 from ..models.agents.tasks import AgentTask
-from ..models.parameters import ParamSpec
-from .base import Agent, normalize_prompt_config
+from ..tools import to_invokable
+from .base import Agent
 
 
 class BasicAgent(Agent):
     """
-    Concrete single-turn LLM agent with a role prompt.
+    Concrete single-turn LLM agent with an instructions slot.
 
-    ``BasicAgent`` is the simplest ``Agent`` subclass: one role prompt, one
-    LLM call per invocation. The ``role_prompt`` may contain ``{placeholder}``
-    slots whose names are auto-discovered and wired into the agent's flat
-    parameter schema as ``extra_parameters`` -- callers supply them as
+    ``BasicAgent`` is the simplest ``Agent`` subclass: one instructions slot,
+    one LLM call per invocation. The slot is a string, a callable or any
+    ``AtomicInvokable`` (an agent included), coerced through ``to_invokable``;
+    a string becomes a ``PromptTemplate`` and its ``{placeholder}``s are
+    auto-discovered. The slot's parameters join the agent's flat parameter
+    schema through the parameter-source hook -- callers supply them as
     ordinary top-level ``inputs`` keys, exactly like ``pre_invoke``/
-    ``post_invoke`` parameters.
+    ``post_invoke`` parameters. Recursion (an agent as the slot) is allowed and
+    unguarded.
 
-    The role prompt is fixed at construction. There is no supported way to
-    change its text or placeholders afterward -- ``BasicAgent`` declares no
-    mutation API for it, matching the fixed-topology invariant every other
-    ``AtomicInvokable`` in this codebase already follows (parameters are
-    resolved once at construction and are immutable thereafter).
+    The slot is rendered once per invoke, as the last step of ``pre_process``,
+    into ``task.instructions`` (it is invoked with only its own parameters);
+    the system message is that text, unframed. The slot is fixed at
+    construction -- there is no mutation API for it, matching the
+    fixed-topology invariant every other ``AtomicInvokable`` in this codebase
+    follows.
 
     The single user message each call sends is a task block: the current
     prompt wrapped in the task markers, preceded by a runtime-context block
@@ -38,8 +43,6 @@ class BasicAgent(Agent):
     history as JSON, not as a Python repr.
     """
 
-    DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
-
     _TASK_CLS = AgentTask
 
     def __init__(
@@ -47,7 +50,7 @@ class BasicAgent(Agent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: str | PromptTemplate | None = None,
+        instructions: str | Callable[..., Any] | AtomicInvokable = DEFAULT_INSTRUCTIONS,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -59,16 +62,13 @@ class BasicAgent(Agent):
         *,
         response_schema: dict[str, Any] | None = None,
     ) -> None:
-        # 1. Normalize the role prompt and discover its placeholders.
-        config = normalize_prompt_config(
-            role_prompt,
-            name=f"{name}_role_prompt",
-            default_template=self.DEFAULT_ROLE_PROMPT,
-            provided_description="Role prompt",
-            default_description="Default assistant role prompt",
-            error_label="role_prompt",
+        # 1. Coerce the instructions slot. Set before the base init because
+        # _extra_parameter_sources reads it there.
+        self._instructions = to_invokable(
+            instructions,
+            name=f"{name}_instructions",
+            description=f"Instructions of agent {name}",
         )
-        role_params = self._merge_prompt_parameters(list(config.parameters))
 
         # 2. Validate and store response_schema -- no deeper validation
         # (no JSON-Schema key checks), matching LLMEngine's own
@@ -82,8 +82,7 @@ class BasicAgent(Agent):
             )
         self._response_schema = response_schema
 
-        # 3. Delegate to Agent base; role placeholders are the sole
-        # extra_parameters source.
+        # 3. Delegate to Agent base.
         super().__init__(
             name=name,
             description=description,
@@ -95,21 +94,16 @@ class BasicAgent(Agent):
             response_to_context=response_to_context,
             response_to_post=response_to_post,
             use_runtime_context=use_runtime_context,
-            extra_parameters=role_params,
             records_window=records_window,
-
         )
 
-        # 4. Keep the role prompt.
-        self._role_config = config
-
     # ------------------------------------------------------------------ #
-    # Role prompt API
+    # Instructions slot API
     # ------------------------------------------------------------------ #
     @property
-    def role_prompt(self) -> str:
-        """Role prompt template string."""
-        return self._role_config.template
+    def instructions(self) -> AtomicInvokable:
+        """The instructions slot invokable (a ``PromptTemplate`` for a ``str``)."""
+        return self._instructions
 
     @property
     def response_schema(self) -> dict[str, Any] | None:
@@ -117,18 +111,9 @@ class BasicAgent(Agent):
         ``None`` requests plain text. Frozen at construction -- no setter."""
         return self._response_schema
 
-    def _merge_prompt_parameters(self, role_params: list[ParamSpec]) -> list[ParamSpec]:
-        """Seam for a subclass that registers more prompt templates than the
-        role prompt and wants their placeholders in the agent's signature.
-
-        1. return ``role_params`` unchanged (``BasicAgent``: identity)
-
-        An override returns the full list of prompt-derived parameters, the
-        role prompt's included and first so it keeps priority. It runs inside
-        ``__init__`` before ``Agent.__init__``, so it may read only attributes
-        the subclass set before calling ``super().__init__``.
-        """
-        return role_params
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        """The instructions slot joins the agent's signature."""
+        return [*super()._extra_parameter_sources(), self._instructions]
 
     # ------------------------------------------------------------------ #
     # Conversation defaults
@@ -153,10 +138,46 @@ class BasicAgent(Agent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
+    def _render_instructions(self, task: AgentTask) -> None:
+        """Render the instructions slot into ``task.instructions``.
+
+        1. Take only the slot's own parameter names from ``task.agentic_inputs``.
+        2. Invoke the slot once; errors from it propagate unwrapped.
+        3. A non-``str`` result raises ``TypeError`` naming the slot.
+        """
+        slot = self._instructions
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in slot.parameters if p.name in task.agentic_inputs
+        }
+        text = slot.invoke(inputs).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{type(text).__name__}; instructions must render to a str."
+            )
+        task.instructions = text
+
+    async def _async_render_instructions(self, task: AgentTask) -> None:
+        """Async twin of ``_render_instructions``; awaits ``slot.async_invoke``
+        so an agent used as the slot never has its sync ``invoke`` called."""
+        slot = self._instructions
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in slot.parameters if p.name in task.agentic_inputs
+        }
+        text = (await slot.async_invoke(inputs)).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: instructions ({slot.name!r}) returned "
+                f"{type(text).__name__}; instructions must render to a str."
+            )
+        task.instructions = text
+
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
-        """The role prompt rendered against ``task.inputs``, as the single
-        system message."""
-        return [{"role": "system", "content": self._role_config.invoke(task.inputs).result}]
+        """The rendered instructions as the single, unframed system message.
+        A synchronous read of ``task.instructions``; valid after ``pre_process``."""
+        return [{"role": "system", "content": task.instructions}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.
@@ -219,8 +240,8 @@ class BasicAgent(Agent):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict:
-        """Return a diagnostic snapshot including the role prompt."""
+        """Return a diagnostic snapshot including the instructions slot."""
         d = super().to_dict()
-        d["role_prompt"] = self.role_prompt
+        d["instructions"] = self._instructions.to_dict()
         d["response_schema"] = self.response_schema
         return d

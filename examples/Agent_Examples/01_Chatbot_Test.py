@@ -15,7 +15,7 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 Agent_Atom = BasicAgent(
     name = "Agent_Atom",
     llm_engine = llm,
-    role_prompt = """
+    instructions = """
     You are a helpful and enthusiastic assistant named Agent Atom.
     You always end your responses with excitement and emojis.""",
     description= "A generically helpful conversational AI assistant for basic Q&A",

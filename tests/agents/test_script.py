@@ -111,7 +111,7 @@ class TestConstruction:
 
     def test_instructions_stored(self) -> None:
         agent = _make_agent(_engine(), instructions="Be terse.")
-        assert agent.instructions == "Be terse."
+        assert agent.instructions.template == "Be terse."
 
     @pytest.mark.parametrize(
         "removed",
@@ -293,8 +293,10 @@ class TestPromptContextRendering:
 
     def test_instructions_are_framed_in_the_system_message(self) -> None:
         agent = _make_agent(_engine(), instructions="Always say please.")
+        task = _new_task(agent)
+        agent._render_instructions(task)
 
-        messages = agent.render_task(_new_task(agent))
+        messages = agent.render_task(task)
 
         system_msg = next(m["content"] for m in messages if m["role"] == "system")
         assert "USER-DEFINED INSTRUCTIONS" in system_msg
