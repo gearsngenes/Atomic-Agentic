@@ -56,11 +56,10 @@ Private helpers
   ``_paramspec_list_from_strings`` — low-level helpers consumed by the public
   functions above.
 - ``_normalize_prompt_template``, ``_try_parse_clean_field`` — template-string
-  field discovery/escaping for ``PromptConfig``
-  (``models/agents/prompts.py``). Imported directly by that module — a
-  one-directional exception to the usual ``models -> utils`` ordering, mirroring
-  the existing ``models/results/llm.py -> utils/core.py`` precedent; no cycle
-  results since this module has no dependency on ``models/agents/``.
+  field discovery/escaping for ``PromptTemplate``
+  (``core/prompt_template.py``). Imported directly by that module (a
+  ``core -> utils`` import, in the normal direction); the name stays private
+  and Stage 10a revisits it.
 """
 
 from __future__ import annotations
@@ -68,6 +67,7 @@ from __future__ import annotations
 import inspect
 import re
 import warnings
+from collections.abc import Set as AbstractSet
 from types import UnionType
 from typing import (
     Annotated,
@@ -545,12 +545,19 @@ def _try_parse_clean_field(inner: str) -> str | None:
     return name
 
 
-def _normalize_prompt_template(template: str) -> tuple[str, list[str]]:
+def _normalize_prompt_template(
+    template: str,
+    listed: AbstractSet[str] | None = None,
+) -> tuple[str, list[str]]:
     """Normalize a raw prompt template and discover its identifier fields.
 
     Scans ``template`` once. Clean, self-contained identifier fields (see
     ``_try_parse_clean_field``) are kept single-braced and their names are
-    discovered in first-appearance order, deduplicated. Every other brace
+    discovered in first-appearance order, deduplicated. When ``listed`` is
+    given, only clean fields whose name is in ``listed`` are kept and
+    discovered; any other clean field is escaped like the regions below, and
+    a listed name that never appears is simply absent from the result (the
+    caller compares). Every other brace
     region — non-identifier shapes (``{}``, ``{0}``, ``{obj.attr}``,
     ``{x[0]}``), fields nested inside other fields, unbalanced/stray braces —
     is escaped into inert literal text (whole-span, not partially recovered).
@@ -595,7 +602,7 @@ def _normalize_prompt_template(template: str) -> tuple[str, list[str]]:
             span = template[i:j]
             if not nested:
                 name = _try_parse_clean_field(template[i + 1 : j - 1])
-                if name is not None:
+                if name is not None and (listed is None or name in listed):
                     out.append(span)
                     if name not in seen:
                         seen.add(name)

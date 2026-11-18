@@ -11,7 +11,7 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.a2a import A2AClientHub
@@ -210,8 +210,8 @@ class TestToolAgentConstruction:
     def test_instructions_whitespace_only_normalizes_to_none(self) -> None:
         assert make_stub_tool_agent(instructions="   ").instructions is None
 
-    def test_instructions_promptconfig_passthrough(self) -> None:
-        config = PromptConfig(template="Static guidance.", description="d")
+    def test_instructions_prompt_template_passthrough(self) -> None:
+        config = PromptTemplate(template="Static guidance.", name="t", description="d")
         agent = make_stub_tool_agent(instructions=config)
         assert agent.instructions == "Static guidance."
 

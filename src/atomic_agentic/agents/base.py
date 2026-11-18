@@ -20,6 +20,7 @@ from ..exceptions import (
     AgentInvocationError,
 )
 from ..core.atomic_invokable import AtomicInvokable
+from ..core.prompt_template import PromptTemplate
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
@@ -53,6 +54,46 @@ from ..utils.rendering import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_prompt_config(
+    value: str | PromptTemplate | None,
+    *,
+    name: str,
+    default_template: str | None,
+    provided_description: str,
+    error_label: str,
+    default_description: str | None = None,
+) -> PromptTemplate | None:
+    """Pass 1 shim (Pass 2 deletes it): coerce a prompt-shaped construction
+    value to a ``PromptTemplate``, or ``None``.
+
+    1. ``None`` or a blank ``str``: ``None`` when ``default_template`` is
+       ``None``, else a ``PromptTemplate`` of ``default_template``.
+    2. A non-blank ``str``: a ``PromptTemplate`` of ``value.strip()``.
+    3. A ``PromptTemplate``: returned unchanged.
+    4. Anything else: ``TypeError``.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default_template is None:
+            return None
+        return PromptTemplate(
+            template=default_template,
+            name=name,
+            description=default_description,
+        )
+    if isinstance(value, str):
+        return PromptTemplate(
+            template=value.strip(),
+            name=name,
+            description=provided_description,
+        )
+    if isinstance(value, PromptTemplate):
+        return value
+    raise TypeError(
+        f"{error_label} must be str, PromptTemplate, or None; got {type(value).__name__}."
+    )
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent

@@ -59,7 +59,7 @@ from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
-from ..models.agents.prompts import PromptConfig
+from ..core.prompt_template import PromptTemplate
 from ..models.agents.tasks import ReActTask
 from ..models.agents.records import ToolAgentRecord, LLMRecord
 from ..utils.agents import resolve_statement_args
@@ -122,7 +122,7 @@ class ReActAgent(ToolAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptTemplate] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,

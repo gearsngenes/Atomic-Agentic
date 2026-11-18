@@ -7,11 +7,10 @@ from typing import Any, Callable, Mapping, Optional
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
-from ..models.agents.prompts import PromptConfig
+from ..core.prompt_template import PromptTemplate
 from ..models.agents.tasks import AgentTask
 from ..models.parameters import ParamSpec
-from ..utils.agents import normalize_prompt_config
-from .base import Agent
+from .base import Agent, normalize_prompt_config
 
 
 class BasicAgent(Agent):
@@ -48,7 +47,7 @@ class BasicAgent(Agent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: str | PromptConfig | None = None,
+        role_prompt: str | PromptTemplate | None = None,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -63,6 +62,7 @@ class BasicAgent(Agent):
         # 1. Normalize the role prompt and discover its placeholders.
         config = normalize_prompt_config(
             role_prompt,
+            name=f"{name}_role_prompt",
             default_template=self.DEFAULT_ROLE_PROMPT,
             provided_description="Role prompt",
             default_description="Default assistant role prompt",
@@ -156,7 +156,7 @@ class BasicAgent(Agent):
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """The role prompt rendered against ``task.inputs``, as the single
         system message."""
-        return [{"role": "system", "content": self._role_config.render(task.inputs)}]
+        return [{"role": "system", "content": self._role_config.invoke(task.inputs).result}]
 
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this invocation's single task message.

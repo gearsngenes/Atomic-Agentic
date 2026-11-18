@@ -9,7 +9,7 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.agents.toolagent import ToolAgent
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask, ToolAgentTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
@@ -53,7 +53,7 @@ def make_planact_agent(
     fail_fast: bool = True,
     post_invoke: Any = None,
     response_to_post: Any = (),
-    instructions: str | PromptConfig | None = None,
+    instructions: str | PromptTemplate | None = None,
     **overrides: Any,
 ) -> PlanActAgent:
     agent = PlanActAgent(
@@ -82,7 +82,7 @@ def make_react_agent(
     fail_fast: bool = False,
     post_invoke: Any = None,
     response_to_post: Any = (),
-    instructions: str | PromptConfig | None = None,
+    instructions: str | PromptTemplate | None = None,
     **overrides: Any,
 ) -> ReActAgent:
     agent = ReActAgent(
@@ -236,7 +236,7 @@ def make_stub_thinker(
     responses: list[Any],
     *,
     done_after: int = 1,
-    role_prompt: str | PromptConfig | None = "You are a careful assistant.",
+    role_prompt: str | PromptTemplate | None = "You are a careful assistant.",
     record_enabled: bool = False,
     **kwargs: Any,
 ) -> StubThinker:

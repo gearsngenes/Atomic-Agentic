@@ -8,7 +8,7 @@ import asyncio
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError
 from atomic_agentic.models.agents.conversations import Conversation
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 
@@ -21,7 +21,7 @@ TASK_PROMPT_END = "==== USER TASK PROMPT [END] ===="
 def make_basic_agent(
     *,
     engine: FakeLLMEngine | None = None,
-    role_prompt: str | PromptConfig | None = None,
+    role_prompt: str | PromptTemplate | None = None,
     record_enabled: bool = False,
     **kwargs: Any,
 ) -> BasicAgent:
@@ -56,8 +56,8 @@ class TestBasicAgentRolePrompt:
         agent = make_basic_agent(role_prompt="  You are a poet.  ")
         assert agent.role_prompt == "You are a poet."
 
-    def test_prompt_config_role_prompt_stored_as_is(self) -> None:
-        config = PromptConfig(template="Act like {role}.", description="Custom role")
+    def test_prompt_template_role_prompt_stored_as_is(self) -> None:
+        config = PromptTemplate(template="Act like {role}.", name="t", description="Custom role")
         agent = make_basic_agent(role_prompt=config)
         assert agent.role_prompt == "Act like {role}."
 
@@ -95,7 +95,7 @@ class TestBasicAgentSchemaComposition:
     """Role-prompt placeholders are now a flat extra_parameters source."""
 
     def test_role_prompt_placeholder_becomes_top_level_param(self) -> None:
-        config = PromptConfig(template="You are a {persona} assistant.", description="d")
+        config = PromptTemplate(template="You are a {persona} assistant.", name="t", description="d")
         agent = make_basic_agent(role_prompt=config)
 
         names = [p.name for p in agent.parameters]
@@ -107,25 +107,63 @@ class TestBasicAgentSchemaComposition:
         names = [p.name for p in agent.parameters]
         assert names == ["prompt"]
 
-    def test_placeholder_default_from_field_specs_is_preserved(self) -> None:
-        config = PromptConfig(
+    def test_placeholder_default_from_explicit_parameter_is_preserved(self) -> None:
+        config = PromptTemplate(
             template="Speak as {persona}.",
+            name="t",
             description="d",
-            field_specs={"persona": {"default": "a helper"}},
+            parameters=[
+                ParamSpec(
+                    name="persona",
+                    index=0,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type="Any",
+                    default="a helper",
+                )
+            ],
         )
         agent = make_basic_agent(role_prompt=config)
 
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.default == "a helper"
 
+    def test_role_placeholder_is_positional_or_keyword(self) -> None:
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
+        agent = make_basic_agent(role_prompt=config)
+
+        persona_param = next(p for p in agent.parameters if p.name == "persona")
+        assert persona_param.kind == ParamSpec.POSITIONAL_OR_KEYWORD
+
+    def test_pre_invoke_keyword_only_declaration_wins_reconciliation(self) -> None:
+        def custom_pre(*, persona: str) -> str:
+            return persona
+
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
+        agent = make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
+
+        persona_param = next(p for p in agent.parameters if p.name == "persona")
+        assert persona_param.kind == ParamSpec.KEYWORD_ONLY
+
+    def test_placeholder_can_be_passed_by_keyword_through_call(self) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
+        agent = make_basic_agent(engine=engine, role_prompt=config)
+
+        agent("hi", persona="x")
+
+        assert engine.calls[0][0]["content"] == "You are a x."
+
     def test_placeholder_name_colliding_with_pre_invoke_param_type_raises(self) -> None:
         def custom_pre(*, x: str) -> str:
             return x
 
-        config = PromptConfig(
+        config = PromptTemplate(
             template="Value: {x}.",
+            name="t",
             description="d",
-            field_specs={"x": {"type": "int"}},
+            parameters=[
+                ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int")
+            ],
         )
         with pytest.raises(AgentError):
             make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
@@ -150,7 +188,7 @@ class TestBasicAgentMergePromptParameters:
         assert agent._merge_prompt_parameters(params) is params
 
     def test_default_leaves_the_signature_to_the_role_prompt(self) -> None:
-        config = PromptConfig(template="You are {persona}.", description="d")
+        config = PromptTemplate(template="You are {persona}.", name="t", description="d")
 
         agent = make_basic_agent(role_prompt=config)
 
@@ -158,7 +196,7 @@ class TestBasicAgentMergePromptParameters:
 
     def test_override_adds_parameters_to_the_signature(self) -> None:
         tone = ParamSpec(name="tone", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("str",))
-        config = PromptConfig(template="You are {persona}.", description="d")
+        config = PromptTemplate(template="You are {persona}.", name="t", description="d")
 
         agent = _MergingAgent(
             extra=[tone],
@@ -185,7 +223,7 @@ class TestBasicAgentInvoke:
 
     def test_invoke_renders_placeholder_in_system_prompt(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        config = PromptConfig(template="You are a {persona}.", description="d")
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
         agent.invoke({"prompt": "Speak.", "persona": "pirate"})
@@ -194,10 +232,19 @@ class TestBasicAgentInvoke:
 
     def test_invoke_uses_placeholder_default_when_omitted(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        config = PromptConfig(
+        config = PromptTemplate(
             template="Speak as {persona}.",
+            name="t",
             description="d",
-            field_specs={"persona": {"default": "a helper"}},
+            parameters=[
+                ParamSpec(
+                    name="persona",
+                    index=0,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type="Any",
+                    default="a helper",
+                )
+            ],
         )
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
@@ -206,10 +253,10 @@ class TestBasicAgentInvoke:
         assert engine.calls[0][0]["content"] == "Speak as a helper."
 
     def test_invoke_missing_required_placeholder_raises(self) -> None:
-        config = PromptConfig(template="You are a {persona}.", description="d")
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
         agent = make_basic_agent(role_prompt=config)
 
-        with pytest.raises(ValueError, match="persona"):
+        with pytest.raises(KeyError, match="persona"):
             agent.invoke({"prompt": "Speak."})
 
     def test_invoke_result_is_echo_of_prompt(self) -> None:
@@ -272,7 +319,7 @@ class TestBasicAgentAsyncInvoke:
 
     def test_async_invoke_renders_placeholder_in_system_prompt(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
-        config = PromptConfig(template="You are a {persona}.", description="d")
+        config = PromptTemplate(template="You are a {persona}.", name="t", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
         asyncio.run(agent.async_invoke({"prompt": "Speak.", "persona": "pirate"}))

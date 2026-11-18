@@ -13,6 +13,7 @@ import copy
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
+from .base import normalize_prompt_config
 from .thinking import ThinkingAgent
 from ..constants.agents import (
     STOP_EARLY_PROMPT_SECTION,
@@ -20,11 +21,10 @@ from ..constants.agents import (
 )
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
-from ..models.agents.prompts import PromptConfig
+from ..core.prompt_template import PromptTemplate
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
 from ..models.parameters import ParamSpec
-from ..utils.agents import normalize_prompt_config
 from ..utils.rendering import frame_content
 from ..utils.parameters import (
     apply_parameter_reports,
@@ -69,8 +69,8 @@ class ScratchpadAgent(ThinkingAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: str | PromptConfig | None = None,
-        thinking_instructions: str | PromptConfig | None = None,
+        role_prompt: str | PromptTemplate | None = None,
+        thinking_instructions: str | PromptTemplate | None = None,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -87,7 +87,7 @@ class ScratchpadAgent(ThinkingAgent):
         """
         Parameters
         ----------
-        thinking_instructions : str | PromptConfig | None
+        thinking_instructions : str | PromptTemplate | None
             The thinking phase's entire system message (framed by markers and
             followed by a format section when ``stop_early`` is on). Defaults
             to ``DEFAULT_THINKING_PROMPT`` when omitted or blank. Its
@@ -113,6 +113,7 @@ class ScratchpadAgent(ThinkingAgent):
         # 2. Store the thinking state the merge hook and hooks read.
         self._thinking_config = normalize_prompt_config(
             thinking_instructions,
+            name=f"{name}_thinking_instructions",
             default_template=self.DEFAULT_THINKING_PROMPT,
             provided_description="Thinking instructions",
             default_description="Default thinking instructions.",
@@ -279,7 +280,7 @@ class ScratchpadAgent(ThinkingAgent):
         """
         if task.thinking_complete:
             return super()._render_system_message(task)
-        content = self._thinking_config.render(task.inputs)
+        content = self._thinking_config.invoke(task.inputs).result
         if self._stop_early:
             content = (
                 frame_content(content, "USER-DEFINED THINKING INSTRUCTIONS")

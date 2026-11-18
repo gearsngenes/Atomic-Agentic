@@ -40,7 +40,7 @@ from typing import (
 )
 from collections.abc import Iterable
 
-from .base import Agent
+from .base import Agent, normalize_prompt_config
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask, ToolAgentTask
@@ -54,9 +54,9 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..models.agents.prompts import PromptConfig
+from ..core.prompt_template import PromptTemplate
 from ..models.results.agents import ToolAgentResult
-from ..utils.agents import build_usage_report, normalize_prompt_config
+from ..utils.agents import build_usage_report
 from ..utils.rendering import frame_content
 
 
@@ -133,7 +133,7 @@ class ToolAgent(Agent, ABC):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | PromptTemplate] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -153,12 +153,12 @@ class ToolAgent(Agent, ABC):
         ----------
         name, description, llm_engine
             Forwarded to ``Agent.__init__`` unchanged.
-        instructions : str | PromptConfig | None
+        instructions : str | PromptTemplate | None
             Optional standing user guidance (e.g. "always call the outliner
             first"), rendered after the family prompt inside a
             ``USER-DEFINED INSTRUCTIONS`` frame, only when set. A plain
             ``str`` is free-form prose (empty/whitespace-only normalizes to
-            "not provided"); a ``PromptConfig`` is accepted directly for a
+            "not provided"); a ``PromptTemplate`` is accepted directly for a
             caller who wants template fields of their own. A discovered
             ``{name}`` field becomes a declared parameter of this agent --
             validated/defaulted by the normal ``invoke(inputs)`` pipeline --
@@ -193,6 +193,7 @@ class ToolAgent(Agent, ABC):
         # inside the template can be declared as a real extra_parameters entry.
         normalized_instructions = normalize_prompt_config(
             instructions,
+            name=f"{name}_instructions",
             default_template=None,
             provided_description="Instructions",
             error_label="instructions",
@@ -657,7 +658,7 @@ class ToolAgent(Agent, ABC):
 
         config = self._instructions
         if config is not None:
-            text = config.render(dict(task.inputs))
+            text = config.invoke(dict(task.inputs)).result
             sections.append(
                 f"{INSTRUCTIONS_PRECEDENCE}\n"
                 f"{frame_content(text, 'USER-DEFINED INSTRUCTIONS')}"

@@ -15,9 +15,10 @@ from atomic_agentic.constants.agents import (
     STOP_EARLY_SCHEMA_TEMPLATE,
 )
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ScratchpadTask
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResult
 
 
@@ -34,8 +35,8 @@ def make_agent(
     responses: list[Any] | None = None,
     *,
     thinking_rounds: int = 1,
-    role_prompt: str | PromptConfig | None = ROLE,
-    thinking_instructions: str | PromptConfig | None = THINK,
+    role_prompt: str | PromptTemplate | None = ROLE,
+    thinking_instructions: str | PromptTemplate | None = THINK,
     record_enabled: bool = False,
     cls: type[ScratchpadAgent] = ScratchpadAgent,
     **kwargs: Any,
@@ -451,19 +452,25 @@ class TestPlaceholders:
     def test_thinking_only_placeholder_joins_the_signature_and_renders(self) -> None:
         agent = make_agent(
             ["t1", "R"],
-            thinking_instructions=PromptConfig(template="Focus on {angle}.", description="d"),
+            thinking_instructions=PromptTemplate(
+                template="Focus on {angle}.", name="t", description="d"
+            ),
         )
 
         agent.invoke({"prompt": "hi", "angle": "costs"})
 
         assert [p.name for p in agent.parameters] == ["prompt", "angle"]
+        angle = next(p for p in agent.parameters if p.name == "angle")
+        assert angle.kind == ParamSpec.POSITIONAL_OR_KEYWORD
         assert calls(agent)[0][0]["content"] == "Focus on costs."
         assert calls(agent)[1][0]["content"] == ROLE
 
     def test_placeholder_renders_inside_the_stop_early_frame(self) -> None:
         agent = make_agent(
             [step("t1", False), "R"],
-            thinking_instructions=PromptConfig(template="Focus on {angle}.", description="d"),
+            thinking_instructions=PromptTemplate(
+                template="Focus on {angle}.", name="t", description="d"
+            ),
             thinking_rounds=2, stop_early=True,
         )
 
@@ -475,8 +482,10 @@ class TestPlaceholders:
     def test_a_name_shared_by_both_prompts_is_one_input(self) -> None:
         agent = make_agent(
             ["t1", "R"],
-            role_prompt=PromptConfig(template="You are {persona}.", description="d"),
-            thinking_instructions=PromptConfig(template="Think as {persona}.", description="d"),
+            role_prompt=PromptTemplate(template="You are {persona}.", name="r", description="d"),
+            thinking_instructions=PromptTemplate(
+                template="Think as {persona}.", name="t", description="d"
+            ),
         )
 
         agent.invoke({"prompt": "hi", "persona": "a chef"})
@@ -486,11 +495,11 @@ class TestPlaceholders:
         assert calls(agent)[1][0]["content"] == "You are a chef."
 
     def test_compatible_overlap_warns_and_the_role_prompt_wins(self) -> None:
-        role = PromptConfig(
-            template="You are {persona}.", description="d",
-            field_specs={"persona": {"default": "a helper"}},
+        role = PromptTemplate(
+            template="You are {persona}.", name="r", description="d",
+            parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default="a helper")],
         )
-        thinking = PromptConfig(template="Think as {persona}.", description="d")
+        thinking = PromptTemplate(template="Think as {persona}.", name="t", description="d")
 
         with pytest.warns(UserWarning, match="not identical"):
             agent = make_agent(["t1", "R"], role_prompt=role, thinking_instructions=thinking)
@@ -502,11 +511,11 @@ class TestPlaceholders:
         assert calls(agent)[0][0]["content"] == "Think as a helper."
 
     def test_the_overlap_warning_points_at_the_constructing_code(self) -> None:
-        role = PromptConfig(
-            template="You are {persona}.", description="d",
-            field_specs={"persona": {"default": "a helper"}},
+        role = PromptTemplate(
+            template="You are {persona}.", name="r", description="d",
+            parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default="a helper")],
         )
-        thinking = PromptConfig(template="Think as {persona}.", description="d")
+        thinking = PromptTemplate(template="Think as {persona}.", name="t", description="d")
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -517,13 +526,13 @@ class TestPlaceholders:
         assert overlap[0].filename == __file__
 
     def test_a_true_collision_raises(self) -> None:
-        role = PromptConfig(
-            template="You are {persona}.", description="d",
-            field_specs={"persona": {"type": "str"}},
+        role = PromptTemplate(
+            template="You are {persona}.", name="r", description="d",
+            parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str")],
         )
-        thinking = PromptConfig(
-            template="Think as {persona}.", description="d",
-            field_specs={"persona": {"type": "int"}},
+        thinking = PromptTemplate(
+            template="Think as {persona}.", name="t", description="d",
+            parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int")],
         )
 
         with pytest.raises(AgentError, match="no compatible reconciliation"):
@@ -533,9 +542,9 @@ class TestPlaceholders:
         def about(*, topic: str) -> str:
             return f"About {topic}"
 
-        thinking = PromptConfig(
-            template="Think about {topic}.", description="d",
-            field_specs={"topic": {"type": "str"}},
+        thinking = PromptTemplate(
+            template="Think about {topic}.", name="t", description="d",
+            parameters=[ParamSpec(name="topic", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str")],
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -547,10 +556,10 @@ class TestPlaceholders:
         assert calls(agent)[0][0]["content"] == "Think about cats."
         assert "About cats" in calls(agent)[0][1]["content"]
 
-    def test_described_and_defaulted_placeholder_via_field_specs(self) -> None:
-        thinking = PromptConfig(
-            template="Take the {angle} angle.", description="d",
-            field_specs={"angle": {"description": "the angle to take", "default": "costs"}},
+    def test_described_and_defaulted_placeholder_via_explicit_parameter(self) -> None:
+        thinking = PromptTemplate(
+            template="Take the {angle} angle.", name="t", description="d",
+            parameters=[ParamSpec(name="angle", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default="costs", description="the angle to take")],
         )
         agent = make_agent(["t1", "R"], thinking_instructions=thinking)
 
