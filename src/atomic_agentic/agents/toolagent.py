@@ -48,15 +48,15 @@ from ..exceptions import (
     ToolAgentError,
     ToolRegistrationError,
 )
-from ..constants.agents import INSTRUCTIONS_PRECEDENCE, TASK_RESULT_PREFIX, TOOLS_PREAMBLE
+from ..constants.agents import TASK_RESULT_PREFIX
+from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from ..core.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..tools import toolify
+from ..tools import toolify, to_invokable
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolAgentResult
-from ..utils.agents import build_usage_report, normalize_prompt_config
+from ..utils.agents import build_usage_report
 from ..utils.rendering import frame_content
 
 
@@ -75,9 +75,10 @@ class ToolAgent(Agent, ABC):
       hook (default: reserved-name check only) a subclass with its own
       additional naming constraints (e.g. ``ScriptActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
-    - ``instructions`` (construction-time only, read-only property): standing
-      user guidance rendered after the tools frame inside a
-      ``USER-DEFINED INSTRUCTIONS`` frame, only when set.
+    - ``instructions`` (construction-time only, read-only property returning
+      the instructions invokable or ``None``): standing user guidance rendered once per
+      invoke into ``task.instructions`` and placed after the tools frame inside
+      a ``USER-DEFINED INSTRUCTIONS`` frame, only when instructions are set.
     - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
       ``tool_concurrency_limit``.
     - ``_seed_task``: one read-only ``task_result_i`` context entry per
@@ -133,10 +134,10 @@ class ToolAgent(Agent, ABC):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
@@ -153,17 +154,18 @@ class ToolAgent(Agent, ABC):
         ----------
         name, description, llm_engine
             Forwarded to ``Agent.__init__`` unchanged.
-        instructions : str | PromptConfig | None
+        instructions : str | Callable | AtomicInvokable | None
             Optional standing user guidance (e.g. "always call the outliner
             first"), rendered after the family prompt inside a
-            ``USER-DEFINED INSTRUCTIONS`` frame, only when set. A plain
-            ``str`` is free-form prose (empty/whitespace-only normalizes to
-            "not provided"); a ``PromptConfig`` is accepted directly for a
-            caller who wants template fields of their own. A discovered
-            ``{name}`` field becomes a declared parameter of this agent --
-            validated/defaulted by the normal ``invoke(inputs)`` pipeline --
-            and is rendered against ``task.inputs``. Frozen at construction --
-            read-only via the ``instructions`` property.
+            ``USER-DEFINED INSTRUCTIONS`` frame, only when set. A string,
+            callable or invokable (an agent included; recursion is allowed
+            and unguarded), coerced through ``to_invokable``. Its parameters
+            (a string's ``{name}`` fields) become declared parameters of this
+            agent -- validated/defaulted by the normal ``invoke(inputs)``
+            pipeline. ``None`` means no user instructions; ``""`` or a
+            whitespace-only string raises ``ValueError``. Rendered once per
+            invoke in the pre stage. Frozen at construction -- read-only via
+            the ``instructions`` property.
         tools : list | None
             Construction-time convenience: registered via ``register_tools()``
             if given.
@@ -189,13 +191,14 @@ class ToolAgent(Agent, ABC):
         ``constant_descriptions``, ``tool_instructions``) is rejected by
         Python with ``TypeError``.
         """
-        # Normalized before super().__init__() so a {name} field discovered
-        # inside the template can be declared as a real extra_parameters entry.
-        normalized_instructions = normalize_prompt_config(
-            instructions,
-            default_template=None,
-            provided_description="Instructions",
-            error_label="instructions",
+        # Set before super().__init__(): _extra_parameter_sources reads it there.
+        self._instructions: Optional[AtomicInvokable] = (
+            None if instructions is None
+            else to_invokable(
+                instructions,
+                name=f"{name}_instructions",
+                description=f"Instructions of agent {name}",
+            )
         )
 
         super().__init__(
@@ -210,11 +213,6 @@ class ToolAgent(Agent, ABC):
             response_to_post=response_to_post,
             use_runtime_context=use_runtime_context,
             records_window=records_window,
-            extra_parameters=(
-                list(normalized_instructions.parameters)
-                if normalized_instructions is not None
-                else []
-            ),
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
@@ -233,8 +231,6 @@ class ToolAgent(Agent, ABC):
 
         if tools is not None:
             self.register_tools(tools)
-
-        self._instructions = normalized_instructions
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -276,10 +272,55 @@ class ToolAgent(Agent, ABC):
         self._tool_concurrency_limit = value
 
     @property
-    def instructions(self) -> Optional[str]:
-        """Template of the registered instructions, or None. Read-only."""
-        config = self._instructions
-        return config.template if config is not None else None
+    def instructions(self) -> Optional[AtomicInvokable]:
+        """The user instructions, or ``None``. Read-only."""
+        return self._instructions
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        """The instructions join the signature when there are any."""
+        sources = super()._extra_parameter_sources()
+        if self._instructions is not None:
+            sources.append(self._instructions)
+        return sources
+
+    def _render_instructions(self, task: AgentTask) -> None:
+        """Render the user instructions into ``task.instructions``.
+
+        1. No instructions: return.
+        2. Invoke it once with only its own parameter names from
+           ``task.agentic_inputs``; a non-``str`` result raises ``TypeError``.
+        """
+        instructions = self._instructions
+        if instructions is None:
+            return
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in instructions.parameters if p.name in task.agentic_inputs
+        }
+        text = instructions.invoke(inputs).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
+                f"{type(text).__name__}; instructions must render to a str."
+            )
+        task.instructions = text
+
+    async def _async_render_instructions(self, task: AgentTask) -> None:
+        """Async twin of ``_render_instructions`` (awaits ``async_invoke``)."""
+        instructions = self._instructions
+        if instructions is None:
+            return
+        inputs = {
+            p.name: task.agentic_inputs[p.name]
+            for p in instructions.parameters if p.name in task.agentic_inputs
+        }
+        text = (await instructions.async_invoke(inputs)).result
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.full_name}: instructions ({instructions.name!r}) returned "
+                f"{type(text).__name__}; instructions must render to a str."
+            )
+        task.instructions = text
 
     # ------------------------------------------------------------------ #
     # Shared helpers
@@ -643,8 +684,8 @@ class ToolAgent(Agent, ABC):
 
         1. ``TOOL-CALLING INSTRUCTIONS``: the family's ``TOOL_INSTRUCTIONS``.
         2. ``AVAILABLE TOOLS``: ``_render_actions()``.
-        3. With instructions set: ``INSTRUCTIONS_PRECEDENCE``, then the
-           instructions rendered against ``task.inputs`` in their
+        3. With instructions: ``INSTRUCTIONS_PRECEDENCE``, then
+           ``task.instructions`` (rendered by ``pre_process``) in its
            ``USER-DEFINED INSTRUCTIONS`` frame.
 
         Sections are joined by a blank line. Carries no budget text: per-call
@@ -655,12 +696,10 @@ class ToolAgent(Agent, ABC):
             frame_content(self._render_actions(), "AVAILABLE TOOLS"),
         ]
 
-        config = self._instructions
-        if config is not None:
-            text = config.render(dict(task.inputs))
+        if self._instructions is not None:
             sections.append(
                 f"{INSTRUCTIONS_PRECEDENCE}\n"
-                f"{frame_content(text, 'USER-DEFINED INSTRUCTIONS')}"
+                f"{frame_content(task.instructions, 'USER-DEFINED INSTRUCTIONS')}"
             )
 
         return [{"role": "system", "content": "\n\n".join(sections)}]
@@ -806,7 +845,9 @@ class ToolAgent(Agent, ABC):
             "tool_calls_limit": self.tool_calls_limit,
             "regeneration_limit": self.regeneration_limit,
             "tool_concurrency_limit": self.tool_concurrency_limit,
-            "instructions": self.instructions,
+            "instructions": (
+                None if self._instructions is None else self._instructions.to_dict()
+            ),
             "tools": {
                 name: tool.to_dict()
                 for name, tool in self._toolbox.items()

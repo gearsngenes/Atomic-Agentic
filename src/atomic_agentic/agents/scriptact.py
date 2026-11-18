@@ -10,19 +10,17 @@ from ..a2a.a2a_client_hub import A2AClientHub
 from ..a2a.py_a2atomic_client import PyA2AtomicClient
 
 from .toolagent import ToolAgent
-from .prompts import ONESHOT_PLANNER_PROMPT
+from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
 from .tools import attr_call_tool, builtin_call_tool
 from ..core.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
-from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
 from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
-    BUILTINS_PREAMBLE,
     ALLOWED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
@@ -108,10 +106,10 @@ class ScriptActAgent(ToolAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),

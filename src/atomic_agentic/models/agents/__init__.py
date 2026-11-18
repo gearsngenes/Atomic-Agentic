@@ -1,4 +1,3 @@
-from .prompts import PromptConfig
 from .records import (
     AgentRecord,
     LLMRecord,
@@ -21,7 +20,6 @@ from .tasks import (
 )
 
 __all__ = [
-    "PromptConfig",
     "AgentRecord",
     "LLMRecord",
     "ToolAgentRecord",

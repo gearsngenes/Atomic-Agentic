@@ -82,7 +82,7 @@ action. Don't force criticism when something works.
 Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
-# Standing role prompt (the agent's `instructions`). The working state lives in
+# Standing instructions (the agent's `instructions`). The working state lives in
 # two context variables, `latest_draft` and `latest_review`, which the model
 # sees in its context block and updates by assigning to them -- so the prompt
 # can describe a role instead of spelling out variable plumbing.
@@ -106,7 +106,7 @@ outliner = BasicAgent(
     name="StoryOutliner",
     description="Generate a structured outline from a one-sentence idea.",
     llm_engine=sub_agent_llm,
-    role_prompt=OUTLINER_PROMPT,
+    instructions=OUTLINER_PROMPT,
 )
 
 
@@ -123,7 +123,7 @@ writer = BasicAgent(
     name="StoryWriter",
     description="Writes a first draft from an outline, then revises using only reviewer notes.",
     llm_engine=sub_agent_llm,
-    role_prompt=WRITER_PROMPT,
+    instructions=WRITER_PROMPT,
     record_enabled=True,
     pre_invoke=writer_pre,
 )
@@ -137,7 +137,7 @@ reviewer = BasicAgent(
     name="DraftReviewer",
     description="Reviews drafts and provides revision notes.",
     llm_engine=sub_agent_llm,
-    role_prompt=REVIEWER_PROMPT,
+    instructions=REVIEWER_PROMPT,
     record_enabled=True,
     pre_invoke=reviewer_pre,
 )

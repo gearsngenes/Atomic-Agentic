@@ -32,7 +32,7 @@ haiku_agent = BasicAgent(
     name="HaikuWriter",
     description="Writes Haiku when given a topic.",
     llm_engine=sub_agent_llm,
-    role_prompt=(
+    instructions=(
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-7-5 syllable structure. "
         "Be creative; do not just restate the topic."

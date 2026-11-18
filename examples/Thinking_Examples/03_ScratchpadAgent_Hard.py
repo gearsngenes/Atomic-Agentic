@@ -1,8 +1,9 @@
 import sys
 import os
 from dotenv import load_dotenv
+from atomic_agentic import ParamSpec
 from atomic_agentic.agents import ScratchpadAgent
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.llm import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 
 # --- some models produce non-ASCII punctuation (e.g. an arrow) in their
@@ -21,16 +22,17 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 
 # --- thinking_instructions is the parameterized side of this example
 #     (Example 1 used plain prompts and example 2 a parameterized
-#     role_prompt -- this one shows a plain string role_prompt paired with a
-#     thinking_instructions PromptConfig contributing its OWN
-#     {verification_style} placeholder, reconciled against role_prompt's own
+#     instructions -- this one shows a plain string instructions paired with a
+#     thinking_instructions PromptTemplate contributing its OWN
+#     {verification_style} placeholder, reconciled against the instructions' own
 #     params the same way at construction time).
 #
 #     Thoughts are free text, so the instructions below carry the whole
 #     structure (focus, leads, working hypothesis, ruled-out leads) and are the
 #     guardrail: they explicitly forbid stating the final unlock phrase during
 #     thinking, so the solution only ever appears once, in the reply phase ---
-PUZZLE_THINKING_INSTRUCTIONS = PromptConfig(
+PUZZLE_THINKING_INSTRUCTIONS = PromptTemplate(
+    name="puzzle_thinking_instructions",
     template="""\
 You are working through a strictly sequential, multi-stage puzzle -- each
 stage's clue only makes sense once the previous stage is fully resolved, and
@@ -48,24 +50,27 @@ your reply, after thinking concludes.
 Verification style: {verification_style}
 """,
     description="Sequential-puzzle-solving thinking instructions, parameterized by verification rigor.",
-    field_specs={
-        "verification_style": {
-            "type": "str",
-            "description": (
+    parameters=[
+        ParamSpec(
+            name="verification_style",
+            index=0,
+            kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+            type="str",
+            description=(
                 "How rigorously to double-check each stage's answer before "
                 "moving to the next (e.g. 'briefly sanity-check each stage's "
                 "answer before proceeding' or 'move quickly, trusting your "
                 "first answer')."
             ),
-        },
-    },
+        ),
+    ],
 )
 
 puzzle_agent = ScratchpadAgent(
     name="Branching_Puzzle_Solver",
     llm_engine=llm,
     thinking_rounds=3,
-    role_prompt="You are a meticulous puzzle solver who shows its work clearly.",
+    instructions="You are a meticulous puzzle solver who shows its work clearly.",
     thinking_instructions=PUZZLE_THINKING_INSTRUCTIONS,
     description="A puzzle solver that explores multiple candidate leads per stage before committing, via multi-round labelled thinking.",
 )

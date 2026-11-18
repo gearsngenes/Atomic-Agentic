@@ -57,7 +57,7 @@ def make_agent(
         name="writer_agent",
         description="Deterministic writer integration-test agent.",
         llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
-        role_prompt=ROLE_PROMPT,
+        instructions=ROLE_PROMPT,
         record_enabled=record_enabled,
         records_window=records_window,
         pre_invoke=build_prompt,
@@ -223,7 +223,7 @@ class TestAgentBasicPipeline:
         agent_snapshot = data["steps"][0]
         assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
-        assert agent_snapshot["role_prompt"] == ROLE_PROMPT
+        assert agent_snapshot["instructions"]["template"] == ROLE_PROMPT
         assert agent_snapshot["record_enabled"] is True
         assert agent_snapshot["records_window"] == 1
         assert agent_snapshot["pre_invoke"]["name"] == f"{agent.name}_pre_invoke"

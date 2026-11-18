@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Set as AbstractSet
+from collections.abc import Iterable
 from typing import (
     Any,
     Callable,
@@ -23,7 +23,7 @@ from ..core.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
-from ..tools import toolify
+from ..tools import to_invokable
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask
@@ -34,14 +34,14 @@ from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TASK_RESULT_PREFIX,
-    PROMPT_PARAM,
     RUNTIME_PARAM,
 )
+from ..constants.prompts import DEFAULT_PRE_INVOKE
+from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import is_reserved_name
 from ..utils.parameters import (
     semantically_identical,
     insert_by_category,
-    to_paramspec_list,
     build_parameter_reports,
     apply_parameter_reports,
 )
@@ -52,6 +52,7 @@ from ..utils.rendering import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -90,18 +91,19 @@ class Agent(AtomicInvokable, ABC):
 
     Schema composition
     -------------------
-    The agent's parameter schema is composed at construction time from four
+    The agent's parameter schema is composed at construction time from these
     flat sources:
 
-    - All ``pre_invoke`` parameters (the built-in ``prompt`` parameter when
-      there is no ``pre_invoke``).
+    - All ``pre_invoke`` parameters (``pre_invoke`` is always present; it
+      defaults to the identity template ``"{prompt}"``, which contributes the
+      single ``prompt`` parameter).
     - Post-only parameters not filled by a ``response_to_post`` destination
-      (those leave the public signature unless pre_invoke/extra_parameters
-      also declares them), preserving their original declared kind (no
+      (those leave the public signature unless pre_invoke or a parameter
+      source also declares them), preserving their original declared kind (no
       forced ``KEYWORD_ONLY`` coercion).
-    - ``extra_parameters`` — a flat, subclass-computed source (e.g.
-      ``BasicAgent`` passes its role-prompt placeholders as this agent's
-      sole ``extra_parameters`` source).
+    - The parameter sources ``_extra_parameter_sources()`` returns, in list
+      order (e.g. ``BasicAgent`` returns its instructions, so their
+      placeholders become agent inputs).
     - The runtime context parameter (``**runtime_context``), when
       ``use_runtime_context`` is set at construction.
 
@@ -112,7 +114,7 @@ class Agent(AtomicInvokable, ABC):
     compatible-but-not-identical overlap warns once per construction call,
     grouped across every such name — not one warning per name. The
     highest-priority declaring source (``pre_invoke`` > ``post_invoke`` >
-    ``extra_parameters`` > runtime) supplies ``kind``/``default``/``description``
+    parameter sources in order > runtime) supplies ``kind``/``default``/``description``
     together; the constructed ``type`` is the full witness set of compatible
     type tokens, not just the winning source's own declared type. An
     identical overlap is silent. Grafting uses ``insert_by_category`` so every
@@ -143,18 +145,20 @@ class Agent(AtomicInvokable, ABC):
     if absent -- and writes back any other changed variable only if the
     conversation still holds it. See ``record``.
 
-    ``post_invoke=None`` means no post stage.
+    ``post_invoke=None`` means no post stage. Either stage may be a ``str``
+    (a ``PromptTemplate``), a callable, or any ``AtomicInvokable``, agents
+    included (recursion is allowed and unguarded).
 
     Runtime context
     ---------------
     ``**runtime_context`` carries improvised per-call variables that have no
     explicit conversation mapping. The parameter exists iff
     ``use_runtime_context`` is set at construction or ``pre_invoke``/
-    ``post_invoke`` declares it; a declaration (or any parameter named
-    ``runtime_context``) must be semantically identical to ``RUNTIME_PARAM``,
-    knob on or off, and that is the only ``**kwargs`` allowed in pre/post
-    (anything else raises ``AgentError``). Pre/post receive the dict only if
-    they declare it. With ``use_runtime_context`` set, ``create_task``
+    ``post_invoke`` or a parameter source declares it. One rule for every
+    source: a declaration (or any parameter named ``runtime_context``) must be
+    semantically identical to ``RUNTIME_PARAM``, knob on or off, and that is
+    the only ``**kwargs`` allowed (anything else raises ``AgentError``);
+    ``*args`` is allowed. Each declarer receives the dict. With ``use_runtime_context`` set, ``create_task``
     flattens the dict into ``task.context`` by its own keys -- before
     ``inputs_to_context``, so an explicit mapping wins a name clash --
     replacing a writable variable, skipping a readonly one and creating an
@@ -186,10 +190,13 @@ class Agent(AtomicInvokable, ABC):
     call time -- always its own current tail, never an arbitrary earlier
     record. Retargeting to an earlier point requires an explicit
     ``import_conversation`` (of a ``Conversation.slice``) or
-    ``switch_conversation`` call before invoking (``create_conversation``/
-    ``get_record``/``remove_conversation`` round out the rest of the explicit
-    conversation-management API). Context mutation goes through the
-    conversation itself (``agent.get_conversation(name).remember(...)``).
+    ``switch_conversation`` call before invoking (``get_conversation``/
+    ``remove_conversation`` round out the rest of the explicit
+    conversation-management API; a named conversation is built as
+    ``Conversation(...)`` and registered with ``import_conversation``; records
+    are looked up with ``agent.get_conversation().get_record(...)``).
+    Context mutation goes through the conversation itself
+    (``agent.get_conversation(name).remember(...)``).
     There is no implicit forking: two invocations racing to extend the same
     tail both append to their bound conversation in commit order
     (``Conversation.commit`` serializes the commits), each with ``prev`` set
@@ -234,49 +241,50 @@ class Agent(AtomicInvokable, ABC):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        pre_invoke: Optional[AtomicInvokable | Callable] = None,
-        post_invoke: Optional[AtomicInvokable | Callable] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),
         use_runtime_context: bool = False,
-        extra_parameters: list[str] | list[ParamSpec] | None = None,
         record_enabled: bool = True,
         records_window: Optional[int] = None,
     ) -> None:
         if type(use_runtime_context) is not bool:
             raise ValueError("use_runtime_context must be a bool.")
 
-        # ── Pre-invoke ───────────────────────────────────────────────────────
-        if pre_invoke is None:
-            pre_tool = None  # no pre stage: the caller's prompt passes straight through
-        elif isinstance(pre_invoke, AtomicInvokable):
-            pre_tool = pre_invoke
-        else:
-            pre_tool = toolify(
-                pre_invoke,
-                name=f"{name}_pre_invoke",
-                description=f"The tool that preprocesses inputs into a string for Agent {name}",
-            )
-
-        # ── Post-invoke ──────────────────────────────────────────────────────
-        if post_invoke is None:
-            post_tool = None  # no post stage: the response is returned as-is
-        elif isinstance(post_invoke, AtomicInvokable):
-            post_tool = post_invoke
-        else:
-            post_tool = toolify(
+        # ── Pre and post stages ──────────────────────────────────────────────
+        # A str becomes a PromptTemplate, a callable a Tool, an invokable (a
+        # sub-agent included) is used as is; anything else raises TypeError.
+        pre_tool = to_invokable(
+            pre_invoke,
+            name=f"{name}_pre_invoke",
+            description=f"The tool that preprocesses inputs into a string for Agent {name}",
+        )
+        post_tool = (
+            None if post_invoke is None
+            else to_invokable(
                 post_invoke,
                 name=f"{name}_post_invoke",
                 description=f"The tool that postprocesses outputs of Agent {name}",
             )
+        )
+
+        # ── Parameter sources ────────────────────────────────────────────────
+        # Called once; subclasses have already set their instructions attributes.
+        sources = self._extra_parameter_sources()
 
         # ── Variadic keywords and the runtime name ───────────────────────────
-        # Independent of the knob: a **kwargs parameter must BE the runtime
-        # parameter (every name pre/post consume must be enumerable at
-        # construction), and any parameter NAMED runtime_context must be
-        # identical to it.
-        for tool, label in ((pre_tool, "pre_invoke"), (post_tool, "post_invoke")):
+        # One rule for every source, independent of the knob: a **kwargs
+        # parameter must BE the runtime parameter (every name a source
+        # consumes must be enumerable at construction), and any parameter NAMED
+        # runtime_context must be identical to it.
+        checked = [
+            (pre_tool, "pre_invoke"),
+            (post_tool, "post_invoke"),
+            *((src, src.name) for src in sources),
+        ]
+        for tool, label in checked:
             for p in () if tool is None else tool.parameters:
                 if (
                     p.kind == ParamSpec.VAR_KEYWORD or p.name == RUNTIME_PARAM.name
@@ -290,25 +298,10 @@ class Agent(AtomicInvokable, ABC):
                         "callable to drop it."
                     )
 
-        # ── Extra parameters ─────────────────────────────────────────────────
-        extra_raw = to_paramspec_list(extra_parameters)
-        for p in extra_raw:
-            if p.kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
-                raise AgentError(
-                    f"extra_parameters entry {p.name!r} must not be variadic; "
-                    f"got kind {p.kind!r}."
-                )
-            if p.name == RUNTIME_PARAM.name:
-                raise AgentError(
-                    f"extra_parameters entry {p.name!r} is the runtime context "
-                    "parameter's name; extras cannot be variadic, so it can never "
-                    "match it."
-                )
-
         # ── Bindings ─────────────────────────────────────────────────────────
         # A post parameter filled by response_to_post that no other source
         # declares is fed by the response alone, so it leaves the public
-        # signature. One that pre_invoke/extra_parameters also declares stays in
+        # signature. One that pre_invoke or a source also declares stays in
         # the reconciliation below: when the response lacks its key, the
         # caller's value is what the post receives, so the declarations must be
         # compatible.
@@ -336,24 +329,25 @@ class Agent(AtomicInvokable, ABC):
                 "caller's runtime context channel, not a post parameter the "
                 "response may fill."
             )
-        pre_declared = list(pre_tool.parameters) if pre_tool is not None else [PROMPT_PARAM]
+        pre_declared = list(pre_tool.parameters)
+        source_params = [list(src.parameters) for src in sources]
         declared_elsewhere = {p.name for p in pre_declared} | {
-            p.name for p in extra_raw
+            p.name for ps in source_params for p in ps
         }
         response_filled = bound_post - declared_elsewhere
 
         # ── Schema composition ───────────────────────────────────────────────
         # The sources are reconciled N-way (pre_invoke > post_invoke >
-        # extra_parameters > runtime), raising on the first genuine conflict and
+        # parameter sources in order > runtime), raising on the first genuine conflict and
         # warning once for compatible-but-not-identical names. Any runtime_context
         # declaration reaching this point is already identical to RUNTIME_PARAM.
         post_only = [p for p in post_params if p.name not in response_filled]
-        sources = [pre_declared, post_only, extra_raw]
-        labels = ["pre_invoke", "post_invoke", "extra_parameters"]
+        report_sources = [pre_declared, post_only, *source_params]
+        labels = ["pre_invoke", "post_invoke", *(src.name for src in sources)]
         if use_runtime_context:
-            sources.append([RUNTIME_PARAM])
+            report_sources.append([RUNTIME_PARAM])
             labels.append("use_runtime_context")
-        reports = build_parameter_reports(sources)
+        reports = build_parameter_reports(report_sources)
         constructed = apply_parameter_reports(
             reports, tuple(labels), error_cls=AgentError, stacklevel=4
         )
@@ -372,7 +366,7 @@ class Agent(AtomicInvokable, ABC):
             )
 
         # Lifecycle components and the per-consumer name sets create_task slices by.
-        self._pre_invoke: Optional[AtomicInvokable] = pre_tool
+        self._pre_invoke: AtomicInvokable = pre_tool
         self._post_invoke: Optional[AtomicInvokable] = post_tool
         self._inputs_to_context = inputs_binding  # dict[str, str]; {} when unbound
         self._response_to_context = context_binding  # str | dict[Any, str]; {} when unbound
@@ -386,7 +380,7 @@ class Agent(AtomicInvokable, ABC):
         self._context_destinations: frozenset[str] = frozenset(destinations)
         self._pre_names = frozenset(p.name for p in pre_declared)
         self._post_names = frozenset(p.name for p in post_params)
-        self._agentic_names = frozenset(p.name for p in extra_raw)
+        self._agentic_names = frozenset(p.name for ps in source_params for p in ps)
         self._use_runtime_context: bool = use_runtime_context
 
         # Store Agent runtime configuration.
@@ -411,6 +405,30 @@ class Agent(AtomicInvokable, ABC):
             ),
         )
 
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        """Invokables whose declared parameters join this agent's signature,
+        in priority order (an earlier one wins an overlap).
+
+        Called once, from ``Agent.__init__``, so a subclass must set the
+        attributes it reads before calling ``super().__init__()``. Subclasses
+        extend the base list through ``super()``. The base has none.
+        """
+        return []
+
+    def _render_instructions(self, task: AgentTask) -> None:
+        """Render this agent's instructions into ``task`` fields.
+
+        Called as the last step of ``pre_process``. A subclass with
+        instructions overrides it (and its async twin), invoking each
+        instructions invokable once per invoke. The base has none, so this is
+        a no-op.
+        """
+
+    async def _async_render_instructions(self, task: AgentTask) -> None:
+        """Async twin of ``_render_instructions``; the default is a no-op, so
+        it runs inline. A subclass that overrides the sync hook must override
+        this too (it awaits the instructions' ``async_invoke``)."""
+
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
@@ -420,21 +438,16 @@ class Agent(AtomicInvokable, ABC):
         *,
         route: str,
         allow_str: bool = True,
-    ) -> str | dict[Any, str]:
+    ) -> Binding:
         """Validate one binding knob and return its normalized form.
 
-        1. ``None`` raises (pass an empty collection for no binding); ``str`` ->
-           the str itself (whole response; raises when ``allow_str`` is false);
-           ``Mapping`` -> ``dict(value)``; any other non-bytes iterable of names
-           (list, tuple, set, dict view, generator...) -> ``{d: d}``, sorted when
-           unordered; anything else raises.
-        2. An empty collection/mapping normalizes to ``{}``.
-        3. Destinations are stripped of surrounding whitespace (as
-           ``ContextVariable``/``ParamSpec`` names are), then each must be an
-           identifier string and must not start with ``TASK_RESULT_PREFIX``.
-        4. Duplicate destinations within this route raise (checked before
-           collapsing to a dict); the same name across routes is legal.
-        5. ``inputs_to_context`` only: the selectors (sources) are stripped and
+        1. ``None`` raises (pass an empty collection for no binding).
+        2. The shape rules (str / iterable of names / mapping, empty, stripping,
+           duplicates) are ``normalize_binding``'s; its ``TypeError``/``ValueError``
+           surface here as ``AgentError``.
+        3. Each destination must be an identifier string and must not start with
+           ``TASK_RESULT_PREFIX``.
+        4. ``inputs_to_context`` only: the selectors (sources) are stripped and
            must be identifier strings; membership in the agent's schema is
            checked by ``__init__``.
         """
@@ -443,32 +456,15 @@ class Agent(AtomicInvokable, ABC):
                 f"{route} must not be None; pass an empty collection for no binding."
             )
 
-        if isinstance(value, str):
-            if not allow_str:
-                raise AgentError(
-                    f"{route} does not accept a bare str; pass a collection of "
-                    "input names or a {input: destination} mapping."
-                )
-            selectors, names = None, [value]
-        elif isinstance(value, Mapping):
-            selectors, names = list(value), list(value.values())
-        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
-            selectors, names = None, list(value)
-            if isinstance(value, AbstractSet) and all(isinstance(n, str) for n in names):
-                names.sort()  # unordered: store deterministically
-        else:
-            raise AgentError(
-                f"{route} must be None, "
-                + ("a str, " if allow_str else "")
-                + "a collection of str, or a mapping of "
-                + ("selector" if allow_str else "input name")
-                + f" -> str; got {type(value).__name__}."
-            )
+        try:
+            binding = normalize_binding(value, label=route, allow_str=allow_str)
+        except (TypeError, ValueError) as exc:
+            raise AgentError(str(exc)) from exc
 
-        if not names:
-            return {}
+        if binding == {}:
+            return binding
 
-        names = [n.strip() if isinstance(n, str) else n for n in names]
+        names = [binding] if isinstance(binding, str) else list(binding.values())
         for n in names:
             if not (isinstance(n, str) and IDENTIFIER_PATTERN.fullmatch(n)):
                 raise AgentError(
@@ -479,20 +475,17 @@ class Agent(AtomicInvokable, ABC):
                     f"{route} destination {n!r} is reserved (a "
                     f"{TASK_RESULT_PREFIX!r} name)."
                 )
-        if len(set(names)) != len(names):
-            raise AgentError(f"{route} has duplicate destinations.")
 
-        if selectors is not None and route == "inputs_to_context":
-            selectors = [s.strip() if isinstance(s, str) else s for s in selectors]
+        if route == "inputs_to_context":
+            selectors = [s.strip() if isinstance(s, str) else s for s in binding]
             for s in selectors:
                 if not (isinstance(s, str) and IDENTIFIER_PATTERN.fullmatch(s)):
                     raise AgentError(
                         f"{route} source {s!r} must be a valid identifier string."
                     )
+            binding = dict(zip(selectors, names))
 
-        if isinstance(value, str):
-            return names[0]
-        return dict(zip(names if selectors is None else selectors, names))
+        return binding
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -550,9 +543,9 @@ class Agent(AtomicInvokable, ABC):
         return list(self._conversations.keys())
 
     @property
-    def pre_invoke(self) -> Optional[AtomicInvokable]:
-        """Invokable that converts the input mapping into a prompt string, or
-        ``None`` when there is no pre stage (the caller's ``prompt`` is used as-is)."""
+    def pre_invoke(self) -> AtomicInvokable:
+        """Invokable that converts the input mapping into the prompt string.
+        Never ``None``; the default is the identity template ``"{prompt}"``."""
         return self._pre_invoke
 
     @property
@@ -666,8 +659,9 @@ class Agent(AtomicInvokable, ABC):
         receives the caller inputs for its declared parameters, with bound
         values overlaid by ``post_process``; pre/post see ``runtime_context``
         only if they declare it. ``agentic_inputs`` holds the
-        ``extra_parameters``-sourced names
-        (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
+        names the agent's parameter sources declare (the instructions); it is
+        the union over all sources, and each source takes only its own names
+        from it (not every system-prompt placeholder -- a ``ToolAgent``'s ``{TOOLS}``
         etc. are render context, not agent parameters).
 
         The task class comes from ``_TASK_CLS``; ``_seed_task`` then does any
@@ -773,41 +767,40 @@ class Agent(AtomicInvokable, ABC):
         return self.summarize(task)
 
     def pre_process(self, task: AgentTask) -> AgentTask:
-        """Run ``pre_invoke`` over ``task.pre_inputs`` to produce the prompt.
+        """Produce the prompt, then render the instructions.
 
-        Reads ``task.pre_inputs``; always overwrites ``task.user_prompt``;
-        returns ``task``. With no ``pre_invoke`` the prompt is
-        ``task.pre_inputs["prompt"]``. Errors raised by ``pre_invoke``
-        propagate unchanged. A non-``str`` prompt raises
-        ``AgentInvocationError`` -- a prompt string is required.
+        1. Run ``pre_invoke`` over ``task.pre_inputs``; always overwrites
+           ``task.user_prompt``. A non-``str`` result raises ``TypeError``
+           naming the stage; errors the stage raises propagate unchanged.
+        2. Last step: ``_render_instructions(task)`` renders the agent's
+           instructions into the task's flat fields (a no-op without any).
+
+        Returns ``task``.
         """
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-        if self._pre_invoke is None:
-            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
-        else:
-            raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
-            subject = "pre_invoke returned a non-string result"
-        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
+        raw_prompt = self._pre_invoke.invoke(task.pre_inputs).result
+        if not isinstance(raw_prompt, str):
+            raise TypeError(
+                f"{self._pre_invoke.name!r} returned {type(raw_prompt).__name__}; "
+                "the user prompt must be a string."
+            )
+        task.user_prompt = raw_prompt
+        self._render_instructions(task)
         return task
 
     async def async_pre_process(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``pre_process``."""
+        """Async mirror of ``pre_process``; ends with
+        ``_async_render_instructions(task)``."""
         logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-        if self._pre_invoke is None:
-            raw_prompt, subject = task.pre_inputs["prompt"], "the prompt is not a string"
-        else:
-            raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
-            subject = "pre_invoke returned a non-string result"
-        task.user_prompt = self._require_prompt_str(raw_prompt, subject)
-        return task
-
-    @staticmethod
-    def _require_prompt_str(raw_prompt: Any, subject: str) -> str:
+        raw_prompt = (await self._pre_invoke.async_invoke(task.pre_inputs)).result
         if not isinstance(raw_prompt, str):
-            raise AgentInvocationError(
-                f"{subject} (type={type(raw_prompt)!r}); a prompt string is required"
+            raise TypeError(
+                f"{self._pre_invoke.name!r} returned {type(raw_prompt).__name__}; "
+                "the user prompt must be a string."
             )
-        return raw_prompt
+        task.user_prompt = raw_prompt
+        await self._async_render_instructions(task)
+        return task
 
     def think(self, task: AgentTask) -> AgentTask:
         """Advance ``task``'s reasoning phase by one round.
@@ -890,7 +883,8 @@ class Agent(AtomicInvokable, ABC):
         single ``{"role": "system", "content": ...}`` dict.
 
         Hard-abstract: the base has no prompt of its own. A pure function of
-        the agent and the task.
+        the agent and the task. Reads fields the pre stage rendered; valid only
+        after ``pre_process``.
         """
         ...
 
@@ -947,8 +941,10 @@ class Agent(AtomicInvokable, ABC):
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
         """Slice the generated response per the two response routes.
 
-        1. Both routes are sliced first (``_slice_response``), so a bad
-           response shape raises before anything runs or is written.
+        1. Both routes are sliced first (``slice_response``, skipping missing
+           selectors), so a bad response shape raises before anything runs or
+           is written. A ``str``/``bytes``/``bytearray`` response with selectors raises
+           ``AgentInvocationError``; any other ``TypeError`` propagates.
         2. The ``response_to_post`` pieces overwrite those entries of
            ``task.post_inputs`` (every destination is a post parameter, checked
            at construction).
@@ -956,42 +952,20 @@ class Agent(AtomicInvokable, ABC):
         Returns the ``response_to_context`` pieces (a skipped selector has no
         entry), which ``post_process`` hands to the context sink.
         """
-        post_bound = self._slice_response(task, self._response_to_post, "response_to_post")
-        context_bound = self._slice_response(
-            task, self._response_to_context, "response_to_context"
-        )
+        response = task.generated_response
+        try:
+            post_bound = slice_response(
+                response, self._response_to_post, label="response_to_post", on_missing="skip"
+            )
+            context_bound = slice_response(
+                response, self._response_to_context, label="response_to_context", on_missing="skip"
+            )
+        except TypeError as exc:
+            if isinstance(response, (str, bytes, bytearray)):
+                raise AgentInvocationError(str(exc)) from exc
+            raise
         task.post_inputs.update(post_bound)
         return context_bound
-
-    @staticmethod
-    def _slice_response(
-        task: AgentTask, spec: str | dict[Any, str], route: str
-    ) -> dict[str, Any]:
-        """Resolve one response binding against ``task.generated_response``.
-
-        An empty mapping -> ``{}``. A ``str`` binds the whole response; a mapping
-        indexes each selector out of it (a missing key/index is skipped, a
-        present ``None`` is bound, other errors propagate; a ``str``/``bytes``
-        response raises ``AgentInvocationError`` since it would index
-        characters).
-        """
-        response = task.generated_response
-        if isinstance(spec, str):
-            return {spec: response}
-        if not spec:
-            return {}
-        if isinstance(response, (str, bytes)):
-            raise AgentInvocationError(
-                f"{route} selectors cannot index a str/bytes response; "
-                "use the str form to bind the whole response."
-            )
-        bound = {}
-        for selector, destination in spec.items():
-            try:
-                bound[destination] = response[selector]
-            except (KeyError, IndexError):
-                continue
-        return bound
 
     @staticmethod
     def _write_context(
@@ -1152,7 +1126,9 @@ class Agent(AtomicInvokable, ABC):
         context and preview limits (a conversation shared with another agent
         stays intact there); ``self._conversations`` becomes a single fresh
         ``"default"`` built by ``_new_conversation()`` and the active
-        conversation resets to ``"default"``.
+        conversation resets to ``"default"``. It differs from
+        ``remove_conversation("default")`` by also resetting the active
+        pointer and dropping every other conversation.
         Not synchronized: an in-flight call whose ``record`` looks up a key
         this reset removed raises ``KeyError``.
         """
@@ -1173,22 +1149,23 @@ class Agent(AtomicInvokable, ABC):
 
         The single source of every default conversation this agent builds: the
         initial ``"default"``, the one rebuilt by ``clear_memory()``, the one
-        rebuilt by ``remove_conversation("default")``, and the starting point
-        ``create_conversation`` overlays its arguments onto. A subclass
+        rebuilt by ``remove_conversation("default")``. A subclass
         overrides it to give its conversations different defaults
         (``BasicAgent``: render_mode ``"j"`` when it has a response_schema).
         """
         return Conversation()
 
-    def _check_new_conversation_name(self, name: str, caller: str) -> None:
+    def _check_new_conversation_name(self, name: str) -> None:
         """Raise ``ValueError`` if ``name`` is badly shaped or already taken."""
         if not CONVERSATION_NAME_PATTERN.fullmatch(name):
             raise ValueError(
-                f"{caller}: invalid conversation name {name!r} (must be "
+                f"import_conversation: invalid conversation name {name!r} (must be "
                 "alphanumeric/underscore)."
             )
         if name in self._conversations:
-            raise ValueError(f"{caller}: conversation {name!r} already exists.")
+            raise ValueError(
+                f"import_conversation: conversation {name!r} already exists."
+            )
 
     def get_conversation(self, conversation_id: str | None = None) -> Conversation:
         """Return the stored conversation itself (not a snapshot).
@@ -1210,86 +1187,6 @@ class Agent(AtomicInvokable, ABC):
             raise AgentInvocationError(f"get_conversation: unknown conversation {key!r}.")
         return self._conversations[key]
 
-    def create_conversation(
-        self,
-        name: str,
-        *,
-        response_preview_limit: int | None = None,
-        prompt_preview_limit: int | None = None,
-        context_preview_limit: int | None = None,
-        render_mode: str | None = None,
-    ) -> Conversation:
-        """Create a new, empty conversation and return the stored object.
-
-        ``name`` must be alphanumeric-plus-underscore; a bad shape or a name
-        that already exists raises ``ValueError`` with a specific message.
-
-        1. check the name.
-        2. start from ``self._new_conversation()``.
-        3. assign each argument that is not ``None`` onto it. The three
-           preview limits (``None`` unlimited, ``0`` hidden, else
-           ``int > 0``) and ``render_mode`` (how prior responses are formatted
-           in history; omitted -> the agent's default) are validated by
-           ``Conversation`` (``ValueError``); a failure leaves nothing
-           registered.
-        4. register and return it. Never auto-activates.
-
-        ``None`` means "not given" for every argument, so a limit cannot be
-        set back to ``None`` over a default the agent's hook already set.
-        """
-        self._check_new_conversation_name(name, "create_conversation")
-        conv = self._new_conversation()
-        given = {
-            "response_preview_limit": response_preview_limit,
-            "prompt_preview_limit": prompt_preview_limit,
-            "context_preview_limit": context_preview_limit,
-            "render_mode": render_mode,
-        }
-        for field, value in given.items():
-            if value is not None:
-                setattr(conv, field, value)
-        self._conversations[name] = conv
-        return conv
-
-    def get_record(
-        self,
-        *,
-        run_id: str | None = None,
-        conversation: str | None = None,
-        index: int | None = None,
-    ) -> AgentRecord:
-        """Single-record lookup. Valid combinations:
-
-        - ``run_id`` alone: first match scanning every conversation.
-        - ``run_id`` + ``conversation``: first match in that conversation.
-        - ``conversation`` + ``index``: ``records[index]``.
-        - ``index`` alone: index into the active conversation.
-
-        Anything else (``run_id`` + ``index``, ``conversation`` alone,
-        nothing) raises ``ValueError``. An unknown ``conversation`` raises
-        ``AgentInvocationError``; no record with the ``run_id`` raises
-        ``ValueError``; an out-of-range ``index`` raises the natural
-        ``IndexError``.
-        """
-        if run_id is not None:
-            if index is not None:
-                raise ValueError("get_record: run_id may not be combined with index.")
-            if conversation is None:
-                convs = list(self._conversations.values())
-            else:
-                convs = [self.get_conversation(conversation)]
-            for conv in convs:
-                found = next((r for r in conv.records if r.run_id == run_id), None)
-                if found is not None:
-                    return found
-            raise ValueError(f"get_record: no record with run_id {run_id!r} found.")
-
-        if index is None:
-            raise ValueError(
-                "get_record: must supply run_id, conversation + index, or index."
-            )
-        return self.get_conversation(conversation).records[index]
-
     def import_conversation(self, conversation: Conversation, *, name: str) -> None:
         """Register ``conversation`` (the SAME object, shared) under ``name``.
 
@@ -1300,8 +1197,8 @@ class Agent(AtomicInvokable, ABC):
         Never activates; returns ``None``.
 
         Not a ``Conversation`` raises ``TypeError`` (before anything is
-        registered). ``name`` is validated/collision-checked exactly like
-        ``create_conversation``'s (``ValueError``); the same object already
+        registered). ``name`` is validated and collision-checked
+        (``ValueError``); the same object already
         registered under another key of this agent also raises ``ValueError``.
         """
         if not isinstance(conversation, Conversation):
@@ -1310,7 +1207,7 @@ class Agent(AtomicInvokable, ABC):
                 f"got {type(conversation)!r}."
             )
 
-        self._check_new_conversation_name(name, "import_conversation")
+        self._check_new_conversation_name(name)
         if any(c is conversation for c in self._conversations.values()):
             raise ValueError(
                 "import_conversation: conversation is already registered here."
@@ -1395,7 +1292,7 @@ class Agent(AtomicInvokable, ABC):
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
         d.update({
-            "pre_invoke": self.pre_invoke.to_dict() if self.pre_invoke is not None else None,
+            "pre_invoke": self.pre_invoke.to_dict(),
             "post_invoke": self.post_invoke.to_dict() if self.post_invoke is not None else None,
             "inputs_to_context": self.inputs_to_context,
             "response_to_context": self.response_to_context,

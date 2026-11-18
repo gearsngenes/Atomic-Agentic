@@ -60,7 +60,7 @@ class TestPlanActConstruction:
 
     def test_instructions_forwarded(self) -> None:
         agent = make_planact_agent([], instructions="Be terse.")
-        assert agent.instructions == "Be terse."
+        assert agent.instructions.template == "Be terse."
 
     @pytest.mark.parametrize("removed", [{"constants": [1]}, {"tool_instructions": "x"}])
     def test_removed_constructor_arguments_raise_type_error(self, removed: dict[str, Any]) -> None:

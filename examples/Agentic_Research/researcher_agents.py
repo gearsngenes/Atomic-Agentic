@@ -36,7 +36,7 @@ writer = BasicAgent(
     name="report_writer",
     description="Drafts and revises an APA-style research report.",
     llm_engine=llm,
-    role_prompt=(
+    instructions=(
         "You are an expert research writer.\n"
         "Write APA-style reports grounded in the provided sources.\n"
         "Never fabricate citations."
@@ -64,7 +64,7 @@ critic = BasicAgent(
     name="report_critic",
     description="Reviews the report draft and returns revision notes or <<APPROVED>>.",
     llm_engine=llm,
-    role_prompt=(
+    instructions=(
         "You are a strict but fair APA research report reviewer.\n\n"
         "Evaluate the draft for:\n"
         "- APA structure (title/abstract/headings/references)\n"

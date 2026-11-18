@@ -678,6 +678,45 @@ class TestNormalizePromptTemplate:
         assert discovered_twice == discovered_once
 
 
+class TestNormalizePromptTemplateListed:
+    def test_listed_none_equals_default_behavior(self) -> None:
+        raw = "Hi {a} and {b!r:>5} { x } {{lit}}"
+
+        assert _normalize_prompt_template(raw, None) == _normalize_prompt_template(raw)
+
+    def test_unlisted_clean_field_is_escaped_and_not_discovered(self) -> None:
+        normalized, discovered = _normalize_prompt_template("{a} {b}", {"a"})
+
+        assert normalized == "{a} {{b}}"
+        assert discovered == ["a"]
+
+    def test_empty_listed_escapes_every_clean_field(self) -> None:
+        normalized, discovered = _normalize_prompt_template("{a} {b}", set())
+
+        assert normalized == "{{a}} {{b}}"
+        assert discovered == []
+
+    def test_listed_name_absent_from_template_is_not_returned(self) -> None:
+        normalized, discovered = _normalize_prompt_template("{a}", {"a", "ghost"})
+
+        assert normalized == "{a}"
+        assert discovered == ["a"]
+
+    def test_unlisted_field_with_conversion_and_spec_is_escaped_whole(self) -> None:
+        normalized, discovered = _normalize_prompt_template("{b!r:>5}", {"a"})
+
+        assert normalized == "{{b!r:>5}}"
+        assert discovered == []
+
+    def test_renormalizing_with_same_listed_is_a_noop(self) -> None:
+        listed = {"a"}
+        once, discovered_once = _normalize_prompt_template("{a} {b} {c.d}", listed)
+        twice, discovered_twice = _normalize_prompt_template(once, listed)
+
+        assert twice == once
+        assert discovered_twice == discovered_once
+
+
 class TestSemanticallyCompatible:
     def test_same_type_same_non_variadic_kind_is_compatible(self) -> None:
         a = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")

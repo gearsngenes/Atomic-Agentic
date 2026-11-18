@@ -22,7 +22,7 @@ estimator_agent = ScratchpadAgent(
     llm_engine=llm,
     thinking_rounds=8,
     stop_early=True,
-    role_prompt="You are a practical estimator. Give a single number with a one-sentence justification.",
+    instructions="You are a practical estimator. Give a single number with a one-sentence justification.",
     thinking_instructions=(
         "You are estimating a quantity. Each round, add one focused thought: "
         "break the quantity into factors you can reason about, or sanity-check "

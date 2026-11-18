@@ -58,7 +58,7 @@ builder = BasicAgent(
     Returns complete Python module source, joined with "#- path/to/module.py" headers.
     """,
     llm_engine=sub_agent_llm,
-    role_prompt=(
+    instructions=(
         "You are a senior software engineer. Produce complete, cohesive Python module(s) "
         "that fulfill the task, with consistent names, imports, and interfaces. Avoid "
         "stubs or omitted implementation unless explicitly requested.\n"
@@ -91,7 +91,7 @@ reviewer = BasicAgent(
     "Acceptable" and "Outstanding" both mean: stop and return the latest draft, no rebuild.
     """,
     llm_engine=sub_agent_llm,
-    role_prompt=(
+    instructions=(
         "You are an expert Python project reviewer. Inputs: draft_code (the project source) "
         "and criteria (a string of acceptance requirements). Judge the project primarily "
         "against every stated criterion; identify unmet or ambiguous requirements, and check "

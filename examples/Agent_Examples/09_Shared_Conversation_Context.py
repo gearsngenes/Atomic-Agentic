@@ -54,7 +54,7 @@ def main() -> None:
         name="writer",
         description="Writes and revises a short story draft.",
         llm_engine=engine,
-        role_prompt=(
+        instructions=(
             "You are a fiction writer. Reply with ONLY the story text, at most "
             "100 words. When the conversation contains a reviewer critique, "
             "revise your latest draft to address it."
@@ -65,7 +65,7 @@ def main() -> None:
         name="reviewer",
         description="Critiques the latest story draft in the conversation.",
         llm_engine=engine,
-        role_prompt=(
+        instructions=(
             "You are a strict editor. Review the writer's LATEST draft in this "
             "conversation. Approve only if it has a clear arc and a strong "
             "ending; otherwise ask for a revision with one specific critique."

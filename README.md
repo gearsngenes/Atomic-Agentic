@@ -180,7 +180,7 @@ advisor = BasicAgent(
     name="finance_advisor",
     description="Investment advisor.",
     llm_engine=engine,
-    role_prompt="""You are an expert financial advisor at a bank. 
+    instructions="""You are an expert financial advisor at a bank. 
 When you receive customer banking data and a desired sector,
 provide a bulleted list of relevant investment tickers.""",
     pre_invoke=format_finance_request,
@@ -294,6 +294,56 @@ print(flow.invoke({"x": 2, "y": 3}).result)  # {'result': 10}
 ```
 
 An agent does the same through `post_invoke` (with `response_to_post="result"`): the function receives the agent's reply and returns the dict.
+
+------------------------------------------------------------------------
+
+## Agents Inside Agents
+
+`instructions`, `thinking_instructions`, `pre_invoke` and `post_invoke` each accept a string (a prompt template), a callable, or any `AtomicInvokable`, agents included. An agent used this way is invoked once per call of the outer agent, and its parameters join the outer agent's signature. There is no cycle guard, so avoid an agent that (directly or not) uses itself.
+
+```python
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
+
+engine = OpenAIEngine(model="gpt-4o-mini")
+
+# The persona writer is an agent with its own pre_invoke template. Its two
+# placeholders, `persona` and `tone`, become parameters of whoever uses it.
+persona_writer = BasicAgent(
+    name="persona_writer",
+    description="Writes the system prompt for a persona.",
+    llm_engine=engine,
+    instructions=(
+        "You write system prompts. Given a persona and a tone, reply with two or three "
+        "sentences that tell an assistant who it is, how it speaks and what it avoids. "
+        "Reply with the system prompt only."
+    ),
+    pre_invoke="Persona: {persona}\nTone: {tone}",
+    record_enabled=False,  # a helper agent: keep no per-call records
+)
+
+# The assistant's instructions are that agent, so its system message is written
+# fresh on every call. Its own pre_invoke template shapes the user task.
+assistant = BasicAgent(
+    name="assistant",
+    description="Answers in a persona another agent wrote.",
+    llm_engine=engine,
+    instructions=persona_writer,
+    pre_invoke="Topic: {topic}\nQuestion: {question}",
+)
+
+print([p.name for p in assistant.parameters])  # ['topic', 'question', 'persona', 'tone']
+
+result = assistant.invoke({
+    "topic": "navigation",
+    "question": "How do I find north without a compass?",
+    "persona": "a retired pirate captain",
+    "tone": "gruff but encouraging",
+})
+print(result.result)
+```
+
+`topic` and `question` come from the assistant's own `pre_invoke` template and make up the user task. `persona` and `tone` come from the `persona_writer` and shape only the system message. The assistant's signature lists all four. A helper agent keeps a record of every call by default, so set `record_enabled=False` on one that runs inside another agent.
 
 ------------------------------------------------------------------------
 

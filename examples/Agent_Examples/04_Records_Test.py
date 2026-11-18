@@ -32,7 +32,7 @@ def main() -> None:
         name="basic_turn_demo_agent",
         description="Basic Agent demo showing canonical turn history and rendering.",
         llm_engine=engine,
-        role_prompt="You are concise. Answer in one short sentence.",
+        instructions="You are concise. Answer in one short sentence.",
         record_enabled=True,
         records_window=None,
         post_invoke=summarize_result,

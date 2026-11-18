@@ -52,6 +52,12 @@ class AgentTask:
         ``ThinkingAgent.think`` is its only writer. Tool families do not use
         it.
 
+    instructions : str
+        The main instructions rendered once per invoke by the agent's
+        ``_render_instructions`` hook (the last step of ``pre_process``).
+        Empty until then, and empty for an agent with no instructions.
+        The system message reads it; nothing else writes it.
+
     llm_records : list[LLMRecord]
         Accumulator for every LLM generation made while producing this
         invocation's result. Read exactly once, at loop-close, to populate
@@ -107,7 +113,9 @@ class AgentTask:
 
     pre_inputs, post_inputs, agentic_inputs : dict[str, Any]
         Views of ``inputs`` sliced by consumer (pre-invoke, post-invoke,
-        agent-specific -- the ``extra_parameters``-sourced names). A name
+        agent-specific -- the names the agent's parameter sources declare,
+        i.e. the instructions). ``agentic_inputs`` is the union over all
+        sources; each source takes only its own names from it. A name
         consumed by more than one goes into every
         bucket that declares it. ``post_process`` then overlays the response
         pieces bound by ``response_to_post`` onto ``post_inputs`` (always names
@@ -137,6 +145,7 @@ class AgentTask:
     agentic_inputs: dict[str, Any] = field(default_factory=dict)
     run_id: str | None = None
     thinking_complete: bool = True
+    instructions: str = ""
 
 
 @dataclass(slots=True)
@@ -433,5 +442,12 @@ class ScratchpadTask(ThinkingTask):
         ``ScratchpadAgent._generate_thoughts`` overwrites it after every
         thinking call when ``stop_early`` is on and never touches it
         otherwise.
+
+    thinking_instructions : str
+        The thinking instructions rendered once per invoke by the agent's
+        ``_render_instructions`` hook (the last step of ``pre_process``).
+        Empty until then, and empty when ``thinking_rounds`` is 0 at
+        pre-process time. The system message reads it; nothing else writes it.
     """
     more_thinking_required: bool = True
+    thinking_instructions: str = ""

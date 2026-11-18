@@ -1,24 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any
 
 import pytest
 
+from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
-from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
 from atomic_agentic.tools import Tool
 from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
-from atomic_agentic.constants.agents import BUILTINS_PREAMBLE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
+from atomic_agentic.constants.prompts import BUILTINS_PREAMBLE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from atomic_agentic.utils.rendering import frame_content
 
 from ..fake_engines import FakeLLMEngine
@@ -203,17 +205,40 @@ class TestToolAgentConstruction:
     def test_instructions_defaults_to_none(self) -> None:
         assert make_stub_tool_agent().instructions is None
 
-    def test_instructions_string_normalized(self) -> None:
+    def test_instructions_string_becomes_a_named_prompt_template(self) -> None:
         agent = make_stub_tool_agent(instructions="Always say hi.")
-        assert agent.instructions == "Always say hi."
+        assert isinstance(agent.instructions, PromptTemplate)
+        assert agent.instructions.template == "Always say hi."
+        assert agent.instructions.name == "tests_instructions"
 
-    def test_instructions_whitespace_only_normalizes_to_none(self) -> None:
-        assert make_stub_tool_agent(instructions="   ").instructions is None
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_instructions_blank_string_raises_value_error(self, blank: str) -> None:
+        with pytest.raises(ValueError):
+            make_stub_tool_agent(instructions=blank)
 
-    def test_instructions_promptconfig_passthrough(self) -> None:
-        config = PromptConfig(template="Static guidance.", description="d")
+    def test_instructions_prompt_template_passthrough(self) -> None:
+        config = PromptTemplate(template="Static guidance.", name="t", description="d")
         agent = make_stub_tool_agent(instructions=config)
-        assert agent.instructions == "Static guidance."
+        assert agent.instructions is config
+
+    def test_instructions_callable_is_wrapped_and_named(self) -> None:
+        def guidance(loops: int) -> str:
+            return f"Repeat {loops} times."
+
+        agent = make_stub_tool_agent(instructions=guidance)
+
+        assert isinstance(agent.instructions, Tool)
+        assert agent.instructions.name == "tests_instructions"
+        assert "loops" in {p.name for p in agent.parameters}
+
+    def test_instructions_tool_is_used_as_is(self) -> None:
+        tool = Tool(lambda: "Stay calm.", name="calm", description="d")
+        assert make_stub_tool_agent(instructions=tool).instructions is tool
+
+    def test_sources_are_empty_without_a_slot_and_the_slot_otherwise(self) -> None:
+        assert make_stub_tool_agent()._extra_parameter_sources() == []
+        agent = make_stub_tool_agent(instructions="Always say hi.")
+        assert agent._extra_parameter_sources() == [agent.instructions]
 
     def test_instructions_invalid_type_raises(self) -> None:
         with pytest.raises(TypeError, match="instructions"):
@@ -227,6 +252,63 @@ class TestToolAgentConstruction:
     def test_instructions_placeholder_becomes_agent_parameter(self) -> None:
         agent = make_stub_tool_agent(instructions="Repeat {loops} times.")
         assert "loops" in {p.name for p in agent.parameters}
+
+    def test_instructions_slot_runs_once_per_invoke(self) -> None:
+        calls: list[int] = []
+
+        def guidance(loops: int) -> str:
+            calls.append(loops)
+            return f"Repeat {loops} times."
+
+        agent = make_stub_tool_agent(instructions=guidance)
+
+        agent.invoke({"prompt": "go", "loops": 3})
+
+        assert calls == [3]
+
+    def test_non_str_slot_result_raises_type_error_naming_slot_and_type(self) -> None:
+        def guidance() -> int:
+            return 5
+
+        agent = make_stub_tool_agent(instructions=guidance)
+
+        with pytest.raises(TypeError, match=r"tests_instructions.*int"):
+            agent.invoke({"prompt": "go"})
+        with pytest.raises(TypeError, match=r"tests_instructions.*int"):
+            asyncio.run(agent.async_invoke({"prompt": "go"}))
+
+    def test_agent_slot_uses_async_invoke_only_on_the_async_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inner = BasicAgent(
+            name="inner", description="d", llm_engine=FakeLLMEngine(["Be kind.", "Be kind."]),
+        )
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("sync invoke must not be called on an async path")
+
+        monkeypatch.setattr(inner, "invoke", boom)
+        agent = make_stub_tool_agent(instructions=inner)
+
+        result = asyncio.run(agent.async_invoke({"prompt": "go"}))
+
+        assert result.result == "done"
+        task = agent.create_task(agent.filter_inputs({"prompt": "go"}))
+        asyncio.run(agent.async_pre_process(task))
+        assert task.instructions == "Be kind."
+
+    def test_slot_declaring_runtime_context_gets_exactly_the_runtime_dict(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def guidance(loops: int, **runtime_context: Any) -> str:
+            seen["runtime"] = dict(runtime_context)
+            return f"Repeat {loops} times."
+
+        agent = make_stub_tool_agent(instructions=guidance, use_runtime_context=True)
+
+        agent.invoke({"prompt": "go", "loops": 2, "runtime_context": {"k": 1}})
+
+        assert seen["runtime"] == {"k": 1}
 
 
 # --------------------------------------------------------------------------- #
@@ -598,6 +680,7 @@ class TestSystemMessageRendering:
     def test_instructions_follow_the_tools_frame_after_the_precedence_line(self) -> None:
         agent = make_stub_tool_agent(instructions="Always say hi.")
         task = agent.create_task({"prompt": "p"})
+        agent.pre_process(task)
 
         content = agent._render_system_message(task)[0]["content"]
 
@@ -610,19 +693,34 @@ class TestSystemMessageRendering:
     def test_instructions_placeholders_render_from_task_inputs(self) -> None:
         agent = make_stub_tool_agent(instructions="Repeat {loops} times.")
         task = agent.create_task({"prompt": "do work", "loops": 3})
+        agent.pre_process(task)
 
         content = agent._render_system_message(task)[0]["content"]
 
         assert "Repeat 3 times." in content
+
+    def test_without_a_slot_no_user_instructions_frame_is_rendered(self) -> None:
+        agent = make_stub_tool_agent(instructions=None)
+        task = agent.create_task({"prompt": "p"})
+        agent.pre_process(task)
+
+        content = agent._render_system_message(task)[0]["content"]
+
+        assert "USER-DEFINED INSTRUCTIONS" not in content
+        assert INSTRUCTIONS_PRECEDENCE not in content
 
     def test_to_dict_reports_instructions_but_not_the_family_prompt(self) -> None:
         agent = make_stub_tool_agent(instructions="Always say hi.")
 
         data = agent.to_dict()
 
-        assert data["instructions"] == "Always say hi."
+        assert data["instructions"] == agent.instructions.to_dict()
+        assert data["instructions"]["template"] == "Always say hi."
         assert "system_prompts" not in data
         assert "You are a stub." not in str(data)
+
+    def test_to_dict_instructions_is_none_without_a_slot(self) -> None:
+        assert make_stub_tool_agent().to_dict()["instructions"] is None
 
     def test_builtins_preamble_follows_the_tool_list_in_the_tools_frame(self) -> None:
         agent = _build(_PreambleStub)

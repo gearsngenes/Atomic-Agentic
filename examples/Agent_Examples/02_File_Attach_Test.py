@@ -19,7 +19,7 @@ agent = BasicAgent(
     name="DocSummarizer",
     description="Summarizes uploaded documents.",
     llm_engine=llm,
-    role_prompt="You are a concise technical summarizer.",
+    instructions="You are a concise technical summarizer.",
     record_enabled=True,   # enables history tracking
 )
 

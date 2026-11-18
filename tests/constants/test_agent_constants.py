@@ -7,7 +7,6 @@ import atomic_agentic.constants.agents as agent_constants
 
 from atomic_agentic.constants.agents import (
     ATTR_CALL_ALIAS,
-    BUILTINS_PREAMBLE,
     CODE_FENCE_PATTERN,
     EMBEDDED_CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
@@ -17,13 +16,10 @@ from atomic_agentic.constants.agents import (
     LEADING_CODE_FENCE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
-    REPLY_DIRECTIVE,
     RHS_ASSIGN_ALIAS,
-    STOP_EARLY_PROMPT_SECTION,
     STOP_EARLY_SCHEMA_TEMPLATE,
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
-    THINKING_DIRECTIVE,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
@@ -61,11 +57,6 @@ class TestAllowedPyBuiltins:
         for name in dir(builtins):
             if name.startswith("_"):
                 assert name not in ALLOWED_PY_BUILTINS
-
-    def test_preamble_lists_exactly_the_allowlist(self) -> None:
-        for name in ALLOWED_PY_BUILTINS:
-            assert name in BUILTINS_PREAMBLE
-        assert "eval" not in BUILTINS_PREAMBLE
 
 
 class TestDunderAttributePattern:
@@ -145,10 +136,7 @@ class TestFrameSubjects:
     def test_exported(self) -> None:
         for name in (
             "FRAME_SUBJECTS",
-            "STOP_EARLY_PROMPT_SECTION",
             "STOP_EARLY_SCHEMA_TEMPLATE",
-            "THINKING_DIRECTIVE",
-            "REPLY_DIRECTIVE",
         ):
             assert name in agent_constants.__all__
 
@@ -174,27 +162,9 @@ class TestStopEarlySchemaTemplate:
         assert thought["type"] == "string"
         assert thought["description"].strip()
 
-    def test_prompt_section_names_both_fields(self) -> None:
-        assert "thought" in STOP_EARLY_PROMPT_SECTION
-        assert "more_thinking_required" in STOP_EARLY_PROMPT_SECTION
-
     def test_unsafe_schema_keys_constant_is_gone(self) -> None:
         assert not hasattr(agent_constants, "STOP_EARLY_UNSAFE_SCHEMA_KEYS")
         assert "STOP_EARLY_UNSAFE_SCHEMA_KEYS" not in agent_constants.__all__
-
-
-class TestDirectives:
-    def test_are_distinct_non_empty_strings(self) -> None:
-        assert THINKING_DIRECTIVE.strip() and REPLY_DIRECTIVE.strip()
-        assert THINKING_DIRECTIVE != REPLY_DIRECTIVE
-
-    def test_name_only_listed_frame_subjects(self) -> None:
-        # The directives refer to frames by subject; keep text, call sites and
-        # FRAME_SUBJECTS in sync.
-        for directive in (THINKING_DIRECTIVE, REPLY_DIRECTIVE):
-            for subject in ("USER TASK PROMPT", "THOUGHTS"):
-                assert subject in directive
-                assert subject in FRAME_SUBJECTS
 
 
 class TestThinkingRoundsParamRemoved:

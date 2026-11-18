@@ -78,7 +78,7 @@ def main() -> None:
         name="LessonPlanner",
         description="Builds lesson plans from structured inputs.",
         llm_engine=engine,
-        role_prompt="You are an expert teacher who writes concise, practical lesson plans.",
+        instructions="You are an expert teacher who writes concise, practical lesson plans.",
         record_enabled=True,
         records_window=8,
         pre_invoke=strict_tool,

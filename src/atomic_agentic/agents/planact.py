@@ -72,7 +72,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
-from .prompts import PLANNER_PROMPT
+from ..constants.prompts import DEFAULT_PRE_INVOKE, PLANNER_PROMPT
 from .tools import make_dict, make_sequence
 from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
 from ..core import AtomicInvokable
@@ -81,7 +81,6 @@ from ..exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationEr
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..models.agents.blackboard_models import ToolStatement
-from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import PlanActTask
 from ..models.agents.records import ToolAgentRecord, LLMRecord
 from ..utils.agents import (
@@ -160,10 +159,10 @@ class PlanActAgent(ToolAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        instructions: Optional[str | PromptConfig] = None,
+        instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
+        post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
         response_to_context: str | Iterable[str] | Mapping[Any, str] = (),
         response_to_post: str | Iterable[str] | Mapping[Any, str] = (),

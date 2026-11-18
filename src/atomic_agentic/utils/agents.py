@@ -20,7 +20,6 @@ from ..constants.agents import (
 )
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import ToolStatement
-from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolUsageRecord, ToolUsageReport
 
 if TYPE_CHECKING:
@@ -29,7 +28,6 @@ if TYPE_CHECKING:
 __all__ = [
     "evaluate_expr",
     "extract_identifiers",
-    "normalize_prompt_config",
     "reject_unsupported_forms",
     "strip_code_fence",
     "is_dispatched",
@@ -39,48 +37,6 @@ __all__ = [
     "resolve_statement_args",
     "check_call_bindings",
 ]
-
-
-def normalize_prompt_config(
-    value: str | PromptConfig | None,
-    *,
-    default_template: str | None,
-    provided_description: str,
-    error_label: str,
-    default_description: str | None = None,
-) -> PromptConfig | None:
-    """Coerce a prompt-shaped construction value to a ``PromptConfig``, or
-    ``None``.
-
-    Unifies what were three near-identical coercion functions (role prompt,
-    thinking instructions, tool-agent instructions) into one, parameterized per
-    call site rather than derived from a generic label, so existing callers
-    get byte-identical ``PromptConfig``/error text.
-
-    ``value`` is ``None`` or an all-whitespace ``str``:
-        - ``default_template`` is ``None`` -- returns ``None``. The one
-          branch a role prompt or thinking instructions never take (an
-          agent always needs *some* version of either); a caller with no
-          sensible generic fallback (e.g. tool-agent instructions) passes
-          ``None`` here to get real absence back instead of boilerplate.
-        - ``default_template`` is a ``str`` -- returns
-          ``PromptConfig(template=default_template, description=default_description)``.
-    ``value`` is a non-blank ``str`` -- returns
-        ``PromptConfig(template=value.strip(), description=provided_description)``.
-    ``value`` is already a ``PromptConfig`` -- returned unchanged.
-    Anything else -- raises ``TypeError``.
-    """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        if default_template is None:
-            return None
-        return PromptConfig(template=default_template, description=default_description)
-    if isinstance(value, str):
-        return PromptConfig(template=value.strip(), description=provided_description)
-    if isinstance(value, PromptConfig):
-        return value
-    raise TypeError(
-        f"{error_label} must be str, PromptConfig, or None; got {type(value).__name__}."
-    )
 
 
 def extract_identifiers(

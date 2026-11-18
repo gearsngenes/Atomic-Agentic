@@ -12,6 +12,7 @@ import asyncio
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.core.prompt_template import PromptTemplate
 from atomic_agentic.models.results import AgentResult
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
@@ -19,9 +20,11 @@ from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.tasks import AgentTask
+from atomic_agentic.constants.agents import RUNTIME_PARAM
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import to_paramspec_list
 from ..fake_engines import FakeLLMEngine, echo_latest_user
+from .conftest import param_source
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -37,6 +40,13 @@ class _MinimalAgent(Agent):
     override -- Agent's concrete base implementation (bare AgentTask) is
     sufficient. ``think``/``prepare`` stay inherited no-ops.
     """
+
+    def __init__(self, *, sources: Any = (), **kwargs: Any) -> None:
+        self._test_sources = list(sources)
+        super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return [{"role": "system", "content": "minimal"}]
@@ -92,9 +102,13 @@ class _EchoAgent(Agent):
     contract.
     """
 
-    def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
+    def __init__(self, *, system_prompt: str = ROLE_PROMPT, sources: Any = (), **kwargs: Any) -> None:
         self._echo_system_prompt = system_prompt
+        self._test_sources = list(sources)
         super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return [{"role": "system", "content": self._echo_system_prompt}]
@@ -292,6 +306,7 @@ def make_agent(
     system_prompt: str = ROLE_PROMPT,
     agent_cls: type[_EchoAgent] = _EchoAgent,
     name: str = "writer_agent",
+    sources: Any = (),
 ) -> _EchoAgent:
     # Default binding "result" matches the first parameter of the default
     # post (package_response) and most helper posts below; it applies only
@@ -319,6 +334,7 @@ def make_agent(
         response_to_post=response_to_post,
         response_to_context=response_to_context,
         inputs_to_context=inputs_to_context,
+        sources=sources,
     )
 
 
@@ -721,39 +737,39 @@ class TestConversationManagement:
         assert agent.active_conversation == "default"
         assert agent.get_conversation().records == []
 
-    def test_create_conversation_returns_conversation_on_fresh_name(self) -> None:
+    def test_import_conversation_registers_on_fresh_name(self) -> None:
         agent = make_agent()
+        created = Conversation()
 
-        created = agent.create_conversation("scratch")
+        assert agent.import_conversation(created, name="scratch") is None
 
-        assert isinstance(created, Conversation)
-        assert created.records == []
         assert "scratch" in agent.conversation_names
+        assert agent.get_conversation("scratch") is created
         assert agent.get_conversation("scratch").records == []
-        # create_conversation never auto-activates.
+        # import_conversation never auto-activates.
         assert agent.active_conversation == "default"
 
-    def test_create_conversation_raises_on_existing_name_no_mutation(self) -> None:
+    def test_import_conversation_raises_on_existing_name_no_mutation(self) -> None:
         agent = make_agent(record_enabled=True)
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         with pytest.raises(ValueError, match="conversation 'scratch' already exists"):
-            agent.create_conversation("scratch")
+            agent.import_conversation(Conversation(), name="scratch")
         # The existing conversation's history survives the rejected collision.
         assert len(agent.get_conversation("scratch").records) == 1
 
     @pytest.mark.parametrize("bad_name", ["bad name", "1bad", ""])
-    def test_create_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
+    def test_import_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
         agent = make_agent()
 
         with pytest.raises(ValueError):
-            agent.create_conversation(bad_name)
+            agent.import_conversation(Conversation(), name=bad_name)
 
     def test_switch_conversation_switches_active(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
 
         agent.switch_conversation("scratch")
 
@@ -793,15 +809,15 @@ class TestConversationManagement:
         assert len(stored.records) == 1
         assert "x" in agent.get_conversation().context
 
-    def test_create_conversation_returns_the_stored_object_with_limits(self) -> None:
+    def test_imported_conversation_keeps_its_limits(self) -> None:
         agent = make_agent()
 
-        conv = agent.create_conversation(
-            "scratch",
+        conv = Conversation(
             response_preview_limit=5,
             prompt_preview_limit=0,
             context_preview_limit=9,
         )
+        agent.import_conversation(conv, name="scratch")
 
         assert agent.get_conversation("scratch") is conv
         assert (
@@ -811,39 +827,20 @@ class TestConversationManagement:
         ) == (5, 0, 9)
         assert agent.active_conversation == "default"
 
-    def test_create_conversation_defaults_limits_to_none(self) -> None:
-        conv = make_agent().create_conversation("scratch")
-
-        assert conv.response_preview_limit is None
-        assert conv.prompt_preview_limit is None
-        assert conv.context_preview_limit is None
-
-    @pytest.mark.parametrize("bad", [-1, True, 1.5, "5"])
-    def test_create_conversation_rejects_bad_limits_and_stores_nothing(
-        self, bad: object
-    ) -> None:
-        agent = make_agent()
-
-        with pytest.raises(ValueError, match="response_preview_limit"):
-            agent.create_conversation("scratch", response_preview_limit=bad)  # type: ignore[arg-type]
-        assert agent.conversation_names == ["default"]
-
-    def test_create_conversation_bad_shape_message(self) -> None:
+    def test_import_conversation_bad_shape_message(self) -> None:
         with pytest.raises(ValueError, match="invalid conversation name"):
-            make_agent().create_conversation("bad name")
+            make_agent().import_conversation(Conversation(), name="bad name")
 
     def test_trailing_digits_names_are_valid(self) -> None:
         agent = make_agent()
 
-        agent.create_conversation("branch_5")
+        agent.import_conversation(Conversation(), name="branch_5")
 
         assert "branch_5" in agent.conversation_names
 
     def test_name_is_required(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(TypeError):
-            agent.create_conversation()  # type: ignore[call-arg]
         with pytest.raises(TypeError):
             agent.import_conversation(agent.get_conversation())  # type: ignore[call-arg]
 
@@ -869,7 +866,7 @@ class TestConversationManagement:
 
     def test_remove_conversation_refuses_active_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
 
         with pytest.raises(AgentInvocationError):
@@ -878,7 +875,8 @@ class TestConversationManagement:
 
     def test_remove_conversation_returns_the_popped_non_active_conversation(self) -> None:
         agent = make_agent(record_enabled=True)
-        scratch = agent.create_conversation("scratch")
+        scratch = Conversation()
+        agent.import_conversation(scratch, name="scratch")
         agent.switch_conversation("scratch")
         agent.invoke({"topic": "pytest", "tone": "strict"})
         agent.switch_conversation("default")
@@ -907,7 +905,7 @@ class TestConversationManagement:
 
     def test_remove_default_while_another_is_active_keeps_active_key(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         agent.switch_conversation("scratch")
 
         agent.remove_conversation("default")
@@ -925,7 +923,7 @@ class TestConversationContext:
 
     def test_mutators_through_get_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
         scratch = agent.get_conversation("scratch")
 
         scratch.remember("x", 1, "one")
@@ -1025,7 +1023,7 @@ class TestImportConversation:
         source, _ = self._source()
         conv = source.get_conversation()
         target = make_agent()
-        target.create_conversation("taken")
+        target.import_conversation(Conversation(), name="taken")
 
         with pytest.raises(ValueError, match="invalid conversation name 'bad name'"):
             target.import_conversation(conv, name="bad name")
@@ -1175,70 +1173,10 @@ class TestAgentName:
         assert a.get_conversation().records[0].agent_name != b.get_conversation().records[0].agent_name
 
 
-class TestGetRecord:
-    def _agent(self) -> tuple[_EchoAgent, list[str]]:
-        agent = make_agent(record_enabled=True)
-        ids = [agent.invoke({"topic": t, "tone": "strict"}).run_id for t in ("a", "b")]
-        agent.create_conversation("other")
-        agent.switch_conversation("other")
-        ids.append(agent.invoke({"topic": "c", "tone": "strict"}).run_id)
-        return agent, ids
-
-    def test_run_id_alone_scans_every_conversation(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(run_id=ids[0]).run_id == ids[0]
-        assert agent.get_record(run_id=ids[2]).run_id == ids[2]
-
-    def test_run_id_with_conversation_is_scoped(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(run_id=ids[2], conversation="other").run_id == ids[2]
-        with pytest.raises(ValueError, match="no record"):
-            agent.get_record(run_id=ids[0], conversation="other")
-
-    def test_conversation_and_index(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(conversation="default", index=1).run_id == ids[1]
-        assert agent.get_record(conversation="default", index=-1).run_id == ids[1]
-
-    def test_index_alone_uses_the_active_conversation(self) -> None:
-        agent, ids = self._agent()
-
-        assert agent.get_record(index=0).run_id == ids[2]
-
-    def test_unknown_run_id_raises_value_error(self) -> None:
-        agent, _ = self._agent()
-
-        with pytest.raises(ValueError, match="no record"):
-            agent.get_record(run_id="nope")
-
-    def test_unknown_conversation_raises(self) -> None:
-        agent, ids = self._agent()
-
-        with pytest.raises(AgentInvocationError):
-            agent.get_record(conversation="nope", index=0)
-        with pytest.raises(AgentInvocationError):
-            agent.get_record(run_id=ids[0], conversation="nope")
-
-    def test_out_of_range_index_raises_index_error(self) -> None:
-        agent, _ = self._agent()
-
-        with pytest.raises(IndexError):
-            agent.get_record(conversation="default", index=9)
-
-    def test_invalid_combinations_raise_value_error(self) -> None:
-        agent, ids = self._agent()
-
-        with pytest.raises(ValueError):
-            agent.get_record()
-        with pytest.raises(ValueError):
-            agent.get_record(conversation="default")
-        with pytest.raises(ValueError):
-            agent.get_record(run_id=ids[0], index=0)
-        with pytest.raises(ValueError):
-            agent.get_record(run_id=ids[0], conversation="default", index=0)
+class TestRemovedConversationHelpers:
+    def test_create_conversation_and_get_record_are_gone_from_agent(self) -> None:
+        assert not hasattr(Agent, "create_conversation")
+        assert not hasattr(Agent, "get_record")
 
 
 class TestAgentValidation:
@@ -1251,7 +1189,7 @@ class TestAgentValidation:
     def test_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*dict"):
             agent.invoke({"topic": "pytest"})
 
     def test_post_invoke_with_one_defaulted_parameter_is_allowed(self) -> None:
@@ -1397,7 +1335,7 @@ class TestAgentAsyncInvoke:
     def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*dict"):
             asyncio.run(agent.async_invoke({"topic": "pytest"}))
 
     def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
@@ -1468,35 +1406,35 @@ class TestAgentMutableRuntimeProperties:
         }
 
 
-class TestExtraParametersNormalization:
-    """Coverage for extra_parameters normalization via to_paramspec_list."""
+class TestParameterSources:
+    """Coverage for the parameter-source hook (``_extra_parameter_sources``)."""
 
-    def test_extra_parameters_none_produces_no_extra_schema_entries(self) -> None:
+    def test_no_sources_produces_no_extra_schema_entries(self) -> None:
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
-        # "prompt" comes from the built-in PROMPT_PARAM; no extra_parameters
+        # "prompt" comes from the default "{prompt}" pre template; no sources
         # means nothing else is grafted.
         assert [p.name for p in agent.parameters] == ["prompt"]
 
-    def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
+    def test_source_name_list_preserves_declared_kind(self) -> None:
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=["persona", "style"],
+            sources=[param_source("extras", ["persona", "style"])],
         )
         names = [p.name for p in agent.parameters]
         assert "persona" in names
         assert "style" in names
-        # to_paramspec_list default for a bare string list is POSITIONAL_OR_KEYWORD,
-        # not force-coerced to KEYWORD_ONLY (unlike the retired Graft-D behavior).
+        # A bare name is a POSITIONAL_OR_KEYWORD placeholder, not force-coerced
+        # to KEYWORD_ONLY (unlike the retired Graft-D behavior).
         persona_param = next(p for p in agent.parameters if p.name == "persona")
         assert persona_param.kind == "POSITIONAL_OR_KEYWORD"
 
-    def test_extra_parameters_paramspec_list_preserves_declared_kind(self) -> None:
+    def test_source_paramspec_list_preserves_declared_kind(self) -> None:
         specs = [
             ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
         ]
@@ -1504,36 +1442,105 @@ class TestExtraParametersNormalization:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=specs,
+            sources=[param_source("extras", specs)],
         )
         lang_param = next(p for p in agent.parameters if p.name == "lang")
         assert lang_param.kind == "KEYWORD_ONLY"
         assert lang_param.default == "English"
 
-    def test_extra_parameters_rejects_variadic_paramspec(self) -> None:
+    def test_source_var_keyword_that_is_not_runtime_context_raises(self) -> None:
         specs = [
-            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
+            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_KEYWORD, type="Any", default=NO_VAL),
         ]
-        with pytest.raises(AgentError, match="variadic"):
+        with pytest.raises(AgentError, match="extras"):
             _MinimalAgent(
                 name="a",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                extra_parameters=specs,
+                sources=[param_source("extras", specs)],
             )
 
-    def test_extra_parameters_values_reach_invoke_via_inputs(self) -> None:
+    def test_source_var_positional_is_accepted(self) -> None:
+        specs = [
+            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
+        ]
         agent = _MinimalAgent(
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", specs)],
+        )
+        items = next(p for p in agent.parameters if p.name == "items")
+        assert items.kind == ParamSpec.VAR_POSITIONAL
+
+    def test_source_runtime_context_identical_to_runtime_param_is_accepted(self) -> None:
+        agent = make_value_agent(
+            "r", sources=[param_source("extras", [RUNTIME_PARAM])]
+        )
+        assert _names(agent) == ["prompt", "runtime_context"]
+        task = agent.create_task(
+            agent.filter_inputs({"prompt": "p", "runtime_context": {"a": 1}})
+        )
+        # The source declared **runtime_context, so the dict rides in its slice.
+        assert task.agentic_inputs == {"runtime_context": {"a": 1}}
+        assert task.pre_inputs == {"prompt": "p"}
+
+    def test_sources_are_listed_in_priority_order_and_earlier_wins_an_overlap(self) -> None:
+        first = param_source("first", [ParamSpec(
+            name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="a")])
+        second = param_source("second", [ParamSpec(
+            name="x", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="b")])
+        with pytest.warns(UserWarning, match="second"):
+            agent = _MinimalAgent(
+                name="a",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                sources=[first, second],
+            )
+        assert next(p for p in agent.parameters if p.name == "x").default == "a"
+
+    def test_pre_beats_post_beats_sources(self) -> None:
+        def pre(topic: str = "pre") -> str:
+            return topic
+
+        def post(result: str, topic: str = "post") -> str:
+            return result
+
+        source = param_source("src", [ParamSpec(
+            name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="src")])
+        with pytest.warns(UserWarning, match="not identical"):
+            agent = _MinimalAgent(
+                name="a",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre,
+                post_invoke=post,
+                response_to_post="result",
+                sources=[source],
+            )
+        assert next(p for p in agent.parameters if p.name == "topic").default == "pre"
+
+    def test_hook_default_is_empty_and_render_hooks_are_no_ops(self) -> None:
+        agent = make_agent()
+        task = agent.create_task(agent.filter_inputs({"topic": "t", "tone": "x"}))
+
+        assert Agent._extra_parameter_sources(agent) == []
+        agent.pre_process(task)
+        asyncio.run(agent.async_pre_process(task))
+        assert task.instructions == ""
+
+    def test_source_values_reach_invoke_via_inputs(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         # _MinimalAgent ignores extra inputs entirely, but invoke() must
-        # accept the extra top-level key without complaint (no more "context"
-        # dict wrapper -- extra_parameters values are flat top-level keys now).
+        # accept the extra top-level key without complaint (source values are
+        # flat top-level keys).
         result = agent.invoke({"prompt": "hi", "lang": "French"})
         assert result is not None
 
@@ -1582,7 +1589,7 @@ class TestPeerOverlapReconciliation:
 
 
 class TestBindResponseToSharedNames:
-    """A destination that another source (pre_invoke / extra_parameters) also
+    """A destination that another source (pre_invoke / a parameter source) also
     declares."""
 
     def test_bound_name_declared_by_pre_must_be_type_compatible(self) -> None:
@@ -1610,7 +1617,7 @@ class TestBindResponseToSharedNames:
         )
         assert agent._response_to_post == "topic"
 
-    def test_collision_with_extra_parameters_name_is_allowed(self) -> None:
+    def test_collision_with_parameter_source_name_is_allowed(self) -> None:
         def post_with_flag(result: str, flag: str = "x") -> str:
             return result
 
@@ -1620,7 +1627,7 @@ class TestBindResponseToSharedNames:
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             post_invoke=post_with_flag,
             response_to_post="flag",
-            extra_parameters=["flag"],
+            sources=[param_source("extras", ["flag"])],
         )
         assert agent._response_to_post == "flag"
 
@@ -1681,7 +1688,7 @@ class TestPreVsPostReconciliation:
 
 class TestCombinedVsExtraReconciliation:
     """Named for the overlap it exercises (pre_invoke/post_invoke's combined
-    schema vs. extra_parameters); the underlying mechanism is now the same
+    schema vs. a parameter source); the underlying mechanism is now the same
     single unified N-way peer report described in TestPreVsPostReconciliation,
     not a distinct second fold stage."""
 
@@ -1692,9 +1699,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="int", default=NO_VAL),
-                ],
+                ])],
             )
 
     def test_compatible_but_not_identical_overlap_warns_and_combined_wins(self) -> None:
@@ -1704,9 +1711,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="fallback"),
-                ],
+                ])],
             )
         topic_param = next(p for p in agent.parameters if p.name == "topic")
         # combined (pre_invoke's) declaration wins: required, no default.
@@ -1721,9 +1728,9 @@ class TestCombinedVsExtraReconciliation:
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="topic", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
-                ],
+                ])],
             )
         assert not any("topic" in str(w.message) for w in caught)
 
@@ -1733,9 +1740,9 @@ class TestCombinedVsExtraReconciliation:
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre_with_two_fields,
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="flag", index=0, kind=ParamSpec.KEYWORD_ONLY, type="bool", default=False),
-            ],
+            ])],
         )
         names = [p.name for p in agent.parameters]
         assert names == ["subject", "style", "flag"]
@@ -1756,7 +1763,7 @@ class TestNWayWitnessOrderIndependence:
     unmodified as the fold "winner" and discarded post_invoke's full type
     declaration for any overlapping name -- meaning the old fold's final
     verdict for a name shared by all three sources reduced to a bare
-    pre_invoke-vs-extra_parameters pairwise check, silently blind to
+    pre_invoke-vs-parameter-source pairwise check, silently blind to
     whatever bridging information only post_invoke held.
 
     NOTE ON THE BRAINSTORM DOC'S OWN WORKED EXAMPLE: the brainstorm doc's
@@ -1796,12 +1803,12 @@ class TestNWayWitnessOrderIndependence:
                 pre_invoke=pre_with_dict_shared,
                 post_invoke=post_with_bare_dict_shared,
                 response_to_post="result",
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(
                         name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
                         type="dict[str, str]", default=NO_VAL,
                     ),
-                ],
+                ])],
             )
 
         shared_param = next(p for p in agent.parameters if p.name == "shared")
@@ -1837,9 +1844,9 @@ class TestNWayWitnessOrderIndependence:
                 pre_invoke=pre_int_shared,
                 post_invoke=post_int_or_str_shared,
                 response_to_post="result",
-                extra_parameters=[
+                sources=[param_source("extras", [
                     ParamSpec(name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
-                ],
+                ])],
             )
 
 
@@ -1892,13 +1899,20 @@ class TestAgentRecordsNeverStoredWhenRecordDisabled:
         assert len(second_call) == 2  # just system + user from _MinimalAgent
 
 
+def _described_prompt_pre(
+    prompt: Annotated[str, "The prompt to send to the agent."],
+) -> str:
+    return prompt
+
+
 class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_follows_base_getter(self) -> None:
-        # Built on _MinimalAgent (no pre_invoke) so the built-in, described
-        # ``prompt`` parameter demonstrates the description augmentation.
+        # A pre stage with a described ``prompt`` parameter demonstrates the
+        # description augmentation (the default template's parameter has none).
         agent = _MinimalAgent(
             name="a",
             description="Deterministic writer test agent.",
+            pre_invoke=_described_prompt_pre,
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -1909,6 +1923,7 @@ class TestAgentDescriptionOverrideRemoval:
         agent = _MinimalAgent(
             name="a",
             description="Deterministic writer test agent.",
+            pre_invoke=_described_prompt_pre,
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
@@ -1935,9 +1950,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
@@ -1948,9 +1963,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
@@ -1961,9 +1976,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
 
@@ -1974,9 +1989,9 @@ class TestInvocationLifecycle:
             name="a",
             description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-            extra_parameters=[
+            sources=[param_source("extras", [
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
-            ],
+            ])],
         )
         agent.invoke({"prompt": "hi"})
         agent.invoke({"prompt": "yo"})
@@ -2006,7 +2021,7 @@ def _run_until_post(agent: Agent, inputs: Mapping[str, Any]) -> tuple[AgentTask,
 class TestCreateTask:
     def test_binds_conversation_and_mints_identity(self) -> None:
         agent = make_agent(record_enabled=True)
-        agent.create_conversation("side")
+        agent.import_conversation(Conversation(), name="side")
         agent.switch_conversation("side")
 
         task = agent.create_task(agent.filter_inputs(_INPUTS))
@@ -2068,7 +2083,7 @@ class TestCreateTask:
             name="a", description="d",
             llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre, post_invoke=post, response_to_post="result",
-            extra_parameters=[ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")],
+            sources=[param_source("extras", [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="en")])],
         )
         inputs = agent.filter_inputs(
             {"subject": "s", "shared": "x", "only_post": "y", "lang": "fr"}
@@ -2078,7 +2093,7 @@ class TestCreateTask:
 
         assert task.pre_inputs == {"subject": "s", "shared": "x"}
         assert task.post_inputs == {"shared": "x", "only_post": "y"}
-        # extra_parameters names only; "lang" is in no other view.
+        # source names only; "lang" is in no other view.
         assert task.agentic_inputs == {"lang": "fr"}
         assert "lang" not in task.pre_inputs
         assert "lang" not in task.post_inputs
@@ -2129,7 +2144,7 @@ class TestPreviewLimitRendering:
 
     def test_limits_come_from_the_task_conversation_not_the_active_one(self) -> None:
         agent = self._agent(response_preview_limit=3)
-        agent.create_conversation("other")
+        agent.import_conversation(Conversation(), name="other")
         task = agent.create_task(agent.filter_inputs(_INPUTS))
         agent.switch_conversation("other")
         agent.get_conversation("other").response_preview_limit = 0
@@ -2180,13 +2195,14 @@ class TestHistoryRenderMode:
 
     def test_create_import_and_slice_carry_the_mode(self) -> None:
         agent = make_agent(record_enabled=True)
-        created = agent.create_conversation("scratch", render_mode="p")
-        assert created.render_mode == "p"
+        created = Conversation(render_mode="p")
+        agent.import_conversation(created, name="scratch")
+        assert agent.get_conversation("scratch").render_mode == "p"
 
         sliced = created.slice()
         assert sliced.render_mode == "p"
         target = make_agent()
-        target.import_conversation(created, name="imp")
+        target.import_conversation(sliced, name="imp")
         assert target.get_conversation("imp").render_mode == "p"
 
     def test_factory_reset_restores_the_default(self) -> None:
@@ -2201,7 +2217,7 @@ class TestHistoryRenderMode:
         agent = make_agent()
 
         with pytest.raises(ValueError, match="render_mode"):
-            agent.create_conversation("scratch", render_mode="nope")
+            Conversation(render_mode="nope")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="render_mode"):
             agent.get_conversation().render_mode = None  # type: ignore[assignment]
         assert agent.get_conversation().render_mode == "s"
@@ -2218,7 +2234,7 @@ class TestFactoryReset:
 
     def test_clear_memory_resets_default_limits_to_none(self) -> None:
         agent = self._with_limits()
-        agent.create_conversation("scratch", response_preview_limit=1)
+        agent.import_conversation(Conversation(response_preview_limit=1), name="scratch")
 
         agent.clear_memory()
 
@@ -2266,7 +2282,7 @@ class TestRememberRenderOptions:
 
     def test_remember_targets_a_named_conversation(self) -> None:
         agent = make_agent()
-        agent.create_conversation("scratch")
+        agent.import_conversation(Conversation(), name="scratch")
 
         agent.get_conversation("scratch").remember("k", 1, render_mode="a")
 
@@ -2324,7 +2340,7 @@ class TestSummarizeAndPreProcess:
 
         agent = make_agent(pre_invoke=pre_any)
         task = agent.create_task(agent.filter_inputs({"prompt": "x"}))
-        with pytest.raises(AgentInvocationError, match="non-string"):
+        with pytest.raises(TypeError, match=r"writer_agent_pre_invoke.*int"):
             agent.pre_process(task)
 
     def test_async_pre_process_matches_sync(self) -> None:
@@ -2540,7 +2556,7 @@ class TestContextLifecycle:
         agent = make_agent(record_enabled=True)
         agent.get_conversation().remember("k", 1)
         task, _ = _run_until_post(agent, _INPUTS)
-        agent.create_conversation("side")
+        agent.import_conversation(Conversation(), name="side")
         agent.switch_conversation("side")  # active changes mid-call
         self._bump(task, "k", 9)
 
@@ -2599,9 +2615,13 @@ class _ValueAgent(Agent):
     the str responses ``_EchoAgent`` requires. It still makes one real
     engine call so ``result_payload_from_task`` has an LLM record to read."""
 
-    def __init__(self, *, response_value: Any, **kwargs: Any) -> None:
+    def __init__(self, *, response_value: Any, sources: Any = (), **kwargs: Any) -> None:
         self._response_value = response_value
+        self._test_sources = list(sources)
         super().__init__(**kwargs)
+
+    def _extra_parameter_sources(self) -> list[AtomicInvokable]:
+        return [*super()._extra_parameter_sources(), *self._test_sources]
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         return []
@@ -2881,6 +2901,27 @@ class TestPostStageBinding:
 
         assert agent.invoke({"topic": "caller"}).result == "from-response"
 
+    def test_shared_name_with_incompatible_type_raises_at_construction(self) -> None:
+        def post(topic: int) -> int:
+            return topic
+
+        with pytest.raises(AgentError, match="(?i)compatible"):
+            make_value_agent(
+                {"topic": 1}, pre_invoke=build_prompt, post_invoke=post, response_to_post=["topic"]
+            )
+
+    def test_response_only_post_parameter_is_absent_from_parameters(self) -> None:
+        def post(topic: str, extra: str = "e") -> str:
+            return f"{topic}{extra}"
+
+        agent = make_value_agent(
+            {"t": "x"}, post_invoke=post, response_to_post={"t": "topic"}
+        )
+
+        assert "topic" not in _names(agent)
+        assert "extra" in _names(agent)
+        assert agent.invoke({"prompt": "q"}).result == "xe"
+
     def test_no_binding_required_post_parameter_is_caller_driven_and_fails_when_missing(self) -> None:
         def post(resp: Any) -> Any:
             return resp
@@ -2998,7 +3039,7 @@ class TestPostStageBinding:
 
         assert agent.get_conversation().records == []
 
-    @pytest.mark.parametrize("response", ["text", b"bytes"])
+    @pytest.mark.parametrize("response", ["text", b"bytes", bytearray(b"bytes")])
     def test_str_or_bytes_response_with_selectors_raises(self, response: Any) -> None:
         agent = make_value_agent(
             response, post_invoke=post_zero_args, response_to_context={0: "first"}
@@ -3085,21 +3126,24 @@ class TestBuildMessagesRemoved:
         assert not hasattr(Agent, "build_messages")
 
 
-class TestOptionalPreInvoke:
-    def test_default_agent_has_no_pre_stage(self) -> None:
-        agent = make_value_agent("r")
+class TestSliceResponseRemoved:
+    def test_agent_has_no_slice_response(self) -> None:
+        assert not hasattr(Agent, "_slice_response")
 
-        assert agent.pre_invoke is None
-        assert agent.to_dict()["pre_invoke"] is None
 
-    def test_default_signature_is_the_built_in_prompt_parameter(self) -> None:
+class TestPreInvokeStage:
+    def test_default_pre_is_the_identity_template(self) -> None:
         agent = make_value_agent("r")
         prompt = agent.parameters[0]
 
+        assert isinstance(agent.pre_invoke, PromptTemplate)
+        assert agent.pre_invoke.name == "value_agent_pre_invoke"
+        assert isinstance(agent.to_dict()["pre_invoke"], dict)
         assert _names(agent) == ["prompt"]
         assert prompt.kind == ParamSpec.POSITIONAL_OR_KEYWORD
-        assert prompt.type == ("str",)
+        assert prompt.type == ("Any",)
         assert prompt.default is NO_VAL
+        assert prompt.description is None
 
     def test_prompt_passes_through_verbatim_sync_and_async(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -3114,29 +3158,42 @@ class TestOptionalPreInvoke:
 
         assert [c[-1] for c in engine.calls] == [{"role": "user", "content": "hello"}] * 3
 
-    def test_non_str_prompt_raises_agent_invocation_error(self) -> None:
+    def test_non_str_prompt_is_stringified_by_the_template(self) -> None:
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = _EchoAgent(name="a", description="d", llm_engine=engine)
+
+        agent.invoke({"prompt": 5})
+
+        assert engine.calls[-1][-1] == {"role": "user", "content": "5"}
+
+    def test_missing_prompt_raises_key_error(self) -> None:
         agent = make_value_agent("r")
 
-        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
-            agent.invoke({"prompt": 5})
-        with pytest.raises(AgentInvocationError, match="the prompt is not a string"):
-            asyncio.run(agent.async_invoke({"prompt": 5}))
+        with pytest.raises(KeyError):
+            agent.invoke({})
 
-    def test_post_parameter_named_prompt_shares_the_built_in_parameter(self) -> None:
+    def test_post_parameter_named_prompt_shares_the_pre_parameter(self) -> None:
         def post(prompt: str, resp: Any) -> str:
             return f"{prompt}->{resp}"
 
-        agent = make_value_agent("r", post_invoke=post, response_to_post="resp")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            agent = make_value_agent("r", post_invoke=post, response_to_post="resp")
 
         assert _names(agent).count("prompt") == 1
+        # The reconciled type narrows to the post parameter's ``str``.
+        assert agent.parameters[0].type == ("str",)
         assert agent.invoke({"prompt": "q"}).result == "q->r"
 
     def test_incompatible_post_prompt_type_raises_at_construction(self) -> None:
+        def pre(prompt: str) -> str:
+            return prompt
+
         def post(prompt: int, resp: Any) -> Any:
             return resp
 
         with pytest.raises(AgentError, match="(?i)compatible"):
-            make_value_agent("r", post_invoke=post, response_to_post="resp")
+            make_value_agent("r", pre_invoke=pre, post_invoke=post, response_to_post="resp")
 
     def test_custom_pre_invoke_with_its_own_prompt_parameter_still_works(self) -> None:
         def pre(prompt: str, tone: str = "calm") -> str:
@@ -3144,9 +3201,95 @@ class TestOptionalPreInvoke:
 
         agent = make_value_agent("r", pre_invoke=pre)
 
-        assert agent.pre_invoke is not None
+        assert isinstance(agent.pre_invoke, Tool)
         assert set(_names(agent)) == {"prompt", "tone"}
         assert agent.invoke({"prompt": "go"}).result == "r"
+
+    @pytest.mark.parametrize("bad", [None, 5, {"a": 1}])
+    def test_wrong_pre_types_raise_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError):
+            make_value_agent("r", pre_invoke=bad)
+
+    @pytest.mark.parametrize("bad", ["", "   "])
+    def test_blank_pre_string_raises_value_error(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            make_value_agent("r", pre_invoke=bad)
+
+    def test_str_pre_with_placeholders_exposes_each_in_order(self) -> None:
+        agent = make_value_agent("r", pre_invoke="{topic}: {prompt}")
+
+        assert _names(agent) == ["topic", "prompt"]
+        assert agent.invoke({"topic": "t", "prompt": "p"}).result == "r"
+
+    def test_callable_pre_returning_non_str_raises_and_skips_engine(self) -> None:
+        def pre(prompt: str) -> Any:
+            return 7
+
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        agent = _EchoAgent(name="a", description="d", llm_engine=engine, pre_invoke=pre)
+
+        with pytest.raises(TypeError, match=r"a_pre_invoke.*int"):
+            agent.invoke({"prompt": "x"})
+        with pytest.raises(TypeError, match=r"a_pre_invoke.*int"):
+            asyncio.run(agent.async_invoke({"prompt": "x"}))
+        assert engine.calls == []
+
+    def test_atomic_invokable_pre_is_used_as_is(self) -> None:
+        tool = Tool(function=lambda prompt: prompt.upper(), name="shout", description="d")
+
+        agent = make_value_agent("r", pre_invoke=tool)
+
+        assert agent.pre_invoke is tool
+
+    def test_agent_as_pre_stage_sync_and_async(self) -> None:
+        inner = _EchoAgent(
+            name="inner", description="d",
+            llm_engine=FakeLLMEngine(response_fn=lambda m: "inner-reply"),
+        )
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
+        outer = _EchoAgent(name="outer", description="d", llm_engine=engine, pre_invoke=inner)
+
+        outer.invoke({"prompt": "q"})
+        asyncio.run(outer.async_invoke({"prompt": "q"}))
+
+        assert [c[-1]["content"] for c in engine.calls] == ["inner-reply"] * 2
+
+
+class TestPostInvokeStage:
+    def test_str_post_becomes_a_template(self) -> None:
+        agent = make_value_agent("r", post_invoke="<<{resp}>>", response_to_post="resp")
+
+        assert isinstance(agent.post_invoke, PromptTemplate)
+        assert agent.post_invoke.name == "value_agent_post_invoke"
+        assert agent.return_type == ("str",)
+        assert agent.invoke({"prompt": "q"}).result == "<<r>>"
+
+    def test_bound_placeholder_leaves_signature_rest_stay_public(self) -> None:
+        agent = make_value_agent("r", post_invoke="{resp} / {extra}", response_to_post="resp")
+
+        assert _names(agent) == ["prompt", "extra"]
+        assert agent.invoke({"prompt": "q", "extra": "e"}).result == "r / e"
+
+    def test_none_post_means_no_stage(self) -> None:
+        agent = make_value_agent("r")
+
+        assert agent.post_invoke is None
+        assert agent.return_type == ("Any",)
+
+    def test_agent_as_post_stage_sync_and_async(self) -> None:
+        inner = _EchoAgent(
+            name="inner", description="d",
+            llm_engine=FakeLLMEngine(response_fn=lambda m: "post-reply"),
+        )
+        agent = make_value_agent("r", post_invoke=inner, response_to_post="prompt")
+
+        assert agent.invoke({"prompt": "q"}).result == "post-reply"
+        assert asyncio.run(agent.async_invoke({"prompt": "q"})).result == "post-reply"
+
+    @pytest.mark.parametrize("bad", [5, {"a": 1}])
+    def test_wrong_post_types_raise_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError):
+            make_value_agent("r", post_invoke=bad)
 
 
 class TestContextSink:
@@ -3663,9 +3806,9 @@ class TestRuntimeContext:
             make_value_agent(
                 "r", post_invoke=post_plain, response_to_post="resp", use_runtime_context=knob
             )
-        with pytest.raises(AgentError, match="runtime context parameter's name"):
+        with pytest.raises(AgentError, match="runtime context"):
             make_value_agent(
-                "r", extra_parameters=["runtime_context"], use_runtime_context=knob
+                "r", sources=[param_source("extras", ["runtime_context"])], use_runtime_context=knob
             )
 
     @pytest.mark.parametrize("binding", ["runtime_context", {"k": "runtime_context"}])
@@ -3792,14 +3935,14 @@ class TestInvokeHook:
 
         assert result.run_id
         assert agent.get_conversation().records[0].run_id == result.run_id
-        assert agent.get_record(run_id=result.run_id) is agent.get_conversation().records[0]
+        assert agent.get_conversation().get_record(run_id=result.run_id) is agent.get_conversation().records[0]
 
     def test_async_run_id_matches_the_stored_record(self) -> None:
         agent = make_agent(record_enabled=True)
 
         result = asyncio.run(agent.async_invoke(_INPUTS))
 
-        assert agent.get_record(run_id=result.run_id).run_id == result.run_id
+        assert agent.get_conversation().get_record(run_id=result.run_id).run_id == result.run_id
         assert make_agent(record_enabled=False).invoke(_INPUTS).run_id is None
 
     def test_result_timing_and_identity_come_from_the_template(self) -> None:
@@ -3864,18 +4007,15 @@ class TestNewConversationHook:
 
         assert agent.get_conversation().render_mode == "r"
 
-    def test_create_conversation_overlays_given_arguments(self) -> None:
+    def test_imported_hand_built_conversation_ignores_the_hook(self) -> None:
         agent = make_agent(agent_cls=_HookAgent)
+        built = Conversation()
 
-        given = agent.create_conversation(
-            "a", response_preview_limit=3, render_mode="a"
-        )
-        omitted = agent.create_conversation("b", prompt_preview_limit=4)
+        agent.import_conversation(built, name="a")
 
-        assert (given.response_preview_limit, given.render_mode) == (3, "a")
-        assert omitted.render_mode == "r"
-        assert omitted.prompt_preview_limit == 4
-        assert omitted.response_preview_limit is None
+        assert agent.get_conversation("a") is built
+        assert built.render_mode == "s"
+        assert agent.get_conversation().render_mode == "r"
 
     def test_base_hook_returns_a_new_default_conversation_each_call(self) -> None:
         agent = make_agent()
@@ -3889,12 +4029,13 @@ class TestNewConversationHook:
 
     def test_removing_a_non_default_conversation_does_not_use_the_hook(self) -> None:
         agent = make_agent(agent_cls=_HookAgent)
-        agent.create_conversation("x")
+        imported = Conversation()
+        agent.import_conversation(imported, name="x")
         before = _HookAgent.hook_calls
 
         popped = agent.remove_conversation("x")
 
-        assert popped.render_mode == "r"
+        assert popped is imported
         assert _HookAgent.hook_calls == before
         assert "x" not in agent.conversation_names
 
@@ -3917,7 +4058,7 @@ class TestConstructorRule:
             "name", "description", "llm_engine",
             "pre_invoke", "post_invoke",
             "inputs_to_context", "response_to_context", "response_to_post",
-            "use_runtime_context", "extra_parameters",
+            "use_runtime_context",
             "record_enabled", "records_window",
         ]
         assert all(
