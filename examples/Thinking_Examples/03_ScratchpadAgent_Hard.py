@@ -22,9 +22,9 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 
 # --- thinking_instructions is the parameterized side of this example
 #     (Example 1 used plain prompts and example 2 a parameterized
-#     instructions -- this one shows a plain string instructions slot paired with a
+#     instructions -- this one shows a plain string instructions paired with a
 #     thinking_instructions PromptTemplate contributing its OWN
-#     {verification_style} placeholder, reconciled against the instructions slot's own
+#     {verification_style} placeholder, reconciled against the instructions' own
 #     params the same way at construction time).
 #
 #     Thoughts are free text, so the instructions below carry the whole

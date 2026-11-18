@@ -166,7 +166,7 @@ class TestConstruction:
 
         assert [p.name for p in agent.parameters] == ["prompt"]
 
-    def test_thinking_and_main_instructions_are_stored_as_slots(self) -> None:
+    def test_thinking_and_main_instructions_are_stored_as_instructions(self) -> None:
         agent = make_agent()
 
         assert agent.thinking_instructions.template == THINK
@@ -434,7 +434,7 @@ class TestSystemMessage:
 
         assert calls(agent)[-1][0]["content"] == ROLE
 
-    def test_omitted_slots_use_the_default_constants(self) -> None:
+    def test_omitted_instructions_use_the_default_constants(self) -> None:
         agent = ScratchpadAgent(
             name="tests", description="d",
             llm_engine=FakeLLMEngine(["t1", "R"]), thinking_rounds=1,
@@ -445,7 +445,7 @@ class TestSystemMessage:
         assert calls(agent)[0][0]["content"] == DEFAULT_THINKING_INSTRUCTIONS
         assert calls(agent)[1][0]["content"] == DEFAULT_INSTRUCTIONS
 
-    def test_none_slots_raise_type_error_and_blank_slots_value_error(self) -> None:
+    def test_none_instructions_raise_type_error_and_blank_instructions_value_error(self) -> None:
         with pytest.raises(TypeError, match="thinking_instructions"):
             make_agent(thinking_instructions=None)
         with pytest.raises(TypeError, match="instructions"):
@@ -514,7 +514,7 @@ class TestPlaceholders:
         assert calls(agent)[0][0]["content"] == "Think as a chef."
         assert calls(agent)[1][0]["content"] == "You are a chef."
 
-    def test_compatible_overlap_warns_and_the_instructions_slot_wins(self) -> None:
+    def test_compatible_overlap_warns_and_the_instructions_win(self) -> None:
         role = PromptTemplate(
             template="You are {persona}.", name="r", description="d",
             parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default="a helper")],
@@ -526,11 +526,11 @@ class TestPlaceholders:
 
         persona = next(p for p in agent.parameters if p.name == "persona")
         assert persona.default == "a helper"
-        # The instructions slot's default reaches the thinking message too.
+        # The instructions' default reaches the thinking message too.
         agent.invoke({"prompt": "hi"})
         assert calls(agent)[0][0]["content"] == "Think as a helper."
 
-    def test_the_overlap_warning_is_emitted_once_for_the_two_slots(self) -> None:
+    def test_the_overlap_warning_is_emitted_once_for_the_two_instructions(self) -> None:
         role = PromptTemplate(
             template="You are {persona}.", name="r", description="d",
             parameters=[ParamSpec(name="persona", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default="a helper")],
@@ -591,7 +591,7 @@ class TestPlaceholders:
         assert calls(agent)[0][0]["content"] == "Take the costs angle."
 
 
-class TestSlotRendering:
+class TestInstructionRendering:
     def test_sources_are_instructions_then_thinking_instructions(self) -> None:
         agent = make_agent()
 
@@ -600,7 +600,7 @@ class TestSlotRendering:
         ]
 
     @pytest.mark.parametrize("kind", ["callable", "agent"])
-    def test_non_template_slots_render_both_phases(self, kind: str) -> None:
+    def test_non_template_instructions_render_both_phases(self, kind: str) -> None:
         if kind == "callable":
             def thinking(angle: str) -> str:
                 return f"Focus on {angle}."
@@ -609,10 +609,10 @@ class TestSlotRendering:
                 return f"Answer about {angle}."
         else:
             thinking = BasicAgent(
-                name="think_slot", description="d", llm_engine=FakeLLMEngine(["Think X."]),
+                name="think_instructions", description="d", llm_engine=FakeLLMEngine(["Think X."]),
             )
             main = BasicAgent(
-                name="main_slot", description="d", llm_engine=FakeLLMEngine(["Main X."]),
+                name="main_instructions", description="d", llm_engine=FakeLLMEngine(["Main X."]),
             )
         agent = make_agent(["t1", "R"], instructions=main, thinking_instructions=thinking)
 
@@ -624,7 +624,7 @@ class TestSlotRendering:
         )
         assert (calls(agent)[0][0]["content"], calls(agent)[1][0]["content"]) == expected
 
-    def test_slots_run_once_per_invoke_across_all_rounds(self) -> None:
+    def test_instructions_run_once_per_invoke_across_all_rounds(self) -> None:
         counts = {"main": 0, "think": 0}
 
         def main() -> str:
@@ -645,7 +645,7 @@ class TestSlotRendering:
         assert len(calls(agent)) == 4
         assert counts == {"main": 1, "think": 1}
 
-    def test_zero_rounds_never_invokes_the_thinking_slot(self) -> None:
+    def test_zero_rounds_never_invokes_the_thinking_instructions(self) -> None:
         seen: list[str] = []
 
         def think() -> str:
@@ -661,7 +661,7 @@ class TestSlotRendering:
         assert task.thinking_instructions == ""
         assert task.instructions == ROLE
 
-    def test_thinking_slot_text_lands_on_the_task_field(self) -> None:
+    def test_thinking_instructions_text_lands_on_the_task_field(self) -> None:
         agent = make_agent(["t1", "R"])
         task = agent.create_task(agent.filter_inputs({"prompt": "hi"}))
 
@@ -673,7 +673,7 @@ class TestSlotRendering:
         task.thinking_complete = True
         assert agent._render_system_message(task) == [{"role": "system", "content": ROLE}]
 
-    def test_non_str_thinking_slot_result_raises_naming_the_slot_and_type(self) -> None:
+    def test_non_str_thinking_instructions_result_raises_naming_them_and_type(self) -> None:
         def think() -> int:
             return 5
 
@@ -684,7 +684,7 @@ class TestSlotRendering:
         with pytest.raises(TypeError, match=r"tests_thinking_instructions.*int"):
             asyncio.run(agent.async_invoke({"prompt": "hi"}))
 
-    def test_async_run_renders_both_slots(self) -> None:
+    def test_async_run_renders_both_instructions(self) -> None:
         agent = make_agent(["t1", "R"], thinking_instructions="Focus on {angle}.")
 
         asyncio.run(agent.async_invoke({"prompt": "hi", "angle": "costs"}))
@@ -692,7 +692,7 @@ class TestSlotRendering:
         assert calls(agent)[0][0]["content"] == "Focus on costs."
         assert calls(agent)[1][0]["content"] == ROLE
 
-    def test_each_slot_takes_only_its_own_names_and_the_runtime_dict(self) -> None:
+    def test_each_instructions_invokable_takes_only_its_own_names_and_the_runtime_dict(self) -> None:
         seen: dict[str, Any] = {}
 
         def main(persona: str, **runtime_context: Any) -> str:

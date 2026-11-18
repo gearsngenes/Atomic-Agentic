@@ -85,47 +85,47 @@ class TestBasicAgentInstructions:
         assert not hasattr(BasicAgent, "DEFAULT_ROLE_PROMPT")
 
 
-def _persona_slot(persona: str) -> str:
+def _persona_instructions(persona: str) -> str:
     return f"You are a {persona}."
 
 
-class TestBasicAgentSlotTypes:
-    def test_callable_slot_is_wrapped_and_named(self) -> None:
-        agent = make_basic_agent(instructions=_persona_slot)
+class TestBasicAgentInstructionSources:
+    def test_callable_instructions_is_wrapped_and_named(self) -> None:
+        agent = make_basic_agent(instructions=_persona_instructions)
 
         assert isinstance(agent.instructions, Tool)
         assert agent.instructions.name == "basic_agent_instructions"
         assert [p.name for p in agent.parameters] == ["prompt", "persona"]
 
-    def test_string_slot_is_a_prompt_template_with_the_coerced_name(self) -> None:
+    def test_string_instructions_is_a_prompt_template_with_the_coerced_name(self) -> None:
         agent = make_basic_agent(instructions="You are a {persona}.")
 
         assert isinstance(agent.instructions, PromptTemplate)
         assert agent.instructions.name == "basic_agent_instructions"
 
-    def test_tool_slot_is_used_as_is(self) -> None:
-        tool = Tool(_persona_slot, name="my_slot", description="d")
+    def test_tool_instructions_is_used_as_is(self) -> None:
+        tool = Tool(_persona_instructions, name="my_instructions", description="d")
         agent = make_basic_agent(instructions=tool)
 
         assert agent.instructions is tool
-        assert agent.instructions.name == "my_slot"
+        assert agent.instructions.name == "my_instructions"
 
-    @pytest.mark.parametrize("slot", ["string", "callable", "tool", "template"])
-    def test_every_slot_type_renders_the_system_message(self, slot: str) -> None:
+    @pytest.mark.parametrize("source", ["string", "callable", "tool", "template"])
+    def test_every_instructions_source_renders_the_system_message(self, source: str) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         instructions = {
             "string": "You are a {persona}.",
-            "callable": _persona_slot,
-            "tool": Tool(_persona_slot, name="slot", description="d"),
+            "callable": _persona_instructions,
+            "tool": Tool(_persona_instructions, name="instructions", description="d"),
             "template": PromptTemplate(template="You are a {persona}.", name="t", description="d"),
-        }[slot]
+        }[source]
         agent = make_basic_agent(engine=engine, instructions=instructions)
 
         agent.invoke({"prompt": "hi", "persona": "pirate"})
 
         assert engine.calls[0][0] == {"role": "system", "content": "You are a pirate."}
 
-    def test_agent_slot_renders_its_reply_as_the_system_message(self) -> None:
+    def test_agent_instructions_render_its_reply_as_the_system_message(self) -> None:
         inner = make_basic_agent(instructions="inner")
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(engine=engine, instructions=inner)
@@ -134,7 +134,7 @@ class TestBasicAgentSlotTypes:
 
         assert engine.calls[0][0]["content"] == f"ECHO: {wrap('hi')}"
 
-    def test_async_agent_slot_uses_async_invoke_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_async_agent_instructions_use_async_invoke_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         inner = make_basic_agent(instructions="inner")
         calls = {"async": 0}
         real_async = inner.async_invoke
@@ -156,40 +156,40 @@ class TestBasicAgentSlotTypes:
         assert result.result.startswith("ECHO: ")
 
 
-class TestBasicAgentSlotRendering:
-    def test_slot_runs_exactly_once_per_invoke(self) -> None:
+class TestBasicAgentInstructionRendering:
+    def test_instructions_run_exactly_once_per_invoke(self) -> None:
         calls: list[str] = []
 
-        def slot(persona: str) -> str:
+        def instructions_fn(persona: str) -> str:
             calls.append(persona)
             return f"You are a {persona}."
 
-        agent = make_basic_agent(instructions=slot)
+        agent = make_basic_agent(instructions=instructions_fn)
 
         agent.invoke({"prompt": "a", "persona": "x"})
         agent.invoke({"prompt": "b", "persona": "y"})
 
         assert calls == ["x", "y"]
 
-    def test_non_str_slot_result_raises_type_error_naming_slot_and_type(self) -> None:
-        def slot() -> int:
+    def test_non_str_instructions_result_raises_type_error_naming_instructions_and_type(self) -> None:
+        def instructions_fn() -> int:
             return 5
 
-        agent = make_basic_agent(instructions=slot)
+        agent = make_basic_agent(instructions=instructions_fn)
 
         with pytest.raises(TypeError, match=r"basic_agent_instructions.*int"):
             agent.invoke({"prompt": "hi"})
         with pytest.raises(TypeError, match=r"basic_agent_instructions.*int"):
             asyncio.run(agent.async_invoke({"prompt": "hi"}))
 
-    def test_slot_errors_are_not_rewrapped_by_the_agent(self) -> None:
-        def slot() -> str:
-            raise RuntimeError("slot blew up")
+    def test_instructions_errors_are_not_rewrapped_by_the_agent(self) -> None:
+        def instructions_fn() -> str:
+            raise RuntimeError("instructions blew up")
 
-        agent = make_basic_agent(instructions=slot)
+        agent = make_basic_agent(instructions=instructions_fn)
 
         # A toolified callable surfaces as the Tool's own ToolInvocationError.
-        with pytest.raises(ToolInvocationError, match="slot blew up"):
+        with pytest.raises(ToolInvocationError, match="instructions blew up"):
             agent.invoke({"prompt": "hi"})
 
     def test_system_message_is_unframed_task_instructions(self) -> None:
@@ -212,17 +212,17 @@ class TestBasicAgentSlotRendering:
 
         assert task.instructions == "You are a pirate."
 
-    def test_slot_receives_only_its_own_names(self) -> None:
+    def test_instructions_receive_only_its_own_names(self) -> None:
         seen: dict[str, Any] = {}
 
-        def slot(persona: str) -> str:
+        def instructions_fn(persona: str) -> str:
             seen["persona"] = persona
             return persona
 
         def pre(prompt: str, topic: str = "t") -> str:
             return prompt
 
-        agent = make_basic_agent(instructions=slot, pre_invoke=pre)
+        agent = make_basic_agent(instructions=instructions_fn, pre_invoke=pre)
         task = agent.create_task(
             agent.filter_inputs({"prompt": "hi", "persona": "x", "topic": "y"})
         )
@@ -231,20 +231,20 @@ class TestBasicAgentSlotRendering:
         agent.pre_process(task)
         assert seen == {"persona": "x"}
 
-    def test_slot_declaring_runtime_context_receives_exactly_the_runtime_dict(self) -> None:
+    def test_instructions_declaring_runtime_context_receives_exactly_the_runtime_dict(self) -> None:
         seen: dict[str, Any] = {}
 
-        def slot(persona: str, **runtime_context: Any) -> str:
+        def instructions_fn(persona: str, **runtime_context: Any) -> str:
             seen["runtime"] = dict(runtime_context)
             return persona
 
-        agent = make_basic_agent(instructions=slot, use_runtime_context=True)
+        agent = make_basic_agent(instructions=instructions_fn, use_runtime_context=True)
 
         agent.invoke({"prompt": "hi", "persona": "x", "runtime_context": {"a": 1}})
 
         assert seen["runtime"] == {"a": 1}
 
-    def test_slot_placeholder_overlapping_pre_invoke_warns_and_pre_wins(self) -> None:
+    def test_instructions_placeholder_overlapping_pre_invoke_warns_and_pre_wins(self) -> None:
         def pre(prompt: str, persona: str = "pre") -> str:
             return prompt
 
@@ -364,7 +364,7 @@ class _SourcingAgent(BasicAgent):
 
 
 class TestBasicAgentParameterSources:
-    def test_sources_are_the_instructions_slot(self) -> None:
+    def test_sources_are_the_instructions(self) -> None:
         agent = make_basic_agent()
 
         assert agent._extra_parameter_sources() == [agent.instructions]
@@ -376,7 +376,7 @@ class TestBasicAgentParameterSources:
 
         assert [p.name for p in agent.parameters] == ["prompt", "persona"]
 
-    def test_override_adds_parameters_after_the_instructions_slot(self) -> None:
+    def test_override_adds_parameters_after_the_instructions(self) -> None:
         tone = PromptTemplate(template="{tone}", name="tone_src", description="d")
         config = PromptTemplate(template="You are {persona}.", name="t", description="d")
 
@@ -611,7 +611,7 @@ class TestBasicAgentResponseSchema:
 
 
 class TestBasicAgentSerialization:
-    def test_to_dict_nests_the_instructions_slot_dict(self) -> None:
+    def test_to_dict_nests_the_instructions_dict(self) -> None:
         agent = make_basic_agent(instructions="Custom.")
 
         data = agent.to_dict()

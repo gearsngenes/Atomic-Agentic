@@ -324,6 +324,8 @@ def to_invokable(
        and the type.
 
     Invokables are callable, so they are tested first; ``str`` is not callable.
+    Used for instructions and the pre/post stages; an agent is an invokable, so
+    recursion is allowed and unguarded.
     """
     if isinstance(obj, AtomicInvokable):
         return obj

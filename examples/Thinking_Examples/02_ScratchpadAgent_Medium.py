@@ -15,9 +15,9 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-5-mini")
 # llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
 # llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
-# --- the instructions slot is a PromptTemplate with its OWN two caller-facing
+# --- the instructions are a PromptTemplate with its OWN two caller-facing
 #     placeholders, {max_word_count}/{writing_rules} -- these are real,
-#     required parameters on the agent's schema (the instructions slot's and
+#     required parameters on the agent's schema (the instructions' and
 #     thinking_instructions' own discovered placeholders both join the
 #     signature, reconciled against each other at construction), supplied at
 #     invoke() time like any other input,

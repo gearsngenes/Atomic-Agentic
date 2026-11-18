@@ -157,7 +157,6 @@ def _anthropic_engine() -> LLMEngine:
     try:
         return AnthropicEngine(
             model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            temperature=None,
             timeout_seconds=60,
             max_retries=0,
         )

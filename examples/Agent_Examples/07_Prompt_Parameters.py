@@ -7,7 +7,7 @@ literal style clause baked into its instructions at construction time. All
 three are invoked once with byte-identical inputs (same task prompt, same
 domain value); any difference in output is attributable only to instructions.
 
-The instructions slot is fixed at construction with no mutator (matches every other
+The instructions are fixed at construction with no mutator (matches every other
 AtomicInvokable's fixed-topology/immutability invariant) — so "swap the
 persona" now means "construct a different agent," not "mutate this one."
 
@@ -77,7 +77,7 @@ def build_persona_prompt(augmentation: str) -> PromptTemplate:
     return PromptTemplate(
         template=template,
         name="tutor_persona_prompt",
-        description="Tutor persona prompt with a required domain slot.",
+        description="Tutor persona prompt with a required domain placeholder.",
         parameters=[
             ParamSpec(
                 name="domain",
