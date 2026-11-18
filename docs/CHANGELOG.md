@@ -5,6 +5,35 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a35] - 2026-11-18
+
+Prompts release (Stage 6). `PromptConfig` is replaced by `PromptTemplate`, an invokable, and every prompt-bearing parameter of an agent (`instructions`, `thinking_instructions`, `pre_invoke`, `post_invoke`) now takes a string, a callable or any `AtomicInvokable` through one conversion, so an agent can be used in any of them. `role_prompt` is renamed `instructions`, `pre_invoke` defaults to `"{prompt}"` and rejects `None`, and subclasses declare extra parameters through a `_extra_parameter_sources()` hook instead of an `extra_parameters` argument. The family prompts and the prompt defaults move into `atomic_agentic.constants.prompts`. The release is breaking for anyone who passes `role_prompt`, `extra_parameters` or `pre_invoke=None`, reads `ToolAgent.instructions` as a string, or imports prompt constants from their old modules.
+
+### Added
+
+- `atomic_agentic.core.PromptTemplate` is an invokable that renders a template string and returns `str`. Clean `{name}` fields (also `{name!r}`, `{name:spec}`) become parameters, in order of first appearance, of kind `POSITIONAL_OR_KEYWORD` and type `Any`; every other brace region is escaped into literal text. An explicit `parameters` list is exclusive and may carry `ParamSpec` entries. A blank template raises `ValueError`.
+- `atomic_agentic.tools.to_invokable(obj, *, name, description)` turns a `str` into a `PromptTemplate`, a callable into a `Tool` and leaves an invokable unchanged; anything else raises `TypeError` naming the item.
+- `instructions`, `thinking_instructions`, `pre_invoke` and `post_invoke` accept `str | callable | AtomicInvokable`. An agent may be used in any of them; it runs once per call of the outer agent and its parameters join the outer agent's signature. There is no cycle guard. The README gains an "Agents Inside Agents" section.
+- `Agent._extra_parameter_sources()` returns the invokables whose parameters join the agent's signature, in priority order. `ToolAgent` and `ScratchpadAgent` use it for their instructions.
+- `atomic_agentic.constants.prompts` (with `__all__`) holds the family prompts, the frame and thinking prose, and `DEFAULT_INSTRUCTIONS`, `DEFAULT_THINKING_INSTRUCTIONS` and `DEFAULT_PRE_INVOKE`.
+
+### Changed
+
+- `pre_invoke` defaults to the template `"{prompt}"`, so `prompt` is an ordinary discovered parameter (type `Any`, no description) and `agent(5)` reaches the model as `"5"`. Descriptions for template parameters come from building the `PromptTemplate` yourself.
+- Discovered placeholder parameters are `POSITIONAL_OR_KEYWORD` (they were `KEYWORD_ONLY`), so `agent("hi")` works with the default pre stage.
+- Instructions are rendered once per invoke, before the model call, and each receives only the parameters it declares. A string is used as written (no stripping); a required `instructions` of `None` or a blank string raises.
+- `post_invoke` may still be `None`; a `str` post stage becomes a `PromptTemplate` named `<agent>_post_invoke`.
+
+### Removed
+
+- breaking: `PromptConfig` and `atomic_agentic.models.agents.prompts` are removed. Use `PromptTemplate`.
+- breaking: `role_prompt` is renamed `instructions` on `BasicAgent` and `ScratchpadAgent`, with no alias. The `to_dict` key follows, and the `DEFAULT_ROLE_PROMPT` and `DEFAULT_THINKING_PROMPT` class attributes become the module constants `DEFAULT_INSTRUCTIONS` and `DEFAULT_THINKING_INSTRUCTIONS`.
+- breaking: the `extra_parameters` argument is removed. Subclasses override `_extra_parameter_sources()` and set their attributes before `super().__init__()`.
+- breaking: `pre_invoke=None` raises `TypeError`, `agent.pre_invoke` is never `None`, and `PROMPT_PARAM` is removed. A `str` stage is a `PromptTemplate`.
+- breaking: `ToolAgent.instructions` returns an invokable (or `None`), not a string, and the agents' `to_dict` nests the invokable's own `to_dict`.
+- breaking: `atomic_agentic.agents.prompts` is removed. Import the family prompts and the prompt constants (`DEFAULT_*`, the preambles and the directives) from `atomic_agentic.constants.prompts`, no longer from `atomic_agentic.constants.agents`.
+- breaking: a non-`str` result from the instructions, the thinking instructions or the pre stage raises `TypeError` naming the item and the type (it was `AgentInvocationError`); a wrong-typed or `None` instructions argument raises `TypeError` at construction.
+
 ## [2.0.0a34.post2] - 2026-11-17
 
 Agent binding and conversation API release (Stage 5). The response-binding
