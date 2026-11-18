@@ -14,12 +14,12 @@ from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 from .thinking import ThinkingAgent
-from ..constants.agents import (
+from ..constants.agents import STOP_EARLY_SCHEMA_TEMPLATE
+from ..constants.prompts import (
     DEFAULT_INSTRUCTIONS,
     DEFAULT_PRE_INVOKE,
     DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
-    STOP_EARLY_SCHEMA_TEMPLATE,
 )
 from ..core.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError, AgentInvocationError

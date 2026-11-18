@@ -34,9 +34,9 @@ from ..constants.agents import (
     DEFAULT_CONVERSATION_NAME,
     CONVERSATION_NAME_PATTERN,
     TASK_RESULT_PREFIX,
-    DEFAULT_PRE_INVOKE,
     RUNTIME_PARAM,
 )
+from ..constants.prompts import DEFAULT_PRE_INVOKE
 from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import is_reserved_name
 from ..utils.parameters import (

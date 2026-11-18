@@ -5,7 +5,8 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.constants.agents import CONTEXT_PREAMBLE, FRAME_SUBJECTS
+from atomic_agentic.constants.agents import FRAME_SUBJECTS
+from atomic_agentic.constants.prompts import CONTEXT_PREAMBLE
 from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.utils.rendering import (
     elide_markers,

@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from pprint import pformat
 from typing import Any
 
-from ..constants.agents import CONTEXT_PREAMBLE, FRAME_SUBJECTS
+from ..constants.agents import FRAME_SUBJECTS
+from ..constants.prompts import CONTEXT_PREAMBLE
 from ..models.agents.context import ContextVariable
 
 __all__ = [

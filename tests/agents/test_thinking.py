@@ -7,7 +7,7 @@ import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
-from atomic_agentic.constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
+from atomic_agentic.constants.prompts import REPLY_DIRECTIVE, THINKING_DIRECTIVE
 from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask
 from atomic_agentic.models.results.agents import AgentResult, ThinkingAgentResult

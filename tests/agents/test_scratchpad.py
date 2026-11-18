@@ -10,11 +10,11 @@ from .conftest import FakeLLMEngine
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.scratchpad import ScratchpadAgent
-from atomic_agentic.constants.agents import (
+from atomic_agentic.constants.agents import STOP_EARLY_SCHEMA_TEMPLATE
+from atomic_agentic.constants.prompts import (
     DEFAULT_INSTRUCTIONS,
     DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
-    STOP_EARLY_SCHEMA_TEMPLATE,
 )
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.core.prompt_template import PromptTemplate

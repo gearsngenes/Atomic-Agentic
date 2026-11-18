@@ -6,7 +6,7 @@ import pytest
 import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.constants.agents import DEFAULT_INSTRUCTIONS
+from atomic_agentic.constants.prompts import DEFAULT_INSTRUCTIONS
 from atomic_agentic.exceptions import AgentError, ToolInvocationError
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.core.atomic_invokable import AtomicInvokable

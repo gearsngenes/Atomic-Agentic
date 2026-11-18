@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.constants.agents import BUILTINS_PREAMBLE
+from atomic_agentic.constants.prompts import BUILTINS_PREAMBLE
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.tools import attr_call_tool, builtin_call_tool
 from atomic_agentic.constants.agents import (

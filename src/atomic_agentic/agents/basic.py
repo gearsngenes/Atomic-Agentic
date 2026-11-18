@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, Mapping, Optional
 
 
-from ..constants.agents import DEFAULT_INSTRUCTIONS, DEFAULT_PRE_INVOKE
+from ..constants.prompts import DEFAULT_INSTRUCTIONS, DEFAULT_PRE_INVOKE
 from ..core.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine

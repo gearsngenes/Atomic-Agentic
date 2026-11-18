@@ -50,9 +50,9 @@ from collections.abc import Iterable
 from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
-from ..constants.prompts import REACT_PROMPT
+from ..constants.prompts import DEFAULT_PRE_INVOKE, REACT_PROMPT
 from .tools import make_dict, make_sequence, return_tool
-from ..constants.agents import DEFAULT_PRE_INVOKE, RETURN_TOOL_NAME
+from ..constants.agents import RETURN_TOOL_NAME
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError

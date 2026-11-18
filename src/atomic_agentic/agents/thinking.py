@@ -13,7 +13,7 @@ from abc import abstractmethod
 from typing import Any, ClassVar
 
 from .basic import BasicAgent
-from ..constants.agents import REPLY_DIRECTIVE, THINKING_DIRECTIVE
+from ..constants.prompts import REPLY_DIRECTIVE, THINKING_DIRECTIVE
 from ..models.agents.records import ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.results.agents import ThinkingAgentResult
