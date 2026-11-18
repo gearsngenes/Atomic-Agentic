@@ -318,8 +318,8 @@ persona_writer = BasicAgent(
         "sentences that tell an assistant who it is, how it speaks and what it avoids. "
         "Reply with the system prompt only."
     ),
-    pre_invoke="Persona: {persona}
-Tone: {tone}",
+    pre_invoke="Persona: {persona}\nTone: {tone}",
+    record_enabled=False,  # a helper agent: keep no per-call records
 )
 
 # The assistant's instructions are that agent, so its system message is written
@@ -329,8 +329,7 @@ assistant = BasicAgent(
     description="Answers in a persona another agent wrote.",
     llm_engine=engine,
     instructions=persona_writer,
-    pre_invoke="Topic: {topic}
-Question: {question}",
+    pre_invoke="Topic: {topic}\nQuestion: {question}",
 )
 
 print([p.name for p in assistant.parameters])  # ['topic', 'question', 'persona', 'tone']
@@ -344,7 +343,7 @@ result = assistant.invoke({
 print(result.result)
 ```
 
-`topic` and `question` come from the assistant's own `pre_invoke` template and make up the user task. `persona` and `tone` come from the `persona_writer` and shape only the system message. The assistant's signature lists all four.
+`topic` and `question` come from the assistant's own `pre_invoke` template and make up the user task. `persona` and `tone` come from the `persona_writer` and shape only the system message. The assistant's signature lists all four. A helper agent keeps a record of every call by default, so set `record_enabled=False` on one that runs inside another agent.
 
 ------------------------------------------------------------------------
 
