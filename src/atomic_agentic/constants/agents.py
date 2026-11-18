@@ -490,6 +490,7 @@ __all__ = [
     "STOP_EARLY_SCHEMA_TEMPLATE",
     # Prompt slot defaults
     "DEFAULT_INSTRUCTIONS",
+    "DEFAULT_PRE_INVOKE",
     "DEFAULT_THINKING_INSTRUCTIONS",
     # Built-in agent parameters
     "RUNTIME_PARAM",

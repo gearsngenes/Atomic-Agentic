@@ -72,7 +72,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from .toolagent import ToolAgent
-from .prompts import PLANNER_PROMPT
+from ..constants.prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
 from ..constants.agents import DEFAULT_PRE_INVOKE, RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
 from ..core import AtomicInvokable

@@ -523,7 +523,7 @@ class TestReActRecordAndResultShape:
         assert result.usage_report.total_failed == 1
 
     def test_tool_instructions_is_the_react_prompt(self) -> None:
-        from atomic_agentic.agents.prompts import REACT_PROMPT
+        from atomic_agentic.constants.prompts import REACT_PROMPT
 
         assert ReActAgent.TOOL_INSTRUCTIONS is REACT_PROMPT
         assert isinstance(ReActAgent.TOOL_INSTRUCTIONS, str)

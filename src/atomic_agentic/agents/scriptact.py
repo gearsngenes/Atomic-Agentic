@@ -10,7 +10,7 @@ from ..a2a.a2a_client_hub import A2AClientHub
 from ..a2a.py_a2atomic_client import PyA2AtomicClient
 
 from .toolagent import ToolAgent
-from .prompts import ONESHOT_PLANNER_PROMPT
+from ..constants.prompts import ONESHOT_PLANNER_PROMPT
 from .tools import attr_call_tool, builtin_call_tool
 from ..core.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
