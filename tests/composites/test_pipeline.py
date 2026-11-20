@@ -69,15 +69,6 @@ def make_tool(function: Any, name: str) -> Tool:
     return Tool(function=function, name=name, description=f"Test tool {name}.")
 
 
-class _ExtraDescriptionTool(Tool):
-    def __init__(self, *args: Any, extra: str, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._extra = extra
-
-    def _extra_description(self) -> str:
-        return self._extra
-
-
 def build(steps: list[Any], name: str = "pipe") -> Pipeline:
     return Pipeline(name, "Test pipeline.", steps)
 
@@ -241,21 +232,6 @@ class TestReturn:
         result = build([add_one]).invoke({"value": 1})
         assert type(result) is AtomicResult
         assert not hasattr(result, "trace")
-
-
-class TestExtraDescription:
-    def test_chains_from_last_step_when_bare(self) -> None:
-        last = _ExtraDescriptionTool(
-            function=label, name="last", description="Last.", extra="EXTRA"
-        )
-        assert build([add_one, double, last])._extra_description() == "EXTRA"
-        assert "EXTRA" in build([add_one, double, last]).description
-
-    def test_empty_when_last_is_bound(self) -> None:
-        last = _ExtraDescriptionTool(
-            function=label, name="last", description="Last.", extra="EXTRA"
-        )
-        assert build([add_one, double, (last, "out")])._extra_description() == ""
 
 
 class TestAsync:

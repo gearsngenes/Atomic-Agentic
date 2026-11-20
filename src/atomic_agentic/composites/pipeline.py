@@ -95,11 +95,6 @@ class Pipeline(AtomicInvokable):
         """The fixed tuple of configured ``Step`` objects."""
         return self._steps
 
-    def _extra_description(self) -> str:
-        """Chain from the last step when it is bare; a bound dict hides its shape."""
-        last = self._steps[-1]
-        return last.invokable._extra_description() if last.binding is None else ""
-
     def _handoff(self, index: int, response: Any) -> Any:
         """Apply step ``index``'s binding to its response (shared by sync and async)."""
         binding = self._steps[index].binding
