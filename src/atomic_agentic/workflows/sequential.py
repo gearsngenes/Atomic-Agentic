@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Optional
 
 from ..exceptions import ValidationError
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.results.workflows import SequentialFlowResult
 from .base import Workflow
 

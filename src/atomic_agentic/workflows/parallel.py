@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from ..exceptions import WorkflowError
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..utils.core import run_coro_sync
 from ..utils.parameters import (
     build_parameter_reports,

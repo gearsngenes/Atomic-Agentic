@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.results import AtomicResult
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL

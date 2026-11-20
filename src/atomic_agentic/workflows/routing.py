@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Any, ClassVar
 
 from ..exceptions import ValidationError, WorkflowError
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..models.parameters import ParamSpec
 from ..utils.parameters import (

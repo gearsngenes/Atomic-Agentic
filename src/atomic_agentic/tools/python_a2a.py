@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, ClassVar, Dict, Mapping, Optional
 
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec

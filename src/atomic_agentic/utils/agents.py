@@ -23,7 +23,7 @@ from ..models.agents.blackboard_models import ToolStatement
 from ..models.results.agents import ToolUsageRecord, ToolUsageReport
 
 if TYPE_CHECKING:
-    from ..core.atomic_invokable import AtomicInvokable
+    from ..invokables.atomic_invokable import AtomicInvokable
 
 __all__ = [
     "evaluate_expr",

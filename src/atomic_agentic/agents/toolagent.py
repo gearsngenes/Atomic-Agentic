@@ -50,7 +50,7 @@ from ..exceptions import (
 )
 from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools import toolify, to_invokable
 from ..mcp import MCPClientHub

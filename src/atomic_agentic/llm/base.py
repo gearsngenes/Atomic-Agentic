@@ -17,7 +17,7 @@ from typing import (
 )
 
 # ~~~Local Imports~~~
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..models.parameters import ParamSpec
 from ..exceptions import LLMEngineError

@@ -9,8 +9,8 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.agents.thinking import ThinkingAgent
 from atomic_agentic.agents.toolagent import ToolAgent
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.tools import toolify
 from atomic_agentic.models.agents.records import LLMRecord

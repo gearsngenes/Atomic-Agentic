@@ -17,7 +17,7 @@ from atomic_agentic.constants.prompts import (
     STOP_EARLY_PROMPT_SECTION,
 )
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ScratchpadTask
 from atomic_agentic.models.parameters import ParamSpec

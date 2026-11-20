@@ -12,7 +12,7 @@ from ..a2a.py_a2atomic_client import PyA2AtomicClient
 from .toolagent import ToolAgent
 from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
 from .tools import attr_call_tool, builtin_call_tool
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.records import LLMRecord, ScriptActAgentRecord

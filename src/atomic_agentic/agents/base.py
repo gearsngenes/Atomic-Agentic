@@ -19,7 +19,7 @@ from ..exceptions import (
     AgentError,
     AgentInvocationError,
 )
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult

@@ -6,7 +6,7 @@ from typing import Any, ClassVar, NamedTuple
 
 from ..constants.core import NO_VAL
 from ..exceptions import ValidationError
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.results.workflows import IterativeFlowResult
 from .base import Workflow
 

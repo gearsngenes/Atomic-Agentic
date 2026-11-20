@@ -11,8 +11,8 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.results import AgentResult
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL

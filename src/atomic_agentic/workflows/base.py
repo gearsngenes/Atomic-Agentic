@@ -6,7 +6,7 @@ from collections.abc import Collection, Mapping
 from typing import Any, ClassVar, Dict
 
 from ..exceptions import ExecutionError
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results.workflows import WorkflowResult
 

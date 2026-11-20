@@ -5,7 +5,7 @@ from typing import Any, Callable, Mapping, Optional
 
 
 from ..constants.prompts import DEFAULT_INSTRUCTIONS, DEFAULT_PRE_INVOKE
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord

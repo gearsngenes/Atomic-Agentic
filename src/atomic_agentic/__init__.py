@@ -13,8 +13,8 @@ from .utils.parameters import (
     semantically_compatible,
     semantically_identical,
 )
-from .core.atomic_invokable import AtomicInvokable
-from .core.core_api import extract_io, parameter_overlap, parameter_collisions
+from .invokables.atomic_invokable import AtomicInvokable
+from .invokables.core_api import extract_io, parameter_overlap, parameter_collisions
 
 __all__ = [
     # Sentinels

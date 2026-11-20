@@ -21,7 +21,7 @@ from ..constants.prompts import (
     DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
 )
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord

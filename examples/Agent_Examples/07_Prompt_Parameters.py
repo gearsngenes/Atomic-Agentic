@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from atomic_agentic import ParamSpec
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()

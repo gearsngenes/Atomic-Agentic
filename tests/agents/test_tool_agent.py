@@ -13,11 +13,11 @@ from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
 from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.a2a import A2AClientHub
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.tools import Tool
 from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
 from atomic_agentic.constants.prompts import BUILTINS_PREAMBLE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
