@@ -7,9 +7,11 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.composites import Graph, GraphResult, Pipeline
+from atomic_agentic.composites import Graph, Pipeline
+from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results import GraphResult
 from atomic_agentic.tools.base import Tool
 
 GRAPH_LOGGER = "atomic_agentic.composites.graph"
@@ -140,10 +142,6 @@ class TestConstruction:
         with pytest.raises(TypeError):
             build({"n": echo}, [], "n", max_traversal_depth=depth)
 
-    def test_rejects_non_bool_flag(self) -> None:
-        with pytest.raises(TypeError):
-            build({"n": echo}, [], "n", raise_on_depth_limit=1)
-
     @pytest.mark.parametrize("returns", [5, "", [1], ("a",)])
     def test_rejects_bad_returns(self, returns: Any) -> None:
         with pytest.raises(TypeError):
@@ -174,12 +172,10 @@ class TestConstruction:
             "a",
             returns=["x", "y"],
             max_traversal_depth=7,
-            raise_on_depth_limit=False,
             collision_handling_order=["a"],
         )
         assert graph.returns == ("x", "y")
         assert graph.max_traversal_depth == 7
-        assert graph.raise_on_depth_limit is False
         assert graph.collision_handling_order == ("a",)
 
     def test_nodes_view_is_read_only_and_node_frozen(self) -> None:
@@ -401,9 +397,8 @@ class TestDepthCap:
         graph = build({"a": echo, "b": echo}, [("a", "b")], "a", max_traversal_depth=2)
         result = graph.invoke({})
         assert result.trace == (("a",), ("b",))
-        assert result.hit_depth_limit is False
 
-    def test_non_empty_queue_at_cap_raises_by_default(self) -> None:
+    def test_non_empty_queue_at_cap_raises(self) -> None:
         graph = build(
             {"a": echo, "b": echo, "c": echo},
             [("a", "b"), ("b", "c")],
@@ -413,35 +408,9 @@ class TestDepthCap:
         with pytest.raises(RuntimeError, match="max_traversal_depth=2"):
             graph.invoke({})
 
-    def test_flag_off_stops_and_returns_slice(self) -> None:
-        graph = build(
-            {"a": writer({"v": 1}), "b": writer({"v": 2}), "c": writer({"v": 3})},
-            [("a", "b"), ("b", "c")],
-            "a",
-            max_traversal_depth=2,
-            raise_on_depth_limit=False,
-            returns="v",
-        )
-        result = graph.invoke({})
-        assert result.result == 2
-        assert result.hit_depth_limit is True
-        assert len(result.trace) == 2
-
     def test_self_loop_without_exit_raises(self) -> None:
         graph = build({"a": echo}, [("a", "a")], "a", max_traversal_depth=3)
         with pytest.raises(RuntimeError):
-            graph.invoke({})
-
-    def test_unwritten_returns_key_raises_on_cap_stop_too(self) -> None:
-        graph = build(
-            {"a": echo},
-            [("a", "a")],
-            "a",
-            max_traversal_depth=2,
-            raise_on_depth_limit=False,
-            returns="missing",
-        )
-        with pytest.raises(KeyError):
             graph.invoke({})
 
 
@@ -466,7 +435,6 @@ class TestResultAndModes:
         result = build({"n": abc}, [], "n").invoke({})
         assert type(result) is GraphResult
         assert result.trace == (("n",),)
-        assert result.hit_depth_limit is False
 
     def test_async_matches_sync(self) -> None:
         graph = build({"step": bump}, [("step", again)], "step")
@@ -483,10 +451,12 @@ class TestResultAndModes:
 
         assert asyncio.run(main()) == 1
 
-    def test_node_exception_propagates_unwrapped(self) -> None:
+    def test_node_exception_is_not_wrapped_by_the_graph(self) -> None:
+        # Tool wraps its own failures; the graph adds no wrapper of its own.
         graph = build({"n": boom}, [], "n")
-        with pytest.raises(ValueError, match="boom"):
+        with pytest.raises(ToolInvocationError, match="boom") as info:
             graph.invoke({})
+        assert "graph" not in str(info.value).lower()
 
     def test_debug_only_logging(self, caplog: pytest.LogCaptureFixture) -> None:
         graph = build({"a": echo, "b": echo}, [("a", "b")], "a")
@@ -505,7 +475,6 @@ class TestSerialization:
             ["a"],
             returns=["x"],
             max_traversal_depth=9,
-            raise_on_depth_limit=False,
             collision_handling_order=["b"],
         )
         data = graph.to_dict()
@@ -516,7 +485,6 @@ class TestSerialization:
         assert data["start"] == ["a"]
         assert data["returns"] == ["x"]
         assert data["max_traversal_depth"] == 9
-        assert data["raise_on_depth_limit"] is False
         assert data["collision_handling_order"] == ["b"]
 
 
@@ -524,7 +492,7 @@ class TestSurface:
     def test_export(self) -> None:
         import atomic_agentic.composites as composites
 
-        assert composites.__all__ == ["Graph", "GraphResult", "Pipeline"]
+        assert composites.__all__ == ["Graph", "Pipeline"]
         assert composites.Graph is Graph
         assert composites.Pipeline is Pipeline
 

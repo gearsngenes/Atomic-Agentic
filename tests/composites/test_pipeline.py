@@ -272,7 +272,7 @@ class TestSurface:
     def test_export(self) -> None:
         import atomic_agentic.composites as composites
 
-        assert composites.__all__ == ["Pipeline"]
+        assert composites.__all__ == ["Graph", "Pipeline"]
         assert composites.Pipeline is Pipeline
 
     def test_workflows_package_still_imports(self) -> None:

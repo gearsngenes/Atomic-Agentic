@@ -9,6 +9,7 @@ from .agents import (
     ToolUsageRecord,
     ToolUsageReport,
 )
+from .graph import GraphResult
 from .llm import (
     AnthropicTokenUsage,
     GeminiTokenUsage,
@@ -63,4 +64,5 @@ __all__ = [
     "IterativeFlowResult",
     "ParallelFlowResult",
     "GraphFlowResult",
+    "GraphResult",
 ]

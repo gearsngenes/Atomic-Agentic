@@ -3,38 +3,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Callable, ClassVar
 
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
-from ..models.results import AtomicResult
+from ..models.results import GraphResult
 from ..tools.toolification import to_invokable
 from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import run_coro_sync
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Graph", "GraphResult"]
-
-
-@dataclass(frozen=True, slots=True)
-class GraphResult(AtomicResult):
-    """Result of one ``Graph`` run.
-
-    Fields
-    ------
-    trace:
-        Node names fired per superstep (declaration order within a superstep),
-        always populated. Routers do not appear.
-    hit_depth_limit:
-        True when the run stopped at ``max_traversal_depth`` with a non-empty
-        ready set (only possible when ``raise_on_depth_limit`` is false).
-    """
-
-    trace: tuple[tuple[str, ...], ...] = field(default=(), kw_only=True)
-    hit_depth_limit: bool = field(default=False, kw_only=True)
+__all__ = ["Graph"]
 
 
 class Graph(AtomicInvokable):
@@ -50,7 +32,20 @@ class Graph(AtomicInvokable):
       ``source``. A node with no outgoing edges is terminal.
     - ``start`` names the round-0 nodes (several start nodes run in parallel).
     - ``parameters`` default to a single ``**kwargs``; ``return_type`` is ``Any``.
-      Both are fixed. Topology is fixed in this pass; mutators come later.
+      Both, and ``name``, are fixed for the graph's life.
+
+    Mutation contract
+    -----------------
+    - Nodes, edges and knobs change only through the mutators below, each of
+      which validates fully before changing anything (a failed call leaves the
+      graph untouched). Node records are replaced, never edited in place.
+    - Relations are sets: ``add_edge`` of an existing edge, ``remove_edge`` of an
+      absent one and ``disconnect_node`` with nothing attached return ``False``.
+      Names that do not exist, wrong types and invariant violations raise.
+    - ``add_node`` appends in declaration order, which ranks the new node below
+      existing ones in default collision handling.
+    - A run works from a snapshot taken at its start; mutation during a run
+      affects only later runs.
 
     Runtime contract
     ----------------
@@ -63,8 +58,7 @@ class Graph(AtomicInvokable):
       ``collision_handling_order`` names first, then every other node in
       declaration order.
     - The run ends when nothing is ready. At ``max_traversal_depth`` with nodes
-      still ready it raises (``raise_on_depth_limit``) or stops and returns the
-      normal slice with ``hit_depth_limit`` set.
+      still ready it raises ``RuntimeError``.
     - ``returns`` selects the result: ``None`` whole state, ``str`` one key's
       value, ``list[str]`` a subset dict.
     """
@@ -92,37 +86,19 @@ class Graph(AtomicInvokable):
         parameters: list[ParamSpec] | None = None,
         returns: str | list[str] | None = None,
         max_traversal_depth: int = 50,
-        raise_on_depth_limit: bool = True,
         collision_handling_order: list[str] | None = None,
     ) -> None:
-        # 1. nodes container
+        # 1. nodes
         if not isinstance(nodes, dict):
             raise TypeError(f"nodes must be a non-empty dict, got {type(nodes)!r}")
         if not nodes:
             raise ValueError("nodes must not be empty")
+        built = {
+            node_name: self._coerce_node(name, node_name, entry)
+            for node_name, entry in nodes.items()
+        }
 
-        # 2. node entries
-        built: dict[str, tuple[AtomicInvokable, Binding | None]] = {}
-        for node_name, entry in nodes.items():
-            if not isinstance(node_name, str) or not node_name:
-                raise TypeError(f"node names must be non-empty str, got {node_name!r}")
-            if isinstance(entry, tuple):
-                if len(entry) != 2:
-                    raise ValueError(
-                        f"node {node_name!r} tuple must be (node, binding); got length {len(entry)}"
-                    )
-                obj, raw_binding = entry
-            else:
-                obj, raw_binding = entry, None
-            binding = normalize_binding(raw_binding, label=f"{name} node {node_name!r} binding")
-            invokable = to_invokable(
-                obj,
-                name=node_name,
-                description=f"Node {node_name} of graph {name}",
-            )
-            built[node_name] = (invokable, binding)
-
-        # 3. edges
+        # 2. edges
         if not isinstance(edges, list):
             raise TypeError(f"edges must be a list, got {type(edges)!r}")
         outgoing: dict[str, list[str]] = {n: [] for n in built}
@@ -134,72 +110,21 @@ class Graph(AtomicInvokable):
             if len(edge) != 2:
                 raise ValueError(f"each edge must be (source, target); got length {len(edge)}")
             source, target = edge
-            if not isinstance(source, str):
-                raise TypeError(f"edge source must be a str, got {type(source)!r}")
-            if source not in built:
-                raise ValueError(f"edge source {source!r} is not a node")
+            self._check_edge_ends(source, target, built)
             if isinstance(target, str):
-                if target not in built:
-                    raise ValueError(f"edge target {target!r} is not a node")
                 if target not in outgoing[source]:
                     outgoing[source].append(target)
             else:
-                routers[source].append(
-                    to_invokable(
-                        target,
-                        name=f"{name}_router_{router_count}",
-                        description=f"Router {router_count} of graph {name}",
-                    )
-                )
+                routers[source].append(self._coerce_router(name, target, router_count))
                 router_count += 1
 
-        # 4. start
-        if isinstance(start, str):
-            start_tuple: tuple[str, ...] = (start,)
-        elif isinstance(start, list):
-            start_tuple = tuple(start)
-        else:
-            raise TypeError(f"start must be a str or list[str], got {type(start)!r}")
-        if not start_tuple:
-            raise ValueError("start must not be empty")
-        self._check_node_names(start_tuple, built, "start")
+        # 3. knobs
+        start_tuple = self._check_start(start, built)
+        depth = self._check_depth(max_traversal_depth)
+        returns_value = self._check_returns(returns)
+        order_value = self._check_order(collision_handling_order, built)
 
-        # 5. depth and flag
-        if isinstance(max_traversal_depth, bool) or not isinstance(max_traversal_depth, int):
-            raise TypeError(f"max_traversal_depth must be an int, got {type(max_traversal_depth)!r}")
-        if max_traversal_depth <= 0:
-            raise ValueError("max_traversal_depth must be > 0")
-        if not isinstance(raise_on_depth_limit, bool):
-            raise TypeError(f"raise_on_depth_limit must be a bool, got {type(raise_on_depth_limit)!r}")
-
-        # 6. returns
-        returns_value: str | tuple[str, ...] | None
-        if returns is None:
-            returns_value = None
-        elif isinstance(returns, str):
-            if not returns:
-                raise TypeError("returns must be a non-empty str when given as a str")
-            returns_value = returns
-        elif isinstance(returns, list) and all(isinstance(k, str) for k in returns):
-            returns_value = tuple(returns)
-        else:
-            raise TypeError(f"returns must be None, a str or a list[str], got {returns!r}")
-
-        # 7. collision order
-        order_value: tuple[str, ...] | None
-        if collision_handling_order is None:
-            order_value = None
-        elif isinstance(collision_handling_order, list) and all(
-            isinstance(n, str) for n in collision_handling_order
-        ):
-            order_value = tuple(collision_handling_order)
-            self._check_node_names(order_value, built, "collision_handling_order")
-        else:
-            raise TypeError(
-                f"collision_handling_order must be None or a list[str], got {collision_handling_order!r}"
-            )
-
-        # 8. base init
+        # 4. base init
         if parameters is None:
             parameters = [
                 ParamSpec(name="kwargs", index=0, kind=ParamSpec.VAR_KEYWORD, type=("Any",))
@@ -211,7 +136,7 @@ class Graph(AtomicInvokable):
             return_type="Any",
         )
 
-        # 9. store
+        # 5. store
         self._nodes: dict[str, Graph.Node] = {
             node_name: Graph.Node(
                 invokable=invokable,
@@ -221,11 +146,48 @@ class Graph(AtomicInvokable):
             )
             for node_name, (invokable, binding) in built.items()
         }
+        self._router_count = router_count
         self._start = start_tuple
         self._returns = returns_value
-        self._max_traversal_depth = max_traversal_depth
-        self._raise_on_depth_limit = raise_on_depth_limit
+        self._max_traversal_depth = depth
         self._collision_handling_order = order_value
+
+    # ---------------------------------------------------------------- #
+    # Shared validators (constructor and mutators)
+    # ---------------------------------------------------------------- #
+    @staticmethod
+    def _coerce_node(
+        graph_name: str, node_name: Any, entry: Any
+    ) -> tuple[AtomicInvokable, Binding | None]:
+        """Turn a node entry into ``(invokable, binding)``."""
+        if not isinstance(node_name, str) or not node_name:
+            raise TypeError(f"node names must be non-empty str, got {node_name!r}")
+        if isinstance(entry, tuple):
+            if len(entry) != 2:
+                raise ValueError(
+                    f"node {node_name!r} tuple must be (node, binding); got length {len(entry)}"
+                )
+            obj, raw_binding = entry
+        else:
+            obj, raw_binding = entry, None
+        binding = normalize_binding(
+            raw_binding, label=f"{graph_name} node {node_name!r} binding"
+        )
+        invokable = to_invokable(
+            obj,
+            name=node_name,
+            description=f"Node {node_name} of graph {graph_name}",
+        )
+        return invokable, binding
+
+    @staticmethod
+    def _coerce_router(graph_name: str, target: Any, index: int) -> AtomicInvokable:
+        """Turn a router target into an invokable named from ``index``."""
+        return to_invokable(
+            target,
+            name=f"{graph_name}_router_{index}",
+            description=f"Router {index} of graph {graph_name}",
+        )
 
     @staticmethod
     def _check_node_names(names: tuple[str, ...], nodes: Mapping[str, Any], label: str) -> None:
@@ -237,6 +199,73 @@ class Graph(AtomicInvokable):
                 raise ValueError(f"{label} entry {node_name!r} is not a node")
         if len(set(names)) != len(names):
             raise ValueError(f"{label} must not repeat a node: {list(names)!r}")
+
+    @staticmethod
+    def _check_edge_ends(source: Any, target: Any, nodes: Mapping[str, Any]) -> None:
+        """The source must be a node; a ``str`` target must be a node."""
+        if not isinstance(source, str):
+            raise TypeError(f"edge source must be a str, got {type(source)!r}")
+        if source not in nodes:
+            raise ValueError(f"edge source {source!r} is not a node")
+        if isinstance(target, str) and target not in nodes:
+            raise ValueError(f"edge target {target!r} is not a node")
+
+    @staticmethod
+    def _check_start(start: Any, nodes: Mapping[str, Any]) -> tuple[str, ...]:
+        """Normalize ``start`` to a non-empty tuple of node names."""
+        if isinstance(start, str):
+            start_tuple: tuple[str, ...] = (start,)
+        elif isinstance(start, list):
+            start_tuple = tuple(start)
+        else:
+            raise TypeError(f"start must be a str or list[str], got {type(start)!r}")
+        if not start_tuple:
+            raise ValueError("start must not be empty")
+        Graph._check_node_names(start_tuple, nodes, "start")
+        return start_tuple
+
+    @staticmethod
+    def _check_returns(returns: Any) -> str | tuple[str, ...] | None:
+        """Normalize ``returns``: ``None``, a non-empty str, or a tuple of str."""
+        if returns is None:
+            return None
+        if isinstance(returns, str):
+            if not returns:
+                raise TypeError("returns must be a non-empty str when given as a str")
+            return returns
+        if isinstance(returns, list) and all(isinstance(k, str) for k in returns):
+            return tuple(returns)
+        raise TypeError(f"returns must be None, a str or a list[str], got {returns!r}")
+
+    @staticmethod
+    def _check_depth(depth: Any) -> int:
+        """The depth cap must be a positive int (not a bool)."""
+        if isinstance(depth, bool) or not isinstance(depth, int):
+            raise TypeError(f"max_traversal_depth must be an int, got {type(depth)!r}")
+        if depth <= 0:
+            raise ValueError("max_traversal_depth must be > 0")
+        return depth
+
+    @staticmethod
+    def _check_order(order: Any, nodes: Mapping[str, Any]) -> tuple[str, ...] | None:
+        """Normalize the collision order: ``None`` or a tuple of node names."""
+        if order is None:
+            return None
+        if not isinstance(order, list) or not all(isinstance(n, str) for n in order):
+            raise TypeError(
+                f"collision_handling_order must be None or a list[str], got {order!r}"
+            )
+        order_tuple = tuple(order)
+        Graph._check_node_names(order_tuple, nodes, "collision_handling_order")
+        return order_tuple
+
+    def _require_node(self, name: Any) -> Graph.Node:
+        """Return the record of node ``name``; it must be a str naming a node."""
+        if not isinstance(name, str):
+            raise TypeError(f"node name must be a str, got {type(name)!r}")
+        if name not in self._nodes:
+            raise ValueError(f"{self.full_name}: {name!r} is not a node")
+        return self._nodes[name]
 
     # ---------------------------------------------------------------- #
     # Read-only surface
@@ -261,15 +290,150 @@ class Graph(AtomicInvokable):
         """The superstep cap."""
         return self._max_traversal_depth
 
-    @property
-    def raise_on_depth_limit(self) -> bool:
-        """Whether reaching the cap with nodes still ready raises."""
-        return self._raise_on_depth_limit
+    @max_traversal_depth.setter
+    def max_traversal_depth(self, value: int) -> None:
+        self._max_traversal_depth = self._check_depth(value)
 
     @property
     def collision_handling_order(self) -> tuple[str, ...] | None:
         """Node names that win same-key collisions first, in order (``None``: declaration order)."""
         return self._collision_handling_order
+
+    # ---------------------------------------------------------------- #
+    # Node mutators
+    # ---------------------------------------------------------------- #
+    def add_node(self, name: str, entry: Any) -> None:
+        """Add a node with no edges, appended in declaration order.
+
+        1. Coerce ``entry`` (same forms as the constructor).
+        2. A name that is already a node raises ``ValueError``.
+        3. Append the record; ``start`` and the collision order are untouched.
+        """
+        invokable, binding = self._coerce_node(self.name, name, entry)
+        if name in self._nodes:
+            raise ValueError(f"{self.full_name}: {name!r} is already a node")
+        self._nodes[name] = Graph.Node(invokable, binding, (), ())
+        logger.debug("%s: added node %r", self.full_name, name)
+
+    def update_node(self, name: str, entry: Any) -> None:
+        """Replace a node's invokable and binding, keeping its edges and position."""
+        node = self._require_node(name)
+        invokable, binding = self._coerce_node(self.name, name, entry)
+        self._nodes[name] = replace(node, invokable=invokable, binding=binding)
+        logger.debug("%s: updated node %r", self.full_name, name)
+
+    def remove_node(self, name: str) -> None:
+        """Remove a node together with its own outgoing edges and routers.
+
+        Raises while another node has a fixed edge to it, or while it is in
+        ``start`` or ``collision_handling_order``. A self-loop does not block.
+        A router elsewhere that later returns the name fails at run time.
+        """
+        self._require_node(name)
+        pointing = [n for n, node in self._nodes.items() if n != name and name in node.outgoing]
+        if pointing:
+            raise ValueError(
+                f"{self.full_name}: cannot remove {name!r}: nodes {pointing!r} have edges to it"
+            )
+        if name in self._start:
+            raise ValueError(f"{self.full_name}: cannot remove start node {name!r}")
+        if self._collision_handling_order and name in self._collision_handling_order:
+            raise ValueError(
+                f"{self.full_name}: cannot remove {name!r}: it is in collision_handling_order"
+            )
+        del self._nodes[name]
+        logger.debug("%s: removed node %r", self.full_name, name)
+
+    # ---------------------------------------------------------------- #
+    # Edge mutators (relations are sets: return True if changed)
+    # ---------------------------------------------------------------- #
+    def add_edge(
+        self, source: str, target: str | AtomicInvokable | Callable[..., Any]
+    ) -> bool:
+        """Add a fixed edge (``str`` target) or a router (anything else).
+
+        Returns ``False`` for a fixed edge already present or a router invokable
+        already stored for ``source`` (by identity). A callable is coerced into
+        a new router each time.
+        """
+        node = self._require_node(source)
+        if isinstance(target, str):
+            self._require_node(target)
+            if target in node.outgoing:
+                logger.debug("%s: edge %r -> %r already present", self.full_name, source, target)
+                return False
+            self._nodes[source] = replace(node, outgoing=node.outgoing + (target,))
+            logger.debug("%s: added edge %r -> %r", self.full_name, source, target)
+            return True
+        if isinstance(target, AtomicInvokable) and any(r is target for r in node.routers):
+            logger.debug("%s: router already stored on %r", self.full_name, source)
+            return False
+        router = self._coerce_router(self.name, target, self._router_count)
+        self._router_count += 1
+        self._nodes[source] = replace(node, routers=node.routers + (router,))
+        logger.debug("%s: added router %s on %r", self.full_name, router.name, source)
+        return True
+
+    def remove_edge(self, source: str, target: str | AtomicInvokable) -> bool:
+        """Remove a fixed edge (``str``) or a stored router (by identity).
+
+        Returns ``False`` when the relation is not present. A raw callable cannot
+        match a router (it was coerced); pass the invokable from
+        ``graph.nodes[source].routers``.
+        """
+        node = self._require_node(source)
+        if isinstance(target, str):
+            self._require_node(target)
+            if target not in node.outgoing:
+                logger.debug("%s: no edge %r -> %r", self.full_name, source, target)
+                return False
+            remaining = tuple(t for t in node.outgoing if t != target)
+            self._nodes[source] = replace(node, outgoing=remaining)
+            logger.debug("%s: removed edge %r -> %r", self.full_name, source, target)
+            return True
+        if isinstance(target, AtomicInvokable):
+            if not any(r is target for r in node.routers):
+                logger.debug("%s: router not stored on %r", self.full_name, source)
+                return False
+            remaining_routers = tuple(r for r in node.routers if r is not target)
+            self._nodes[source] = replace(node, routers=remaining_routers)
+            logger.debug("%s: removed router %s from %r", self.full_name, target.name, source)
+            return True
+        raise TypeError(
+            f"remove_edge target must be a node name or a stored router invokable "
+            f"(see graph.nodes[{source!r}].routers), got {type(target)!r}"
+        )
+
+    def disconnect_node(self, name: str) -> bool:
+        """Remove every fixed edge to and from ``name`` and all of its routers."""
+        self._require_node(name)
+        replacements: dict[str, Graph.Node] = {}
+        for node_name, node in self._nodes.items():
+            if node_name == name:
+                if node.outgoing or node.routers:
+                    replacements[node_name] = replace(node, outgoing=(), routers=())
+            elif name in node.outgoing:
+                replacements[node_name] = replace(
+                    node, outgoing=tuple(t for t in node.outgoing if t != name)
+                )
+        self._nodes.update(replacements)
+        logger.debug("%s: disconnected %r (changed=%s)", self.full_name, name, bool(replacements))
+        return bool(replacements)
+
+    # ---------------------------------------------------------------- #
+    # Knob mutators
+    # ---------------------------------------------------------------- #
+    def set_start(self, start: str | list[str]) -> None:
+        """Set the round-0 nodes (validated as at construction)."""
+        self._start = self._check_start(start, self._nodes)
+
+    def set_returns(self, returns: str | list[str] | None) -> None:
+        """Set the result selection (validated as at construction)."""
+        self._returns = self._check_returns(returns)
+
+    def set_collision_handling_order(self, order: list[str] | None) -> None:
+        """Set the collision order (validated as at construction)."""
+        self._collision_handling_order = self._check_order(order, self._nodes)
 
     # ---------------------------------------------------------------- #
     # Run helpers
@@ -357,13 +521,12 @@ class Graph(AtomicInvokable):
         return run_coro_sync(self._async_invoke_impl(inputs))
 
     async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """Run supersteps until nothing is ready or the depth cap is reached."""
+        """Run supersteps until nothing is ready; raise at the depth cap."""
         # 1. snapshot of topology and knobs
         nodes = dict(self._nodes)
         start = self._start
         returns = self._returns
         depth = self._max_traversal_depth
-        raise_on_limit = self._raise_on_depth_limit
         order = self._collision_handling_order or ()
         rank = {n: i for i, n in enumerate([*order, *(n for n in nodes if n not in order)])}
 
@@ -371,7 +534,6 @@ class Graph(AtomicInvokable):
         state = self._seed_state(inputs)
         ready: set[str] = set(start)
         trace: list[tuple[str, ...]] = []
-        hit_depth_limit = False
 
         while True:
             # 3. this superstep's nodes, in declaration order
@@ -407,24 +569,20 @@ class Graph(AtomicInvokable):
                 if choice is not None:
                     next_ready.add(choice)
 
-            # 8. finish, cap, or continue
+            # 8. finish, or raise at the cap, or continue
             if not next_ready:
                 break
             if len(trace) >= depth:
-                if raise_on_limit:
-                    raise RuntimeError(
-                        f"{self.full_name}: reached max_traversal_depth={depth} with "
-                        f"nodes still ready: {sorted(next_ready)!r}"
-                    )
-                hit_depth_limit = True
-                break
+                raise RuntimeError(
+                    f"{self.full_name}: reached max_traversal_depth={depth} with "
+                    f"nodes still ready: {sorted(next_ready)!r}"
+                )
             ready = next_ready
 
         # 9. result
         return {
             "result": self._select_returns(state, returns),
             "trace": tuple(trace),
-            "hit_depth_limit": hit_depth_limit,
         }
 
     # ---------------------------------------------------------------- #
@@ -454,7 +612,6 @@ class Graph(AtomicInvokable):
                 if isinstance(self._returns, tuple)
                 else self._returns,
                 "max_traversal_depth": self._max_traversal_depth,
-                "raise_on_depth_limit": self._raise_on_depth_limit,
                 "collision_handling_order": list(self._collision_handling_order)
                 if self._collision_handling_order is not None
                 else None,
