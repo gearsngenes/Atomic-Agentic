@@ -10,7 +10,7 @@ from typing import Any, TypeAlias, TypeVar
 # =============================================================================
 # Used by:
 # - models/parameters.py: ParamSpec defaults
-# - core/atomic_invokable.py: signature/default rendering and input filtering
+# - invokables/atomic_invokable.py: signature/default rendering and input filtering
 #
 # Contract:
 # - NO_VAL is identity-checkable. Use `is NO_VAL`, not equality.
@@ -39,7 +39,7 @@ NO_VAL: Any = _NoValSentinel()
 # =============================================================================
 # Invocation logging
 # =============================================================================
-# Used by: core/atomic_invokable.py (default for AtomicInvokable.log_level)
+# Used by: invokables/atomic_invokable.py (default for AtomicInvokable.log_level)
 
 DEFAULT_LOG_LEVEL: int = logging.DEBUG
 
@@ -48,7 +48,7 @@ DEFAULT_LOG_LEVEL: int = logging.DEBUG
 # Generic identifier/name validation
 # =============================================================================
 # Used by:
-# - core/atomic_invokable.py: invokable names and parameter names
+# - invokables/atomic_invokable.py: invokable names and parameter names
 # - utils/parameters.py: schema-derived parameter names
 #
 # This is intentionally Python-identifier-like, not a full Python keyword check.

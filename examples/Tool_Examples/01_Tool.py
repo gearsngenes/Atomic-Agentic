@@ -94,7 +94,7 @@ if __name__ == "__main__":
     run_case("greet: basic", t_greet, {"name": "Ava"})             # -> "Hello, Ava."
     run_case("greet: excited", t_greet, {"name": "Ava", "excited": True})  # -> "Hello, Ava!!!"
 
-    long_text = "Atomic-Agentic helps you orchestrate agents, tools, and workflows cleanly."
+    long_text = "Atomic-Agentic helps you orchestrate agents, tools, and composites cleanly."
     run_case("summarize: clamp", t_sum, {"text": long_text, "max_chars": 40})
 
     # Common mistakes (to see helpful errors)

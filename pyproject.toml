@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomic-agentic"
-description = "Provider-agnostic, schema-driven tools, agents, and workflows for building agentic systems."
+description = "Provider-agnostic, schema-driven tools, agents, and composable workflows for building agentic systems."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dynamic = ["version"]
 
 authors = [{ name = "gearsngenes" }]
-keywords = ["agents", "workflows", "tools", "LLM", "RAG", "MCP", "A2A"]
+keywords = ["agents", "workflows", "composites", "pipelines", "graphs", "routing", "tools", "LLM", "RAG", "MCP", "A2A"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",

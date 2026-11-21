@@ -27,12 +27,9 @@ class A2AtomicSkillMetadata:
     purity in this same module. Building an instance *from* an
     ``AtomicInvokable`` is ``A2AtomicExecutor``'s own private
     ``_build_skill_metadata`` helper, not a method here: ``models/`` sits
-    below ``core/`` in the dependency topology
-    (``{exceptions, constants} -> models -> utils -> core -> {..., a2a}``),
-    so this type can't know about ``AtomicInvokable`` without reopening the
-    exact ``TYPE_CHECKING``-only-import layering workaround a27 closed for
-    good when it removed ``CheckerSpec``/``GraphFlowNode`` from
-    ``models/workflows/``.
+    below ``invokables/`` in the dependency topology
+    (``{exceptions, constants} -> models -> utils -> invokables -> {..., a2a}``),
+    so this layer is deliberately ``AtomicInvokable``-unaware.
     """
 
     remote_name: str
