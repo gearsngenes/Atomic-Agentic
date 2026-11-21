@@ -24,13 +24,15 @@ class Graph(AtomicInvokable):
 
     Construction contract
     ---------------------
-    - ``nodes`` is a non-empty dict of name to entry (an invokable, a ``str``, a
-      callable, or ``(entry, binding)``). Entries are coerced through the shared
-      ``to_invokable`` and named by their dict key.
+    - ``nodes`` is an optional dict of name to entry (an invokable, a ``str``, a
+      callable, or ``(entry, binding)``); a graph may start empty. Entries are
+      coerced through the shared ``to_invokable`` and named by their dict key.
     - ``edges`` are ``(source, target)`` pairs: a ``str`` target is a node name
       (fixed edge); a callable or invokable target is a router attached to
       ``source``. A node with no outgoing edges is terminal.
-    - ``start`` names the round-0 nodes (several start nodes run in parallel).
+    - ``start`` names the round-0 nodes (several start nodes run in parallel). It
+      may be empty while the graph is being built; running with an empty
+      ``start`` raises ``RuntimeError``.
     - ``parameters`` default to a single ``**kwargs``; ``return_type`` is ``Any``.
       Both, and ``name``, are fixed for the graph's life.
 
@@ -46,6 +48,15 @@ class Graph(AtomicInvokable):
       existing ones in default collision handling.
     - A run works from a snapshot taken at its start; mutation during a run
       affects only later runs.
+
+    Injection
+    ---------
+    - ``add_sequence`` and ``add_parallel`` add a dict of named nodes (same entry
+      forms as the constructor) and may bridge them to existing nodes
+      (``start_from``/``end_at``, ``fan_out``/``fan_in``). They only add edges,
+      are atomic, and never touch ``start`` or the collision order.
+    - ``add_sequence(..., repeat_until={key: value})`` loops the sequence until
+      every key matches in state; the depth cap ends a loop that never matches.
 
     Runtime contract
     ----------------
@@ -79,9 +90,10 @@ class Graph(AtomicInvokable):
         self,
         name: str,
         description: str,
-        nodes: dict[str, AtomicInvokable | str | Callable[..., Any] | tuple[Any, Binding | None]],
-        edges: list[tuple[str, str | AtomicInvokable | Callable[..., Any]]],
-        start: str | list[str],
+        nodes: dict[str, AtomicInvokable | str | Callable[..., Any] | tuple[Any, Binding | None]]
+        | None = None,
+        edges: list[tuple[str, str | AtomicInvokable | Callable[..., Any]]] | None = None,
+        start: str | list[str] | None = None,
         *,
         parameters: list[ParamSpec] | None = None,
         returns: str | list[str] | None = None,
@@ -89,16 +101,16 @@ class Graph(AtomicInvokable):
         collision_handling_order: list[str] | None = None,
     ) -> None:
         # 1. nodes
+        nodes = {} if nodes is None else nodes
         if not isinstance(nodes, dict):
-            raise TypeError(f"nodes must be a non-empty dict, got {type(nodes)!r}")
-        if not nodes:
-            raise ValueError("nodes must not be empty")
+            raise TypeError(f"nodes must be a dict, got {type(nodes)!r}")
         built = {
             node_name: self._coerce_node(name, node_name, entry)
             for node_name, entry in nodes.items()
         }
 
         # 2. edges
+        edges = [] if edges is None else edges
         if not isinstance(edges, list):
             raise TypeError(f"edges must be a list, got {type(edges)!r}")
         outgoing: dict[str, list[str]] = {n: [] for n in built}
@@ -212,15 +224,15 @@ class Graph(AtomicInvokable):
 
     @staticmethod
     def _check_start(start: Any, nodes: Mapping[str, Any]) -> tuple[str, ...]:
-        """Normalize ``start`` to a non-empty tuple of node names."""
+        """Normalize ``start`` to a tuple of node names (empty is valid)."""
+        if start is None:
+            return ()
         if isinstance(start, str):
             start_tuple: tuple[str, ...] = (start,)
         elif isinstance(start, list):
             start_tuple = tuple(start)
         else:
-            raise TypeError(f"start must be a str or list[str], got {type(start)!r}")
-        if not start_tuple:
-            raise ValueError("start must not be empty")
+            raise TypeError(f"start must be None, a str or a list[str], got {type(start)!r}")
         Graph._check_node_names(start_tuple, nodes, "start")
         return start_tuple
 
@@ -325,8 +337,8 @@ class Graph(AtomicInvokable):
     def remove_node(self, name: str) -> None:
         """Remove a node together with its own outgoing edges and routers.
 
-        Raises while another node has a fixed edge to it, or while it is in
-        ``start`` or ``collision_handling_order``. A self-loop does not block.
+        Raises while another node has a fixed edge to it. The node is dropped from
+        ``start`` and ``collision_handling_order``. A self-loop does not block.
         A router elsewhere that later returns the name fails at run time.
         """
         self._require_node(name)
@@ -335,13 +347,13 @@ class Graph(AtomicInvokable):
             raise ValueError(
                 f"{self.full_name}: cannot remove {name!r}: nodes {pointing!r} have edges to it"
             )
-        if name in self._start:
-            raise ValueError(f"{self.full_name}: cannot remove start node {name!r}")
-        if self._collision_handling_order and name in self._collision_handling_order:
-            raise ValueError(
-                f"{self.full_name}: cannot remove {name!r}: it is in collision_handling_order"
-            )
+        start = tuple(n for n in self._start if n != name)
+        order = self._collision_handling_order
+        if order is not None:
+            order = tuple(n for n in order if n != name) or None
         del self._nodes[name]
+        self._start = start
+        self._collision_handling_order = order
         logger.debug("%s: removed node %r", self.full_name, name)
 
     # ---------------------------------------------------------------- #
@@ -423,8 +435,8 @@ class Graph(AtomicInvokable):
     # ---------------------------------------------------------------- #
     # Knob mutators
     # ---------------------------------------------------------------- #
-    def set_start(self, start: str | list[str]) -> None:
-        """Set the round-0 nodes (validated as at construction)."""
+    def set_start(self, start: str | list[str] | None) -> None:
+        """Set the round-0 nodes (validated as at construction); empty clears them."""
         self._start = self._check_start(start, self._nodes)
 
     def set_returns(self, returns: str | list[str] | None) -> None:
@@ -434,6 +446,118 @@ class Graph(AtomicInvokable):
     def set_collision_handling_order(self, order: list[str] | None) -> None:
         """Set the collision order (validated as at construction)."""
         self._collision_handling_order = self._check_order(order, self._nodes)
+
+    # ---------------------------------------------------------------- #
+    # Injection (add a group of named nodes, optionally bridged to existing ones)
+    # ---------------------------------------------------------------- #
+    def _stage_nodes(self, nodes: Any) -> dict[str, tuple[AtomicInvokable, Binding | None]]:
+        """Validate and coerce a dict of new nodes without changing the graph."""
+        if not isinstance(nodes, dict):
+            raise TypeError(f"nodes must be a dict, got {type(nodes)!r}")
+        if not nodes:
+            raise ValueError("nodes must not be empty")
+        clashes = [n for n in nodes if n in self._nodes]
+        if clashes:
+            raise ValueError(f"{self.full_name}: node name(s) already exist: {clashes!r}")
+        return {n: self._coerce_node(self.name, n, entry) for n, entry in nodes.items()}
+
+    def _link_names(self, label: str, value: Any) -> tuple[str, ...]:
+        """Normalize a bridge argument (``None``, a name or a list) to existing node names."""
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            names: tuple[str, ...] = (value,)
+        elif isinstance(value, list):
+            names = tuple(value)
+        else:
+            raise TypeError(f"{label} must be None, a str or a list[str], got {type(value)!r}")
+        self._check_node_names(names, self._nodes, label)
+        return names
+
+    def add_sequence(
+        self,
+        nodes: dict[str, Any],
+        *,
+        start_from: str | list[str] | None = None,
+        end_at: str | list[str] | None = None,
+        repeat_until: dict[str, Any] | None = None,
+    ) -> None:
+        """Add ``nodes`` as a chain in dict order, optionally bridged and looped.
+
+        1. Validate the new nodes and the bridge names; nothing changes yet.
+        2. ``start_from`` nodes get an edge to the first new node; the last new
+           node gets an edge to each ``end_at`` node.
+        3. ``repeat_until`` replaces that last edge with a router that returns the
+           first node until every key matches its value in state (a missing key
+           does not match), then the single ``end_at`` node or ``None``. The body
+           runs at least once; the depth cap ends a loop that never matches.
+        """
+        staged = self._stage_nodes(nodes)
+        sources = self._link_names("start_from", start_from)
+        sinks = self._link_names("end_at", end_at)
+        names = list(staged)
+        head = names[0]
+
+        router: AtomicInvokable | None = None
+        if repeat_until is not None:
+            if not isinstance(repeat_until, dict) or not all(
+                isinstance(k, str) for k in repeat_until
+            ):
+                raise TypeError(f"repeat_until must be a dict with str keys, got {repeat_until!r}")
+            if not repeat_until:
+                raise ValueError("repeat_until must not be empty")
+            if len(sinks) > 1:
+                raise ValueError("end_at must be a single node when repeat_until is given")
+            expected = dict(repeat_until)
+            exit_to = sinks[0] if sinks else None
+
+            def decide(**state: Any) -> str | None:
+                done = all(k in state and state[k] == v for k, v in expected.items())
+                return exit_to if done else head
+
+            router = self._coerce_router(self.name, decide, self._router_count)
+
+        records: dict[str, Graph.Node] = {}
+        for i, node_name in enumerate(names):
+            invokable, binding = staged[node_name]
+            if i + 1 < len(names):
+                records[node_name] = Graph.Node(invokable, binding, (names[i + 1],), ())
+            elif router is not None:
+                records[node_name] = Graph.Node(invokable, binding, (), (router,))
+            else:
+                records[node_name] = Graph.Node(invokable, binding, sinks, ())
+        for source in sources:
+            node = self._nodes[source]
+            self._nodes[source] = replace(node, outgoing=node.outgoing + (head,))
+        self._nodes.update(records)
+        if router is not None:
+            self._router_count += 1
+        logger.debug("%s: added sequence %s", self.full_name, names)
+
+    def add_parallel(
+        self,
+        nodes: dict[str, Any],
+        *,
+        fan_out: str | list[str] | None = None,
+        fan_in: str | list[str] | None = None,
+    ) -> None:
+        """Add ``nodes`` as independent branches, optionally bridged.
+
+        Each ``fan_out`` node gets an edge to every branch and every branch gets an
+        edge to each ``fan_in`` node (which runs once, after all branches).
+        """
+        staged = self._stage_nodes(nodes)
+        sources = self._link_names("fan_out", fan_out)
+        sinks = self._link_names("fan_in", fan_in)
+        names = tuple(staged)
+        records = {
+            n: Graph.Node(invokable, binding, sinks, ()) for n, (invokable, binding) in staged.items()
+        }
+        for source in sources:
+            node = self._nodes[source]
+            self._nodes[source] = replace(node, outgoing=node.outgoing + names)
+        self._nodes.update(records)
+        logger.debug("%s: added parallel branches %s", self.full_name, list(names))
 
     # ---------------------------------------------------------------- #
     # Run helpers
@@ -528,6 +652,8 @@ class Graph(AtomicInvokable):
         returns = self._returns
         depth = self._max_traversal_depth
         order = self._collision_handling_order or ()
+        if not start:
+            raise RuntimeError(f"{self.full_name}: no start nodes; call set_start(...) first")
         rank = {n: i for i, n in enumerate([*order, *(n for n in nodes if n not in order)])}
 
         # 2. state and loop bookkeeping

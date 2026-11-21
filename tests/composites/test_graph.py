@@ -76,9 +76,17 @@ class TestConstruction:
         with pytest.raises(TypeError, match="dict"):
             build([echo], [], "echo")  # type: ignore[arg-type]
 
-    def test_rejects_empty_nodes(self) -> None:
-        with pytest.raises(ValueError, match="must not be empty"):
+    def test_empty_graph_is_valid(self) -> None:
+        graph = Graph("g", "d")
+        assert dict(graph.nodes) == {}
+        assert graph.start == ()
+
+    def test_empty_nodes_with_a_start_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="not a node"):
             build({}, [], "n")
+
+    def test_nodes_without_a_start_are_valid(self) -> None:
+        assert Graph("g", "d", {"a": echo}).start == ()
 
     def test_rejects_non_str_node_name(self) -> None:
         with pytest.raises(TypeError):
@@ -127,7 +135,7 @@ class TestConstruction:
         assert build({"n": echo}, [], "n").start == ("n",)
         assert build({"a": echo, "b": echo}, [], ["a", "b"]).start == ("a", "b")
 
-    @pytest.mark.parametrize("start", [[], ["a", "a"], ["zzz"], 5])
+    @pytest.mark.parametrize("start", [["a", "a"], ["zzz"], 5])
     def test_rejects_bad_start(self, start: Any) -> None:
         with pytest.raises((TypeError, ValueError)):
             build({"a": echo}, [], start)

@@ -123,12 +123,17 @@ class TestRemoveNode:
         with pytest.raises(ValueError, match="'a'"):
             abc_graph().remove_node("b")
 
-    def test_raises_for_start_and_collision_order_nodes(self) -> None:
+    def test_drops_the_node_from_start_and_collision_order(self) -> None:
         graph = abc_graph(collision_handling_order=["c"])
-        with pytest.raises(ValueError, match="start"):
-            graph.remove_node("a")
-        with pytest.raises(ValueError, match="collision_handling_order"):
-            graph.remove_node("c")
+        graph.remove_node("c")
+        assert graph.collision_handling_order is None
+        graph.remove_node("a")
+        assert graph.start == ()
+
+    def test_removing_the_last_node_leaves_an_empty_graph(self) -> None:
+        graph = build({"a": echo}, [], "a")
+        graph.remove_node("a")
+        assert dict(graph.nodes) == {} and graph.start == ()
 
     def test_self_loop_does_not_block(self) -> None:
         graph = build({"a": echo, "b": echo}, [("b", "b")], "a")
@@ -255,10 +260,16 @@ class TestKnobs:
         graph.set_start(["c", "a"])
         assert graph.start == ("c", "a")
 
-    @pytest.mark.parametrize("start", [[], ["a", "a"], ["zzz"], 5])
+    @pytest.mark.parametrize("start", [["a", "a"], ["zzz"], 5])
     def test_set_start_rejects_bad_values(self, start: Any) -> None:
         with pytest.raises((TypeError, ValueError)):
             abc_graph().set_start(start)
+
+    @pytest.mark.parametrize("empty", [[], None])
+    def test_set_start_empty_clears_the_start(self, empty: Any) -> None:
+        graph = abc_graph()
+        graph.set_start(empty)
+        assert graph.start == ()
 
     def test_set_returns(self) -> None:
         graph = abc_graph()
@@ -297,13 +308,10 @@ FAILING_CALLS: list[Callable[[Graph], Any]] = [
     lambda g: g.update_node("zzz", echo),
     lambda g: g.update_node("a", 42),
     lambda g: g.remove_node("b"),
-    lambda g: g.remove_node("a"),
-    lambda g: g.remove_node("c"),
     lambda g: g.add_edge("zzz", "a"),
     lambda g: g.add_edge("a", 5),
     lambda g: g.remove_edge("a", 5),
     lambda g: g.disconnect_node("zzz"),
-    lambda g: g.set_start([]),
     lambda g: g.set_returns(5),
     lambda g: g.set_collision_handling_order(["zzz"]),
     lambda g: setattr(g, "max_traversal_depth", 0),
