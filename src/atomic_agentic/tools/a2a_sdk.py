@@ -33,9 +33,9 @@ class A2AProxyTool(Tool):
 
     Only ``client_hub``-based construction is supported (no raw-transport-
     param alternative) -- deliberately lighter than ``MCPProxyTool``'s dual-
-    path constructor. Has no ``refresh()``/mutation lifecycle of its own --
-    same policy as ``PyA2AtomicTool``; call ``self.client_hub.refresh(...)``
-    directly to pick up remote-side changes.
+    path constructor. Has no ``refresh()``/mutation lifecycle of its own;
+    call ``self.client_hub.refresh(...)`` directly to pick up remote-side
+    changes.
     """
 
     result_cls: ClassVar[type[A2AProxyToolResult]] = A2AProxyToolResult
@@ -166,6 +166,13 @@ class A2AProxyTool(Tool):
         if self._skill_id is not None:
             return A2AClientHub.call_atomic_skill.__module__, A2AClientHub.call_atomic_skill.__qualname__
         return A2AClientHub.send_parts.__module__, A2AClientHub.send_parts.__qualname__
+
+    def _extra_description(self) -> str:
+        """Skill mode surfaces the remote invokable's own extra description
+        (carried in the skill metadata); generic mode has none."""
+        if self._skill_id is not None:
+            return self._skill_metadata.extra_description
+        return ""
 
     def to_arg_kwarg(
         self,

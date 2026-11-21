@@ -91,7 +91,7 @@ def _a2a_sdk_skill_metadata(*, remote_name: str) -> A2AtomicSkillMetadata:
 
 class FakeA2AClientHub(A2AClientHub):
     """Minimal A2AClientHub subclass that skips real network construction --
-    same precedent as FakeMCPClientHub/FakePyA2AtomicClient elsewhere in this
+    same precedent as FakeMCPClientHub elsewhere in this
     test suite. Re-verified against the current A2AClientHub/A2AProxyTool
     interface (agent_card/transport_mode/get_atomic_skills/call_atomic_skill)
     before reuse -- A2AClientHub is a plain class (not ABC), so overriding

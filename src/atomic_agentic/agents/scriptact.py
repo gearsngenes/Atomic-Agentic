@@ -7,7 +7,6 @@ from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from ..mcp.mcp_client_hub import MCPClientHub
 from ..a2a.a2a_client_hub import A2AClientHub
-from ..a2a.py_a2atomic_client import PyA2AtomicClient
 
 from .toolagent import ToolAgent
 from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
@@ -107,7 +106,7 @@ class ScriptActAgent(ToolAgent):
         description: str,
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub]] = None,
         pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
         post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),

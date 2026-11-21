@@ -54,7 +54,7 @@ from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools import toolify, to_invokable
 from ..mcp import MCPClientHub
-from ..a2a import A2AClientHub, PyA2AtomicClient
+from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult
 from ..utils.agents import build_usage_report
 from ..utils.rendering import frame_content
@@ -135,7 +135,7 @@ class ToolAgent(Agent, ABC):
         description: str,
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub]] = None,
         pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
         post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -414,16 +414,15 @@ class ToolAgent(Agent, ABC):
 
     def register_tools(
         self,
-        tools: list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient],
+        tools: list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub],
         *,
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
     ) -> bool:
         """
-        Register a mixed batch of plain invokables/callables and
-        hub/client objects (``MCPClientHub``/``A2AClientHub``/
-        ``PyA2AtomicClient``) in one pass. A hub/client entry expands into
-        every tool it exposes, each under its own intrinsic bare ``name`` --
-        never the dotted ``full_name``. Every candidate's name is validated
+        Register a mixed batch of plain invokables/callables and hub objects
+        (``MCPClientHub``/``A2AClientHub``) in one pass. A hub entry expands
+        into every tool it exposes, each under its own intrinsic bare ``name``
+        -- never the dotted ``full_name``. Every candidate's name is validated
         via ``_validate_tool_name`` as soon as it's computed, during this
         same expansion pass -- not a second, separate pass afterward.
         Whole-batch validation happens before any toolbox mutation;
@@ -440,13 +439,11 @@ class ToolAgent(Agent, ABC):
         # mutating self._toolbox yet.
         candidates: list[tuple[str, AtomicInvokable]] = []
         for index, item in enumerate(tools):
-            if isinstance(item, (MCPClientHub, A2AClientHub, PyA2AtomicClient)):
+            if isinstance(item, (MCPClientHub, A2AClientHub)):
                 if isinstance(item, MCPClientHub):
                     remote_names = item.list_tools()
-                elif isinstance(item, A2AClientHub):
-                    remote_names = list(item.get_atomic_skills())
                 else:
-                    remote_names = item.list_invokables()
+                    remote_names = list(item.get_atomic_skills())
 
                 for remote_name in remote_names:
                     try:

@@ -167,6 +167,71 @@ class TestToAgentCard:
             executor.to_agent_card("", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC)
 
 
+class DescribedInvokable(AtomicInvokable):
+    """Described parameter plus a non-empty extra description."""
+
+    def _invoke_impl(self, inputs): return {"result": inputs}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs}
+
+    def _extra_description(self) -> str:
+        return "Output schema: [value]"
+
+
+def make_described_invokable(name: str = "described") -> DescribedInvokable:
+    return DescribedInvokable(
+        name=name,
+        description="Described invokable.",
+        parameters=[
+            ParamSpec(
+                name="value",
+                index=0,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="Any",
+                description="The value to echo back.",
+            )
+        ],
+        return_type="dict[str, Any]",
+    )
+
+
+class TestMetadataPropagation:
+    def test_skill_metadata_carries_raw_description_not_rendered(self) -> None:
+        invokable = make_described_invokable()
+        executor = A2AtomicExecutor([invokable])
+
+        description = executor._skill_metadata["described"].description
+
+        assert description == invokable._description
+        assert description != invokable.description
+        assert "- value:" not in description
+
+    def test_extension_carries_extra_description(self) -> None:
+        executor = A2AtomicExecutor([make_described_invokable()])
+        card = executor.to_agent_card(
+            "http://127.0.0.1:9", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC
+        )
+
+        raw = MessageToDict(list(card.capabilities.extensions)[0].params)
+
+        assert raw["described"]["extra_description"] == "Output schema: [value]"
+
+    def test_extra_description_empty_by_default(self) -> None:
+        executor = A2AtomicExecutor([make_add_invokable("add")])
+
+        assert executor._skill_metadata["add"].extra_description == ""
+
+
+class TestToDict:
+    def test_executor_to_dict(self) -> None:
+        executor = A2AtomicExecutor([make_add_invokable("add"), make_failing_invokable("boom")])
+
+        assert executor.to_dict() == {
+            "type": "A2AtomicExecutor",
+            "invokable_names": ["add", "boom"],
+            "invokable_count": 2,
+        }
+
+
 # --------------------------------------------------------------------------- #
 # cancel() -- unit-level, no live server needed
 # --------------------------------------------------------------------------- #

@@ -5,7 +5,7 @@ from typing import Any
 
 from .atomic import AtomicResult
 
-__all__ = ["ToolResult", "MCPToolResult", "PyA2AtomicToolResult", "A2AProxyToolResult"]
+__all__ = ["ToolResult", "MCPToolResult", "A2AProxyToolResult"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,50 +66,6 @@ class MCPToolResult(ToolResult):
                 "remote_name": self.remote_name,
                 "endpoint": self.endpoint,
                 "command": self.command,
-            }
-        )
-        return data
-
-
-@dataclass(frozen=True, slots=True)
-class PyA2AtomicToolResult(ToolResult):
-    """
-    ToolResult carrying A2A transport/identity metadata.
-
-    Fields
-    ------
-    url:
-        The A2A host URL this proxy is bound to.
-    remote_name:
-        The invokable name registered on the remote host.
-    invokable_type:
-        Class name of the remote invokable as reported by the host
-        (e.g. ``"Tool"``, ``"Agent"``, ``"JsonToolAgent"``). Reflects the
-        metadata snapshot at the time of this invocation.
-    """
-
-    url: str
-    remote_name: str
-    invokable_type: str
-
-    def __post_init__(self) -> None:
-        for field_name, value in (
-            ("url", self.url),
-            ("remote_name", self.remote_name),
-            ("invokable_type", self.invokable_type),
-        ):
-            if not isinstance(value, str) or not value.strip():
-                raise TypeError(f"{field_name} must be a non-empty string.")
-            object.__setattr__(self, field_name, value.strip())
-        AtomicResult.__post_init__(self)
-
-    def to_dict(self) -> dict[str, Any]:
-        data = AtomicResult.to_dict(self)
-        data.update(
-            {
-                "url": self.url,
-                "remote_name": self.remote_name,
-                "invokable_type": self.invokable_type,
             }
         )
         return data

@@ -5,8 +5,6 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
-from atomic_agentic.a2a.py_a2atomic_client import PyA2AtomicClient
-from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
@@ -16,7 +14,6 @@ from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.tools.toolification import batch_toolify, to_invokable, toolify
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
-from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.agents.tools import return_tool
@@ -66,23 +63,6 @@ def make_param(
         type=type_,
         default=default,
     )
-
-
-def make_param_dict(
-    name: str,
-    index: int,
-    *,
-    kind: str = ParamSpec.POSITIONAL_OR_KEYWORD,
-    type_: str = "Any",
-    default: Any = NO_VAL,
-) -> dict[str, Any]:
-    return make_param(
-        name,
-        index,
-        kind=kind,
-        type_=type_,
-        default=default,
-    ).to_dict()
 
 
 class EchoInvokable(AtomicInvokable):
@@ -191,90 +171,6 @@ class FakeMCPClientHub(MCPClientHub):
             "command": self.command,
             "args": list(self.args or ()),
             "has_headers": self.headers is not None,
-        }
-
-
-def a2a_metadata(
-    *,
-    name: str = "echo",
-    description: str = "Remote A2A echo.",
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "description": description,
-        "parameters": [
-            make_param_dict("value", 0, type_="Any"),
-        ],
-        "return_type": "dict[str, Any]",
-        "invokable_type": "EchoInvokable",
-    }
-
-
-class FakePyA2AtomicClient(PyA2AtomicClient):
-    def __init__(
-        self,
-        *,
-        invokables: dict[str, dict[str, Any]] | None = None,
-        result: Any | None = None,
-    ) -> None:
-        self._url = "http://example.test/a2a"
-        self._headers: Mapping[str, str] | None = None
-        self._agent_card = type(
-            "FakeAgentCard",
-            (),
-            {
-                "name": "fake_agent",
-                "description": "Fake A2A agent.",
-            },
-        )()
-        self._invokables = (
-            {
-                "echo": a2a_metadata(name="echo", description="Remote A2A echo."),
-                "classify": a2a_metadata(
-                    name="classify",
-                    description="Remote A2A classify.",
-                ),
-            }
-            if invokables is None
-            else invokables
-        )
-        self.result = result if result is not None else {"a2a": True}
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.metadata_calls: list[str] = []
-
-    @property
-    def url(self) -> str:
-        return self._url
-
-    @property
-    def headers(self) -> Mapping[str, str] | None:
-        return self._headers
-
-    @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
-        self._headers = value
-
-    @property
-    def agent_card(self) -> Any:
-        return self._agent_card
-
-    def list_invokables(self) -> dict[str, dict[str, Any]]:
-        return dict(self._invokables)
-
-    def get_invokable_metadata(self, remote_name: str) -> dict[str, Any]:
-        self.metadata_calls.append(remote_name)
-        return dict(self._invokables[remote_name])
-
-    def call_invokable(self, remote_name: str, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        self.calls.append((remote_name, dict(inputs)))
-        return {PYA2A_RESULT_KEY: self.result}
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "FakePyA2AtomicClient",
-            "url": self.url,
-            "has_headers": self.headers is not None,
-            "agent_name": self.agent_card.name,
         }
 
 
@@ -511,7 +407,7 @@ class TestToolifyPositionalOverrides:
 class TestToolifyExistingProxyTool:
     """`toolify()`'s route 1 ("already a Tool") must work uniformly across
     plain `Tool` and every proxy-tool subtype (`MCPProxyTool`,
-    `PyA2AtomicTool`, `A2AProxyTool` in both skill and generic mode) --
+    `A2AProxyTool` in both skill and generic mode) --
     an explicit Pass 4 checklist item that was previously unverified."""
 
     def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
@@ -531,24 +427,6 @@ class TestToolifyExistingProxyTool:
         assert result.function is original
         assert result.name == "local_search"
         assert result.invoke({"query": "hello"}).result == "mcp result"
-
-    def test_pya2atomic_tool_without_overrides_returned_unchanged(self) -> None:
-        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
-
-        result = toolify(original)
-
-        assert result is original
-
-    def test_pya2atomic_tool_with_overrides_wraps_by_reference(self) -> None:
-        original = PyA2AtomicTool(FakePyA2AtomicClient(), "echo")
-
-        result = toolify(original, name="local_echo")
-
-        assert result is not original
-        assert type(result) is Tool
-        assert result.function is original
-        assert result.name == "local_echo"
-        assert result.invoke({"value": "hi"}).result == {"a2a": True}
 
     def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
@@ -642,42 +520,6 @@ class TestToolifyMCPClientHub:
 
         assert tool.invoke({"query": "hello"}).result == "ok"
         assert hub.calls == [("search", {"query": "hello"})]
-
-
-class TestToolifyPyA2AtomicClient:
-    def test_a2a_client_requires_remote_name(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
-            toolify(FakePyA2AtomicClient())
-
-    def test_a2a_client_becomes_pya2atomic_tool(self) -> None:
-        client = FakePyA2AtomicClient()
-
-        tool = toolify(client, remote_name="echo")
-
-        assert isinstance(tool, PyA2AtomicTool)
-        assert tool.remote_name == "echo"
-        assert tool.name == "echo"
-
-    def test_a2a_client_applies_overrides(self) -> None:
-        client = FakePyA2AtomicClient()
-
-        tool = toolify(
-            client,
-            remote_name="echo",
-            name="local_echo",
-            description="Local echo.",
-        )
-
-        assert isinstance(tool, PyA2AtomicTool)
-        assert tool.name == "local_echo"
-        assert tool.description == "Local echo."
-
-    def test_a2a_tool_invokes_fake_client(self) -> None:
-        client = FakePyA2AtomicClient(result={"ok": True})
-        tool = toolify(client, remote_name="echo")
-
-        assert tool.invoke({"value": 123}).result == {"ok": True}
-        assert client.calls == [("echo", {"value": 123})]
 
 
 class TestToolifyA2AClientHub:
@@ -795,52 +637,38 @@ class TestBatchToolifyRemoteExpansion:
         assert all(isinstance(tool, MCPProxyTool) for tool in tools)
         assert [tool.remote_name for tool in tools] == ["search", "summarize"]
 
-    def test_batch_toolify_expands_a2a_client_invokables(self) -> None:
-        client = FakePyA2AtomicClient()
-
-        tools = batch_toolify([client])
-
-        assert len(tools) == 2
-        assert all(isinstance(tool, PyA2AtomicTool) for tool in tools)
-        assert [tool.remote_name for tool in tools] == ["echo", "classify"]
-
     def test_batch_toolify_mixed_sources_preserves_expanded_order(self) -> None:
         hub = FakeMCPClientHub()
-        client = FakePyA2AtomicClient()
 
-        tools = batch_toolify([add, hub, client, multiply])
+        tools = batch_toolify([add, hub, multiply])
 
         assert [type(tool) for tool in tools] == [
             Tool,
             MCPProxyTool,
             MCPProxyTool,
-            PyA2AtomicTool,
-            PyA2AtomicTool,
             Tool,
         ]
         assert [tool.name for tool in tools] == [
             "add",
             "search",
             "summarize",
-            "echo",
-            "classify",
             "multiply",
         ]
 
 
     def test_batch_toolify_remote_tools_can_invoke_fake_backends(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "mcp ok"}})
-        client = FakePyA2AtomicClient(result={"a2a": "ok"})
+        a2a_hub = FakeA2AClientHub(result=17)
 
-        tools = batch_toolify([hub, client])
+        tools = batch_toolify([hub, a2a_hub])
         mcp_tool = tools[0]
         a2a_tool = tools[2]
 
         assert mcp_tool.invoke({"query": "hello"}).result == "mcp ok"
-        assert a2a_tool.invoke({"value": 123}).result == {"a2a": "ok"}
+        assert a2a_tool.invoke({"a": 1, "b": 2}).result == 17
 
         assert hub.calls == [("search", {"query": "hello"})]
-        assert client.calls == [("echo", {"value": 123})]
+        assert a2a_hub.skill_calls == [("add", {"a": 1, "b": 2})]
 
 
 class TestBatchToolifyA2AClientHub:

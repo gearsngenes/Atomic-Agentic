@@ -275,7 +275,7 @@ def validate_name_filter(
 ) -> tuple[frozenset[str] | None, frozenset[str] | None]:
     """
     Validate and normalize a construction-time include/exclude name filter
-    pair, shared by MCPClientHub, A2AClientHub, and PyA2AtomicClient.
+    pair, shared by MCPClientHub and A2AClientHub.
 
     ``None`` disables that side of the filter. A non-``None`` list must be
     non-empty and contain only non-empty (after stripping) strings -- an
