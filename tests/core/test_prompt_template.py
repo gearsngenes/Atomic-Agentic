@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.models.parameters import ParamSpec
 

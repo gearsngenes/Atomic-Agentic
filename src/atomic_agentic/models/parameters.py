@@ -1,7 +1,7 @@
 """Parameter shape specification for callables.
 
 This module provides ``ParamSpec``, the canonical schema atom used by
-``AtomicInvokable``, ``Tool``, ``Agent``, and ``Workflow`` objects to describe
+``AtomicInvokable``, ``Tool``, ``Agent``, and composite objects to describe
 one declared input parameter.
 
 Utility functions that *use* ``ParamSpec`` (``extract_io``, ``to_paramspec_list``,
@@ -73,7 +73,7 @@ class ParamSpec:
     """Typed parameter specification for callable parameters.
 
     ``ParamSpec`` is the canonical schema atom used by AtomicInvokable, Tool,
-    Agent, and Workflow objects to describe one declared input parameter.
+    Agent, and composite objects to describe one declared input parameter.
 
     Each instance is self-sufficient and contains:
 

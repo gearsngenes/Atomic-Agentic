@@ -12,7 +12,7 @@ from atomic_agentic.constants.python_a2a import (
     PYA2A_RESULT_KEY,
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,)
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 
 

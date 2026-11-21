@@ -75,7 +75,7 @@ from .toolagent import ToolAgent
 from ..constants.prompts import DEFAULT_PRE_INVOKE, PLANNER_PROMPT
 from .tools import make_dict, make_sequence
 from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD, RHS_ASSIGN_ALIAS
-from ..core import AtomicInvokable
+from ..invokables import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError, ToolRegistrationError
 from ..mcp import MCPClientHub

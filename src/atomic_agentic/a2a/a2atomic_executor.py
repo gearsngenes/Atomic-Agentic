@@ -10,7 +10,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentExtension, AgentInterfa
 
 from ..constants.a2a_sdk import ATOMIC_RESULT_KEY, PARAM_SCHEMA_EXT_URI, SKILL_ROUTING_KEY, VALID_TRANSPORT_MODES
 from ..constants.core import IDENTIFIER_PATTERN
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.a2a_sdk import A2AtomicSkillMetadata
 
 __all__ = ["A2AtomicExecutor"]

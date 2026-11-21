@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results.tools import ToolResult

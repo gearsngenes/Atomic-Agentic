@@ -54,7 +54,7 @@ def run_blocked(snippet: str, *extra_args: str) -> subprocess.CompletedProcess[s
 def test_all_core_packages_import_without_extras() -> None:
     result = run_blocked(
         "import atomic_agentic, atomic_agentic.llm, atomic_agentic.tools, "
-        "atomic_agentic.agents, atomic_agentic.workflows, atomic_agentic.mcp, "
+        "atomic_agentic.agents, atomic_agentic.composites, atomic_agentic.mcp, "
         "atomic_agentic.a2a\nprint('ok')"
     )
     assert result.returncode == 0, result.stderr

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class AtomicInvokable(ABC):
     """
-    Basal invokable contract for Tools, Agents, and Workflows.
+    Basal invokable contract for Tools, Agents, and composites.
 
     Overview
     --------

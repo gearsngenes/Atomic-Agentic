@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..exceptions import ToolDefinitionError
-from ..core.atomic_invokable import AtomicInvokable
-from ..core.prompt_template import PromptTemplate
+from ..invokables.atomic_invokable import AtomicInvokable
+from ..invokables.prompt_template import PromptTemplate
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
 from .base import Tool

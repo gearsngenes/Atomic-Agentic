@@ -12,8 +12,8 @@ from typing import (
 )
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError
-from ..core.atomic_invokable import AtomicInvokable
-from ..core.core_api import extract_io
+from ..invokables.atomic_invokable import AtomicInvokable
+from ..invokables.core_api import extract_io
 from ..models.parameters import ParamSpec
 from ..utils.core import run_coro_sync
 from ..models.results.tools import ToolResult

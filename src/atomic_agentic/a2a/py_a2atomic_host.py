@@ -20,7 +20,7 @@ except ImportError as _exc:
     AgentCard = Message = MessageRole = FunctionResponseContent = TextContent = run_server = None
     _IMPORT_ERROR = _exc
 
-from ..core.atomic_invokable import AtomicInvokable
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..utils.core import format_missing_dependency
 from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,

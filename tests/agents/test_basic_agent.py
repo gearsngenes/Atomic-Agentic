@@ -9,8 +9,8 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.constants.prompts import DEFAULT_INSTRUCTIONS
 from atomic_agentic.exceptions import AgentError, ToolInvocationError
 from atomic_agentic.models.agents.conversations import Conversation
-from atomic_agentic.core.atomic_invokable import AtomicInvokable
-from atomic_agentic.core.prompt_template import PromptTemplate
+from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
+from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.tools import Tool
 from ..fake_engines import FakeLLMEngine, echo_latest_user

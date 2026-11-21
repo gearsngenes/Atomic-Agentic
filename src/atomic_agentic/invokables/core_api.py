@@ -1,10 +1,10 @@
 """Callable/AtomicInvokable schema introspection and cross-source
 parameter comparison.
 
-Lives in ``core/`` rather than ``utils/`` because these functions need to
+Lives in ``invokables/`` rather than ``utils/`` because these functions need to
 recognize ``AtomicInvokable`` directly (via ``extract_io``), and ``utils/``
-sits *below* ``core/`` in the layered dependency topology
-(``core/atomic_invokable.py`` already imports from ``utils/parameters.py``) — an
+sits *below* ``invokables/`` in the layered dependency topology
+(``invokables/atomic_invokable.py`` already imports from ``utils/parameters.py``) — an
 ``AtomicInvokable``-aware function living in ``utils/`` would be a
 circular import, not just a layering preference. ``extract_io`` was here
 first (a25); ``parameter_overlap``/``parameter_collisions`` joined it here

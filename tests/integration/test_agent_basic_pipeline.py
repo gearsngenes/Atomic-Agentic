@@ -7,10 +7,9 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
+from atomic_agentic.composites import Pipeline
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.models.results import AgentResult
-from atomic_agentic.models.results.workflows import SequentialFlowResult
-from atomic_agentic.workflows.sequential import SequentialFlow
+from atomic_agentic.models.results import AtomicResult
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
@@ -66,24 +65,24 @@ def make_agent(
     )
 
 
-def make_agent_sequential_flow(
+def make_agent_pipeline(
     *,
     engine: FakeLLMEngine | None = None,
     record_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[FakeLLMEngine, BasicAgent, SequentialFlow]:
+) -> tuple[FakeLLMEngine, BasicAgent, Pipeline]:
     resolved_engine = engine or FakeLLMEngine(response_fn=echo_latest_user())
     agent = make_agent(
         engine=resolved_engine,
         record_enabled=record_enabled,
         records_window=records_window,
     )
-    flow = SequentialFlow(
-        name="writer_agent_sequential_flow",
-        description="SequentialFlow wrapping an Agent.",
+    pipe = Pipeline(
+        name="writer_agent_pipeline",
+        description="Pipeline wrapping an Agent.",
         steps=[agent],
     )
-    return resolved_engine, agent, flow
+    return resolved_engine, agent, pipe
 
 
 def make_summary_step() -> Tool:
@@ -95,22 +94,22 @@ def make_summary_step() -> Tool:
 
 
 class TestAgentBasicPipeline:
-    def test_agent_can_be_wrapped_in_sequential_flow(self) -> None:
-        engine, _agent, flow = make_agent_sequential_flow()
+    def test_agent_can_be_wrapped_in_pipeline(self) -> None:
+        engine, _agent, pipe = make_agent_pipeline()
 
-        result = flow.invoke({"topic": "pytest", "tone": "strict"})
+        result = pipe.invoke({"topic": "pytest", "tone": "strict"})
 
         expected_prompt = "Write about pytest in a strict tone."
         expected_message = wrap(expected_prompt)
         expected_raw = f"ECHO: {expected_message}"
 
-        assert isinstance(result, SequentialFlowResult)
+        assert isinstance(result, AtomicResult)
         assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
-        assert len(result.trace) == 1
+        assert result.invoker_id == pipe.full_name
         assert engine.calls == [
             [
                 {"role": "system", "content": ROLE_PROMPT},
@@ -118,56 +117,47 @@ class TestAgentBasicPipeline:
             ]
         ]
 
-    def test_sequential_flow_trace_records_agent_result(self) -> None:
-        _engine, agent, flow = make_agent_sequential_flow()
+    def test_pipeline_result_is_the_agents_raw_response(self) -> None:
+        _engine, agent, pipe = make_agent_pipeline()
 
-        result = flow.invoke({"topic": "agents", "tone": "concise"})
-        step_result = result.trace[0]
+        result = pipe.invoke({"topic": "agents", "tone": "concise"})
 
-        assert isinstance(step_result, AgentResult)
-        assert step_result.result == result.result
+        direct_agent = make_agent()
+        direct = direct_agent.invoke({"topic": "agents", "tone": "concise"})
+        assert result.result == direct.result
         # This agent is constructed with record_enabled=False (the
-        # make_agent_sequential_flow default), so nothing is stored.
+        # make_agent_pipeline default), so nothing is stored.
         assert agent.get_conversation().records == []
 
-    def test_agent_can_feed_sequential_flow_step(self) -> None:
+    def test_agent_can_feed_pipeline_step(self) -> None:
         agent = make_agent()
         summary_step = make_summary_step()
-        flow = SequentialFlow(
-            name="agent_summary_sequence",
+        pipe = Pipeline(
+            name="agent_summary_pipeline",
             description="Agent result feeding a downstream summary step.",
             steps=[agent, summary_step],
         )
 
-        result = flow.invoke({"topic": "composition", "tone": "direct"})
+        result = pipe.invoke({"topic": "composition", "tone": "direct"})
 
         expected_prompt = "Write about composition in a direct tone."
         expected_raw = f"ECHO: {wrap(expected_prompt)}"
-        expected_first = {
-            "final": expected_raw,
-            "length": len(expected_raw),
-            "was_postprocessed": True,
-        }
         expected_second = {
             "summary": f"{len(expected_raw)}:True:{expected_raw}",
         }
 
-        assert isinstance(result, SequentialFlowResult)
+        assert isinstance(result, AtomicResult)
         assert result.result == expected_second
-        assert [r.result for r in result.trace] == [
-            expected_first,
-            expected_second,
-        ]
 
-    def test_wrapped_record_enabled_agent_preserves_history_across_flow_invokes(
+    def test_wrapped_record_enabled_agent_preserves_history_across_pipeline_invokes(
         self,
     ) -> None:
-        engine, agent, flow = make_agent_sequential_flow(
+        engine, agent, pipe = make_agent_pipeline(
             record_enabled=True,
         )
 
-        first = flow.invoke({"topic": "first topic", "tone": "plain"})
-        second = flow.invoke({"topic": "second topic", "tone": "plain"})
+        first = pipe.invoke({"topic": "first topic", "tone": "plain"})
+        second = pipe.invoke({"topic": "second topic", "tone": "plain"})
 
         first_prompt = "Write about first topic in a plain tone."
         second_prompt = "Write about second topic in a plain tone."
@@ -186,41 +176,40 @@ class TestAgentBasicPipeline:
         assert second_call_messages[2]["content"] == f"ECHO: {wrap(first_prompt)}"
         assert second_call_messages[3]["content"] == wrap(second_prompt)
 
-    def test_async_agent_sequential_flow_pipeline(self) -> None:
-        engine, _agent, flow = make_agent_sequential_flow()
+    def test_async_agent_pipeline(self) -> None:
+        engine, _agent, pipe = make_agent_pipeline()
 
         result = asyncio.run(
-            flow.async_invoke({"topic": "async pytest", "tone": "strict"})
+            pipe.async_invoke({"topic": "async pytest", "tone": "strict"})
         )
 
         expected_prompt = "Write about async pytest in a strict tone."
         expected_raw = f"ECHO: {wrap(expected_prompt)}"
 
-        assert isinstance(result, SequentialFlowResult)
+        assert isinstance(result, AtomicResult)
         assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
-        assert len(result.trace) == 1
         assert len(engine.calls) == 1
 
     def test_composed_agent_pipeline_to_dict_exposes_agent_and_engine_snapshot(
         self,
     ) -> None:
-        _engine, agent, flow = make_agent_sequential_flow(
+        _engine, agent, pipe = make_agent_pipeline(
             record_enabled=True,
             records_window=1,
         )
 
-        flow.invoke({"topic": "serialization", "tone": "careful"})
-        data = flow.to_dict()
+        pipe.invoke({"topic": "serialization", "tone": "careful"})
+        data = pipe.to_dict()
 
-        assert data["type"] == "SequentialFlow"
-        assert data["name"] == "writer_agent_sequential_flow"
+        assert data["type"] == "Pipeline"
+        assert data["name"] == "writer_agent_pipeline"
         assert data["step_count"] == 1
 
-        agent_snapshot = data["steps"][0]
+        agent_snapshot = data["steps"][0]["invokable"]
         assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["instructions"]["template"] == ROLE_PROMPT

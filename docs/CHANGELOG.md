@@ -5,6 +5,34 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a36] - 2026-11-21
+
+Composites release (Stage 7). The five workflow classes become three in the new `atomic_agentic.composites` package: a mutable `Graph`, and `Pipeline` and `Router`, which are frozen and built over a private `Graph`. All three use the shared binding grammar from `utils/binding.py`. The `core` package was renamed `invokables` earlier in this release. The release is breaking for anyone who imports `atomic_agentic.workflows`, `atomic_agentic.core`, or any of the removed classes and exceptions below.
+
+### Added
+
+- `Graph` is a mutable node graph. Nodes are named by valid invokable names, edges are `(source, target)` pairs (a `str` target is a node, a callable or invokable target is a router), and `start` names the first nodes. Knobs are `returns` (`None` for the whole state, a `str` for one key, a list for a subset dict), `collision_handling_order` and `max_traversal_depth`. `return_type` is always `Any`. Nodes, edges and knobs change through mutators that validate before changing anything. Its result is `GraphResult`, whose `trace` holds the node names fired per superstep and is always populated.
+- `Graph.add_sequence(nodes, *, start_from, end_at, repeat_until)` adds a chain, optionally bridged to existing nodes and looped until every `repeat_until` key matches state. `Graph.add_parallel(nodes, *, fan_out, fan_in)` adds independent branches.
+- `Pipeline` is a frozen ordered chain of steps (each an entry or `(entry, binding)`) over a private `Graph`. It returns the plain `AtomicResult`. `Router` is a frozen selector plus a dict of routes over a private `Graph`; its `RouterResult` carries `route` (the selector's value) and `branch` (the chosen branch's name), and its `return_type` is the union of the branch types. Both accept an optional `parameters=` to declare inputs the first step or the selector does not.
+- The shared binding grammar in `atomic_agentic.utils.binding` is used by graph nodes and pipeline steps as well as by `Agent`.
+- `examples/Composite_Examples/` (five files) and three integration test files for the composites.
+
+### Changed
+
+- A `Pipeline` last step with a `str` binding returns the stored value typed `Any`, a list or dict binding returns a dict of the destination keys, and a bare last step returns its own response and return type.
+- `SchemaError` is now a `ValueError`.
+- `AtomicPipelineResearcher` replaces `AtomicWorkflowResearcher` in `examples/Agentic_Research/`.
+- breaking: the `core` package is renamed `invokables`, with no alias.
+- breaking: reaching `max_traversal_depth` with nodes still ready now raises `RuntimeError`; the `raise_on_depth_limit` knob is gone.
+
+### Removed
+
+- breaking: `SequentialFlow`, `ParallelFlow`, `RoutingFlow`, `IterativeFlow` and `GraphFlow`, the `Workflow` base, `WorkflowResult` and its subclasses, `StatePolicySpec` and the `include_trace` option are removed. Use `Graph`, `Pipeline` and `Router`.
+- breaking: `atomic_agentic.workflows` and `atomic_agentic.models.workflows` are removed; import from `atomic_agentic.composites`.
+- breaking: `WorkflowError`, `ValidationError` and `ExecutionError` are removed.
+- The private helper `_simplify_type_set` is removed.
+- `examples/Workflow_Examples/` is removed in favor of `examples/Composite_Examples/`.
+
 ## [2.0.0a35] - 2026-11-18
 
 Prompts release (Stage 6). `PromptConfig` is replaced by `PromptTemplate`, an invokable, and every prompt-bearing parameter of an agent (`instructions`, `thinking_instructions`, `pre_invoke`, `post_invoke`) now takes a string, a callable or any `AtomicInvokable` through one conversion, so an agent can be used in any of them. `role_prompt` is renamed `instructions`, `pre_invoke` defaults to `"{prompt}"` and rejects `None`, and subclasses declare extra parameters through a `_extra_parameter_sources()` hook instead of an `extra_parameters` argument. The family prompts and the prompt defaults move into `atomic_agentic.constants.prompts`. The release is breaking for anyone who passes `role_prompt`, `extra_parameters` or `pre_invoke=None`, reads `ToolAgent.instructions` as a string, or imports prompt constants from their old modules.

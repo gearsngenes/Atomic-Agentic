@@ -5,7 +5,7 @@ It sits one tier above ``models/parameters.py`` in the dependency topology
 (``utils/`` depends on ``models/``) and is the canonical home for all logic that
 *uses* ``ParamSpec`` shapes rather than defining them.
 
-``parameter_overlap``/``parameter_collisions`` moved to ``core/core_api.py``
+``parameter_overlap``/``parameter_collisions`` moved to ``invokables/core_api.py``
 -- their public shape takes ``AtomicInvokable``/``Callable`` sources
 directly, which needs ``extract_io``, which this module can't import
 without a cycle (same reasoning that put ``extract_io`` there in the first
@@ -47,7 +47,7 @@ Private helpers
 ---------------
 - ``_validate_parameter_order`` — raise-or-return-None enforcement of the same
   rules; used internally by ``to_paramspec_list`` and directly by call sites that
-  want the error (``Invokable``, workflow constructors).
+  want the error (``Invokable`` construction).
 - ``_KIND_PRIORITY`` — shared kind-priority table used by both
   ``_validate_parameter_order`` and ``_insertion_category``.
 - ``_insertion_category`` — sort key (kind priority, default tier) consumed by
@@ -57,8 +57,8 @@ Private helpers
   functions above.
 - ``_normalize_prompt_template``, ``_try_parse_clean_field`` — template-string
   field discovery/escaping for ``PromptTemplate``
-  (``core/prompt_template.py``). Imported directly by that module (a
-  ``core -> utils`` import, in the normal direction); the name stays private
+  (``invokables/prompt_template.py``). Imported directly by that module (an
+  ``invokables -> utils`` import, in the normal direction); the name stays private
   and Stage 10a revisits it.
 """
 
@@ -399,7 +399,7 @@ def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
     """Enforce Python-compatible parameter ordering rules, raising on any violation.
 
     This is the primary enforcement function. Call sites that want errors
-    (``Invokable`` construction, workflow constructors, ``to_paramspec_list``)
+    (``Invokable`` construction, ``to_paramspec_list``)
     call this directly. ``is_valid_parameter_order`` wraps it as a bool predicate.
 
     1. Raise TypeError if ``parameters`` is not a list.
@@ -844,26 +844,6 @@ def _single_type_compatible(a: str, b: str) -> bool:
     return False
 
 
-def _simplify_type_set(types: set[str]) -> set[str]:
-    """Drop parameterized entries whose bare origin is also present.
-
-    ``{"dict", "dict[str, int]"}`` -> ``{"dict"}`` -- a bare origin already
-    accepts any parameterization of itself (the same fact
-    ``_single_type_compatible`` relies on for compatibility), so keeping a
-    more specific sibling alongside it is pure redundancy, not real
-    ambiguity. Deliberately non-recursive: ``dict[str, Any]`` alongside
-    ``dict[str, int]`` (no bare ``dict`` present) is a related but distinct
-    redundancy -- catching it would mean reasoning about "Any" absorbing a
-    concrete type at a specific argument position, not just a flat
-    bare-vs-parameterized check -- and is intentionally left alone here.
-    """
-    bare_origins = {t for t in types if _parse_generic(t) is None}
-    return {
-        t for t in types
-        if (parsed := _parse_generic(t)) is None or parsed[0] not in bare_origins
-    }
-
-
 def semantically_compatible(a: ParamSpec, b: ParamSpec) -> bool:
     """Whether two same-named ``ParamSpec``s are compatible enough to merge.
 
@@ -1074,9 +1054,8 @@ def apply_parameter_reports(
 
     Promoted from Agent's own private reconciliation traversal -- the logic
     is caller-agnostic (neither message below names a specific class), so
-    every composite class doing true N-way peer reconciliation (as opposed
-    to RoutingFlow's router-anchored shape, or GraphFlow's validation-only
-    one) can share this single traversal.
+    every class doing true N-way peer reconciliation can share this single
+    traversal (``Agent`` is the current caller).
 
     Traverses ``reports`` once, in order (the order ``build_parameter_reports``
     produced -- first-seen name order across sources):
@@ -1104,13 +1083,10 @@ def apply_parameter_reports(
     ``stacklevel`` has no default -- it must be supplied explicitly by
     every call site, tuned to that call site's own frame depth from this
     function's ``warnings.warn`` call up to the actual user-facing
-    construction call (e.g. ``Agent(...)``, ``ParallelFlow(...)``). This
-    differs across callers depending on whether the calling class is
-    normally reached directly or through a subclass's own ``__init__`` --
-    confirmed empirically for the two call sites in this pass (see
-    proposal addendum): ``4`` for `Agent` (always reached via one layer of
-    subclass indirection), ``3`` for `ParallelFlow` (instantiated directly,
-    no intermediate layer).
+    construction call (e.g. ``Agent(...)``). The value is chosen per call
+    site, depending on whether the calling class is normally reached
+    directly or through a subclass's own ``__init__``: ``4`` for ``Agent``
+    (always reached via one layer of subclass indirection).
 
     Never mutates ``reports``. Returns the constructed list in ``reports``'
     order.
