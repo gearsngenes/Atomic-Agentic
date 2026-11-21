@@ -6,7 +6,8 @@ from typing import Any, Callable
 
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..tools.toolification import to_invokable
-from ..utils.binding import Binding, normalize_binding, slice_response
+from ..utils.binding import Binding, normalize_binding
+from .graph import Graph
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ __all__ = ["Pipeline"]
 
 
 class Pipeline(AtomicInvokable):
-    """Fixed ordered chain of invokables; each step's response feeds the next.
+    """Fixed ordered chain of invokables, run as a linear private ``Graph``.
 
     Construction contract
     ---------------------
@@ -23,23 +24,23 @@ class Pipeline(AtomicInvokable):
       2-tuple ``(entry, binding)``. ``(entry, None)`` is the same as a bare
       entry. Duplicate instances and a single step are legal.
     - Entries are coerced through the shared ``to_invokable``; a coerced step
-      is named ``<pipeline name>_step_{i}``.
-    - Topology and step instances are fixed at construction (shallow
-      immutability: nested invokables keep their own mutability).
-    - ``parameters`` are step 0's, copied once; step 0's binding only shapes
-      its output. ``return_type`` is the last step's when its binding is bare,
-      ``dict[str, Any]`` whenever a binding is present.
+      is named ``<pipeline name>_{i}`` and the private graph's node names match.
+    - The pipeline holds its graph by composition and has no mutators: topology
+      and step instances are fixed at construction (shallow immutability:
+      nested invokables keep their own mutability).
+    - ``parameters`` are step 0's, copied once. ``return_type`` is the last
+      step's when it is bare, ``dict[str, Any]`` when it is bound.
 
     Runtime contract
     ----------------
-    - Inputs go to step 0. A non-last step's response is sliced by its binding
-      (shared grammar, ``on_missing="skip"``) or passed through raw when bare,
-      and becomes the next step's inputs.
-    - The last step's response is the pipeline's response: raw when bare, a
-      dict when bound. The result is a plain ``AtomicResult``.
-    - ``Pipeline`` validates no handoff itself. Binding failures come from
-      ``slice_response`` and everything else from the next step's
-      ``filter_inputs`` (all ``TypeError``).
+    - State flows by binding through the graph's shared state: a later step may
+      read any earlier bound key by name, and the call inputs stay visible to
+      every step. A bare intermediate step must return a mapping (merged into
+      state) or ``TypeError`` is raised by the graph; give it a binding to store
+      a non-mapping response.
+    - A bare last step's raw response is the result. A bound last step returns a
+      dict of its destination keys; a selector that never produced a value
+      raises ``KeyError``. The result is a plain ``AtomicResult`` (no trace).
     """
 
     @dataclass(frozen=True)
@@ -55,11 +56,13 @@ class Pipeline(AtomicInvokable):
         description: str,
         steps: list[AtomicInvokable | str | Callable[..., Any] | tuple[Any, Binding | None]],
     ) -> None:
+        # 1. steps shape
         if not isinstance(steps, list):
             raise TypeError(f"steps must be a non-empty list, got {type(steps)!r}")
         if not steps:
             raise ValueError("steps must not be empty")
 
+        # 2. unpack, normalize and coerce each step
         built: list[Pipeline.Step] = []
         for index, entry in enumerate(steps):
             if isinstance(entry, tuple):
@@ -73,21 +76,56 @@ class Pipeline(AtomicInvokable):
             binding = normalize_binding(raw_binding, label=f"{name} step {index} binding")
             invokable = to_invokable(
                 obj,
-                name=f"{name}_step_{index}",
+                name=f"{name}_{index}",
                 description=f"Step {index} of pipeline {name}",
             )
             built.append(Pipeline.Step(invokable, binding))
         steps_tuple = tuple(built)
 
+        # 3. the last step must name a destination when bound
         last = steps_tuple[-1]
-        return_type = last.invokable.return_type if last.binding is None else "dict[str, Any]"
+        if last.binding is not None and not last.binding:
+            raise ValueError(f"{name}: the last step's binding must name at least one destination")
 
+        # 4. graph nodes: a bare last step is stored under the reserved result key
+        node_names = [f"{name}_{i}" for i in range(len(steps_tuple))]
+        nodes: dict[str, Any] = {}
+        for node_name, step in zip(node_names, steps_tuple):
+            graph_binding = step.binding
+            if step is last and graph_binding is None:
+                graph_binding = "__result__"
+            nodes[node_name] = (step.invokable, graph_binding)
+
+        # 5. returns: raw response when bare, a dict of destinations when bound
+        if last.binding is None:
+            returns: str | list[str] = "__result__"
+        elif isinstance(last.binding, str):
+            returns = [last.binding]
+        else:
+            returns = list(last.binding.values())
+
+        # 6. private graph
+        parameters = steps_tuple[0].invokable.parameters
+        graph = Graph(
+            name,
+            description,
+            nodes,
+            edges=list(zip(node_names, node_names[1:])),
+            start=node_names[0],
+            parameters=parameters,
+            returns=returns,
+            max_traversal_depth=len(steps_tuple),
+        )
+
+        # 7. base init
+        return_type = last.invokable.return_type if last.binding is None else "dict[str, Any]"
         super().__init__(
             name=name,
             description=description,
-            parameters=steps_tuple[0].invokable.parameters,
+            parameters=parameters,
             return_type=return_type,
         )
+        self._graph = graph
         self._steps: tuple[Pipeline.Step, ...] = steps_tuple
 
     @property
@@ -95,49 +133,13 @@ class Pipeline(AtomicInvokable):
         """The fixed tuple of configured ``Step`` objects."""
         return self._steps
 
-    def _handoff(self, index: int, response: Any) -> Any:
-        """Apply step ``index``'s binding to its response (shared by sync and async)."""
-        binding = self._steps[index].binding
-        if binding is None:
-            return response
-        bound = slice_response(
-            response,
-            binding,
-            label=f"{self.full_name} step {index} binding",
-            on_missing="skip",
-        )
-        if isinstance(binding, dict):
-            skipped = set(binding.values()) - set(bound)
-            if skipped:
-                logger.debug(
-                    "%s: step %d skipped missing selector(s) for %s",
-                    self.full_name,
-                    index,
-                    sorted(skipped),
-                )
-        return bound
-
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """Run the steps in order, piping each handoff into the next step."""
-        current: Any = inputs
-        for index, step in enumerate(self._steps):
-            logger.debug(
-                "%s: step %d (%s)", self.full_name, index, step.invokable.full_name
-            )
-            result = step.invokable.invoke(current)
-            current = self._handoff(index, result.result)
-        return {"result": current}
+        """Run the private graph and return its selected result."""
+        return {"result": self._graph.invoke(inputs).result}
 
     async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Async twin of ``_invoke_impl``."""
-        current: Any = inputs
-        for index, step in enumerate(self._steps):
-            logger.debug(
-                "[Async %s]: step %d (%s)", self.full_name, index, step.invokable.full_name
-            )
-            result = await step.invokable.async_invoke(current)
-            current = self._handoff(index, result.result)
-        return {"result": current}
+        return {"result": (await self._graph.async_invoke(inputs)).result}
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the pipeline with each step and its binding."""

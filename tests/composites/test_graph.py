@@ -500,7 +500,7 @@ class TestSurface:
     def test_export(self) -> None:
         import atomic_agentic.composites as composites
 
-        assert composites.__all__ == ["Graph", "Pipeline"]
+        assert composites.__all__ == ["Graph", "Pipeline", "Router"]
         assert composites.Graph is Graph
         assert composites.Pipeline is Pipeline
 

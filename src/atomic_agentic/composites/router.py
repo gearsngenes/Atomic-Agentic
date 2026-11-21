@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import logging
+from collections.abc import Hashable, Mapping
+from types import MappingProxyType
+from typing import Any, Callable
+
+from ..invokables.atomic_invokable import AtomicInvokable
+from ..tools.toolification import to_invokable
+from .graph import Graph
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["Router"]
+
+
+class Router(AtomicInvokable):
+    """A selector plus a dict of routes, run over a private ``Graph``.
+
+    Construction contract
+    ---------------------
+    - ``selector`` is any entry form (invokable, ``str``, callable); it runs
+      first and its whole response is the route value. ``routes`` is a
+      non-empty dict of hashable key to entry; keys need not be ``str``.
+    - Neither the selector nor a route entry may be a tuple: branches are bare,
+      so shape a branch's result by wrapping it in a ``Pipeline``. There is no
+      default route.
+    - Entries are coerced through the shared ``to_invokable``; coerced names are
+      ``<router name>_select`` and ``<router name>_route_{i}`` in dict order.
+      The private graph's node names (``select``, ``route_{i}``) are internal.
+    - ``parameters`` are the selector's. ``return_type`` is the common branch
+      return type when all branches agree, otherwise ``Any``.
+    - The router holds its graph by composition and has no mutators.
+
+    Runtime contract
+    ----------------
+    - The selector's response is looked up in the routes by Python dict
+      equality and hashing, so ``1``, ``1.0`` and ``True`` share one key, and a
+      ``None`` key matches a ``None`` response. That is documented, not
+      special-cased.
+    - The chosen branch receives the shared state (the call inputs plus the
+      selector's response under ``__route__``); only that branch runs, and its
+      raw response (any type) is the result.
+    - A selector value with no matching route raises ``ValueError`` and an
+      unhashable value raises ``ValueError`` too: both surface as the graph's
+      own error for an invalid router target, because an exception raised inside
+      the routing closure would be wrapped by the tool layer. The message names
+      the router and the offending value.
+    - The reserved state keys ``__route__`` and ``__result__`` belong to the
+      router; user input keys with those names are the caller's problem.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        selector: AtomicInvokable | str | Callable[..., Any],
+        routes: dict[Hashable, AtomicInvokable | str | Callable[..., Any]],
+    ) -> None:
+        # 1. shape checks
+        if not isinstance(routes, dict):
+            raise TypeError(f"routes must be a non-empty dict, got {type(routes)!r}")
+        if not routes:
+            raise ValueError("routes must not be empty")
+        if isinstance(selector, tuple):
+            raise TypeError("selector must not be a tuple; wrap it in a Pipeline to shape its result")
+        for key, entry in routes.items():
+            if isinstance(entry, tuple):
+                raise TypeError(
+                    f"route {key!r} must not be a tuple; wrap the branch in a Pipeline "
+                    "to shape its result"
+                )
+
+        # 2. coerce the selector and the branches
+        selector_invokable = to_invokable(
+            selector,
+            name=f"{name}_select",
+            description=f"Selector of router {name}",
+        )
+        branches = [
+            to_invokable(
+                entry,
+                name=f"{name}_route_{i}",
+                description=f"Route {i} of router {name}",
+            )
+            for i, entry in enumerate(routes.values())
+        ]
+
+        # 3. internal node names and the key map
+        key_map = {key: f"route_{i}" for i, key in enumerate(routes)}
+
+        # 4. routing closure; invalid values return a non-node name so the graph raises
+        def decide(**state: Any) -> str:
+            value = state["__route__"]
+            try:
+                target = key_map.get(value)
+            except TypeError:
+                return f"<router {name}: unhashable route value {value!r}>"
+            if target is None:
+                return f"<router {name}: no route for {value!r}>"
+            return target
+
+        # 5. private graph
+        nodes: dict[str, Any] = {"select": (selector_invokable, "__route__")}
+        for i, branch in enumerate(branches):
+            nodes[f"route_{i}"] = (branch, "__result__")
+        graph = Graph(
+            name,
+            description,
+            nodes,
+            edges=[("select", decide)],
+            start="select",
+            parameters=selector_invokable.parameters,
+            returns="__result__",
+            max_traversal_depth=2,
+        )
+
+        # 6. base init
+        branch_types = {branch.return_type for branch in branches}
+        return_type = branch_types.pop() if len(branch_types) == 1 else "Any"
+        super().__init__(
+            name=name,
+            description=description,
+            parameters=selector_invokable.parameters,
+            return_type=return_type,
+        )
+
+        # 7. store
+        self._graph = graph
+        self._selector = selector_invokable
+        self._routes: Mapping[Hashable, AtomicInvokable] = MappingProxyType(
+            dict(zip(routes, branches))
+        )
+
+    @property
+    def selector(self) -> AtomicInvokable:
+        """The coerced selector invokable."""
+        return self._selector
+
+    @property
+    def routes(self) -> Mapping[Hashable, AtomicInvokable]:
+        """Read-only mapping of route key to coerced branch invokable."""
+        return self._routes
+
+    def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Run the private graph and return the chosen branch's raw response."""
+        return {"result": self._graph.invoke(inputs).result}
+
+    async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Async twin of ``_invoke_impl``."""
+        return {"result": (await self._graph.async_invoke(inputs)).result}
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the router with its selector and routes in dict order."""
+        data = super().to_dict()
+        data.update(
+            {
+                "selector": self._selector.to_dict(),
+                "routes": [
+                    {"key": key, "invokable": invokable.to_dict()}
+                    for key, invokable in self._routes.items()
+                ],
+            }
+        )
+        return data

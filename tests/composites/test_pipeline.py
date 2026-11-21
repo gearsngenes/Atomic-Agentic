@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import FrozenInstanceError
 from typing import Any
 
@@ -11,8 +10,6 @@ from atomic_agentic.composites import Pipeline
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.results import AtomicResult
 from atomic_agentic.tools.base import Tool
-
-PIPELINE_LOGGER = "atomic_agentic.composites.pipeline"
 
 
 def add_one(value: int) -> dict[str, int]:
@@ -50,11 +47,6 @@ def take_a(a: int) -> int:
     return a
 
 
-def need_b(b: int) -> int:
-    """Return b."""
-    return b
-
-
 def add_xy(x: int, y: int) -> int:
     """Return x plus y."""
     return x + y
@@ -63,6 +55,26 @@ def add_xy(x: int, y: int) -> int:
 def make_text(value: int) -> str:
     """Return text."""
     return f"v{value}"
+
+
+def add_first_and_tripled(first: int, tripled: int) -> int:
+    """Return first plus tripled."""
+    return first + tripled
+
+
+def add_value_and_second(value: int, second: int) -> int:
+    """Return value plus second."""
+    return value + second
+
+
+def collect_kwargs(**kwargs: Any) -> dict[str, Any]:
+    """Return the keyword payload."""
+    return dict(kwargs)
+
+
+def add_to_n(n: int) -> dict[str, int]:
+    """Increment n."""
+    return {"n": n + 1}
 
 
 def make_tool(function: Any, name: str) -> Tool:
@@ -110,6 +122,14 @@ class TestConstruction:
         single = build([step])
         assert len(single.steps) == 1
 
+    def test_empty_last_binding_raises(self) -> None:
+        with pytest.raises(ValueError, match="at least one destination"):
+            build([add_one, (make_ab, {})])
+
+    def test_empty_intermediate_binding_is_allowed(self) -> None:
+        pipe = build([(add_one, {}), triple])
+        assert pipe.steps[0].binding == {}
+
     def test_rejects_invalid_name(self) -> None:
         with pytest.raises(ValueError):
             Pipeline("bad name", "Test pipeline.", [add_one])
@@ -119,14 +139,14 @@ class TestCoercion:
     def test_str_step_becomes_prompt_template(self) -> None:
         pipe = build(["Hello {who}"], name="p")
         assert isinstance(pipe.steps[0].invokable, PromptTemplate)
-        assert pipe.steps[0].invokable.name == "p_step_0"
+        assert pipe.steps[0].invokable.name == "p_0"
         assert pipe.invoke({"who": "AA"}).result == "Hello AA"
 
     def test_callable_step_becomes_named_tool(self) -> None:
         pipe = build([add_one, double], name="p")
         step = pipe.steps[1].invokable
         assert isinstance(step, Tool)
-        assert step.name == "p_step_1"
+        assert step.name == "p_1"
         assert step.description.startswith("Step 1 of pipeline p")
 
     def test_invokable_step_kept_as_is(self) -> None:
@@ -158,18 +178,23 @@ class TestSchema:
         pipe = build([add_one, double, last])
         assert pipe.return_type == last.return_type
 
-    @pytest.mark.parametrize("binding", ["k", ["a"], {"a": "x"}, {}])
+    @pytest.mark.parametrize("binding", ["k", ["a"], {"a": "x"}])
     def test_return_type_bound_is_dict(self, binding: Any) -> None:
         pipe = build([(make_ab, binding)])
         assert pipe.return_type == ("dict[str, Any]",)
 
 
-class TestHandoff:
-    def test_bare_mapping_passes_through(self) -> None:
+class TestState:
+    def test_bare_mapping_merges_into_state(self) -> None:
         pipe = build([add_one, double, label])
         assert pipe.invoke({"value": 1}).result == "value=4"
 
-    def test_str_binding_stores_non_mapping_under_key(self) -> None:
+    def test_bare_non_mapping_intermediate_raises(self) -> None:
+        pipe = build([triple, triple])
+        with pytest.raises(TypeError, match="unbound"):
+            pipe.invoke({"value": 1})
+
+    def test_bound_intermediate_stores_its_keys(self) -> None:
         pipe = build([(triple, "value"), add_one])
         assert pipe.invoke({"value": 2}).result == {"first": 7}
 
@@ -185,48 +210,45 @@ class TestHandoff:
         pipe = build([(pair, {0: "x", 1: "y"}), add_xy])
         assert pipe.invoke({"value": 4}).result == 9
 
-    def test_missing_selector_is_skipped_with_debug_log(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        pipe = build([(make_ab, {"a": "a", "zzz": "zzz"}), take_a])
-        with caplog.at_level(logging.DEBUG, logger=PIPELINE_LOGGER):
-            assert pipe.invoke({"value": 5}).result == 5
-        assert any("zzz" in r.getMessage() for r in caplog.records)
+    def test_later_step_reads_non_adjacent_key(self) -> None:
+        # step 2 reads "first" (step 0) and "tripled" (step 1), skipping adjacency
+        pipe = build([add_one, (triple, "tripled"), add_first_and_tripled])
+        assert pipe.invoke({"value": 1}).result == 2 + 3
+
+    def test_step_zero_inputs_stay_visible(self) -> None:
+        pipe = build([add_one, double, add_value_and_second])
+        assert pipe.invoke({"value": 1}).result == 1 + 4
 
     def test_str_binding_does_not_cover_next_steps_parameters(self) -> None:
         pipe = build([(make_ab, "blob"), add_xy])
         with pytest.raises(TypeError):
             pipe.invoke({"value": 1})
 
-
-class TestFailurePaths:
-    def test_bare_non_mapping_fails_in_next_step(self) -> None:
-        pipe = build([triple, triple])
-        with pytest.raises(TypeError):
-            pipe.invoke({"value": 1})
-
-    def test_selectors_on_str_response_raise(self) -> None:
-        pipe = build([(make_text, ["x"]), take_a])
-        with pytest.raises(TypeError, match="str/bytes"):
-            pipe.invoke({"value": 1})
-
-    def test_missing_required_key_in_next_step_raises(self) -> None:
-        pipe = build([(make_ab, ["a"]), need_b])
-        with pytest.raises(TypeError):
-            pipe.invoke({"value": 1})
-
-    def test_no_construction_time_destination_check(self) -> None:
-        pipe = build([(make_ab, {"a": "nope"}), triple])
-        assert pipe.steps[0].binding == {"a": "nope"}
+    def test_extra_inputs_reach_kwargs_step_zero(self) -> None:
+        pipe = build([collect_kwargs])
+        assert pipe.invoke({"p": 1, "q": 2}).result == {"p": 1, "q": 2}
 
 
 class TestReturn:
-    def test_last_bare_returns_raw_response(self) -> None:
+    def test_last_bare_returns_raw_response_of_any_type(self) -> None:
         assert build([triple]).invoke({"value": 2}).result == 6
+        assert build([make_text]).invoke({"value": 2}).result == "v2"
+        assert build([pair]).invoke({"value": 2}).result == (2, 3)
 
-    def test_last_bound_partial_dict_is_silent(self) -> None:
+    def test_last_bound_str_returns_dict(self) -> None:
+        assert build([(triple, "k")]).invoke({"value": 2}).result == {"k": 6}
+
+    def test_last_bound_list_returns_dict(self) -> None:
+        assert build([(make_ab, ["a"])]).invoke({"value": 2}).result == {"a": 2}
+
+    def test_last_bound_dict_returns_destinations(self) -> None:
+        pipe = build([(make_ab, {"a": "x", "b": "y"})])
+        assert pipe.invoke({"value": 2}).result == {"x": 2, "y": 3}
+
+    def test_missing_last_selector_raises_key_error(self) -> None:
         pipe = build([(make_ab, {"a": "a", "zzz": "z"})])
-        assert pipe.invoke({"value": 2}).result == {"a": 2}
+        with pytest.raises(KeyError, match="z"):
+            pipe.invoke({"value": 2})
 
     def test_result_is_plain_atomic_result(self) -> None:
         result = build([add_one]).invoke({"value": 1})
@@ -234,10 +256,25 @@ class TestReturn:
         assert not hasattr(result, "trace")
 
 
+class TestDepth:
+    def test_more_than_fifty_steps_run(self) -> None:
+        pipe = build([add_to_n for _ in range(60)])
+        # the last step is bare, so the raw response is the last mapping
+        assert pipe.invoke({"n": 0}).result == {"n": 60}
+
+    def test_single_step_is_valid(self) -> None:
+        assert build([add_one]).invoke({"value": 1}).result == {"first": 2}
+
+    def test_duplicate_instances_run_twice(self) -> None:
+        step = make_tool(add_to_n, "bump")
+        assert build([step, step]).invoke({"n": 0}).result == {"n": 2}
+
+
 class TestAsync:
-    def test_async_mirrors_sync_handoff(self) -> None:
+    def test_async_mirrors_sync(self) -> None:
         pipe = build([(pair, {0: "x", 1: "y"}), add_xy])
         assert asyncio.run(pipe.async_invoke({"value": 4})).result == 9
+        assert pipe.invoke({"value": 4}).result == 9
 
     def test_async_bare_chain(self) -> None:
         pipe = build([add_one, double, label])
@@ -248,23 +285,13 @@ class TestAsync:
         assert asyncio.run(pipe.async_invoke({"value": 2})).result == {"first": 7}
 
 
-class TestLogging:
-    def test_debug_only(self, caplog: pytest.LogCaptureFixture) -> None:
-        pipe = build([add_one, double])
-        with caplog.at_level(logging.DEBUG, logger=PIPELINE_LOGGER):
-            pipe.invoke({"value": 1})
-        records = [r for r in caplog.records if r.name == PIPELINE_LOGGER]
-        assert records
-        assert all(r.levelno == logging.DEBUG for r in records)
-
-
 class TestSerialization:
     def test_to_dict_carries_bindings(self) -> None:
         pipe = build([add_one, (make_ab, {"a": "x"}), (triple, "value")])
         data = pipe.to_dict()
         assert data["step_count"] == 3
         assert [s["binding"] for s in data["steps"]] == [None, {"a": "x"}, "value"]
-        assert data["steps"][0]["invokable"]["name"] == "pipe_step_0"
+        assert data["steps"][0]["invokable"]["name"] == "pipe_0"
         assert "return_index" not in data
 
 
@@ -272,7 +299,7 @@ class TestSurface:
     def test_export(self) -> None:
         import atomic_agentic.composites as composites
 
-        assert composites.__all__ == ["Graph", "Pipeline"]
+        assert composites.__all__ == ["Graph", "Pipeline", "Router"]
         assert composites.Pipeline is Pipeline
 
     def test_workflows_package_still_imports(self) -> None:
