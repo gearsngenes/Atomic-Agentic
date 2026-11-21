@@ -7,7 +7,6 @@ from atomic_agentic.exceptions import (
     AgentInvocationError,
     BlackboardParseError,
     DependencyFailedError,
-    ExecutionError,
     LLMEngineError,
     RemoteInvocationError,
     SchemaError,
@@ -16,8 +15,6 @@ from atomic_agentic.exceptions import (
     ToolError,
     ToolInvocationError,
     ToolRegistrationError,
-    ValidationError,
-    WorkflowError,
 )
 from atomic_agentic.utils.script import parse_statement_to_slots
 
@@ -77,46 +74,13 @@ class TestToolAgentErrors:
             raise ToolRegistrationError("registration failed")
 
 
-class TestWorkflowErrors:
-    def test_validation_error_inherits_workflow_error_and_value_error(self) -> None:
-        assert issubclass(ValidationError, WorkflowError)
-        assert issubclass(ValidationError, ValueError)
+class TestSchemaError:
+    def test_schema_error_inherits_value_error(self) -> None:
+        assert issubclass(SchemaError, ValueError)
 
-    def test_schema_error_inherits_validation_error(self) -> None:
-        assert issubclass(SchemaError, ValidationError)
-
-    def test_execution_error_inherits_workflow_error_and_runtime_error(self) -> None:
-        assert issubclass(ExecutionError, WorkflowError)
-        assert issubclass(ExecutionError, RuntimeError)
-
-    @pytest.mark.parametrize(
-        "error_type",
-        [
-            ValidationError,
-            SchemaError,
-        ],
-    )
-    def test_validation_family_can_be_caught_as_validation_error(
-        self,
-        error_type: type[Exception],
-    ) -> None:
-        with pytest.raises(ValidationError):
-            raise error_type("validation failed")
-
-    @pytest.mark.parametrize(
-        "error_type",
-        [
-            ValidationError,
-            SchemaError,
-            ExecutionError,
-        ],
-    )
-    def test_workflow_errors_can_be_caught_as_workflow_error(
-        self,
-        error_type: type[Exception],
-    ) -> None:
-        with pytest.raises(WorkflowError):
-            raise error_type("workflow failed")
+    def test_schema_error_can_be_caught_as_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            raise SchemaError("bad schema")
 
 
 class TestRemoteInvocationError:

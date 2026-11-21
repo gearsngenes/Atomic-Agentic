@@ -12,9 +12,9 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 from atomic_agentic.agents import BasicAgent
+from atomic_agentic.composites import Pipeline
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.models.results.workflows import SequentialFlowResult
-from atomic_agentic.workflows.sequential import SequentialFlow
+from atomic_agentic.models.results import AtomicResult
 
 
 pytestmark = [
@@ -87,18 +87,18 @@ def make_live_openai_agent() -> BasicAgent:
     )
 
 
-def make_live_openai_sequential_flow() -> tuple[BasicAgent, SequentialFlow]:
+def make_live_openai_pipeline() -> tuple[BasicAgent, Pipeline]:
     agent = make_live_openai_agent()
-    flow = SequentialFlow(
-        name="live_openai_writer_sequential_flow",
-        description="SequentialFlow wrapping a live OpenAI Agent.",
+    pipe = Pipeline(
+        name="live_openai_writer_pipeline",
+        description="Pipeline wrapping a live OpenAI Agent.",
         steps=[agent],
     )
-    return agent, flow
+    return agent, pipe
 
 
-def _assert_live_agent_result(result: SequentialFlowResult) -> None:
-    assert isinstance(result, SequentialFlowResult)
+def _assert_live_agent_result(result: AtomicResult) -> None:
+    assert isinstance(result, AtomicResult)
     assert set(result.result.keys()) == {"final", "length", "was_postprocessed"}
     assert isinstance(result.result["final"], str)
     assert result.result["final"].strip()
@@ -108,43 +108,39 @@ def _assert_live_agent_result(result: SequentialFlowResult) -> None:
 
 
 class TestLiveAgentBasicPipeline:
-    def test_live_openai_agent_can_be_wrapped_in_sequential_flow(
+    def test_live_openai_agent_can_be_wrapped_in_pipeline(
         self,
     ) -> None:
-        _agent, flow = make_live_openai_sequential_flow()
+        _agent, pipe = make_live_openai_pipeline()
 
-        result = flow.invoke({"topic": "pytest integration tests", "tone": "clear"})
+        result = pipe.invoke({"topic": "pytest integration tests", "tone": "clear"})
 
         _assert_live_agent_result(result)
-        assert len(result.trace) == 1
-        assert result.trace[0].result == result.result
 
-    def test_live_openai_agent_sequential_flow_async_pipeline(
+    def test_live_openai_agent_pipeline_async(
         self,
     ) -> None:
-        _agent, flow = make_live_openai_sequential_flow()
+        _agent, pipe = make_live_openai_pipeline()
 
         result = asyncio.run(
-            flow.async_invoke({"topic": "async pytest integration tests", "tone": "brief"})
+            pipe.async_invoke({"topic": "async pytest integration tests", "tone": "brief"})
         )
 
         _assert_live_agent_result(result)
-        assert len(result.trace) == 1
-        assert result.trace[0].result == result.result
 
     def test_live_openai_composed_pipeline_to_dict_does_not_expose_secrets(
         self,
     ) -> None:
-        agent, flow = make_live_openai_sequential_flow()
+        agent, pipe = make_live_openai_pipeline()
 
-        flow.invoke({"topic": "safe serialization", "tone": "plain"})
-        data = flow.to_dict()
+        pipe.invoke({"topic": "safe serialization", "tone": "plain"})
+        data = pipe.to_dict()
 
-        assert data["type"] == "SequentialFlow"
-        assert data["name"] == "live_openai_writer_sequential_flow"
+        assert data["type"] == "Pipeline"
+        assert data["name"] == "live_openai_writer_pipeline"
         assert data["step_count"] == 1
 
-        agent_snapshot = data["steps"][0]
+        agent_snapshot = data["steps"][0]["invokable"]
         assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["llm"]["type"] == "OpenAIEngine"

@@ -844,26 +844,6 @@ def _single_type_compatible(a: str, b: str) -> bool:
     return False
 
 
-def _simplify_type_set(types: set[str]) -> set[str]:
-    """Drop parameterized entries whose bare origin is also present.
-
-    ``{"dict", "dict[str, int]"}`` -> ``{"dict"}`` -- a bare origin already
-    accepts any parameterization of itself (the same fact
-    ``_single_type_compatible`` relies on for compatibility), so keeping a
-    more specific sibling alongside it is pure redundancy, not real
-    ambiguity. Deliberately non-recursive: ``dict[str, Any]`` alongside
-    ``dict[str, int]`` (no bare ``dict`` present) is a related but distinct
-    redundancy -- catching it would mean reasoning about "Any" absorbing a
-    concrete type at a specific argument position, not just a flat
-    bare-vs-parameterized check -- and is intentionally left alone here.
-    """
-    bare_origins = {t for t in types if _parse_generic(t) is None}
-    return {
-        t for t in types
-        if (parsed := _parse_generic(t)) is None or parsed[0] not in bare_origins
-    }
-
-
 def semantically_compatible(a: ParamSpec, b: ParamSpec) -> bool:
     """Whether two same-named ``ParamSpec``s are compatible enough to merge.
 

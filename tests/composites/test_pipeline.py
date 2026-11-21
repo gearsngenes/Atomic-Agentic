@@ -325,6 +325,3 @@ class TestSurface:
 
         assert composites.__all__ == ["Graph", "Pipeline", "Router"]
         assert composites.Pipeline is Pipeline
-
-    def test_workflows_package_still_imports(self) -> None:
-        import atomic_agentic.workflows  # noqa: F401

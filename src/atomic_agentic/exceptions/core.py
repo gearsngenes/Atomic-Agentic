@@ -79,20 +79,8 @@ class DependencyFailedError(Exception):
         self.cause = cause
 
 
-class WorkflowError(Exception):
-    """Base class for workflow-related errors."""
-
-
-class ValidationError(WorkflowError, ValueError):
-    """Raised for input/type validation failures."""
-
-
-class SchemaError(ValidationError):
+class SchemaError(ValueError):
     """Raised when a declared parameter schema is malformed or breaks parameter-ordering rules."""
-
-
-class ExecutionError(WorkflowError, RuntimeError):
-    """Raised when a workflow fails to execute at runtime."""
 
 
 class RemoteInvocationError(Exception):
@@ -179,10 +167,7 @@ __all__ = [
     "ToolRegistrationError",
     "BlackboardParseError",
     "DependencyFailedError",
-    "WorkflowError",
-    "ValidationError",
     "SchemaError",
-    "ExecutionError",
     "RemoteInvocationError",
     "MCPError",
     "MCPConnectionError",
