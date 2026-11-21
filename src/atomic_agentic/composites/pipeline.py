@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..invokables.atomic_invokable import AtomicInvokable
+from ..models.parameters import ParamSpec
 from ..tools.toolification import to_invokable
 from ..utils.binding import Binding, normalize_binding
 from .graph import Graph
@@ -28,8 +29,13 @@ class Pipeline(AtomicInvokable):
     - The pipeline holds its graph by composition and has no mutators: topology
       and step instances are fixed at construction (shallow immutability:
       nested invokables keep their own mutability).
-    - ``parameters`` are step 0's, copied once. ``return_type`` is the last
-      step's when it is bare, ``dict[str, Any]`` when it is bound.
+    - ``parameters`` default to step 0's. Pass ``parameters=[...]`` to accept
+      inputs step 0 does not declare (they are forwarded through the shared
+      state to every later step); undeclared inputs are dropped.
+    - The last step's binding shapes the result and ``return_type``: bare ->
+      its raw response and its own return type; ``str`` -> the stored whole
+      response, ``Any``; list or dict -> a dict of the destination keys,
+      ``dict[str, Any]``.
 
     Runtime contract
     ----------------
@@ -38,9 +44,10 @@ class Pipeline(AtomicInvokable):
       every step. A bare intermediate step must return a mapping (merged into
       state) or ``TypeError`` is raised by the graph; give it a binding to store
       a non-mapping response.
-    - A bare last step's raw response is the result. A bound last step returns a
-      dict of its destination keys; a selector that never produced a value
-      raises ``KeyError``. The result is a plain ``AtomicResult`` (no trace).
+    - A bare last step's raw response is the result. A ``str`` last binding
+      returns the stored value; a list or dict binding returns a dict of its
+      destination keys. A selector that never produced a value raises
+      ``KeyError``. The result is a plain ``AtomicResult`` (no trace).
     """
 
     @dataclass(frozen=True)
@@ -55,6 +62,8 @@ class Pipeline(AtomicInvokable):
         name: str,
         description: str,
         steps: list[AtomicInvokable | str | Callable[..., Any] | tuple[Any, Binding | None]],
+        *,
+        parameters: list[ParamSpec] | None = None,
     ) -> None:
         # 1. steps shape
         if not isinstance(steps, list):
@@ -100,12 +109,13 @@ class Pipeline(AtomicInvokable):
         if last.binding is None:
             returns: str | list[str] = "__result__"
         elif isinstance(last.binding, str):
-            returns = [last.binding]
+            returns = last.binding
         else:
             returns = list(last.binding.values())
 
         # 6. private graph
-        parameters = steps_tuple[0].invokable.parameters
+        if parameters is None:
+            parameters = steps_tuple[0].invokable.parameters
         graph = Graph(
             name,
             description,
@@ -118,7 +128,12 @@ class Pipeline(AtomicInvokable):
         )
 
         # 7. base init
-        return_type = last.invokable.return_type if last.binding is None else "dict[str, Any]"
+        if last.binding is None:
+            return_type = last.invokable.return_type
+        elif isinstance(last.binding, str):
+            return_type = "Any"
+        else:
+            return_type = "dict[str, Any]"
         super().__init__(
             name=name,
             description=description,

@@ -8,6 +8,7 @@ import pytest
 
 from atomic_agentic.composites import Graph, Pipeline, Router
 from atomic_agentic.invokables.prompt_template import PromptTemplate
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import RouterResult
 from atomic_agentic.tools.base import Tool
 
@@ -56,8 +57,13 @@ def make_tool(function: Any, name: str) -> Tool:
     return Tool(function=function, name=name, description=f"Test tool {name}.")
 
 
-def build(selector: Any, routes: dict[Any, Any], name: str = "rt") -> Router:
-    return Router(name, "Test router.", selector, routes)
+def pick_kind_strict(kind: Any) -> Any:
+    """Return kind unchanged; accepts nothing else."""
+    return kind
+
+
+def build(selector: Any, routes: dict[Any, Any], name: str = "rt", **kwargs: Any) -> Router:
+    return Router(name, "Test router.", selector, routes, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -113,9 +119,24 @@ class TestConstruction:
         a, b = make_tool(left, "l"), make_tool(right, "r")
         assert build(pick_kind, {"a": a, "b": b}).return_type == a.return_type
 
-    def test_return_type_differs_is_any(self) -> None:
-        router = build(pick_kind, {"a": left, "b": as_list})
-        assert router.return_type == ("Any",)
+    def test_return_type_is_union_of_branches(self) -> None:
+        router = build(pick_kind, {"a": left, "b": as_list, "c": right})
+        members = {*make_tool(left, "l").return_type, *make_tool(as_list, "t").return_type}
+        assert router.return_type == tuple(sorted(members))
+        assert len(router.return_type) == 2
+
+    def test_explicit_parameters_override_the_selectors(self) -> None:
+        extra = [
+            ParamSpec(name="kind", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("Any",)),
+            ParamSpec(name="x", index=1, kind=ParamSpec.KEYWORD_ONLY, type=("Any",)),
+        ]
+        router = build(pick_kind_strict, {"a": left}, parameters=extra)
+        assert router.parameters == extra
+        assert router.invoke({"kind": "a", "x": 7}).result == "left7"
+
+    def test_undeclared_inputs_are_dropped_without_parameters(self) -> None:
+        router = build(pick_kind_strict, {"a": left})
+        assert router.invoke({"kind": "a", "x": 7}).result == "left0"
 
     def test_to_dict(self) -> None:
         data = build(pick_kind, {"a": left, 2: right}, name="r").to_dict()
@@ -208,7 +229,7 @@ class TestComposition:
     def test_pipeline_as_branch(self) -> None:
         branch = Pipeline("shape", "Shaped branch.", [(left, "text")])
         router = build(pick_kind, {"a": branch, "b": right})
-        assert router.invoke({"kind": "a", "x": 1}).result == {"text": "left1"}
+        assert router.invoke({"kind": "a", "x": 1}).result == "left1"
         assert router.invoke({"kind": "b", "x": 1}).result == "right1"
 
     def test_graph_as_branch(self) -> None:
@@ -242,7 +263,7 @@ class TestComposition:
     def test_router_nested_in_pipeline(self) -> None:
         router = build(pick_kind, {"a": left, "b": right})
         pipe = Pipeline("outer", "Outer.", [(router, "routed")])
-        assert pipe.invoke({"kind": "a", "x": 1}).result == {"routed": "left1"}
+        assert pipe.invoke({"kind": "a", "x": 1}).result == "left1"
 
 
 class TestSurface:

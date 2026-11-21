@@ -1034,7 +1034,7 @@ def _build(cls: type[AtomicInvokable], **overrides: Any) -> Any:
     return cls(**kwargs)
 
 
-_CORE_LOGGER = "atomic_agentic.core.atomic_invokable"
+_CORE_LOGGER = "atomic_agentic.invokables.atomic_invokable"
 
 
 def _records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:

@@ -8,6 +8,7 @@ import pytest
 
 from atomic_agentic.composites import Pipeline
 from atomic_agentic.invokables.prompt_template import PromptTemplate
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import AtomicResult
 from atomic_agentic.tools.base import Tool
 
@@ -25,6 +26,11 @@ def double(first: int) -> dict[str, int]:
 def label(second: int) -> str:
     """Render second as text."""
     return f"value={second}"
+
+
+def add_bonus(value: int, bonus: int = 0) -> int:
+    """Add bonus to value."""
+    return value + bonus
 
 
 def triple(value: int) -> int:
@@ -81,8 +87,8 @@ def make_tool(function: Any, name: str) -> Tool:
     return Tool(function=function, name=name, description=f"Test tool {name}.")
 
 
-def build(steps: list[Any], name: str = "pipe") -> Pipeline:
-    return Pipeline(name, "Test pipeline.", steps)
+def build(steps: list[Any], name: str = "pipe", **kwargs: Any) -> Pipeline:
+    return Pipeline(name, "Test pipeline.", steps, **kwargs)
 
 
 class TestConstruction:
@@ -178,10 +184,26 @@ class TestSchema:
         pipe = build([add_one, double, last])
         assert pipe.return_type == last.return_type
 
-    @pytest.mark.parametrize("binding", ["k", ["a"], {"a": "x"}])
-    def test_return_type_bound_is_dict(self, binding: Any) -> None:
+    @pytest.mark.parametrize("binding", [["a"], {"a": "x"}])
+    def test_return_type_bound_collection_is_dict(self, binding: Any) -> None:
         pipe = build([(make_ab, binding)])
         assert pipe.return_type == ("dict[str, Any]",)
+
+    def test_return_type_bound_str_is_any(self) -> None:
+        assert build([(triple, "k")]).return_type == ("Any",)
+
+    def test_explicit_parameters_forward_undeclared_inputs(self) -> None:
+        extra = [
+            ParamSpec(name="value", index=0, kind=ParamSpec.KEYWORD_ONLY, type=("Any",)),
+            ParamSpec(name="bonus", index=1, kind=ParamSpec.KEYWORD_ONLY, type=("Any",)),
+        ]
+        pipe = build([(triple, "value"), (add_bonus, "total")], parameters=extra)
+        assert pipe.parameters == extra
+        assert pipe.invoke({"value": 2, "bonus": 10}).result == 16
+
+    def test_undeclared_inputs_are_dropped_without_parameters(self) -> None:
+        pipe = build([(triple, "value"), (add_bonus, "total")])
+        assert pipe.invoke({"value": 2, "bonus": 10}).result == 6
 
 
 class TestState:
@@ -235,8 +257,8 @@ class TestReturn:
         assert build([make_text]).invoke({"value": 2}).result == "v2"
         assert build([pair]).invoke({"value": 2}).result == (2, 3)
 
-    def test_last_bound_str_returns_dict(self) -> None:
-        assert build([(triple, "k")]).invoke({"value": 2}).result == {"k": 6}
+    def test_last_bound_str_returns_stored_value(self) -> None:
+        assert build([(triple, "k")]).invoke({"value": 2}).result == 6
 
     def test_last_bound_list_returns_dict(self) -> None:
         assert build([(make_ab, ["a"])]).invoke({"value": 2}).result == {"a": 2}
@@ -283,6 +305,8 @@ class TestAsync:
     def test_async_str_binding_and_bound_last(self) -> None:
         pipe = build([(triple, "value"), (add_one, ["first"])])
         assert asyncio.run(pipe.async_invoke({"value": 2})).result == {"first": 7}
+        pipe = build([(triple, "value"), (triple, "out")])
+        assert asyncio.run(pipe.async_invoke({"value": 2})).result == 18
 
 
 class TestSerialization:

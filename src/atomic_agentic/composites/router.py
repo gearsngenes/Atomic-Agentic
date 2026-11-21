@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Any, Callable, ClassVar
 
 from ..invokables.atomic_invokable import AtomicInvokable
+from ..models.parameters import ParamSpec
 from ..models.results import RouterResult
 from ..tools.toolification import to_invokable
 from .graph import Graph
@@ -29,8 +30,10 @@ class Router(AtomicInvokable):
     - Entries are coerced through the shared ``to_invokable``; coerced names are
       ``<router name>_select`` and ``<router name>_route_{i}`` in dict order.
       The private graph's node names (``select``, ``route_{i}``) are internal.
-    - ``parameters`` are the selector's. ``return_type`` is the common branch
-      return type when all branches agree, otherwise ``Any``.
+    - ``parameters`` default to the selector's. Pass ``parameters=[...]`` to
+      accept inputs the selector does not declare (they reach the chosen branch
+      through the shared state); undeclared inputs are dropped.
+      ``return_type`` is the union of the branch return types.
     - Its result is a ``RouterResult``: ``result`` is the branch's raw response,
       ``route`` the selector's value and ``branch`` the chosen branch's name.
     - The router holds its graph by composition and has no mutators.
@@ -61,6 +64,8 @@ class Router(AtomicInvokable):
         description: str,
         selector: AtomicInvokable | str | Callable[..., Any],
         routes: dict[Hashable, AtomicInvokable | str | Callable[..., Any]],
+        *,
+        parameters: list[ParamSpec] | None = None,
     ) -> None:
         # 1. shape checks
         if not isinstance(routes, dict):
@@ -106,6 +111,8 @@ class Router(AtomicInvokable):
             return target
 
         # 5. private graph
+        if parameters is None:
+            parameters = selector_invokable.parameters
         nodes: dict[str, Any] = {"select": (selector_invokable, "__route__")}
         for i, branch in enumerate(branches):
             nodes[f"route_{i}"] = (branch, "__result__")
@@ -115,18 +122,17 @@ class Router(AtomicInvokable):
             nodes,
             edges=[("select", decide)],
             start="select",
-            parameters=selector_invokable.parameters,
+            parameters=parameters,
             returns=["__route__", "__result__"],
             max_traversal_depth=2,
         )
 
         # 6. base init
-        branch_types = {branch.return_type for branch in branches}
-        return_type = branch_types.pop() if len(branch_types) == 1 else "Any"
+        return_type = {t for branch in branches for t in branch.return_type}
         super().__init__(
             name=name,
             description=description,
-            parameters=selector_invokable.parameters,
+            parameters=parameters,
             return_type=return_type,
         )
 
