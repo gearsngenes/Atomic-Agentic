@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -9,8 +8,6 @@ from ..models.parameters import ParamSpec
 from ..tools.toolification import to_invokable
 from ..utils.binding import Binding, normalize_binding
 from .graph import Graph
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["Pipeline"]
 

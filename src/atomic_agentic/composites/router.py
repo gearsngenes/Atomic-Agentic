@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Hashable, Mapping
 from types import MappingProxyType
 from typing import Any, Callable, ClassVar
@@ -10,8 +9,6 @@ from ..models.parameters import ParamSpec
 from ..models.results import RouterResult
 from ..tools.toolification import to_invokable
 from .graph import Graph
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["Router"]
 

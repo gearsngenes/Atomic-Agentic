@@ -36,8 +36,10 @@ class Graph(AtomicInvokable):
     - ``start`` names the round-0 nodes (several start nodes run in parallel). It
       may be empty while the graph is being built; running with an empty
       ``start`` raises ``RuntimeError``.
-    - ``parameters`` default to a single ``**kwargs``; ``return_type`` is ``Any``.
-      Both, and ``name``, are fixed for the graph's life.
+    - ``parameters`` default to a single ``**kwargs``; ``return_type`` is always ``Any``
+      because ``returns`` is mutable and may switch between a key, a list and the
+      whole state. ``name``, ``parameters`` and ``return_type`` are fixed for the
+      graph's life.
 
     Mutation contract
     -----------------

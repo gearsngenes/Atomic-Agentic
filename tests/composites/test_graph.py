@@ -174,6 +174,14 @@ class TestConstruction:
         assert [(p.name, p.kind) for p in graph.parameters] == [("kwargs", ParamSpec.VAR_KEYWORD)]
         assert graph.return_type == ("Any",)
 
+    @pytest.mark.parametrize("returns", [None, "k", ["k"]])
+    def test_return_type_is_any_whatever_returns_is(self, returns: Any) -> None:
+        graph = build({"n": echo}, [], "n", returns=returns)
+        assert graph.return_type == ("Any",)
+        graph.set_returns(["k"])
+        graph.set_returns("k")
+        assert graph.return_type == ("Any",)
+
     def test_explicit_parameters_are_used(self) -> None:
         params = [ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int",))]
         graph = build({"n": bump}, [], "n", parameters=params)
