@@ -92,6 +92,12 @@ class TestConstruction:
         with pytest.raises(TypeError):
             build({1: echo}, [], "n")  # type: ignore[dict-item]
 
+    @pytest.mark.parametrize("bad", ["a-b", "1st", "a b"])
+    @pytest.mark.parametrize("entry", [echo, "template {x}"])
+    def test_rejects_invalid_invokable_name(self, bad: str, entry) -> None:
+        with pytest.raises(ValueError, match="alphanumeric/underscore"):
+            Graph("g", "d", {bad: entry})
+
     def test_rejects_wrong_tuple_length(self) -> None:
         with pytest.raises(ValueError, match="length 3"):
             build({"n": (echo, "k", "x")}, [], "n")

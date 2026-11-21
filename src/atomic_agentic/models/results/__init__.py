@@ -10,6 +10,7 @@ from .agents import (
     ToolUsageReport,
 )
 from .graph import GraphResult
+from .router import RouterResult
 from .llm import (
     AnthropicTokenUsage,
     GeminiTokenUsage,
@@ -65,4 +66,5 @@ __all__ = [
     "ParallelFlowResult",
     "GraphFlowResult",
     "GraphResult",
+    "RouterResult",
 ]

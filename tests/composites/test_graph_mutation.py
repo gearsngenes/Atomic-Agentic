@@ -80,6 +80,14 @@ class TestAddNode:
         with pytest.raises(ValueError, match="length 3"):
             graph.add_node("x", (echo, "k", "extra"))
 
+    @pytest.mark.parametrize("bad", ["a-b", "1st", "a b"])
+    def test_rejects_invalid_invokable_name(self, bad: str) -> None:
+        graph = abc_graph()
+        with pytest.raises(ValueError, match="alphanumeric/underscore"):
+            graph.add_node(bad, echo)
+        with pytest.raises(ValueError, match="alphanumeric/underscore"):
+            graph.add_node(bad, "template {x}")
+
     def test_coerced_named_by_key_and_not_wired(self) -> None:
         graph = abc_graph(collision_handling_order=["a"])
         graph.add_node("x", echo)

@@ -8,6 +8,7 @@ import pytest
 
 from atomic_agentic.composites import Graph, Pipeline, Router
 from atomic_agentic.invokables.prompt_template import PromptTemplate
+from atomic_agentic.models.results import RouterResult
 from atomic_agentic.tools.base import Tool
 
 CALLS: list[str] = []
@@ -180,6 +181,27 @@ class TestRuntime:
     def test_str_selector_template(self) -> None:
         router = build("{kind}", {"go": left, "stop": right})
         assert router.invoke({"kind": "stop"}).result == "right0"
+
+
+class TestResult:
+    def test_result_reports_route_and_branch(self) -> None:
+        router = build(pick_kind, {"a": left, "b": make_tool(right, "named_right")})
+        first = router.invoke({"kind": "a", "x": 1})
+        assert isinstance(first, RouterResult)
+        assert (first.result, first.route, first.branch) == ("left1", "a", "rt_route_0")
+        second = router.invoke({"kind": "b", "x": 2})
+        assert (second.result, second.route, second.branch) == ("right2", "b", "named_right")
+
+    def test_route_is_the_selector_value_for_non_str_keys(self) -> None:
+        router = build(pick_kind, {(1, 2): left, None: right})
+        assert router.invoke({"kind": (1, 2)}).route == (1, 2)
+        assert router.invoke({"kind": None}).route is None
+
+    def test_async_result_matches_sync(self) -> None:
+        router = build(pick_kind, {"a": left, "b": right})
+        got = asyncio.run(router.async_invoke({"kind": "b", "x": 4}))
+        assert isinstance(got, RouterResult)
+        assert (got.result, got.route, got.branch) == ("right4", "b", "rt_route_1")
 
 
 class TestComposition:

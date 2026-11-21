@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable, Mapping
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from ..invokables.atomic_invokable import AtomicInvokable
+from ..models.results import RouterResult
 from ..tools.toolification import to_invokable
 from .graph import Graph
 
@@ -30,6 +31,8 @@ class Router(AtomicInvokable):
       The private graph's node names (``select``, ``route_{i}``) are internal.
     - ``parameters`` are the selector's. ``return_type`` is the common branch
       return type when all branches agree, otherwise ``Any``.
+    - Its result is a ``RouterResult``: ``result`` is the branch's raw response,
+      ``route`` the selector's value and ``branch`` the chosen branch's name.
     - The router holds its graph by composition and has no mutators.
 
     Runtime contract
@@ -49,6 +52,8 @@ class Router(AtomicInvokable):
     - The reserved state keys ``__route__`` and ``__result__`` belong to the
       router; user input keys with those names are the caller's problem.
     """
+
+    result_cls: ClassVar[type[RouterResult]] = RouterResult
 
     def __init__(
         self,
@@ -111,7 +116,7 @@ class Router(AtomicInvokable):
             edges=[("select", decide)],
             start="select",
             parameters=selector_invokable.parameters,
-            returns="__result__",
+            returns=["__route__", "__result__"],
             max_traversal_depth=2,
         )
 
@@ -127,6 +132,7 @@ class Router(AtomicInvokable):
 
         # 7. store
         self._graph = graph
+        self._branch_names = {f"route_{i}": branch.name for i, branch in enumerate(branches)}
         self._selector = selector_invokable
         self._routes: Mapping[Hashable, AtomicInvokable] = MappingProxyType(
             dict(zip(routes, branches))
@@ -143,12 +149,21 @@ class Router(AtomicInvokable):
         return self._routes
 
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """Run the private graph and return the chosen branch's raw response."""
-        return {"result": self._graph.invoke(inputs).result}
+        """Run the private graph; return the branch's raw response and what was chosen."""
+        return self._payload(self._graph.invoke(inputs))
 
     async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Async twin of ``_invoke_impl``."""
-        return {"result": (await self._graph.async_invoke(inputs)).result}
+        return self._payload(await self._graph.async_invoke(inputs))
+
+    def _payload(self, graph_result: Any) -> dict[str, Any]:
+        """Build the ``RouterResult`` payload; the trace's last node is the branch."""
+        chosen = graph_result.trace[-1][0]
+        return {
+            "result": graph_result.result["__result__"],
+            "route": graph_result.result["__route__"],
+            "branch": self._branch_names[chosen],
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the router with its selector and routes in dict order."""

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Callable, ClassVar
 
+from ..constants.core import IDENTIFIER_PATTERN
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results import GraphResult
@@ -27,6 +28,8 @@ class Graph(AtomicInvokable):
     - ``nodes`` is an optional dict of name to entry (an invokable, a ``str``, a
       callable, or ``(entry, binding)``); a graph may start empty. Entries are
       coerced through the shared ``to_invokable`` and named by their dict key.
+      A node name must be a valid invokable name (alphanumeric/underscore, no
+      leading digit) or ``ValueError`` is raised.
     - ``edges`` are ``(source, target)`` pairs: a ``str`` target is a node name
       (fixed edge); a callable or invokable target is a router attached to
       ``source``. A node with no outgoing edges is terminal.
@@ -174,6 +177,11 @@ class Graph(AtomicInvokable):
         """Turn a node entry into ``(invokable, binding)``."""
         if not isinstance(node_name, str) or not node_name:
             raise TypeError(f"node names must be non-empty str, got {node_name!r}")
+        if not IDENTIFIER_PATTERN.fullmatch(node_name):
+            raise ValueError(
+                f"{graph_name}: node name {node_name!r} must be alphanumeric/underscore "
+                "and not start with a digit"
+            )
         if isinstance(entry, tuple):
             if len(entry) != 2:
                 raise ValueError(
