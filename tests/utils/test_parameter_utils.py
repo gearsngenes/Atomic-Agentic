@@ -17,15 +17,17 @@ from atomic_agentic.utils.parameters import (
     apply_parameter_reports,
     build_parameter_report,
     build_parameter_reports,
+    extract_io,
     insert_by_category,
     is_valid_parameter_order,
     n_way_kind_compatible,
     n_way_type_witness,
+    parameter_collisions,
+    parameter_overlap,
     semantically_compatible,
     semantically_identical,
-    to_paramspec_list,
+    to_parameter_list,
 )
-from atomic_agentic.invokables.core_api import extract_io, parameter_overlap, parameter_collisions
 from atomic_agentic.constants.core import NO_VAL
 
 
@@ -70,13 +72,12 @@ class TestExtractIO:
         with pytest.raises(TypeError):
             extract_io(123)  # type: ignore[arg-type]
 
-    def test_extract_io_returns_atomic_invokable_declared_schema_directly(self) -> None:
+    def test_extract_io_does_not_unwrap_atomic_invokable(self) -> None:
         invokable = _AddInvokable()
 
-        parameters, return_type = extract_io(invokable)
+        parameters, _ = extract_io(invokable)
 
-        assert parameters == invokable.parameters
-        assert return_type == invokable.return_type == ("int",)
+        assert parameters == extract_io(invokable.__call__)[0]
 
     def test_extract_io_extracts_basic_parameters_and_return_type(self) -> None:
         def sample(x: int, y: str = "default") -> bool:
@@ -280,21 +281,21 @@ class TestParameterOrderValidation:
         assert is_valid_parameter_order(parameters) is True
 
 
-class TestToParamSpecList:
+class TestToParameterList:
     def test_none_normalizes_to_empty_list(self) -> None:
-        assert to_paramspec_list(None) == []
+        assert to_parameter_list(None) == []
 
     def test_empty_sequence_normalizes_to_empty_list(self) -> None:
-        assert to_paramspec_list([]) == []
-        assert to_paramspec_list(()) == []
-        assert to_paramspec_list(set()) == []
+        assert to_parameter_list([]) == []
+        assert to_parameter_list(()) == []
+        assert to_parameter_list(set()) == []
 
     def test_typed_dict_class_normalizes_annotations(self) -> None:
         class Config(TypedDict):
             query: str
             top_k: int
 
-        parameters = to_paramspec_list(Config)
+        parameters = to_parameter_list(Config)
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
             ("query", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("str",)),
@@ -307,7 +308,7 @@ class TestToParamSpecList:
             make_param("y", 11, type_="str", default="hello"),
         ]
 
-        parameters = to_paramspec_list(original)
+        parameters = to_parameter_list(original)
 
         assert parameters is not original
         assert [(param.name, param.index, param.type, param.default) for param in parameters] == [
@@ -319,20 +320,20 @@ class TestToParamSpecList:
 
     def test_rejects_unsupported_schema_type(self) -> None:
         with pytest.raises(SchemaError):
-            to_paramspec_list(123)  # type: ignore[arg-type]
+            to_parameter_list(123)  # type: ignore[arg-type]
 
     def test_rejects_mixed_sequence_types(self) -> None:
         with pytest.raises(SchemaError):
-            to_paramspec_list(["x", make_param("y", 1)])  # type: ignore[list-item]
+            to_parameter_list(["x", make_param("y", 1)])  # type: ignore[list-item]
 
     def test_rejects_sequence_of_non_strings_and_non_paramspecs(self) -> None:
         with pytest.raises(SchemaError):
-            to_paramspec_list([1, 2, 3])  # type: ignore[list-item]
+            to_parameter_list([1, 2, 3])  # type: ignore[list-item]
 
 
-class TestToParamSpecListStringGrammar:
+class TestToParameterListStringGrammar:
     def test_plain_string_names_create_positional_or_keyword_parameters(self) -> None:
-        parameters = to_paramspec_list(["x", "y"])
+        parameters = to_parameter_list(["x", "y"])
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
             ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",)),
@@ -340,7 +341,7 @@ class TestToParamSpecListStringGrammar:
         ]
 
     def test_slash_marker_converts_previous_plain_names_to_positional_only(self) -> None:
-        parameters = to_paramspec_list(["x", "y", "/"])
+        parameters = to_parameter_list(["x", "y", "/"])
 
         assert [(param.name, param.index, param.kind) for param in parameters] == [
             ("x", 0, ParamSpec.POSITIONAL_ONLY),
@@ -348,7 +349,7 @@ class TestToParamSpecListStringGrammar:
         ]
 
     def test_star_marker_converts_following_plain_names_to_keyword_only(self) -> None:
-        parameters = to_paramspec_list(["x", "*", "debug", "limit"])
+        parameters = to_parameter_list(["x", "*", "debug", "limit"])
 
         assert [(param.name, param.index, param.kind) for param in parameters] == [
             ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD),
@@ -357,7 +358,7 @@ class TestToParamSpecListStringGrammar:
         ]
 
     def test_named_star_creates_var_positional_and_keyword_only_section(self) -> None:
-        parameters = to_paramspec_list(["x", "*args", "debug"])
+        parameters = to_parameter_list(["x", "*args", "debug"])
 
         assert [(param.name, param.index, param.kind) for param in parameters] == [
             ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD),
@@ -366,7 +367,7 @@ class TestToParamSpecListStringGrammar:
         ]
 
     def test_double_star_creates_var_keyword_parameter(self) -> None:
-        parameters = to_paramspec_list(["x", "**extras"])
+        parameters = to_parameter_list(["x", "**extras"])
 
         assert [(param.name, param.index, param.kind) for param in parameters] == [
             ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD),
@@ -374,7 +375,7 @@ class TestToParamSpecListStringGrammar:
         ]
 
     def test_full_mixed_string_schema_normalizes_to_python_signature_order(self) -> None:
-        parameters = to_paramspec_list([
+        parameters = to_parameter_list([
             "a",
             "b",
             "/",
@@ -412,7 +413,7 @@ class TestToParamSpecListStringGrammar:
     )
     def test_invalid_marker_sequences_raise_schema_error(self, schema: list[str]) -> None:
         with pytest.raises(SchemaError):
-            to_paramspec_list(schema)
+            to_parameter_list(schema)
 
     @pytest.mark.parametrize(
         "schema",
@@ -428,7 +429,7 @@ class TestToParamSpecListStringGrammar:
     )
     def test_invalid_string_names_raise_schema_error(self, schema: list[str]) -> None:
         with pytest.raises(SchemaError):
-            to_paramspec_list(schema)
+            to_parameter_list(schema)
 
 
 class TestExtractIOAnnotated:
@@ -525,13 +526,13 @@ class TestExtractIOAnnotated:
         assert parameters[0].description == "enable feature"
 
 
-class TestToParamSpecListTypedDictAnnotated:
+class TestToParameterListTypedDictAnnotated:
     def test_typed_dict_annotated_field_extracts_description(self) -> None:
         class Config(TypedDict):
             query: Annotated[str, "the search string"]
             limit: int
 
-        parameters = to_paramspec_list(Config)
+        parameters = to_parameter_list(Config)
 
         query_param = next(p for p in parameters if p.name == "query")
         limit_param = next(p for p in parameters if p.name == "limit")
@@ -544,7 +545,7 @@ class TestToParamSpecListTypedDictAnnotated:
             x: int
             y: str
 
-        parameters = to_paramspec_list(Config)
+        parameters = to_parameter_list(Config)
 
         assert all(p.description is None for p in parameters)
 
@@ -846,6 +847,10 @@ class TestSemanticallyIdentical:
         assert semantically_identical(a, b) is True
 
 
+def _specs(*functions):
+    return [extract_io(f)[0] for f in functions]
+
+
 class TestParameterOverlapAndCollisions:
     def test_empty_sources_produce_no_overlap_or_collisions(self) -> None:
         assert parameter_overlap([]) == []
@@ -854,27 +859,27 @@ class TestParameterOverlapAndCollisions:
     def test_disjoint_names_produce_no_overlap_or_collisions(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(y: int) -> None: ...
-        assert parameter_overlap([source_a, source_b]) == []
-        assert parameter_collisions([source_a, source_b]) == []
+        assert parameter_overlap(_specs(source_a, source_b)) == []
+        assert parameter_collisions(_specs(source_a, source_b)) == []
 
     def test_compatible_shared_name_is_overlap_not_collision(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(x) -> None: ...  # noqa: ANN001 -- deliberately untyped -> "Any"
-        assert parameter_overlap([source_a, source_b]) == ["x"]
-        assert parameter_collisions([source_a, source_b]) == []
+        assert parameter_overlap(_specs(source_a, source_b)) == ["x"]
+        assert parameter_collisions(_specs(source_a, source_b)) == []
 
     def test_incompatible_shared_name_is_collision_not_overlap(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(x: str) -> None: ...
-        assert parameter_overlap([source_a, source_b]) == []
-        assert parameter_collisions([source_a, source_b]) == ["x"]
+        assert parameter_overlap(_specs(source_a, source_b)) == []
+        assert parameter_collisions(_specs(source_a, source_b)) == ["x"]
 
     def test_mixed_overlap_and_collisions_partition_cleanly(self) -> None:
         def source_a(compatible: int, colliding: int, only_in_a: int) -> None: ...
         def source_b(compatible, colliding: str, only_in_b: int) -> None: ...  # noqa: ANN001
 
-        overlap = parameter_overlap([source_a, source_b])
-        collisions = parameter_collisions([source_a, source_b])
+        overlap = parameter_overlap(_specs(source_a, source_b))
+        collisions = parameter_collisions(_specs(source_a, source_b))
 
         assert overlap == ["compatible"]
         assert collisions == ["colliding"]
@@ -883,25 +888,25 @@ class TestParameterOverlapAndCollisions:
     def test_results_follow_first_source_order(self) -> None:
         def source_a(second: int, first: int) -> None: ...
         def source_b(first: int, second: int) -> None: ...
-        assert parameter_overlap([source_a, source_b]) == ["second", "first"]
+        assert parameter_overlap(_specs(source_a, source_b)) == ["second", "first"]
 
     def test_name_shared_by_two_of_three_is_overlap_by_default(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(x: int) -> None: ...
         def source_c(y: int) -> None: ...
-        assert parameter_overlap([source_a, source_b, source_c]) == ["x"]
+        assert parameter_overlap(_specs(source_a, source_b, source_c)) == ["x"]
 
     def test_unanimous_only_excludes_names_not_shared_by_every_source(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(x: int) -> None: ...
         def source_c(y: int) -> None: ...
-        assert parameter_overlap([source_a, source_b, source_c], unanimous_only=True) == []
+        assert parameter_overlap(_specs(source_a, source_b, source_c), unanimous_only=True) == []
 
     def test_unanimous_only_includes_names_shared_by_every_source(self) -> None:
         def source_a(x: int) -> None: ...
         def source_b(x: int) -> None: ...
         def source_c(x: int) -> None: ...
-        assert parameter_overlap([source_a, source_b, source_c], unanimous_only=True) == ["x"]
+        assert parameter_overlap(_specs(source_a, source_b, source_c), unanimous_only=True) == ["x"]
 
     def test_parameter_collisions_has_no_unanimous_only_parameter(self) -> None:
         import inspect
@@ -911,12 +916,18 @@ class TestParameterOverlapAndCollisions:
         def source_a(x: int) -> None: ...
         def source_b(x: str) -> None: ...
         def source_c(y: int) -> None: ...
-        assert parameter_collisions([source_a, source_b, source_c]) == ["x"]
+        assert parameter_collisions(_specs(source_a, source_b, source_c)) == ["x"]
 
-    def test_accepts_atomic_invokable_sources(self) -> None:
+    def test_accepts_invokable_parameter_lists(self) -> None:
         invokable = _AddInvokable()
         def source_b(a: int) -> None: ...
-        assert parameter_overlap([invokable, source_b]) == ["a"]
+        assert parameter_overlap([invokable.parameters, extract_io(source_b)[0]]) == ["a"]
+
+    def test_accepts_tuples_of_tuples(self) -> None:
+        def source_a(x: int) -> None: ...
+        def source_b(x: int) -> None: ...
+        lists = tuple(tuple(extract_io(f)[0]) for f in (source_a, source_b))
+        assert parameter_overlap(lists) == ["x"]
 
 
 class TestInsertionCategory:

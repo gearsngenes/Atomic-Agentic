@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
-from ..tools.toolification import to_invokable
+from ..adapters import to_invokable
 from ..utils.binding import Binding, normalize_binding
 from .graph import Graph
 

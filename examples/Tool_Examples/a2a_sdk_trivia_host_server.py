@@ -4,7 +4,7 @@ An A2AtomicExecutor host exposing one BasicAgent as an Atomic skill,
 
 Start it first, in its own terminal:
     python a2a_sdk_trivia_host_server.py
-then reach it from another script (see 06_A2AProxyTool.py for the pattern):
+then reach it from another script (see 05_A2AProxyTool.py for the pattern):
     hub = A2AClientHub("http://127.0.0.1:6000", TRANSPORT_JSON_RPC, persistent=False)
     tool = toolify(hub, remote_name="TriviaAgent")
 Also the trivia backend for a2a_sdk_inter_agent_host_server.py.

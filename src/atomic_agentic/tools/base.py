@@ -13,9 +13,9 @@ from typing import (
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..invokables.atomic_invokable import AtomicInvokable
-from ..invokables.core_api import extract_io
 from ..models.parameters import ParamSpec
 from ..utils.core import run_coro_sync
+from ..utils.parameters import extract_io
 from ..models.results.tools import ToolResult
 
 
@@ -31,10 +31,9 @@ class Tool(AtomicInvokable):
 
         ``invoke(inputs)`` (inherited template) -> ``_invoke_impl`` -> ``to_arg_kwarg`` -> ``execute`` -> ``ToolResult``
 
-    Schema is derived through ``extract_io(...)``, which recognizes
-    ``AtomicInvokable`` inputs directly (reusing their declared
-    ``parameters``/``return_type``) and falls back to signature introspection
-    otherwise. Name/description inference reads ``__name__``/``__doc__`` off
+    Schema comes from the wrapped target: an ``AtomicInvokable`` contributes
+    its declared ``parameters``/``return_type``, and any other callable is
+    introspected through ``extract_io(...)``. Name/description inference reads ``__name__``/``__doc__`` off
     the wrapped target — for an ``AtomicInvokable`` these are kept in sync
     with ``.name``/``.description`` by the base class itself, so no special
     handling is needed here. ``Tool`` stays otherwise blind to what kind of
@@ -94,8 +93,8 @@ class Tool(AtomicInvokable):
         Parameters
         ----------
         function:
-            Plain callable or ``AtomicInvokable`` to expose as a Tool,
-            introspected with ``extract_io(...)``.
+            Plain callable or ``AtomicInvokable`` to expose as a Tool.
+            A plain callable is introspected with ``extract_io(...)``.
 
         name:
             Optional Tool name override. If omitted, defaults to
@@ -184,8 +183,9 @@ class Tool(AtomicInvokable):
     def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
         """Build this Tool's parameter and return schema.
 
-        Schema is derived through ``extract_io(...)`` on the underlying
-        callable.
+        An ``AtomicInvokable`` contributes its own declared ``parameters``
+        and ``return_type``; any other callable is introspected through
+        ``extract_io(...)``.
 
         Subclasses can override this template hook to build signatures from
         alternative metadata sources, such as MCP schemas or remote agent
@@ -196,6 +196,8 @@ class Tool(AtomicInvokable):
         tuple[list[ParamSpec], tuple[str, ...]]
             Ordered parameter specs and the return type tuple.
         """
+        if isinstance(self._function, AtomicInvokable):
+            return self._function.parameters, self._function.return_type
         return extract_io(self._function)
 
     # ------------------------------------------------------------------ #

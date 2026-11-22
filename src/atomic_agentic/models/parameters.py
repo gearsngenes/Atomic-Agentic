@@ -4,7 +4,7 @@ This module provides ``ParamSpec``, the canonical schema atom used by
 ``AtomicInvokable``, ``Tool``, ``Agent``, and composite objects to describe
 one declared input parameter.
 
-Utility functions that *use* ``ParamSpec`` (``extract_io``, ``to_paramspec_list``,
+Utility functions that *use* ``ParamSpec`` (``extract_io``, ``to_parameter_list``,
 ``is_valid_parameter_order``) live in ``utils/parameters.py``.
 
 ``ParamSpec`` is intentionally object-first in v2: live instances expose attribute

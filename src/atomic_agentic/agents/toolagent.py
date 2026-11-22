@@ -52,7 +52,7 @@ from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..tools import toolify, to_invokable
+from ..adapters import toolify, to_invokable
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult

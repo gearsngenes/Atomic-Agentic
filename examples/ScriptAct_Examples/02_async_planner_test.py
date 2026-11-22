@@ -24,7 +24,7 @@ import logging
 import time
 
 from atomic_agentic.agents import ScriptActAgent
-from atomic_agentic.tools import toolify
+from atomic_agentic.adapters import toolify
 
 import sys
 from pathlib import Path

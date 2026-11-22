@@ -1,4 +1,4 @@
-# examples/Tool_Examples/06_A2AProxyTool.py
+# examples/Tool_Examples/05_A2AProxyTool.py
 """
 A2AProxyTool over the a2a-sdk-backed A2AClientHub -- skill (invokable) mode
 vs. generic (send-parts) mode, against two separately-run servers:

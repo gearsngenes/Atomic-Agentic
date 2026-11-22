@@ -22,7 +22,7 @@ from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.constants.agents import RUNTIME_PARAM
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.utils.parameters import to_paramspec_list
+from atomic_agentic.utils.parameters import to_parameter_list
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 from .conftest import param_source
 
@@ -4089,7 +4089,7 @@ class TestConstructorRule:
         assert agent.post_invoke.name == "rule_agent_post_invoke"
 
     def test_invokable_stage_keeps_its_own_name(self) -> None:
-        from atomic_agentic.tools import toolify
+        from atomic_agentic.adapters import toolify
 
         pre = toolify(build_prompt, name="my_pre")
 

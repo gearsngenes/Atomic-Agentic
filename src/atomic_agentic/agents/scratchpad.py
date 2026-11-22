@@ -26,7 +26,7 @@ from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
-from ..tools import to_invokable
+from ..adapters import to_invokable
 from ..utils.rendering import frame_content
 
 

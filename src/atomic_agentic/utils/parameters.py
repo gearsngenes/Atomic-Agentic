@@ -5,17 +5,15 @@ It sits one tier above ``models/parameters.py`` in the dependency topology
 (``utils/`` depends on ``models/``) and is the canonical home for all logic that
 *uses* ``ParamSpec`` shapes rather than defining them.
 
-``parameter_overlap``/``parameter_collisions`` moved to ``invokables/core_api.py``
--- their public shape takes ``AtomicInvokable``/``Callable`` sources
-directly, which needs ``extract_io``, which this module can't import
-without a cycle (same reasoning that put ``extract_io`` there in the first
-place).
-
 Public surface
 --------------
-- ``to_paramspec_list`` — normalize any supported schema input (``None``,
+- ``to_parameter_list`` — normalize any supported schema input (``None``,
   ``TypedDict``, string sequences, ``list[ParamSpec]``) into a fresh canonical
   ``list[ParamSpec]``.
+- ``extract_io`` — callable-only schema extraction: ``(list[ParamSpec], return_type)``.
+- ``parameter_overlap``, ``parameter_collisions`` — cross-source name
+  compatibility over lists of ``ParamSpec`` lists (``extract_io(f)[0]`` or
+  ``invokable.parameters``).
 - ``is_valid_parameter_order`` — bool predicate: ``True`` if the list satisfies
   Python-compatible ordering rules, ``False`` on ``SchemaError``, propagates
   ``TypeError``.
@@ -46,7 +44,7 @@ Public surface
 Private helpers
 ---------------
 - ``_validate_parameter_order`` — raise-or-return-None enforcement of the same
-  rules; used internally by ``to_paramspec_list`` and directly by call sites that
+  rules; used internally by ``to_parameter_list`` and directly by call sites that
   want the error (``Invokable`` construction).
 - ``_KIND_PRIORITY`` — shared kind-priority table used by both
   ``_validate_parameter_order`` and ``_insertion_category``.
@@ -72,6 +70,7 @@ from types import UnionType
 from typing import (
     Annotated,
     Any,
+    Callable,
     Iterable,
     Literal,
     Optional,
@@ -88,10 +87,13 @@ from ..exceptions import SchemaError
 from ..models.parameters import ParameterReport, ParamSpec
 
 __all__ = [
-    "to_paramspec_list",
+    "to_parameter_list",
+    "extract_io",
     "is_valid_parameter_order",
     "semantically_compatible",
     "semantically_identical",
+    "parameter_overlap",
+    "parameter_collisions",
     "insert_by_category",
     "n_way_type_witness",
     "n_way_kind_compatible",
@@ -399,7 +401,7 @@ def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
     """Enforce Python-compatible parameter ordering rules, raising on any violation.
 
     This is the primary enforcement function. Call sites that want errors
-    (``Invokable`` construction, ``to_paramspec_list``)
+    (``Invokable`` construction, ``to_parameter_list``)
     call this directly. ``is_valid_parameter_order`` wraps it as a bool predicate.
 
     1. Raise TypeError if ``parameters`` is not a list.
@@ -637,7 +639,7 @@ def _normalize_prompt_template(
 # ---------------------------------------------------------------------------
 
 
-def to_paramspec_list(
+def to_parameter_list(
     schema: Optional[type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]],
 ) -> list[ParamSpec]:
     """Normalize supported schema inputs into a fresh canonical ``list[ParamSpec]``.
@@ -735,6 +737,97 @@ def to_paramspec_list(
         "Unsupported schema type. Expected one of: None, TypedDict class, "
         "list[str], tuple[str, ...], set[str], or list[ParamSpec]."
     )
+
+
+def extract_io(
+    function: Callable[..., Any],
+) -> tuple[list[ParamSpec], tuple[str, ...]]:
+    """Extract parameter specifications and return type from a callable.
+
+    Callable-only: an ``AtomicInvokable`` is not unwrapped here, so passing
+    one introspects its ``__call__``. Read ``.parameters`` and
+    ``.return_type`` from the invokable instead (``Tool`` does this itself).
+
+    Annotation source: ``get_type_hints(function, include_extras=True)`` is
+    attempted first so that ``Annotated[T, "desc"]`` is preserved intact and
+    forward references are resolved. On ``NameError`` (unresolvable forward
+    reference) the call falls back to ``{}``; each parameter then uses
+    ``param.annotation`` from ``inspect.signature`` directly.
+
+    ``Annotated`` handling: ``_unwrap_annotated`` separates the base type from
+    metadata. The first ``str`` item in the metadata becomes
+    ``ParamSpec.description`` (stripped; empty-after-strip -> ``None``).
+    ``_format_annotation_tuple`` always receives the unwrapped base type.
+
+    Type resolution priority per parameter:
+    1. Unwrapped annotation base type if present.
+    2. ``type(default)`` if annotation absent but default present.
+    3. ``"Any"`` otherwise.
+
+    Parameters
+    ----------
+    function : Callable
+        Any Python callable (function, method, lambda, etc.).
+
+    Returns
+    -------
+    tuple[list[ParamSpec], tuple[str, ...]]
+        - List of ``ParamSpec`` objects in signature order.
+        - Return type as a sorted, deduplicated tuple of type strings
+          (``Annotated`` unwrapped), the same shape as ``ParamSpec.type``.
+
+    Raises
+    ------
+    TypeError
+        If ``function`` is not callable.
+    """
+    if not callable(function):
+        raise TypeError(f"extract_io expects a callable, got {type(function)!r}")
+
+    sig = inspect.signature(function)
+
+    # Prefer resolved hints; fall back to {} on unresolvable forward references.
+    try:
+        hints = get_type_hints(function, include_extras=True)
+    except NameError:
+        hints = {}
+
+    parameters: list[ParamSpec] = []
+
+    for index, (name, param) in enumerate(sig.parameters.items()):
+        kind_name = param.kind.name
+        default   = param.default
+
+        # Annotation source: resolved hint > raw sig annotation.
+        ann = hints.get(name, param.annotation)
+        base_ann, description = _unwrap_annotated(ann)
+
+        # Type resolution: base_ann > type(default) > "Any".
+        if base_ann is not inspect._empty:
+            raw_type = base_ann
+        elif default is not inspect._empty:
+            raw_type = type(default)
+        else:
+            raw_type = inspect._empty
+
+        type_tuple  = _format_annotation_tuple(raw_type)
+        default_val = default if default is not inspect._empty else NO_VAL
+
+        parameters.append(ParamSpec(
+            name=name,
+            index=index,
+            kind=kind_name,
+            type=type_tuple,
+            default=default_val,
+            description=description,
+        ))
+
+    # Return type: resolved hint > raw sig annotation; Annotated unwrapped.
+    ret_ann = hints.get("return", sig.return_annotation)
+    base_ret, _ = _unwrap_annotated(ret_ann)
+    return_type = _format_annotation_tuple(base_ret)
+
+    return parameters, return_type
 
 
 def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
@@ -1130,3 +1223,52 @@ def apply_parameter_reports(
         )
 
     return constructed
+
+
+def parameter_overlap(
+    parameter_lists: Sequence[Sequence[ParamSpec]], *, unanimous_only: bool = False
+) -> list[str]:
+    """Names shared across ``parameter_lists`` that are jointly compatible.
+
+    Each entry is one source's parameter list (``extract_io(f)[0]`` for a
+    callable, ``invokable.parameters`` for an invokable).
+
+    1. Build one ``ParameterReport`` per distinct name via
+       ``build_parameter_reports``.
+    2. A name qualifies if declared by at least ``len(parameter_lists)``
+       sources when ``unanimous_only`` is ``True``, or at least 2 sources
+       otherwise, AND its report has a non-empty ``witness_types`` and
+       ``kind_compatible`` is ``True``.
+    3. Return qualifying names in ``reports``' own order (first-seen
+       across sources).
+
+    Complements ``parameter_collisions`` -- together they partition every
+    name meeting the same shared-ness threshold; a name below that
+    threshold (too few declaring sources) is neither.
+    """
+    reports = build_parameter_reports(parameter_lists)
+    threshold = len(parameter_lists) if unanimous_only else 2
+    return [
+        r.parameter_name
+        for r in reports
+        if sum(1 for o in r.observations if o is not None) >= threshold
+        and r.witness_types
+        and r.kind_compatible
+    ]
+
+
+def parameter_collisions(parameter_lists: Sequence[Sequence[ParamSpec]]) -> list[str]:
+    """Names shared across 2+ of ``parameter_lists`` that are NOT jointly compatible.
+
+    Same report step as ``parameter_overlap``, inverted qualifying
+    condition, and deliberately no ``unanimous_only`` -- this is a safety
+    check; narrowing it to only unanimous disagreement would hide a real
+    collision between just two of many sources.
+    """
+    reports = build_parameter_reports(parameter_lists)
+    return [
+        r.parameter_name
+        for r in reports
+        if sum(1 for o in r.observations if o is not None) >= 2
+        and not (r.witness_types and r.kind_compatible)
+    ]

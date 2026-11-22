@@ -12,7 +12,7 @@ from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.tools import toolify
+from atomic_agentic.adapters import toolify
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask, ToolAgentTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult

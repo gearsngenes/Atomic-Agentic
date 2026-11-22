@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 
 from atomic_agentic.a2a import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
-from atomic_agentic.tools import toolify
+from atomic_agentic.adapters import toolify
 
 import sys
 from pathlib import Path

@@ -296,15 +296,15 @@ class TestParamSpecDescription:
         })
         assert spec.description is None
 
-    def test_to_paramspec_list_copy_preserves_description(self) -> None:
-        from atomic_agentic.utils.parameters import to_paramspec_list
+    def test_to_parameter_list_copy_preserves_description(self) -> None:
+        from atomic_agentic.utils.parameters import to_parameter_list
 
         original = [make_param("x", 0, description="kept")]
-        result = to_paramspec_list(original)
+        result = to_parameter_list(original)
         assert result[0].description == "kept"
 
-    def test_to_paramspec_list_string_schema_yields_none_description(self) -> None:
-        from atomic_agentic.utils.parameters import to_paramspec_list
+    def test_to_parameter_list_string_schema_yields_none_description(self) -> None:
+        from atomic_agentic.utils.parameters import to_parameter_list
 
-        result = to_paramspec_list(["x", "y"])
+        result = to_parameter_list(["x", "y"])
         assert all(p.description is None for p in result)
