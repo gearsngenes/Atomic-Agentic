@@ -5,7 +5,9 @@ import asyncio
 import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError
+from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.tools.base import Tool
+from atomic_agentic.tools.mcp import MCPProxyTool
 
 from ..agents.conftest import make_stub_tool_agent
 
@@ -98,6 +100,16 @@ class TestToolOfErrors:
             Tool()  # type: ignore[call-arg]
         with pytest.raises(ToolDefinitionError):
             Tool(None)  # type: ignore[arg-type]
+
+
+class TestToolOfProxyGuards:
+    def test_mcp_proxy_tool_of_raises(self) -> None:
+        with pytest.raises(TypeError, match="MCPProxyTool.of is not supported"):
+            MCPProxyTool.of(add)
+
+    def test_a2a_proxy_tool_of_raises(self) -> None:
+        with pytest.raises(TypeError, match="A2AProxyTool.of is not supported"):
+            A2AProxyTool.of(name="x")
 
 
 class TestToolOfIntegration:

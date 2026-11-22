@@ -5,6 +5,38 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a37] - 2026-11-22
+
+Remote-and-layout release (Stages 9 part 1 and 8). The unmaintained `python-a2a` surface is removed, so `a2a-sdk` (`A2AtomicExecutor`, `A2AClientHub`, `A2AProxyTool`) is the only A2A path, and the package is reorganized around a new `atomic_agentic.adapters` package that holds the conversion functions, now named `to_tool`, `to_tools`, `to_invokable` and `to_invokables`. `atomic_agentic.utils` exposes only the parameter API, and `Tool.of` adds a decorator form of the `Tool` constructor. This release carries several breaking changes; each is marked `breaking:` below.
+
+### Added
+
+- `atomic_agentic.adapters` package with `to_tool`, `to_tools`, `to_invokable` and `to_invokables`. `to_tool` turns one component (callable, invokable, `MCPClientHub` or `A2AClientHub`) into a `Tool`; `to_tools` converts a batch and expands a hub into one proxy tool per remote tool or skill.
+- `to_invokable` takes optional `name` and `description`: a callable infers them, an `AtomicInvokable` passes through unchanged, and a `str` (which becomes a `PromptTemplate`) still needs both. `to_invokables` converts a batch for a toolbox, expanding hubs and rejecting strings with the item's index.
+- `Tool.of`, the decorator form of the constructor: `@Tool.of` or `@Tool.of(name=..., description=...)`, keyword-only arguments, name and description inferred as in `Tool(...)`. It is not supported on `MCPProxyTool` or `A2AProxyTool`.
+- An `AtomicInvokable` passed to `Tool(...)` takes its own name and description by default.
+- `A2AProxyTool` skill mode shows the remote extra description.
+
+### Changed
+
+- breaking: `toolify`, `batch_toolify` and `to_invokable` move from `atomic_agentic.tools` (module `tools.toolification`) to `atomic_agentic.adapters`, with no alias.
+- breaking: `toolify` is renamed `to_tool`, `batch_toolify` is renamed `to_tools`, and the batch invokable converter is `to_invokables`; the `ToolDefinitionError` messages that began `toolify:` now begin `to_tool:`.
+- breaking: `extract_io` moves from `atomic_agentic.invokables` to `atomic_agentic.utils` and takes only callables; it no longer unwraps an `AtomicInvokable` (use its `.parameters` and `.return_type`).
+- breaking: `parameter_overlap` and `parameter_collisions` move to `atomic_agentic.utils` and take `Sequence[Sequence[ParamSpec]]`.
+- breaking: `to_paramspec_list` is renamed `to_parameter_list`, with no alias.
+- breaking: `atomic_agentic.utils` re-exports only the parameter API (seven names). The async-loop helpers, `normalize_headers`, the name-filter helpers and `dataclass_record_to_dict` import from `atomic_agentic.utils.core`. `atomic_agentic.invokables` no longer exports `extract_io`, `parameter_overlap` or `parameter_collisions`.
+- breaking: a callable with no usable name passed to `Tool(...)` (or to `Tool.of` or `to_tool`) raises `ToolDefinitionError`; it used to be named `unnamed_callable`. A callable with no docstring gets the description `"No description available."` everywhere.
+- `ToolAgent.register_tool` and `register_tools` convert through the shared converter; the `tools` hint on the `ToolAgent` family is `MCPClientHub | A2AClientHub`.
+- The three A2A host-server examples now use `A2AtomicExecutor`, and `06_to_tool_example.py` replaces `07_toolify_example.py` without its `python-a2a` sections.
+
+### Removed
+
+- breaking: `PyA2AtomicHost`, `PyA2AtomicClient`, `PyA2AtomicTool`, `PyA2AtomicToolResult`, `PyA2AtomicError` and `PyA2AtomicConnectionError` are removed, with `atomic_agentic.constants.python_a2a` and the `python-a2a` and `extras` install extras. Use `A2AtomicExecutor`, `A2AClientHub` and `A2AProxyTool`.
+- breaking: servers deployed as `PyA2AtomicHost` cannot be reached by `A2AClientHub`; re-host them with `A2AtomicExecutor`.
+- breaking: not carried over from the removed surface: runtime `register`/`remove` on a host (the executor registry is fixed at construction), a one-call `run_server`, a free-form `capabilities` mapping, the remote class name `invokable_type`, the `headers` setter (use `refresh(headers=...)`), and the proxy-tool `agent_card`, `headers` and `remote_metadata` properties (use `tool.client_hub`). An `A2AProxyError` for a failed remote task names the task state only.
+- breaking: `to_tool`, `to_tools` and `ToolAgent.register_tools` no longer accept a `PyA2AtomicClient`.
+- The `python-a2a` CI flavor, `examples/Tool_Examples/05_PyA2AtomicTool.py` and `atomic_agentic/invokables/core_api.py` are removed.
+
 ## [2.0.0a36] - 2026-11-21
 
 Composites release (Stage 7). The five workflow classes become three in the new `atomic_agentic.composites` package: a mutable `Graph`, and `Pipeline` and `Router`, which are frozen and built over a private `Graph`. All three use the shared binding grammar from `utils/binding.py`. The `core` package was renamed `invokables` earlier in this release. The release is breaking for anyone who imports `atomic_agentic.workflows`, `atomic_agentic.core`, or any of the removed classes and exceptions below.

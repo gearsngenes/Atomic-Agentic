@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
-from typing import Annotated, Any, Mapping, Optional
+from typing import Annotated, Any, Mapping
 import warnings
 
 import pytest
@@ -22,7 +22,6 @@ from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.constants.agents import RUNTIME_PARAM
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.utils.parameters import to_parameter_list
 from ..fake_engines import FakeLLMEngine, echo_latest_user
 from .conftest import param_source
 

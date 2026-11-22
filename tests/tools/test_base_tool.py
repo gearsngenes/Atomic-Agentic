@@ -141,6 +141,14 @@ class TestToolConstruction:
         assert tool.name == "add_no_doc"
         assert tool.description == "No description available."
 
+    def test_callable_without_a_name_raises(self) -> None:
+        class NoName:
+            def __call__(self, value: str) -> str:
+                return value
+
+        with pytest.raises(ToolDefinitionError, match="cannot infer a name"):
+            Tool(function=NoName())
+
     def test_blank_callable_name_and_description_use_fallbacks(self) -> None:
         tool = Tool(function=add, name="   ", description="")
 

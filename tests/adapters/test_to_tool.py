@@ -271,10 +271,10 @@ class TestToToolCallable:
 
         assert tool.description == "Add two integers."
 
-    def test_to_tool_callable_uses_undescribed_fallback_description(self) -> None:
+    def test_to_tool_callable_uses_default_description_fallback(self) -> None:
         tool = to_tool(undocumented)
 
-        assert tool.description == "undescribed"
+        assert tool.description == "No description available."
 
     def test_to_tool_callable_rejects_non_string_description(self) -> None:
         with pytest.raises(ToolDefinitionError, match="description"):

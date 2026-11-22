@@ -53,7 +53,9 @@ def to_tool(
          (unknown ``skill_id``) propagates unwrapped.
 
     5) If ``component`` is a plain callable:
-       - construct and return a plain ``Tool``.
+       - construct and return a plain ``Tool``; the name defaults to
+         ``__name__`` and the description to the docstring (inference and the
+         nameless-callable error are the ``Tool`` constructor's).
 
     ``remote_name`` is only valid for remote-client routes.
 
@@ -96,11 +98,7 @@ def to_tool(
         if not local_tool_override_requested:
             return component
 
-        return Tool(
-            function=component,
-            name=name if name is not None else component.name,
-            description=description if description is not None else component._description,
-        )
+        return Tool(component, name, description)
 
     # 2) Non-tool AtomicInvokable.
     #
@@ -114,11 +112,7 @@ def to_tool(
                 "for a local AtomicInvokable."
             )
 
-        return Tool(
-            function=component,
-            name=name if name is not None else component.name,
-            description=description if description is not None else component._description,
-        )
+        return Tool(component, name, description)
 
     # 3) MCP client hub -> MCPProxyTool.
     if isinstance(component, MCPClientHub):
@@ -158,19 +152,9 @@ def to_tool(
                 "for a plain callable."
             )
 
-        resolved_name = name
-        if not resolved_name:
-            try:
-                resolved_name = component.__name__
-            except Exception as exc:  # noqa: BLE001
-                raise ToolDefinitionError(
-                    "to_tool: `name` is required when converting a callable and "
-                    "could not be inferred from __name__."
-                ) from exc
-
-        if not isinstance(resolved_name, str) or not resolved_name:
+        if name is not None and not isinstance(name, str):
             raise ToolDefinitionError(
-                "to_tool: `name` must resolve to a non-empty string when converting a callable."
+                "to_tool: `name` must be a string when provided for callables."
             )
 
         if description is not None and not isinstance(description, str):
@@ -178,15 +162,9 @@ def to_tool(
                 "to_tool: `description` must be a string when provided for callables."
             )
 
-        effective_description = (
-            description or component.__doc__ or "undescribed"
-        ).strip() or "undescribed"
-
-        return Tool(
-            function=component,
-            name=resolved_name,
-            description=effective_description,
-        )
+        # Name and description inference (and the nameless-callable error)
+        # belong to the Tool constructor.
+        return Tool(component, name, description)
 
     raise ToolDefinitionError(
         "to_tool: unsupported `component` type. Expected Tool | AtomicInvokable | "

@@ -452,6 +452,7 @@ Atomic-Agentic/
 |-- src/
 |   |-- atomic_agentic/
 |       |-- a2a/
+|       |-- adapters/
 |       |-- agents/
 |       |-- composites/
 |       |-- constants/

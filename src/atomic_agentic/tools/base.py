@@ -97,12 +97,16 @@ class Tool(AtomicInvokable):
             A plain callable is introspected with ``extract_io(...)``.
 
         name:
-            Optional Tool name override. If omitted, defaults to
-            ``function.__name__``.
+            Optional Tool name override. If omitted, an ``AtomicInvokable``
+            source supplies its own ``name`` and a plain callable its
+            ``__name__``; if neither resolves, ``ToolDefinitionError`` is
+            raised.
 
         description:
-            Optional Tool description override. If omitted, defaults to the
-            callable's docstring or a fallback description.
+            Optional Tool description override. If omitted, an
+            ``AtomicInvokable`` source supplies its own ``description`` and a
+            plain callable its docstring, falling back to
+            ``"No description available."``.
         """
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
@@ -124,16 +128,26 @@ class Tool(AtomicInvokable):
 
         # Prepare name and description. AtomicInvokable parent validation
         # requires both to resolve to non-empty strings.
-        inferred_name = (
-            inferred_name
-            or getattr(function, "__name__", None)
-            or "unnamed_callable"
-        )
+        if isinstance(function, AtomicInvokable):
+            source_name = function.name
+            source_doc = function.description
+        else:
+            source_name = getattr(function, "__name__", None)
+            source_doc = getattr(function, "__doc__", None)
 
-        doc = getattr(function, "__doc__", None)
+        inferred_name = inferred_name or (
+            source_name.strip()
+            if isinstance(source_name, str) and source_name.strip()
+            else None
+        )
+        if inferred_name is None:
+            raise ToolDefinitionError(
+                f"Tool: cannot infer a name for {type(function).__name__}; pass name=..."
+            )
+
         inferred_description = inferred_description or (
-            doc.strip()
-            if isinstance(doc, str) and doc.strip()
+            source_doc.strip()
+            if isinstance(source_doc, str) and source_doc.strip()
             else "No description available."
         )
 
