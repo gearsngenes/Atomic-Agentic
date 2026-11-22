@@ -11,7 +11,7 @@ from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
-from atomic_agentic.adapters import batch_toolify, toolify
+from atomic_agentic.adapters import to_tools, to_tool
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
@@ -239,9 +239,9 @@ class FakeA2AClientHub(A2AClientHub):
         return self.call_atomic_skill(skill_id, inputs)
 
 
-class TestToolifyCallable:
-    def test_toolify_callable_returns_tool(self) -> None:
-        tool = toolify(add, description="Add values.")
+class TestToToolCallable:
+    def test_to_tool_callable_returns_tool(self) -> None:
+        tool = to_tool(add, description="Add values.")
 
         assert isinstance(tool, Tool)
         assert type(tool) is Tool
@@ -250,13 +250,13 @@ class TestToolifyCallable:
         assert tool.full_name == "Tool.add"
         assert tool.invoke({"a": 2, "b": 3}).result == 5
 
-    def test_toolify_callable_uses_inferred_name_when_name_missing(self) -> None:
-        tool = toolify(add, description="Add values.")
+    def test_to_tool_callable_uses_inferred_name_when_name_missing(self) -> None:
+        tool = to_tool(add, description="Add values.")
 
         assert tool.name == "add"
 
-    def test_toolify_callable_applies_overrides(self) -> None:
-        tool = toolify(
+    def test_to_tool_callable_applies_overrides(self) -> None:
+        tool = to_tool(
             add,
             name="sum_values",
             description="Sum values.",
@@ -266,34 +266,34 @@ class TestToolifyCallable:
         assert tool.description == "Sum values."
         assert tool.full_name == "Tool.sum_values"
 
-    def test_toolify_callable_uses_docstring_description(self) -> None:
-        tool = toolify(add)
+    def test_to_tool_callable_uses_docstring_description(self) -> None:
+        tool = to_tool(add)
 
         assert tool.description == "Add two integers."
 
-    def test_toolify_callable_uses_undescribed_fallback_description(self) -> None:
-        tool = toolify(undocumented)
+    def test_to_tool_callable_uses_undescribed_fallback_description(self) -> None:
+        tool = to_tool(undocumented)
 
         assert tool.description == "undescribed"
 
-    def test_toolify_callable_rejects_non_string_description(self) -> None:
+    def test_to_tool_callable_rejects_non_string_description(self) -> None:
         with pytest.raises(ToolDefinitionError, match="description"):
-            toolify(add, description=123)  # type: ignore[arg-type]
+            to_tool(add, description=123)  # type: ignore[arg-type]
 
-    def test_toolify_callable_requires_name_when_name_cannot_be_inferred(self) -> None:
+    def test_to_tool_callable_requires_name_when_name_cannot_be_inferred(self) -> None:
         with pytest.raises(ToolDefinitionError, match="name"):
-            toolify(CallableWithoutName())
+            to_tool(CallableWithoutName())
 
-    def test_toolify_callable_rejects_empty_resolved_name(self) -> None:
+    def test_to_tool_callable_rejects_empty_resolved_name(self) -> None:
         with pytest.raises(ToolDefinitionError, match="name"):
-            toolify(CallableWithEmptyName())
+            to_tool(CallableWithEmptyName())
 
-    def test_toolify_callable_rejects_remote_name(self) -> None:
+    def test_to_tool_callable_rejects_remote_name(self) -> None:
         with pytest.raises(ToolDefinitionError, match="remote_name"):
-            toolify(add, remote_name="remote_add")
+            to_tool(add, remote_name="remote_add")
 
 
-class TestToolifyExistingTool:
+class TestToToolExistingTool:
     def test_existing_tool_returns_same_instance(self) -> None:
         original = Tool(
             function=add,
@@ -301,7 +301,7 @@ class TestToolifyExistingTool:
             description="Add values.",
         )
 
-        result = toolify(original)
+        result = to_tool(original)
 
         assert result is original
 
@@ -312,7 +312,7 @@ class TestToolifyExistingTool:
             description="Add values.",
         )
 
-        result = toolify(
+        result = to_tool(
             original,
             name="sum_values",
             description="Sum values.",
@@ -339,7 +339,7 @@ class TestToolifyExistingTool:
             description="Add values.",
         )
 
-        result = toolify(original)
+        result = to_tool(original)
 
         assert result is original
         assert original.name == "add"
@@ -352,7 +352,7 @@ class TestToolifyExistingTool:
             description="Add values.",
         )
 
-        result = toolify(original, name="sum_values")
+        result = to_tool(original, name="sum_values")
 
         assert result is not original
         assert result.function is original
@@ -370,10 +370,10 @@ class TestToolifyExistingTool:
         )
 
         with pytest.raises(ToolDefinitionError, match="remote_name"):
-            toolify(original, remote_name="remote_add")
+            to_tool(original, remote_name="remote_add")
 
 
-class TestToolifyPositionalOverrides:
+class TestToToolPositionalOverrides:
     """`name` and `description` are positional-or-keyword; `remote_name` stays
     keyword-only."""
 
@@ -381,7 +381,7 @@ class TestToolifyPositionalOverrides:
         def add(a: int, b: int) -> int:
             return a + b
 
-        tool = toolify(add, "adder", "Adds two ints.")
+        tool = to_tool(add, "adder", "Adds two ints.")
 
         assert tool.name == "adder"
         assert tool.description == "Adds two ints."
@@ -390,9 +390,9 @@ class TestToolifyPositionalOverrides:
         def add(a: int, b: int) -> int:
             return a + b
 
-        original = toolify(add)
+        original = to_tool(add)
 
-        renamed = toolify(original, "renamed")
+        renamed = to_tool(original, "renamed")
 
         assert renamed is not original
         assert renamed.name == "renamed"
@@ -400,11 +400,11 @@ class TestToolifyPositionalOverrides:
 
     def test_remote_name_is_keyword_only(self) -> None:
         with pytest.raises(TypeError):
-            toolify(FakeMCPClientHub(), None, None, "search")  # type: ignore[misc]
+            to_tool(FakeMCPClientHub(), None, None, "search")  # type: ignore[misc]
 
 
-class TestToolifyExistingProxyTool:
-    """`toolify()`'s route 1 ("already a Tool") must work uniformly across
+class TestToToolExistingProxyTool:
+    """`to_tool()`'s route 1 ("already a Tool") must work uniformly across
     plain `Tool` and every proxy-tool subtype (`MCPProxyTool`,
     `A2AProxyTool` in both skill and generic mode) --
     an explicit Pass 4 checklist item that was previously unverified."""
@@ -412,14 +412,14 @@ class TestToolifyExistingProxyTool:
     def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
         original = MCPProxyTool(FakeMCPClientHub(), "search")
 
-        result = toolify(original)
+        result = to_tool(original)
 
         assert result is original
 
     def test_mcp_proxy_tool_with_overrides_wraps_by_reference(self) -> None:
         original = MCPProxyTool(FakeMCPClientHub(), "search")
 
-        result = toolify(original, name="local_search")
+        result = to_tool(original, name="local_search")
 
         assert result is not original
         assert type(result) is Tool
@@ -430,14 +430,14 @@ class TestToolifyExistingProxyTool:
     def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
 
-        result = toolify(original)
+        result = to_tool(original)
 
         assert result is original
 
     def test_a2a_proxy_tool_skill_mode_with_overrides_wraps_by_reference(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
 
-        result = toolify(original, name="local_add")
+        result = to_tool(original, name="local_add")
 
         assert result is not original
         assert type(result) is Tool
@@ -448,14 +448,14 @@ class TestToolifyExistingProxyTool:
     def test_a2a_proxy_tool_generic_mode_without_overrides_returned_unchanged(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub())
 
-        result = toolify(original)
+        result = to_tool(original)
 
         assert result is original
 
     def test_a2a_proxy_tool_generic_mode_with_overrides_wraps_by_reference(self) -> None:
         original = A2AProxyTool(FakeA2AClientHub())
 
-        result = toolify(original, name="local_send")
+        result = to_tool(original, name="local_send")
 
         assert result is not original
         assert type(result) is Tool
@@ -463,11 +463,11 @@ class TestToolifyExistingProxyTool:
         assert result.name == "local_send"
 
 
-class TestToolifyAtomicInvokableWrapping:
+class TestToToolAtomicInvokableWrapping:
     def test_non_tool_atomic_invokable_wraps_by_reference(self) -> None:
         invokable = EchoInvokable()
 
-        tool = toolify(invokable)
+        tool = to_tool(invokable)
 
         assert type(tool) is Tool
         assert tool.function is invokable
@@ -476,24 +476,24 @@ class TestToolifyAtomicInvokableWrapping:
         assert tool.invoke({"value": 123}).result == {"value": 123}
 
 
-class TestToolifyReturnToolIdentity:
-    def test_toolify_return_tool_with_override_delegates_by_reference(self) -> None:
-        result = toolify(return_tool, name="alias")
+class TestToToolReturnToolIdentity:
+    def test_to_tool_return_tool_with_override_delegates_by_reference(self) -> None:
+        result = to_tool(return_tool, name="alias")
 
         assert result is not return_tool
         assert result.function is return_tool
         assert result.name == "alias"
 
 
-class TestToolifyMCPClientHub:
+class TestToToolMCPClientHub:
     def test_mcp_client_hub_requires_remote_name(self) -> None:
         with pytest.raises(ToolDefinitionError, match="remote_name"):
-            toolify(FakeMCPClientHub())
+            to_tool(FakeMCPClientHub())
 
     def test_mcp_client_hub_becomes_mcp_proxy_tool(self) -> None:
         hub = FakeMCPClientHub()
 
-        tool = toolify(hub, remote_name="search")
+        tool = to_tool(hub, remote_name="search")
 
         assert isinstance(tool, MCPProxyTool)
         assert tool.remote_name == "search"
@@ -502,7 +502,7 @@ class TestToolifyMCPClientHub:
     def test_mcp_client_hub_applies_overrides(self) -> None:
         hub = FakeMCPClientHub()
 
-        tool = toolify(
+        tool = to_tool(
             hub,
             remote_name="search",
             name="local_search",
@@ -515,17 +515,17 @@ class TestToolifyMCPClientHub:
 
     def test_mcp_proxy_tool_invokes_fake_hub(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "ok"}})
-        tool = toolify(hub, remote_name="search")
+        tool = to_tool(hub, remote_name="search")
 
         assert tool.invoke({"query": "hello"}).result == "ok"
         assert hub.calls == [("search", {"query": "hello"})]
 
 
-class TestToolifyA2AClientHub:
+class TestToToolA2AClientHub:
     def test_remote_name_present_selects_skill_mode(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = toolify(hub, remote_name="add")
+        tool = to_tool(hub, remote_name="add")
 
         assert isinstance(tool, A2AProxyTool)
         assert tool.skill_id == "add"
@@ -534,7 +534,7 @@ class TestToolifyA2AClientHub:
     def test_remote_name_absent_selects_generic_mode_not_an_error(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = toolify(hub)
+        tool = to_tool(hub)
 
         assert isinstance(tool, A2AProxyTool)
         assert tool.skill_id is None
@@ -543,7 +543,7 @@ class TestToolifyA2AClientHub:
     def test_remote_name_blank_selects_generic_mode(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = toolify(hub, remote_name="   ")
+        tool = to_tool(hub, remote_name="   ")
 
         assert tool.skill_id is None
 
@@ -551,12 +551,12 @@ class TestToolifyA2AClientHub:
         hub = FakeA2AClientHub()
 
         with pytest.raises(ToolDefinitionError, match="skill_id"):
-            toolify(hub, remote_name="does_not_exist")
+            to_tool(hub, remote_name="does_not_exist")
 
     def test_applies_overrides(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = toolify(
+        tool = to_tool(
             hub,
             remote_name="add",
             name="local_add",
@@ -572,39 +572,39 @@ class TestToolifyA2AClientHub:
 
     def test_skill_mode_invokes_fake_hub(self) -> None:
         hub = FakeA2AClientHub(result=17)
-        tool = toolify(hub, remote_name="add")
+        tool = to_tool(hub, remote_name="add")
 
         assert tool.invoke({"a": 12, "b": 5}).result == 17
         assert hub.skill_calls == [("add", {"a": 12, "b": 5})]
 
 
-class TestToolifyInvalidInputs:
-    def test_toolify_none_raises_tool_definition_error(self) -> None:
+class TestToToolInvalidInputs:
+    def test_to_tool_none_raises_tool_definition_error(self) -> None:
         with pytest.raises(ToolDefinitionError, match="expected a non-empty"):
-            toolify(None)  # type: ignore[arg-type]
+            to_tool(None)  # type: ignore[arg-type]
 
-    def test_toolify_unsupported_component_type_raises(self) -> None:
+    def test_to_tool_unsupported_component_type_raises(self) -> None:
         with pytest.raises(ToolDefinitionError, match="unsupported"):
-            toolify(object())  # type: ignore[arg-type]
+            to_tool(object())  # type: ignore[arg-type]
 
 
-class TestBatchToolifyLocalSources:
-    def test_batch_toolify_empty_or_none_returns_empty_list(self) -> None:
-        assert batch_toolify([]) == []
-        assert batch_toolify(None) == []
+class TestToToolsLocalSources:
+    def test_to_tools_empty_or_none_returns_empty_list(self) -> None:
+        assert to_tools([]) == []
+        assert to_tools(None) == []
 
-    def test_batch_toolify_names_local_tools(self) -> None:
-        tools = batch_toolify([add, multiply])
+    def test_to_tools_names_local_tools(self) -> None:
+        tools = to_tools([add, multiply])
 
         assert [tool.full_name for tool in tools] == [
             "Tool.add",
             "Tool.multiply",
         ]
 
-    def test_batch_toolify_wraps_non_tool_atomic_invokable(self) -> None:
+    def test_to_tools_wraps_non_tool_atomic_invokable(self) -> None:
         invokable = EchoInvokable()
 
-        tools = batch_toolify([add, invokable])
+        tools = to_tools([add, invokable])
 
         assert len(tools) == 2
         assert type(tools[0]) is Tool
@@ -613,33 +613,33 @@ class TestBatchToolifyLocalSources:
         assert tools[0].full_name == "Tool.add"
         assert tools[1].full_name == "Tool.echo_invokable"
 
-    def test_batch_toolify_returns_existing_tool_unchanged(self) -> None:
+    def test_to_tools_returns_existing_tool_unchanged(self) -> None:
         original = Tool(
             function=add,
             name="add",
             description="Add values.",
         )
 
-        tools = batch_toolify([original])
+        tools = to_tools([original])
 
         assert tools == [original]
         assert tools[0] is original
 
 
-class TestBatchToolifyRemoteExpansion:
-    def test_batch_toolify_expands_mcp_hub_tools(self) -> None:
+class TestToToolsRemoteExpansion:
+    def test_to_tools_expands_mcp_hub_tools(self) -> None:
         hub = FakeMCPClientHub()
 
-        tools = batch_toolify([hub])
+        tools = to_tools([hub])
 
         assert len(tools) == 2
         assert all(isinstance(tool, MCPProxyTool) for tool in tools)
         assert [tool.remote_name for tool in tools] == ["search", "summarize"]
 
-    def test_batch_toolify_mixed_sources_preserves_expanded_order(self) -> None:
+    def test_to_tools_mixed_sources_preserves_expanded_order(self) -> None:
         hub = FakeMCPClientHub()
 
-        tools = batch_toolify([add, hub, multiply])
+        tools = to_tools([add, hub, multiply])
 
         assert [type(tool) for tool in tools] == [
             Tool,
@@ -655,11 +655,11 @@ class TestBatchToolifyRemoteExpansion:
         ]
 
 
-    def test_batch_toolify_remote_tools_can_invoke_fake_backends(self) -> None:
+    def test_to_tools_remote_tools_can_invoke_fake_backends(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "mcp ok"}})
         a2a_hub = FakeA2AClientHub(result=17)
 
-        tools = batch_toolify([hub, a2a_hub])
+        tools = to_tools([hub, a2a_hub])
         mcp_tool = tools[0]
         a2a_tool = tools[2]
 
@@ -670,7 +670,7 @@ class TestBatchToolifyRemoteExpansion:
         assert a2a_hub.skill_calls == [("add", {"a": 1, "b": 2})]
 
 
-class TestBatchToolifyA2AClientHub:
+class TestToToolsA2AClientHub:
     def test_expands_skills_plus_one_trailing_generic_tool(self) -> None:
         hub = FakeA2AClientHub(
             skills={
@@ -679,7 +679,7 @@ class TestBatchToolifyA2AClientHub:
             }
         )
 
-        tools = batch_toolify([hub])
+        tools = to_tools([hub])
 
         assert len(tools) == 3
         assert all(isinstance(tool, A2AProxyTool) for tool in tools)
@@ -689,7 +689,7 @@ class TestBatchToolifyA2AClientHub:
     def test_zero_skill_hub_still_yields_one_generic_tool(self) -> None:
         hub = FakeA2AClientHub(skills={})
 
-        tools = batch_toolify([hub])
+        tools = to_tools([hub])
 
         assert len(tools) == 1
         assert tools[0].skill_id is None
@@ -700,7 +700,7 @@ class TestBatchToolifyA2AClientHub:
             skills={"add": a2a_sdk_skill_metadata(remote_name="add")}
         )
 
-        tools = batch_toolify([add, hub])
+        tools = to_tools([add, hub])
 
         assert [type(tool) for tool in tools] == [Tool, A2AProxyTool, A2AProxyTool]
         assert [tool.name for tool in tools] == ["add", "add", "send_parts"]

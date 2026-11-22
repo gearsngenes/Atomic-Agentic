@@ -10,13 +10,13 @@ from ..tools.a2a_sdk import A2AProxyTool
 from ..tools.base import Tool
 from ..tools.mcp import MCPProxyTool
 
-__all__ = ["toolify", "batch_toolify"]
+__all__ = ["to_tool", "to_tools", "tool"]
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# toolify
+# to_tool
 # ───────────────────────────────────────────────────────────────────────────────
-def toolify(
+def to_tool(
     component: AtomicInvokable | Callable[..., Any] | MCPClientHub | A2AClientHub,
     name: str | None = None,
     description: str | None = None,
@@ -65,7 +65,7 @@ def toolify(
     """
     if component is None:
         raise ToolDefinitionError(
-            "toolify: expected a non-empty `component`."
+            "to_tool: expected a non-empty `component`."
         )
 
     # Local wrapper overrides are identity settings for local Tool wrapping.
@@ -88,7 +88,7 @@ def toolify(
     if isinstance(component, Tool):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub "
+                "to_tool: `remote_name` is only valid for MCPClientHub "
                 "or A2AClientHub components; got `remote_name` "
                 "for an existing Tool."
             )
@@ -109,7 +109,7 @@ def toolify(
     if isinstance(component, AtomicInvokable):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub "
+                "to_tool: `remote_name` is only valid for MCPClientHub "
                 "or A2AClientHub components; got `remote_name` "
                 "for a local AtomicInvokable."
             )
@@ -125,7 +125,7 @@ def toolify(
         resolved_remote_name = str(remote_name or "").strip()
         if not resolved_remote_name:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is required when `component` is an MCPClientHub."
+                "to_tool: `remote_name` is required when `component` is an MCPClientHub."
             )
 
         return MCPProxyTool(
@@ -153,7 +153,7 @@ def toolify(
     if callable(component):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub "
+                "to_tool: `remote_name` is only valid for MCPClientHub "
                 "or A2AClientHub components; got `remote_name` "
                 "for a plain callable."
             )
@@ -164,18 +164,18 @@ def toolify(
                 resolved_name = component.__name__
             except Exception as exc:  # noqa: BLE001
                 raise ToolDefinitionError(
-                    "toolify: `name` is required when toolifying a callable and "
+                    "to_tool: `name` is required when converting a callable and "
                     "could not be inferred from __name__."
                 ) from exc
 
         if not isinstance(resolved_name, str) or not resolved_name:
             raise ToolDefinitionError(
-                "toolify: `name` must resolve to a non-empty string when toolifying a callable."
+                "to_tool: `name` must resolve to a non-empty string when converting a callable."
             )
 
         if description is not None and not isinstance(description, str):
             raise ToolDefinitionError(
-                "toolify: `description` must be a string when provided for callables."
+                "to_tool: `description` must be a string when provided for callables."
             )
 
         effective_description = (
@@ -189,23 +189,71 @@ def toolify(
         )
 
     raise ToolDefinitionError(
-        "toolify: unsupported `component` type. Expected Tool | AtomicInvokable | "
+        "to_tool: unsupported `component` type. Expected Tool | AtomicInvokable | "
         "Callable | MCPClientHub | A2AClientHub."
     )
 
 
-def batch_toolify(
+# ───────────────────────────────────────────────────────────────────────────────
+# tool
+# ───────────────────────────────────────────────────────────────────────────────
+def tool(
+    fn: Callable[..., Any] | None = None,
+    /,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+) -> Tool | Callable[[Callable[..., Any]], Tool]:
+    """
+    Decorator sugar over ``to_tool``: turn a callable into a plain ``Tool``.
+
+    Forms: ``@tool``, ``@tool()``, ``@tool(name=..., description=...)`` and the
+    direct call ``tool(fn)``. ``name`` and ``description`` are keyword-only;
+    left out, they come from the callable's ``__name__`` and docstring exactly
+    as in ``to_tool``. The decorated name is bound to the ``Tool``, not the
+    function. Sync and async callables both work.
+
+    Limits: a method loses ``self`` binding (``Tool`` is not a descriptor);
+    decorate a module-level function or bind the method first. ``remote_name``
+    is not exposed; use ``to_tool`` for remote components.
+
+    1) If ``fn`` is None, return a decorator that calls
+       ``to_tool(f, name, description)`` on the function it receives.
+    2) If ``fn`` is not callable (e.g. ``@tool("name")``), raise ``TypeError``.
+    3) Otherwise return ``to_tool(fn, name, description)``;
+       ``ToolDefinitionError`` from ``to_tool`` propagates unchanged and an
+       existing ``Tool`` or invokable follows ``to_tool``'s routing.
+    """
+    # 1) Keyword form: configure now, convert when the function arrives.
+    if fn is None:
+        def decorator(f: Callable[..., Any]) -> Tool:
+            return to_tool(f, name, description)
+
+        return decorator
+
+    # 2) A positional non-callable is almost certainly @tool("name").
+    if not callable(fn):
+        raise TypeError(
+            "tool: keyword arguments only; use @tool(name=...), not a "
+            f"positional value (got {type(fn).__name__})."
+        )
+
+    # 3) Bare form.
+    return to_tool(fn, name, description)
+
+
+def to_tools(
     sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | A2AClientHub] | None = None,
 ) -> list[Tool]:
     """
-    Toolify every provided source into Tool objects.
+    Convert every provided source into Tool objects.
 
     Behavior
     --------
-    - Callables and AtomicInvokables are each toolified into one Tool
+    - Callables and AtomicInvokables are each converted into one Tool
       (AtomicInvokable-backed Tools delegate to the original by reference).
     - Existing Tool instances are returned unchanged.
-    - Each MCPClientHub is expanded by listing all remote tools and toolifying
+    - Each MCPClientHub is expanded by listing all remote tools and converting
       each one into its own MCPProxyTool.
     - Each A2AClientHub is expanded into one skill-mode A2AProxyTool per
       discovered Atomic skill, plus exactly one trailing generic-mode
@@ -235,7 +283,7 @@ def batch_toolify(
 
             for remote_name in remote_tools:
                 hub_tools.append(
-                    toolify(
+                    to_tool(
                         source,
                         remote_name=remote_name,
                     )
@@ -246,16 +294,16 @@ def batch_toolify(
 
         if isinstance(source, A2AClientHub):
             skill_tools = [
-                toolify(source, remote_name=skill_id)
+                to_tool(source, remote_name=skill_id)
                 for skill_id in source.get_atomic_skills()
             ]
-            generic_tool = toolify(source)
+            generic_tool = to_tool(source)
 
             tools.extend([*skill_tools, generic_tool])
             continue
 
         tools.append(
-            toolify(
+            to_tool(
                 source,
             )
         )

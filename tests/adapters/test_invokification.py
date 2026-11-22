@@ -4,12 +4,12 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.adapters import batch_to_invokable, to_invokable
+from atomic_agentic.adapters import to_invokables, to_invokable
 from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.tools.mcp import MCPProxyTool
 
-from .test_toolify import FakeA2AClientHub, FakeMCPClientHub, a2a_sdk_skill_metadata
+from .test_to_tool import FakeA2AClientHub, FakeMCPClientHub, a2a_sdk_skill_metadata
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.tools.base import Tool
 
@@ -113,16 +113,16 @@ class TestToInvokableOptionalNames:
             to_invokable(42)  # type: ignore[arg-type]
 
 
-class TestBatchToInvokable:
+class TestToInvokables:
     @pytest.mark.parametrize("empty", [[], None])
     def test_empty_batch_returns_empty_list(self, empty: Any) -> None:
-        assert batch_to_invokable(empty) == []
+        assert to_invokables(empty) == []
 
     def test_mixed_batch_preserves_order_and_expands_hub_in_place(self) -> None:
         tool = Tool(function=lambda x: x, name="orig", description="d")
         tpl = PromptTemplate(template="Hi {a}.", name="tpl", description="d")
 
-        out = batch_to_invokable([tool, _documented, tpl, FakeMCPClientHub()])
+        out = to_invokables([tool, _documented, tpl, FakeMCPClientHub()])
 
         assert out[0] is tool
         assert out[2] is tpl
@@ -130,7 +130,7 @@ class TestBatchToInvokable:
         assert isinstance(out[1], Tool)
 
     def test_mcp_hub_expands_in_list_tools_order(self) -> None:
-        out = batch_to_invokable([FakeMCPClientHub()])
+        out = to_invokables([FakeMCPClientHub()])
 
         assert all(isinstance(t, MCPProxyTool) for t in out)
         assert [t.remote_name for t in out] == ["search", "summarize"]
@@ -143,25 +143,25 @@ class TestBatchToInvokable:
             }
         )
 
-        out = batch_to_invokable([hub])
+        out = to_invokables([hub])
 
         assert all(isinstance(t, A2AProxyTool) for t in out)
         assert [t.skill_id for t in out] == ["add", "multiply", None]
 
     def test_zero_skill_a2a_hub_yields_one_generic_tool(self) -> None:
-        out = batch_to_invokable([FakeA2AClientHub(skills={})])
+        out = to_invokables([FakeA2AClientHub(skills={})])
 
         assert len(out) == 1
         assert out[0].skill_id is None
 
     def test_str_item_raises_naming_its_index(self) -> None:
         with pytest.raises(TypeError, match="index 1"):
-            batch_to_invokable([_documented, "Hello {who}."])
+            to_invokables([_documented, "Hello {who}."])
 
     def test_unsupported_item_raises_naming_its_index(self) -> None:
         with pytest.raises(TypeError, match=r"unsupported component type.*index 2"):
-            batch_to_invokable([_documented, _documented, 42])
+            to_invokables([_documented, _documented, 42])
 
     def test_callable_without_name_propagates_tool_definition_error(self) -> None:
         with pytest.raises(ToolDefinitionError):
-            batch_to_invokable([_NoNameCallable()])
+            to_invokables([_NoNameCallable()])

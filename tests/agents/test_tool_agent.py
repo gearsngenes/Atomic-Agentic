@@ -369,7 +369,7 @@ class TestToolRegistration:
         assert agent.has_tool("add")
         assert agent.get_tool("add").invoke({"x": 1, "y": 2}).result == 3
 
-    def test_register_tool_instance_stores_directly_not_retoolified(self) -> None:
+    def test_register_tool_instance_stores_directly_not_rewrapped(self) -> None:
         agent = make_stub_tool_agent()
         tool = Tool(function=add, name="adder", description="Add values.")
 
@@ -551,7 +551,7 @@ class TestA2AHubRegistration:
     Atomic skill, plus exactly one trailing generic-mode tool -- each under
     its own intrinsic bare name (never the dotted full_name), and never
     aliasable. Verified directly against the current register_tools/
-    A2AProxyTool/toolify bodies, not assumed from the old (dotted-full_name)
+    A2AProxyTool/to_tool bodies, not assumed from the old (dotted-full_name)
     behavior."""
 
     def test_register_tools_with_a2a_hub_registers_skills_plus_generic(self) -> None:

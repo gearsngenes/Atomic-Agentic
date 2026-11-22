@@ -4089,9 +4089,9 @@ class TestConstructorRule:
         assert agent.post_invoke.name == "rule_agent_post_invoke"
 
     def test_invokable_stage_keeps_its_own_name(self) -> None:
-        from atomic_agentic.adapters import toolify
+        from atomic_agentic.adapters import to_tool
 
-        pre = toolify(build_prompt, name="my_pre")
+        pre = to_tool(build_prompt, name="my_pre")
 
         assert self._bare(pre_invoke=pre).pre_invoke.name == "my_pre"
 

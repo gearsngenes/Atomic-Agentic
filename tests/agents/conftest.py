@@ -12,7 +12,7 @@ from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.adapters import toolify
+from atomic_agentic.adapters import to_tool
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask, ToolAgentTask
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
@@ -59,7 +59,7 @@ def param_source(name: str, params: list[str | ParamSpec]) -> AtomicInvokable:
             pieces.append(p.name)
     namespace: dict[str, Any] = {}
     exec(f"def _source({', '.join(pieces)}):\n    return ''\n", namespace)
-    return toolify(namespace["_source"], name=name, description=f"Parameter source {name}")
+    return to_tool(namespace["_source"], name=name, description=f"Parameter source {name}")
 
 
 def add(x: int, y: int) -> int:

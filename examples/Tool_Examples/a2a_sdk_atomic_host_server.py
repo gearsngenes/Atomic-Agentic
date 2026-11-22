@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 
 from atomic_agentic.a2a import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
-from atomic_agentic.adapters import toolify
+from atomic_agentic.adapters import to_tool
 
 import sys
 from pathlib import Path
@@ -22,9 +22,9 @@ HOST = "127.0.0.1"
 PORT = 9000
 BASE_URL = f"http://{HOST}:{PORT}"
 
-# Plain functions are toolified on the fly here -- A2AtomicExecutor requires
+# Plain functions are converted with to_tool on the fly here -- A2AtomicExecutor requires
 # real AtomicInvokable instances (calls .to_agent_card() directly, no
-# toolify step of its own), unlike Agent.register_tools which normalizes a
+# to_tool step of its own), unlike Agent.register_tools which normalizes a
 # bare callable itself. A subset of the math tools is exposed, picked for
 # parameter variety: two floats (add, multiply), one float (sqrt), and a
 # sequence of floats (mean). They live in three separate lists, so all three
@@ -36,7 +36,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     skills = [
-        toolify(fn)
+        to_tool(fn)
         for fn in (*BASIC_MATH_TOOLS, *EXPONENT_TOOLS, *STAT_TOOLS)
         if fn.__name__ in SKILL_NAMES
     ]

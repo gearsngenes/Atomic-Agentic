@@ -242,13 +242,13 @@ class ScriptActAgent(ToolAgent):
                 f"tool name {name!r} collides with a real Python builtin "
                 "of the same name -- a tool with this name would be "
                 "permanently unreachable (the builtin always resolves "
-                "first). Build the tool with a different name via toolify."
+                "first). Build the tool with a different name via to_tool."
             )
         if keyword.iskeyword(name):
             raise ToolRegistrationError(
                 f"tool name {name!r} is a Python keyword; a script could "
                 "never call it. Build the tool with a different name via "
-                "toolify."
+                "to_tool."
             )
 
     def _seed_task(self, task: ScriptActAgentTask) -> None:
@@ -271,7 +271,7 @@ class ScriptActAgent(ToolAgent):
             raise AgentInvocationError(
                 f"{type(self).__name__}.{self.name}: context variable name(s) "
                 f"unusable in a script: {detail}. Rename or forget the "
-                "variable, or rename the tool with toolify."
+                "variable, or rename the tool with to_tool."
             )
 
     # ------------------------------------------------------------------ #

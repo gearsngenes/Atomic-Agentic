@@ -6,9 +6,9 @@ from ..a2a import A2AClientHub
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..invokables.prompt_template import PromptTemplate
 from ..mcp import MCPClientHub
-from .toolification import batch_toolify, toolify
+from .toolification import to_tools, to_tool
 
-__all__ = ["to_invokable", "batch_to_invokable"]
+__all__ = ["to_invokable", "to_invokables"]
 
 
 def to_invokable(
@@ -26,9 +26,9 @@ def to_invokable(
        verbatim (no ``.strip()``; a blank string raises ``PromptTemplate``'s
        ``ValueError``). A template must be named: ``TypeError`` if ``name`` or
        ``description`` is ``None``, naming the missing argument(s).
-    3. Any other callable goes through ``toolify`` with ``name`` and
+    3. Any other callable goes through ``to_tool`` with ``name`` and
        ``description``; a ``None`` falls back to the callable's ``__name__``
-       / ``__doc__`` (``toolify``'s own inference).
+       / ``__doc__`` (``to_tool``'s own inference).
     4. Anything else (``None`` included) raises ``TypeError``: with a ``name``,
        "<name> must be a str, callable or AtomicInvokable; got <type>."; without
        one, "unsupported component type <type!r>. Expected str, callable or
@@ -54,7 +54,7 @@ def to_invokable(
             )
         return PromptTemplate(template=obj, name=name, description=description)
     if callable(obj):
-        return toolify(obj, name=name, description=description)
+        return to_tool(obj, name=name, description=description)
     if name is None:
         raise TypeError(
             f"unsupported component type {type(obj).__name__!r}. "
@@ -65,7 +65,7 @@ def to_invokable(
     )
 
 
-def batch_to_invokable(
+def to_invokables(
     objs: Sequence[Any] | None = None,
 ) -> list[AtomicInvokable]:
     """
@@ -73,21 +73,21 @@ def batch_to_invokable(
     of ``to_invokable`` for a toolbox.
 
     1. An ``MCPClientHub`` or ``A2AClientHub`` expands in place through
-       ``batch_toolify([hub])`` (MCP in ``list_tools()`` order; A2A skills
+       ``to_tools([hub])`` (MCP in ``list_tools()`` order; A2A skills
        first, then the one generic tool).
     2. A ``str`` raises ``TypeError`` naming its index: nothing can name the
        template in a batch.
     3. Any other item goes through ``to_invokable(item)`` with no name or
        description (an invokable passes through unchanged; a callable becomes a
        ``Tool`` named from ``__name__``). A ``TypeError`` from it is re-raised
-       with the index appended; a ``ToolDefinitionError`` from ``toolify``
+       with the index appended; a ``ToolDefinitionError`` from ``to_tool``
        propagates unchanged.
     4. ``None`` is an empty batch. Returns the flat list.
     """
     converted: list[AtomicInvokable] = []
     for index, obj in enumerate(objs or []):
         if isinstance(obj, (MCPClientHub, A2AClientHub)):
-            converted.extend(batch_toolify([obj]))
+            converted.extend(to_tools([obj]))
         elif isinstance(obj, str):
             raise TypeError(
                 f"unsupported component type 'str' at index {index}: "

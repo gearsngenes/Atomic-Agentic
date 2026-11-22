@@ -52,7 +52,7 @@ from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..adapters import batch_to_invokable, to_invokable
+from ..adapters import to_invokables, to_invokable
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult
@@ -368,7 +368,7 @@ class ToolAgent(Agent, ABC):
         Register one invokable under its own ``name`` -- never the dotted
         ``full_name``, which only confuses an LLM asked to copy a tool id
         verbatim. An ``AtomicInvokable`` is stored as-is (never wrapped or
-        renamed; build a differently named tool with ``toolify`` first). A
+        renamed; build a differently named tool with ``to_tool`` first). A
         callable (function or bound method) goes through the shared
         ``to_invokable`` converter: its name comes from ``__name__``, its description from its docstring and
         its parameters from its signature.
@@ -409,7 +409,7 @@ class ToolAgent(Agent, ABC):
         """
         Register a mixed batch of plain invokables/callables and hub objects
         (``MCPClientHub``/``A2AClientHub``) in one pass, converting it with
-        ``batch_to_invokable``. A hub entry expands
+        ``to_invokables``. A hub entry expands
         into every tool it exposes, each under its own intrinsic bare ``name``
         -- never the dotted ``full_name``. Every candidate's name is validated
         via ``_validate_tool_name`` as soon as it's computed, during this
@@ -426,7 +426,7 @@ class ToolAgent(Agent, ABC):
 
         # Convert the whole batch (hubs expanded) before touching self._toolbox.
         try:
-            converted = batch_to_invokable(tools)
+            converted = to_invokables(tools)
         except Exception as exc:
             raise ToolRegistrationError(
                 f"{type(self).__name__}.{self.name}: failed to convert tools: {exc}"
@@ -544,7 +544,7 @@ class ToolAgent(Agent, ABC):
         ``register_tool`` entirely — the one sanctioned way to populate a
         reserved tool name (``register_tool``/``register_tools`` reject
         any name in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
-        toolified first, exactly like ``register_tool``'s own callable
+        converted first, exactly like ``register_tool``'s own callable
         branch; ``AtomicInvokable`` instances are stored as-is. Intended to
         be called from a subclass's own ``__init__``, after
         ``super().__init__()``, once per reserved name that subclass
