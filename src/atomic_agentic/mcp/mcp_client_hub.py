@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import os
 import threading
 from contextlib import AsyncExitStack
 from datetime import timedelta
@@ -70,6 +71,10 @@ class MCPClientHub:
     sse/streamable_http-only; the wrong transport raises. `env` and `cwd`
     for stdio travel in `client_kwargs`. A non-persistent stdio hub spawns
     the server process for every call.
+
+    The secondary constructors `stdio`, `sse` and `http` fix the transport and
+    expose only its options; each builds the same hub as the matching general
+    call. `stdio` takes `env` and `cwd` and carries them in `client_kwargs`.
 
     Immutable identity: location, transport_mode, name, args, persistent,
     include_names, exclude_names. Mutable request/session configuration:
@@ -208,6 +213,115 @@ class MCPClientHub:
         __init__ through a blocking run_coro_sync, so the constructor runs
         on a worker thread. Takes the same options as __init__."""
         return await asyncio.to_thread(cls, location, transport_mode, **options)
+
+    @classmethod
+    def stdio(
+        cls,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: str | os.PathLike[str] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """
+        A stdio hub: `command` is the server command, `args` its arguments.
+
+        `env` and `cwd` are merged into `client_kwargs` (a copy; the caller's
+        mapping is never mutated); naming either in both places raises.
+        """
+        extra: dict[str, Any] = {}
+        if env is not None:
+            extra["env"] = dict(env)
+        if cwd is not None:
+            extra["cwd"] = os.fspath(cwd)
+
+        merged = client_kwargs
+        if extra and isinstance(client_kwargs, Mapping):
+            clash = extra.keys() & client_kwargs.keys()
+            if clash:
+                raise ValueError(
+                    f"client_kwargs already sets {sorted(clash)!r}; pass env/cwd "
+                    "either by name or inside client_kwargs, not both."
+                )
+            merged = {**client_kwargs, **extra}
+        elif extra and client_kwargs is None:
+            merged = extra
+
+        return cls(
+            command,
+            "stdio",
+            args=args,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=merged,
+            session_kwargs=session_kwargs,
+        )
+
+    @classmethod
+    def sse(
+        cls,
+        url: str,
+        *,
+        headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """An SSE hub at `url`."""
+        return cls(
+            url,
+            "sse",
+            headers=headers,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+            session_kwargs=session_kwargs,
+        )
+
+    @classmethod
+    def http(
+        cls,
+        url: str,
+        *,
+        headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """A streamable-HTTP hub at `url`."""
+        return cls(
+            url,
+            "streamable_http",
+            headers=headers,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+            session_kwargs=session_kwargs,
+        )
 
     @staticmethod
     def _normalize_name(name: str | None) -> str | None:

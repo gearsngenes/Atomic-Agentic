@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import socket
 import threading
 import time
@@ -833,5 +834,87 @@ class TestToDictExtended:
             assert data["name"] is None
             assert data["has_client_kwargs"] is False
             assert data["client_kwargs_keys"] == []
+        finally:
+            hub.close()
+
+
+_SECONDARY_CONSTRUCTORS = [
+    ("jsonrpc", TRANSPORT_JSON_RPC),
+    ("rest", TRANSPORT_REST),
+    ("grpc", TRANSPORT_GRPC),
+]
+
+
+class TestSecondaryConstructors:
+    @pytest.mark.parametrize(("method", "transport"), _SECONDARY_CONSTRUCTORS)
+    def test_equivalent_to_general_form(
+        self, fixture_server: FixtureServer, method: str, transport: str, persistent: bool
+    ) -> None:
+        options: dict[str, Any] = {
+            "name": "remote",
+            "persistent": persistent,
+            "headers": {"X-Test": "1"},
+            "timeout_seconds": 7,
+            "client_kwargs": {"follow_redirects": True},
+        }
+
+        built = getattr(A2AClientHub, method)(fixture_server.http_url, **options)
+        general = A2AClientHub(fixture_server.http_url, transport, **options)
+        try:
+            assert built.location == general.location == fixture_server.http_url
+            assert built.transport_mode == general.transport_mode == transport
+            assert built.name == general.name == "remote"
+            assert built.persistent is general.persistent is persistent
+            assert built.headers == general.headers == {"X-Test": "1"}
+            assert built.timeout_seconds == general.timeout_seconds == 7.0
+            assert built.client_kwargs == general.client_kwargs
+            assert built.include_names == general.include_names
+            assert built.exclude_names == general.exclude_names
+            assert built.to_dict() == general.to_dict()
+        finally:
+            built.close()
+            general.close()
+
+    def test_classmethods_return_the_subclass(self, fixture_server: FixtureServer) -> None:
+        class SubHub(A2AClientHub):
+            pass
+
+        for method in ("jsonrpc", "rest", "grpc"):
+            hub = getattr(SubHub, method)(fixture_server.http_url)
+            try:
+                assert type(hub) is SubHub
+            finally:
+                hub.close()
+
+    @pytest.mark.parametrize("method", ["jsonrpc", "rest", "grpc"])
+    def test_transport_mode_is_not_an_option(
+        self, fixture_server: FixtureServer, method: str
+    ) -> None:
+        with pytest.raises(TypeError):
+            getattr(A2AClientHub, method)(
+                fixture_server.http_url, transport_mode=TRANSPORT_JSON_RPC
+            )
+
+    @pytest.mark.parametrize("method", ["jsonrpc", "rest", "grpc"])
+    def test_signature_parity_with_init(self, method: str) -> None:
+        init_params = dict(inspect.signature(A2AClientHub.__init__).parameters)
+        del init_params["self"]
+        params = dict(inspect.signature(getattr(A2AClientHub, method)).parameters)
+
+        assert set(params) == (set(init_params) - {"location", "transport_mode"}) | {"url"}
+        for pname in set(params) - {"url"}:
+            assert params[pname].default == init_params[pname].default
+            assert params[pname].kind == init_params[pname].kind
+            assert params[pname].kind is inspect.Parameter.KEYWORD_ONLY
+
+    @pytest.mark.parametrize(("method", "transport"), _SECONDARY_CONSTRUCTORS)
+    def test_default_persistent_false_and_name_none(
+        self, fixture_server: FixtureServer, method: str, transport: str
+    ) -> None:
+        hub = getattr(A2AClientHub, method)(fixture_server.http_url)
+        try:
+            assert hub.persistent is False
+            assert hub.name is None
+            assert hub.transport_mode == transport
         finally:
             hub.close()

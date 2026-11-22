@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
+import os
 import sys
 import threading
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
@@ -1356,3 +1359,202 @@ class TestToDict:
         assert data["has_headers"] is True
         assert data["header_keys"] == ["Authorization"]
         assert "Bearer secret" not in str(data)
+
+
+def _hub_snapshot(hub: MCPClientHub) -> dict[str, Any]:
+    return {
+        "location": hub.location,
+        "transport_mode": hub.transport_mode,
+        "args": hub.args,
+        "name": hub.name,
+        "persistent": hub.persistent,
+        "headers": hub.headers,
+        "read_timeout_seconds": hub.read_timeout_seconds,
+        "include_names": hub.include_names,
+        "exclude_names": hub.exclude_names,
+        "client_kwargs": hub.client_kwargs,
+        "session_kwargs": hub.session_kwargs,
+        "to_dict": hub.to_dict(),
+    }
+
+
+class TestSecondaryConstructors:
+    def test_stdio_equivalent_to_general_form(self) -> None:
+        options: dict[str, Any] = {
+            "name": "files",
+            "read_timeout_seconds": 5,
+            "include_names": ["read_file"],
+            "client_kwargs": {"encoding": "utf-8"},
+            "session_kwargs": {"sampling_callback": None},
+        }
+
+        built = MCPClientHub.stdio("python", ["server.py"], **options)
+        general = MCPClientHub("python", "stdio", args=["server.py"], **options)
+
+        assert _hub_snapshot(built) == _hub_snapshot(general)
+        assert built.args == ("server.py",)
+
+    def test_sse_equivalent_to_general_form(self) -> None:
+        options: dict[str, Any] = {
+            "name": "remote",
+            "headers": {"X-Test": "yes"},
+            "read_timeout_seconds": 3,
+            "exclude_names": ["hidden"],
+            "session_kwargs": {"sampling_callback": None},
+        }
+
+        built = MCPClientHub.sse("http://localhost:8000/sse", **options)
+        general = MCPClientHub("http://localhost:8000/sse", "sse", **options)
+
+        assert _hub_snapshot(built) == _hub_snapshot(general)
+        assert built.transport_mode == "sse"
+
+    def test_http_equivalent_to_general_form(self) -> None:
+        options: dict[str, Any] = {
+            "name": "remote",
+            "headers": {"X-Test": "yes"},
+            "read_timeout_seconds": 3,
+            "include_names": ["search"],
+            "client_kwargs": {"follow_redirects": True},
+        }
+
+        built = MCPClientHub.http("http://localhost:8000/mcp", **options)
+        general = MCPClientHub("http://localhost:8000/mcp", "streamable_http", **options)
+
+        assert _hub_snapshot(built) == _hub_snapshot(general)
+        assert built.transport_mode == "streamable_http"
+
+    def test_stdio_env_and_cwd_merge_into_client_kwargs(self) -> None:
+        hub = MCPClientHub.stdio(
+            "python",
+            env={"A": "1"},
+            cwd=Path("/tmp/x"),
+            client_kwargs={"encoding": "utf-8"},
+        )
+
+        assert dict(hub.client_kwargs) == {
+            "encoding": "utf-8",
+            "env": {"A": "1"},
+            "cwd": os.fspath(Path("/tmp/x")),
+        }
+        assert isinstance(hub.client_kwargs["cwd"], str)
+        assert type(hub.client_kwargs["env"]) is dict
+
+    def test_stdio_env_and_cwd_without_client_kwargs(self) -> None:
+        hub = MCPClientHub.stdio("python", env={"A": "1"})
+
+        assert dict(hub.client_kwargs) == {"env": {"A": "1"}}
+
+    def test_stdio_env_cwd_do_not_mutate_callers_client_kwargs(self) -> None:
+        source = {"encoding": "utf-8"}
+        env = {"A": "1"}
+
+        MCPClientHub.stdio("python", env=env, cwd="/tmp", client_kwargs=source)
+
+        assert source == {"encoding": "utf-8"}
+        assert env == {"A": "1"}
+
+    def test_stdio_env_or_cwd_duplicated_in_client_kwargs_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"client_kwargs already sets \['env'\]"):
+            MCPClientHub.stdio("python", env={"A": "1"}, client_kwargs={"env": {"B": "2"}})
+
+        with pytest.raises(ValueError, match=r"client_kwargs already sets \['cwd'\]"):
+            MCPClientHub.stdio("python", cwd="/tmp", client_kwargs={"cwd": "/other"})
+
+        with pytest.raises(ValueError, match=r"client_kwargs already sets \['cwd', 'env'\]"):
+            MCPClientHub.stdio(
+                "python",
+                env={"A": "1"},
+                cwd="/tmp",
+                client_kwargs={"env": {}, "cwd": "/other"},
+            )
+
+    def test_stdio_client_kwargs_env_without_named_env_is_untouched(self) -> None:
+        hub = MCPClientHub.stdio("python", client_kwargs={"env": {"B": "2"}})
+
+        assert dict(hub.client_kwargs) == {"env": {"B": "2"}}
+
+    def test_stdio_non_mapping_client_kwargs_still_raises_init_error(self) -> None:
+        with pytest.raises(ValueError, match="client_kwargs must be a mapping"):
+            MCPClientHub.stdio("python", env={"A": "1"}, client_kwargs=["x"])  # type: ignore[arg-type]
+
+    def test_stdio_env_cwd_reach_stdio_server_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = RecordingCall(lambda **kwargs: SimpleNamespace(**kwargs))
+        monkeypatch.setattr(client_hub_module, "StdioServerParameters", recorder)
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server: FakeAsyncCM(("read", "write")),
+        )
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub.stdio("python", env={"A": "1"}, cwd=Path("/tmp/x"))
+        asyncio.run(hub._do_operation(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["env"] == {"A": "1"}
+        assert kwargs["cwd"] == os.fspath(Path("/tmp/x"))
+
+    def test_classmethods_return_the_subclass(self) -> None:
+        class SubHub(MCPClientHub):
+            pass
+
+        assert type(SubHub.stdio("python")) is SubHub
+        assert type(SubHub.sse("http://localhost:8000/sse")) is SubHub
+        assert type(SubHub.http("http://localhost:8000/mcp")) is SubHub
+
+    def test_options_a_classmethod_does_not_declare_raise_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            MCPClientHub.stdio("python", headers={"X-Test": "yes"})  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            MCPClientHub.sse("http://localhost:8000/sse", args=["a"])  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            MCPClientHub.http("http://localhost:8000/mcp", args=["a"])  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            MCPClientHub.sse("http://localhost:8000/sse", env={"A": "1"})  # type: ignore[call-arg]
+
+    def test_persistent_stdio_via_classmethod_connects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        factory = _patch_stdio_fakes(monkeypatch)
+
+        hub = MCPClientHub.stdio("python", persistent=True)
+        try:
+            assert hub.persistent is True
+            assert hub.is_connected is True
+            assert factory.call_count == 1
+        finally:
+            hub.close()
+
+        assert hub.is_connected is False
+
+    def test_signature_parity_with_init(self) -> None:
+        init_params = dict(inspect.signature(MCPClientHub.__init__).parameters)
+        del init_params["self"]
+
+        expectations = {
+            MCPClientHub.stdio: (
+                {"location", "transport_mode", "headers"},
+                {"command", "env", "cwd"},
+            ),
+            MCPClientHub.sse: ({"location", "transport_mode", "args"}, {"url"}),
+            MCPClientHub.http: ({"location", "transport_mode", "args"}, {"url"}),
+        }
+
+        for method, (removed, added) in expectations.items():
+            params = dict(inspect.signature(method).parameters)
+            assert set(params) == (set(init_params) - removed) | added
+
+            for pname in set(params) & set(init_params):
+                assert params[pname].default == init_params[pname].default
+                if pname != "args":
+                    assert params[pname].kind == init_params[pname].kind == (
+                        inspect.Parameter.KEYWORD_ONLY
+                    )
+
+        stdio_args = inspect.signature(MCPClientHub.stdio).parameters["args"]
+        assert stdio_args.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD

@@ -21,6 +21,8 @@ from ..constants.a2a_sdk import (
     SKILL_ROUTING_KEY,
     TERMINAL_FAILURE_STATES,
     TRANSPORT_GRPC,
+    TRANSPORT_JSON_RPC,
+    TRANSPORT_REST,
     VALID_TRANSPORT_MODES,
 )
 from ..constants.core import IDENTIFIER_PATTERN, HeaderValue
@@ -77,6 +79,10 @@ class A2AClientHub:
     `client_kwargs` are options for the httpx client the hub builds (verify,
     auth, proxy, ...); `headers` and `timeout_seconds` are explicit and may
     not be repeated there.
+
+    The secondary constructors `jsonrpc`, `rest` and `grpc` fix the transport
+    and take the same options as the general call; the agent card is fetched
+    over HTTP(S) at `url` for every transport, including gRPC.
 
     Immutable identity: location, transport_mode, name, persistent,
     relative_card_path, include_names, exclude_names. Mutable through
@@ -184,6 +190,95 @@ class A2AClientHub:
         __init__.
         """
         return await asyncio.to_thread(cls, location, transport_mode, **options)
+
+    @classmethod
+    def jsonrpc(
+        cls,
+        url: str,
+        *,
+        name: str | None = None,
+        persistent: bool = False,
+        headers: Mapping[str, HeaderValue] | None = None,
+        timeout_seconds: float = 600,
+        relative_card_path: str | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+    ) -> "A2AClientHub":
+        """A JSON-RPC hub for the agent at `url`."""
+        return cls(
+            url,
+            TRANSPORT_JSON_RPC,
+            name=name,
+            persistent=persistent,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            relative_card_path=relative_card_path,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+        )
+
+    @classmethod
+    def rest(
+        cls,
+        url: str,
+        *,
+        name: str | None = None,
+        persistent: bool = False,
+        headers: Mapping[str, HeaderValue] | None = None,
+        timeout_seconds: float = 600,
+        relative_card_path: str | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+    ) -> "A2AClientHub":
+        """An HTTP+JSON hub for the agent at `url`."""
+        return cls(
+            url,
+            TRANSPORT_REST,
+            name=name,
+            persistent=persistent,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            relative_card_path=relative_card_path,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+        )
+
+    # The module-level `grpc` import is unaffected: method bodies resolve the
+    # module global, not this class attribute.
+    @classmethod
+    def grpc(
+        cls,
+        url: str,
+        *,
+        name: str | None = None,
+        persistent: bool = False,
+        headers: Mapping[str, HeaderValue] | None = None,
+        timeout_seconds: float = 600,
+        relative_card_path: str | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+    ) -> "A2AClientHub":
+        """
+        A gRPC hub for the agent at `url` (the card is still fetched over HTTP;
+        the channel target comes from the card).
+        """
+        return cls(
+            url,
+            TRANSPORT_GRPC,
+            name=name,
+            persistent=persistent,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            relative_card_path=relative_card_path,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+        )
 
     @staticmethod
     def _normalize_name(name: str | None) -> str | None:
