@@ -96,9 +96,9 @@ class FakeHub(MCPClientHub):
     connect via the real (unmocked) _connect_session when persistent=True,
     since only _do_operation is overridden here, not connection setup."""
 
-    def __init__(self, session: FakeSession, **kwargs: Any) -> None:
+    def __init__(self, session: FakeSession, *args: Any, **kwargs: Any) -> None:
         self.fake_session = session
-        super().__init__(**kwargs)
+        super().__init__(*args, **kwargs)
 
     async def _do_operation(
         self,
@@ -109,7 +109,7 @@ class FakeHub(MCPClientHub):
 
 class TestMCPClientHubConstruction:
     def test_valid_stdio_construction(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python", args=["server.py"])
+        hub = MCPClientHub("python", "stdio", args=["server.py"])
 
         assert hub.transport_mode == "stdio"
         assert hub.command == "python"
@@ -118,14 +118,14 @@ class TestMCPClientHubConstruction:
         assert hub.persistent is False
 
     def test_valid_sse_construction(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         assert hub.transport_mode == "sse"
         assert hub.endpoint == "http://localhost:8000/sse"
 
     def test_valid_streamable_http_construction(self) -> None:
         hub = MCPClientHub(
-            "streamable_http", persistent=False, endpoint="http://localhost:8000/mcp"
+            "http://localhost:8000/mcp", "streamable_http"
         )
 
         assert hub.transport_mode == "streamable_http"
@@ -134,36 +134,36 @@ class TestMCPClientHubConstruction:
     @pytest.mark.parametrize("mode", ["bad", "", "websocket"])
     def test_invalid_transport_mode_raises(self, mode: str) -> None:
         with pytest.raises(ValueError, match="transport_mode"):
-            MCPClientHub(mode, persistent=False)  # type: ignore[arg-type]
+            MCPClientHub("python", mode)  # type: ignore[arg-type]
 
-    def test_stdio_requires_command(self) -> None:
+    def test_stdio_requires_location(self) -> None:
         with pytest.raises(ValueError, match="stdio transport requires"):
-            MCPClientHub("stdio", persistent=False)
+            MCPClientHub("", "stdio")
 
     @pytest.mark.parametrize("mode", ["sse", "streamable_http"])
-    def test_http_modes_require_endpoint(self, mode: str) -> None:
-        with pytest.raises(ValueError, match="requires a non-empty endpoint"):
-            MCPClientHub(mode, persistent=False)  # type: ignore[arg-type]
+    def test_http_modes_require_location(self, mode: str) -> None:
+        with pytest.raises(ValueError, match="requires a non-empty location"):
+            MCPClientHub("", mode)  # type: ignore[arg-type]
 
     def test_args_must_be_list_of_strings(self) -> None:
         with pytest.raises(ValueError, match="args"):
             MCPClientHub(
-                "stdio", persistent=False, command="python", args=("server.py",)
+                "python", "stdio", args=("server.py",)
             )  # type: ignore[arg-type]
 
         with pytest.raises(ValueError, match="args"):
             MCPClientHub(
-                "stdio", persistent=False, command="python", args=["server.py", 1]
+                "python", "stdio", args=["server.py", 1]
             )  # type: ignore[list-item]
 
     def test_persistent_must_be_bool(self) -> None:
         with pytest.raises(TypeError, match="persistent must be a bool"):
-            MCPClientHub("stdio", "yes", command="python")  # type: ignore[arg-type]
+            MCPClientHub("python", "stdio", persistent="yes")  # type: ignore[arg-type]
 
 
 class TestMCPClientHubConstructionExtras:
     def test_defaults_are_none(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         assert hub.read_timeout_seconds is None
         assert hub.client_kwargs is None
@@ -171,16 +171,15 @@ class TestMCPClientHubConstructionExtras:
 
     def test_read_timeout_seconds_is_coerced_to_float(self) -> None:
         hub = MCPClientHub(
-            "stdio", persistent=False, command="python", read_timeout_seconds=5
+            "python", "stdio", read_timeout_seconds=5
         )
 
         assert hub.read_timeout_seconds == 5.0
 
     def test_client_kwargs_and_session_kwargs_are_stored(self) -> None:
         hub = MCPClientHub(
+            "python",
             "stdio",
-            persistent=False,
-            command="python",
             client_kwargs={"cwd": "/tmp"},
             session_kwargs={"client_info": None},
         )
@@ -192,13 +191,13 @@ class TestMCPClientHubConstructionExtras:
     def test_non_mapping_kwargs_raise(self, param_name: str) -> None:
         with pytest.raises(ValueError, match=f"{param_name} must be a mapping"):
             MCPClientHub(
-                "stdio", persistent=False, command="python", **{param_name: "bad"}
+                "python", "stdio", **{param_name: "bad"}
             )  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("param_name", ["client_kwargs", "session_kwargs"])
     def test_kwargs_properties_are_immutable_mapping(self, param_name: str) -> None:
         hub = MCPClientHub(
-            "stdio", persistent=False, command="python", **{param_name: {"a": 1}}
+            "python", "stdio", **{param_name: {"a": 1}}
         )
 
         with pytest.raises(TypeError):
@@ -207,18 +206,16 @@ class TestMCPClientHubConstructionExtras:
     def test_streamable_http_headers_and_http_client_collide(self) -> None:
         with pytest.raises(ValueError, match="Cannot set both headers"):
             MCPClientHub(
+                "http://localhost:8000/mcp",
                 "streamable_http",
-                persistent=False,
-                endpoint="http://localhost:8000/mcp",
                 headers={"Authorization": "Bearer x"},
                 client_kwargs={"http_client": object()},
             )
 
     def test_streamable_http_headers_alone_is_fine(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/mcp",
             "streamable_http",
-            persistent=False,
-            endpoint="http://localhost:8000/mcp",
             headers={"Authorization": "Bearer x"},
         )
 
@@ -226,9 +223,8 @@ class TestMCPClientHubConstructionExtras:
 
     def test_streamable_http_client_kwargs_without_http_client_is_fine(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/mcp",
             "streamable_http",
-            persistent=False,
-            endpoint="http://localhost:8000/mcp",
             headers={"Authorization": "Bearer x"},
             client_kwargs={"terminate_on_close": False},
         )
@@ -238,9 +234,8 @@ class TestMCPClientHubConstructionExtras:
     def test_collision_check_does_not_apply_to_sse(self) -> None:
         sentinel = object()
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"Authorization": "Bearer x"},
             client_kwargs={"http_client": sentinel},
         )
@@ -252,9 +247,8 @@ class TestMCPClientHubConstructionExtras:
 class TestMCPClientHubHeaders:
     def test_scalar_header_values_are_normalized(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={
                 "X-Int": 1,
                 "X-Float": 1.5,
@@ -274,9 +268,8 @@ class TestMCPClientHubHeaders:
 
     def test_headers_are_normalized_and_hidden_in_to_dict(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"Authorization": "Bearer secret", "X-Test": "yes"},
         )
 
@@ -289,9 +282,8 @@ class TestMCPClientHubHeaders:
 
     def test_headers_are_immutable_mapping(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"Authorization": "Bearer secret"},
         )
 
@@ -299,7 +291,7 @@ class TestMCPClientHubHeaders:
             hub.headers["Authorization"] = "changed"  # type: ignore[index]
 
     def test_headers_setter_revalidates(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         hub.headers = {"X-Test": "yes"}
 
@@ -322,9 +314,8 @@ class TestMCPClientHubHeaders:
     def test_invalid_headers_raise(self, headers: object, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             MCPClientHub(
+                "http://localhost:8000/sse",
                 "sse",
-                persistent=False,
-                endpoint="http://localhost:8000/sse",
                 headers=headers,  # type: ignore[arg-type]
             )
 
@@ -332,20 +323,20 @@ class TestMCPClientHubHeaders:
 class TestMCPClientHubLocalHelpers:
     def test_to_dict_shape(self) -> None:
         hub = MCPClientHub(
+            "python",
             "stdio",
-            persistent=False,
-            command="python",
             args=["server.py"],
-            headers={"X-Test": "yes"},
         )
 
         assert hub.to_dict() == {
+            "name": None,
+            "location": "python",
             "transport_mode": "stdio",
             "endpoint": None,
             "command": "python",
             "args": ["server.py"],
-            "has_headers": True,
-            "header_keys": ["X-Test"],
+            "has_headers": False,
+            "header_keys": [],
             "read_timeout_seconds": None,
             "has_client_kwargs": False,
             "client_kwargs_keys": [],
@@ -358,12 +349,12 @@ class TestMCPClientHubLocalHelpers:
         }
 
     def test_unpack_transport_streams_accepts_two_tuple(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         assert hub._unpack_transport_streams(("read", "write")) == ("read", "write")
 
     def test_unpack_transport_streams_accepts_three_tuple(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         assert hub._unpack_transport_streams(("read", "write", "session")) == (
             "read",
@@ -371,7 +362,7 @@ class TestMCPClientHubLocalHelpers:
         )
 
     def test_unpack_transport_streams_rejects_bad_shape(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         with pytest.raises(MCPConnectionError, match="Unexpected transport stream shape"):
             hub._unpack_transport_streams(("only-one",))
@@ -382,9 +373,8 @@ class TestMCPClientHubOperationsWithoutRealServer:
         session = FakeSession()
         hub = FakeHub(
             session,
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
         )
 
         tools = hub.list_tools()
@@ -397,9 +387,8 @@ class TestMCPClientHubOperationsWithoutRealServer:
         session = FakeSession()
         hub = FakeHub(
             session,
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
         )
 
         result = hub.call_tool("search", {"query": "hello"})
@@ -413,7 +402,7 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
     def test_call_tool_rejects_blank_remote_name(self) -> None:
         hub = FakeHub(
-            FakeSession(), transport_mode="stdio", persistent=False, command="python"
+            FakeSession(), "python", "stdio"
         )
 
         with pytest.raises(ValueError, match="remote_name"):
@@ -421,7 +410,7 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
     def test_call_tool_rejects_non_mapping_inputs(self) -> None:
         hub = FakeHub(
-            FakeSession(), transport_mode="stdio", persistent=False, command="python"
+            FakeSession(), "python", "stdio"
         )
 
         with pytest.raises(ValueError, match="inputs"):
@@ -429,7 +418,7 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
     def test_list_tools_wraps_session_failure_as_connection_error(self) -> None:
         hub = FakeHub(
-            FailingListSession(), transport_mode="stdio", persistent=False, command="python"
+            FailingListSession(), "python", "stdio"
         )
 
         with pytest.raises(MCPConnectionError, match="Failed to list MCP tools"):
@@ -437,7 +426,7 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
     def test_call_tool_wraps_session_failure_as_tool_error(self) -> None:
         hub = FakeHub(
-            FailingCallSession(), transport_mode="stdio", persistent=False, command="python"
+            FailingCallSession(), "python", "stdio"
         )
 
         with pytest.raises(MCPToolError, match="Failed to call MCP tool 'search'"):
@@ -451,9 +440,8 @@ class TestMCPClientHubNameFiltering:
     def test_include_names_narrows_list_tools(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             include_names=["search"],
         )
 
@@ -462,9 +450,8 @@ class TestMCPClientHubNameFiltering:
     def test_exclude_names_removes_from_list_tools(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             exclude_names=["delete"],
         )
 
@@ -473,9 +460,8 @@ class TestMCPClientHubNameFiltering:
     def test_include_names_entry_absent_from_available_is_silently_dropped(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             include_names=["search", "does_not_exist"],
         )
 
@@ -485,9 +471,8 @@ class TestMCPClientHubNameFiltering:
         session = FakeMultiToolSession()
         hub = FakeHub(
             session,
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             exclude_names=["delete"],
         )
 
@@ -499,9 +484,8 @@ class TestMCPClientHubNameFiltering:
     def test_async_list_tools_applies_the_filter(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             include_names=["search"],
         )
 
@@ -513,9 +497,8 @@ class TestMCPClientHubNameFiltering:
         with pytest.raises(ValueError):
             FakeHub(
                 FakeMultiToolSession(),
-                transport_mode="stdio",
-                persistent=False,
-                command="python",
+                "python",
+                "stdio",
                 include_names=[],
             )
 
@@ -523,9 +506,8 @@ class TestMCPClientHubNameFiltering:
         with pytest.raises(ValueError):
             FakeHub(
                 FakeMultiToolSession(),
-                transport_mode="stdio",
-                persistent=False,
-                command="python",
+                "python",
+                "stdio",
                 include_names=["search"],
                 exclude_names=["search"],
             )
@@ -533,9 +515,8 @@ class TestMCPClientHubNameFiltering:
     def test_to_dict_reports_include_and_exclude_names(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
-            transport_mode="stdio",
-            persistent=False,
-            command="python",
+            "python",
+            "stdio",
             include_names=["search"],
         )
 
@@ -548,9 +529,8 @@ class TestMCPClientHubNameFiltering:
 class TestMCPClientHubRefresh:
     def test_refresh_with_nothing_provided_raises(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"X-Old": "yes"},
         )
 
@@ -558,23 +538,22 @@ class TestMCPClientHubRefresh:
             hub.refresh()
 
     def test_refresh_with_headers_updates_stored_headers(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         hub.refresh(headers={"X-New": "yes"})
 
         assert hub.headers == {"X-New": "yes"}
 
     def test_refresh_header_validation_applies(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         with pytest.raises(ValueError, match="headers must be a mapping"):
             hub.refresh(headers="bad")  # type: ignore[arg-type]
 
     def test_refresh_client_kwargs_alone_updates_only_client_kwargs(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"X-Old": "yes"},
             session_kwargs={"client_info": None},
         )
@@ -587,9 +566,8 @@ class TestMCPClientHubRefresh:
 
     def test_refresh_session_kwargs_alone_updates_only_session_kwargs(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             headers={"X-Old": "yes"},
             client_kwargs={"timeout": 10},
         )
@@ -601,7 +579,7 @@ class TestMCPClientHubRefresh:
         assert hub.client_kwargs == {"timeout": 10}
 
     def test_refresh_replaces_client_kwargs_wholesale_not_merged(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         hub.refresh(client_kwargs={"a": 1})
         hub.refresh(client_kwargs={"b": 2})
@@ -609,16 +587,15 @@ class TestMCPClientHubRefresh:
         assert hub.client_kwargs == {"b": 2}
 
     def test_refresh_client_kwargs_validation_applies(self) -> None:
-        hub = MCPClientHub("sse", persistent=False, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         with pytest.raises(ValueError, match="client_kwargs must be a mapping"):
             hub.refresh(client_kwargs="bad")  # type: ignore[arg-type]
 
     def test_refresh_revalidates_streamable_http_collision(self) -> None:
         hub = MCPClientHub(
+            "http://localhost:8000/mcp",
             "streamable_http",
-            persistent=False,
-            endpoint="http://localhost:8000/mcp",
             headers={"Authorization": "Bearer x"},
         )
 
@@ -630,9 +607,8 @@ class TestMCPClientHubRefresh:
         client_kwargs/session_kwargs exactly as they were — not partially
         applied despite the raise."""
         hub = MCPClientHub(
+            "http://localhost:8000/mcp",
             "streamable_http",
-            persistent=False,
-            endpoint="http://localhost:8000/mcp",
             headers={"Authorization": "Bearer x"},
             session_kwargs={"client_info": None},
         )
@@ -693,7 +669,7 @@ class TestDoOperationErrorWrapping:
         monkeypatch.setattr(
             client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
         )
-        return MCPClientHub("stdio", persistent=False, command="python")
+        return MCPClientHub("python", "stdio")
 
     def test_typed_exception_from_operation_passes_through_unwrapped(
         self,
@@ -760,7 +736,7 @@ class TestDoOperationKwargsForwarding:
         )
 
         hub = MCPClientHub(
-            "stdio", persistent=False, command="python", client_kwargs={"cwd": "/tmp"}
+            "python", "stdio", client_kwargs={"cwd": "/tmp"}
         )
         asyncio.run(hub._do_operation(_identity_op))
 
@@ -776,9 +752,8 @@ class TestDoOperationKwargsForwarding:
         )
 
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             client_kwargs={"timeout": 10},
         )
         asyncio.run(hub._do_operation(_identity_op))
@@ -798,9 +773,8 @@ class TestDoOperationKwargsForwarding:
         )
 
         hub = MCPClientHub(
+            "http://localhost:8000/mcp",
             "streamable_http",
-            persistent=False,
-            endpoint="http://localhost:8000/mcp",
             client_kwargs={"terminate_on_close": False},
         )
         asyncio.run(hub._do_operation(_identity_op))
@@ -822,9 +796,8 @@ class TestDoOperationKwargsForwarding:
         monkeypatch.setattr(client_hub_module, "ClientSession", recorder)
 
         hub = MCPClientHub(
+            "python",
             "stdio",
-            persistent=False,
-            command="python",
             read_timeout_seconds=12.5,
             session_kwargs={"client_info": None},
         )
@@ -852,9 +825,8 @@ class TestDoOperationKwargsForwarding:
         )
 
         hub = MCPClientHub(
+            "http://localhost:8000/sse",
             "sse",
-            persistent=False,
-            endpoint="http://localhost:8000/sse",
             client_kwargs={"env": {"X": "1"}},
         )
 
@@ -909,7 +881,7 @@ class TestMCPClientHubPersistentConnect:
     ) -> None:
         factory = _patch_stdio_fakes(monkeypatch)
 
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         try:
             assert factory.call_count == 1
             assert hub.is_connected is True
@@ -921,7 +893,7 @@ class TestMCPClientHubPersistentConnect:
     ) -> None:
         factory = _patch_stdio_fakes(monkeypatch)
 
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         try:
             hub.list_tools()
             hub.call_tool("search", {"query": "hi"})
@@ -937,7 +909,7 @@ class TestMCPClientHubPersistentConnect:
     ) -> None:
         factory = _patch_stdio_fakes(monkeypatch)
 
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         hub.list_tools()
         hub.list_tools()
@@ -954,7 +926,7 @@ class TestMCPClientHubPersistentConnect:
 
         before = threading.active_count()
         with pytest.raises(MCPConnectionError):
-            MCPClientHub("stdio", persistent=True, command="python")
+            MCPClientHub("python", "stdio", persistent=True)
         after = threading.active_count()
 
         assert after == before
@@ -963,7 +935,7 @@ class TestMCPClientHubPersistentConnect:
 class TestMCPClientHubClose:
     def test_close_is_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_stdio_fakes(monkeypatch)
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
 
         hub.close()
         assert hub.is_connected is False
@@ -971,7 +943,7 @@ class TestMCPClientHubClose:
         assert hub.is_connected is False
 
     def test_close_on_non_persistent_hub_is_a_no_op(self) -> None:
-        hub = MCPClientHub("stdio", persistent=False, command="python")
+        hub = MCPClientHub("python", "stdio")
 
         hub.close()  # must not raise -- nothing was ever opened
 
@@ -981,7 +953,7 @@ class TestMCPClientHubClose:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         factory = _patch_stdio_fakes(monkeypatch)
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         hub.close()
         assert factory.call_count == 1
 
@@ -994,7 +966,7 @@ class TestMCPClientHubClose:
     def test_context_manager_closes_on_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_stdio_fakes(monkeypatch)
 
-        with MCPClientHub("stdio", persistent=True, command="python") as hub:
+        with MCPClientHub("python", "stdio", persistent=True) as hub:
             assert hub.is_connected is True
 
         assert hub.is_connected is False
@@ -1008,7 +980,7 @@ class TestMCPClientHubClose:
         monkeypatch.setattr(client_hub_module.atexit, "register", registered.append)
         monkeypatch.setattr(client_hub_module.atexit, "unregister", unregistered.append)
 
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         assert registered == [hub.close]
 
         hub.close()
@@ -1027,7 +999,7 @@ class TestMCPClientHubPersistentRefresh:
         )
         monkeypatch.setattr(client_hub_module, "ClientSession", factory)
 
-        hub = MCPClientHub("sse", persistent=True, endpoint="http://localhost:8000/sse")
+        hub = MCPClientHub("http://localhost:8000/sse", "sse", persistent=True)
         try:
             assert factory.call_count == 1
 
@@ -1045,7 +1017,7 @@ class TestMCPClientHubPersistentRefresh:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         factory = _patch_stdio_fakes(monkeypatch)
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         try:
             assert factory.call_count == 1
 
@@ -1077,7 +1049,7 @@ class TestMCPClientHubPersistentRefresh:
             client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
         )
 
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         try:
             with pytest.raises(MCPConnectionError):
                 hub.refresh(client_kwargs={"cwd": "/tmp"})
@@ -1111,7 +1083,7 @@ class TestMCPClientHubConcurrency:
         )
         monkeypatch.setattr(client_hub_module, "ClientSession", lambda *a, **k: session)
 
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         results: list[Any] = []
         errors: list[BaseException] = []
         lock = threading.Lock()
@@ -1144,7 +1116,7 @@ class TestMCPClientHubToDictPersistence:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_stdio_fakes(monkeypatch)
-        hub = MCPClientHub("stdio", persistent=True, command="python")
+        hub = MCPClientHub("python", "stdio", persistent=True)
         try:
             data = hub.to_dict()
             assert data["persistent"] is True
@@ -1183,3 +1155,204 @@ class TestWindowsBackgroundLoopSubprocessSupport:
             assert b"Python" in output
         finally:
             stop_background_loop(loop, thread)
+
+
+class TestConstructionContract:
+    def test_two_required_arguments(self) -> None:
+        hub = MCPClientHub("python", "stdio")
+
+        assert hub.location == "python"
+        assert hub.transport_mode == "stdio"
+        assert hub.persistent is False
+        assert hub.name is None
+
+    def test_options_are_keyword_only(self) -> None:
+        with pytest.raises(TypeError):
+            MCPClientHub("python", "stdio", ["server.py"])  # type: ignore[misc]
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_location_required_and_stripped_per_transport(self, blank: str) -> None:
+        with pytest.raises(
+            ValueError, match=r"stdio transport requires a non-empty location \(the command\)"
+        ):
+            MCPClientHub(blank, "stdio")
+
+        for mode in ("sse", "streamable_http"):
+            with pytest.raises(
+                ValueError,
+                match=rf"{mode} transport requires a non-empty location \(the URL\)",
+            ):
+                MCPClientHub(blank, mode)  # type: ignore[arg-type]
+
+        assert MCPClientHub(" python ", "stdio").location == "python"
+        assert MCPClientHub(" http://h/sse ", "sse").location == "http://h/sse"
+
+    @pytest.mark.parametrize("bad", [None, 5, ["python"]])
+    def test_non_str_location_raises_value_error(self, bad: Any) -> None:
+        with pytest.raises(ValueError, match="location must be a string"):
+            MCPClientHub(bad, "stdio")
+
+    @pytest.mark.parametrize("mode", ["sse", "streamable_http"])
+    def test_args_on_non_stdio_raises(self, mode: str) -> None:
+        with pytest.raises(ValueError, match="args is only valid for the stdio transport"):
+            MCPClientHub("http://localhost:8000/x", mode, args=["a"])  # type: ignore[arg-type]
+
+    def test_headers_on_stdio_raises(self) -> None:
+        with pytest.raises(ValueError, match="headers are not valid for the stdio transport"):
+            MCPClientHub("python", "stdio", headers={"X-Test": "yes"})
+
+    def test_headers_setter_rejects_stdio(self) -> None:
+        hub = MCPClientHub("python", "stdio")
+
+        with pytest.raises(ValueError, match="headers are not valid for the stdio transport"):
+            hub.headers = {"X-Test": "yes"}
+
+        assert hub.headers is None
+
+    def test_refresh_headers_rejected_for_stdio_non_persistent(self) -> None:
+        hub = MCPClientHub("python", "stdio")
+
+        with pytest.raises(ValueError, match="headers are not valid for the stdio transport"):
+            hub.refresh(headers={"X-Test": "yes"})
+
+        assert hub.headers is None
+
+    def test_refresh_headers_rejected_for_stdio_persistent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        factory = _patch_stdio_fakes(monkeypatch)
+        hub = MCPClientHub("python", "stdio", persistent=True)
+        try:
+            with pytest.raises(
+                ValueError, match="headers are not valid for the stdio transport"
+            ):
+                hub.refresh(headers={"X-Test": "yes"})
+
+            assert hub.headers is None
+            assert factory.call_count == 1  # no respawn attempted
+            assert hub.is_connected is True
+        finally:
+            hub.close()
+
+    def test_env_and_cwd_travel_in_client_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = RecordingCall(lambda **kwargs: SimpleNamespace(**kwargs))
+        monkeypatch.setattr(client_hub_module, "StdioServerParameters", recorder)
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server: FakeAsyncCM(("read", "write")),
+        )
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub(
+            "python", "stdio", client_kwargs={"env": {"A": "1"}, "cwd": "/tmp"}
+        )
+        asyncio.run(hub._do_operation(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["env"] == {"A": "1"}
+        assert kwargs["cwd"] == "/tmp"
+
+
+class TestName:
+    def test_default_none(self) -> None:
+        assert MCPClientHub("python", "stdio").name is None
+
+    def test_valid_identifier_stored_and_in_to_dict(self) -> None:
+        hub = MCPClientHub("python", "stdio", name="files_1")
+
+        assert hub.name == "files_1"
+        assert hub.to_dict()["name"] == "files_1"
+
+    @pytest.mark.parametrize("bad", [5, ["a"], b"a"])
+    def test_non_str_raises_type_error(self, bad: Any) -> None:
+        with pytest.raises(TypeError, match="name must be a string"):
+            MCPClientHub("python", "stdio", name=bad)
+
+    @pytest.mark.parametrize("bad", ["", " ", " a", "a ", "a-b", "1a"])
+    def test_empty_whitespace_and_non_identifier_raise_value_error(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="name must be a valid identifier"):
+            MCPClientHub("python", "stdio", name=bad)
+
+    def test_name_has_no_setter(self) -> None:
+        hub = MCPClientHub("python", "stdio", name="files")
+
+        with pytest.raises(AttributeError):
+            hub.name = "other"  # type: ignore[misc]
+
+
+class TestViews:
+    def test_endpoint_and_command_views_per_transport(self) -> None:
+        stdio = MCPClientHub("python", "stdio")
+        assert stdio.command == "python"
+        assert stdio.endpoint is None
+
+        for mode in ("sse", "streamable_http"):
+            hub = MCPClientHub("http://localhost:8000/x", mode)  # type: ignore[arg-type]
+            assert hub.endpoint == "http://localhost:8000/x"
+            assert hub.command is None
+
+    def test_location_property(self) -> None:
+        assert MCPClientHub("python", "stdio").location == "python"
+        assert MCPClientHub("http://localhost:8000/sse", "sse").location == (
+            "http://localhost:8000/sse"
+        )
+
+
+class TestAsyncCreate:
+    def test_async_create_non_persistent(self) -> None:
+        hub = asyncio.run(MCPClientHub.async_create("python", "stdio"))
+
+        assert isinstance(hub, MCPClientHub)
+        assert hub.location == "python"
+        assert hub.persistent is False
+
+    def test_async_create_persistent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_stdio_fakes(monkeypatch)
+
+        hub = asyncio.run(MCPClientHub.async_create("python", "stdio", persistent=True))
+        try:
+            assert hub.is_connected is True
+        finally:
+            hub.close()
+
+        assert hub.is_connected is False
+
+    def test_async_create_forwards_options(self) -> None:
+        hub = asyncio.run(
+            MCPClientHub.async_create(
+                "http://localhost:8000/sse",
+                "sse",
+                name="remote",
+                read_timeout_seconds=7,
+                headers={"X-Test": "yes"},
+            )
+        )
+
+        assert hub.name == "remote"
+        assert hub.read_timeout_seconds == 7.0
+        assert hub.headers == {"X-Test": "yes"}
+
+
+class TestToDict:
+    def test_adds_name_and_location_and_keeps_redaction(self) -> None:
+        hub = MCPClientHub(
+            "http://localhost:8000/sse",
+            "sse",
+            name="remote",
+            headers={"Authorization": "Bearer secret"},
+        )
+
+        data = hub.to_dict()
+
+        assert data["name"] == "remote"
+        assert data["location"] == "http://localhost:8000/sse"
+        assert data["endpoint"] == "http://localhost:8000/sse"
+        assert data["command"] is None
+        assert data["has_headers"] is True
+        assert data["header_keys"] == ["Authorization"]
+        assert "Bearer secret" not in str(data)

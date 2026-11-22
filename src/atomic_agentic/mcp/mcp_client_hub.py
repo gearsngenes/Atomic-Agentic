@@ -22,7 +22,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from ..constants.core import HeaderValue, T
+from ..constants.core import IDENTIFIER_PATTERN, HeaderValue, T
 from ..exceptions import MCPConnectionError, MCPToolError
 from ..utils.core import (
     apply_name_filter,
@@ -64,11 +64,17 @@ class MCPClientHub:
     the process exits normally (atexit-registered at construction), so a
     forgotten close() doesn't orphan the underlying stdio subprocess.
 
-    Immutable transport identity: transport_mode, endpoint, command, args,
-    persistent, include_names, exclude_names. Mutable request/session
-    configuration: headers (direct setter, or via refresh()),
-    client_kwargs/session_kwargs (via refresh() only). read_timeout_seconds
-    is fixed at construction.
+    Construction takes two required arguments, `location` (the command for
+    stdio, the URL for sse and streamable_http) and `transport_mode`; every
+    other option is keyword-only. `args` is stdio-only and `headers` is
+    sse/streamable_http-only; the wrong transport raises. `env` and `cwd`
+    for stdio travel in `client_kwargs`. A non-persistent stdio hub spawns
+    the server process for every call.
+
+    Immutable identity: location, transport_mode, name, args, persistent,
+    include_names, exclude_names. Mutable request/session configuration:
+    headers (direct setter, or via refresh()), client_kwargs/session_kwargs
+    (via refresh() only). read_timeout_seconds is fixed at construction.
 
     include_names/exclude_names filter list_tools()/async_list_tools()'s
     output only -- discovery-only, not enforced on call_tool()/
@@ -78,17 +84,18 @@ class MCPClientHub:
 
     def __init__(
         self,
+        location: str,
         transport_mode: Literal["stdio", "sse", "streamable_http"],
-        persistent: bool,
-        endpoint: str | None = None,
-        command: str | None = None,
+        *,
         args: list[str] | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
         read_timeout_seconds: float | None = None,
-        client_kwargs: Mapping[str, Any] | None = None,
-        session_kwargs: Mapping[str, Any] | None = None,
         include_names: list[str] | None = None,
         exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         mode = str(transport_mode).strip()
         if mode not in {"stdio", "sse", "streamable_http"}:
@@ -99,30 +106,27 @@ class MCPClientHub:
         if not isinstance(persistent, bool):
             raise TypeError("persistent must be a bool.")
 
-        normalized_endpoint: str | None = None
-        if endpoint is not None:
-            if not isinstance(endpoint, str):
-                raise ValueError("endpoint must be a string when provided.")
-            normalized_endpoint = endpoint.strip() or None
-
-        normalized_command: str | None = None
-        if command is not None:
-            if not isinstance(command, str):
-                raise ValueError("command must be a string when provided.")
-            normalized_command = command.strip() or None
+        if not isinstance(location, str):
+            raise ValueError("location must be a string.")
+        normalized_location = location.strip()
+        if not normalized_location:
+            what = "the command" if mode == "stdio" else "the URL"
+            raise ValueError(
+                f"{mode} transport requires a non-empty location ({what})."
+            )
 
         normalized_args: tuple[str, ...] | None = None
         if args is not None:
             if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
                 raise ValueError("args must be a list of strings when provided.")
+            if mode != "stdio":
+                raise ValueError("args is only valid for the stdio transport.")
             normalized_args = tuple(args)
 
         normalized_headers = normalize_headers(headers)
+        self._validate_headers_for_transport(mode, normalized_headers)
 
-        if mode == "stdio" and not normalized_command:
-            raise ValueError("stdio transport requires a non-empty command string.")
-        if mode in {"sse", "streamable_http"} and not normalized_endpoint:
-            raise ValueError(f"{mode} transport requires a non-empty endpoint string.")
+        normalized_name = self._normalize_name(name)
 
         normalized_read_timeout_seconds: float | None = (
             float(read_timeout_seconds) if read_timeout_seconds is not None else None
@@ -144,8 +148,8 @@ class MCPClientHub:
         )
 
         self._transport_mode: Literal["stdio", "sse", "streamable_http"] = mode
-        self._endpoint: str | None = normalized_endpoint
-        self._command: str | None = normalized_command
+        self._location: str = normalized_location
+        self._name: str | None = normalized_name
         self._args: tuple[str, ...] | None = normalized_args
         self._headers: Mapping[str, str] | None = normalized_headers
         self._read_timeout_seconds: float | None = normalized_read_timeout_seconds
@@ -193,6 +197,43 @@ class MCPClientHub:
             # orphaning it. Unregistered by close() itself.
             atexit.register(self.close)
 
+    @classmethod
+    async def async_create(
+        cls,
+        location: str,
+        transport_mode: Literal["stdio", "sse", "streamable_http"],
+        **options: Any,
+    ) -> MCPClientHub:
+        """Non-blocking construction: a persistent hub connects inside
+        __init__ through a blocking run_coro_sync, so the constructor runs
+        on a worker thread. Takes the same options as __init__."""
+        return await asyncio.to_thread(cls, location, transport_mode, **options)
+
+    @staticmethod
+    def _normalize_name(name: str | None) -> str | None:
+        """None passes through; otherwise name must be an identifier."""
+        if name is None:
+            return None
+        if not isinstance(name, str):
+            raise TypeError("name must be a string when provided.")
+        if not IDENTIFIER_PATTERN.match(name):
+            raise ValueError(
+                "name must be a valid identifier (letters, digits, underscores) "
+                "when provided."
+            )
+        return name
+
+    @staticmethod
+    def _validate_headers_for_transport(
+        transport_mode: str,
+        headers: Mapping[str, str] | None,
+    ) -> None:
+        """Raise if headers are given for the stdio transport. Takes explicit
+        candidate values (not self.*) so refresh() can validate before
+        committing."""
+        if transport_mode == "stdio" and headers is not None:
+            raise ValueError("headers are not valid for the stdio transport.")
+
     @staticmethod
     def _normalize_kwargs_mapping(
         value: Mapping[str, Any] | None,
@@ -234,12 +275,22 @@ class MCPClientHub:
         return self._transport_mode
 
     @property
+    def location(self) -> str:
+        return self._location
+
+    @property
+    def name(self) -> str | None:
+        return self._name
+
+    @property
     def endpoint(self) -> str | None:
-        return self._endpoint
+        """The URL for sse/streamable_http, None for stdio (a view over location)."""
+        return self._location if self._transport_mode != "stdio" else None
 
     @property
     def command(self) -> str | None:
-        return self._command
+        """The command for stdio, None otherwise (a view over location)."""
+        return self._location if self._transport_mode == "stdio" else None
 
     @property
     def args(self) -> tuple[str, ...] | None:
@@ -251,7 +302,9 @@ class MCPClientHub:
 
     @headers.setter
     def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
-        self._headers = normalize_headers(value)
+        normalized = normalize_headers(value)
+        self._validate_headers_for_transport(self._transport_mode, normalized)
+        self._headers = normalized
 
     @property
     def read_timeout_seconds(self) -> float | None:
@@ -333,6 +386,9 @@ class MCPClientHub:
                 else self._session_kwargs
             )
 
+            self._validate_headers_for_transport(
+                self._transport_mode, resolved_headers
+            )
             self._validate_streamable_http_collision(
                 transport_mode=self._transport_mode,
                 headers=resolved_headers,
@@ -373,6 +429,9 @@ class MCPClientHub:
                 else self._session_kwargs
             )
 
+            self._validate_headers_for_transport(
+                self._transport_mode, resolved_headers
+            )
             self._validate_streamable_http_collision(
                 transport_mode=self._transport_mode,
                 headers=resolved_headers,
@@ -412,6 +471,8 @@ class MCPClientHub:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
+            "location": self.location,
             "transport_mode": self.transport_mode,
             "endpoint": self.endpoint,
             "command": self.command,

@@ -25,9 +25,9 @@ class TestMCPClientHubRealStdioPersistence:
 
     def test_construct_call_close_does_not_raise(self) -> None:
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
         try:
@@ -41,9 +41,9 @@ class TestMCPClientHubRealStdioPersistence:
 
     def test_close_is_idempotent(self) -> None:
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
 
@@ -58,9 +58,9 @@ class TestMCPClientHubRealStdioPersistence:
         close_event.set() + await old_holder_task) -- a second real path
         into the exact constraint this file guards."""
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
         try:

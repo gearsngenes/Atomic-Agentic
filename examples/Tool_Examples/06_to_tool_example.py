@@ -152,9 +152,8 @@ def main() -> None:
     print("[MCP] Connecting to:", MCP_ENDPOINT)
     try:
         mcp_hub = MCPClientHub(
-            transport_mode="streamable_http",
-            persistent=False,
-            endpoint=MCP_ENDPOINT,
+            MCP_ENDPOINT,
+            "streamable_http",
             headers=MCP_HEADERS,
         )
 
