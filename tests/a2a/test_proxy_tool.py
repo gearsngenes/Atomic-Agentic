@@ -293,7 +293,7 @@ def echo_fixture_server():
 
 class TestSkillMode:
     def test_construction_defaults_name(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, skill_id="add")
             assert tool.name == "add"
@@ -304,7 +304,7 @@ class TestSkillMode:
             hub.close()
 
     def test_unknown_skill_id_raises(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(ToolDefinitionError):
                 A2AProxyTool(hub, skill_id="does_not_exist")
@@ -312,7 +312,7 @@ class TestSkillMode:
             hub.close()
 
     def test_sync_invocation(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, skill_id="add")
             result = tool.invoke({"a": 2, "b": 3})
@@ -324,7 +324,7 @@ class TestSkillMode:
             hub.close()
 
     def test_async_invocation(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             result = asyncio.run(A2AProxyTool(hub, skill_id="add").async_invoke({"a": 4, "b": 5}))
             assert result.result == 9
@@ -332,7 +332,7 @@ class TestSkillMode:
             hub.close()
 
     def test_remote_failure_raises_tool_invocation_error(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, skill_id="boom")
             with pytest.raises(ToolInvocationError):
@@ -341,7 +341,7 @@ class TestSkillMode:
             hub.close()
 
     def test_execute_payload_and_result_fields(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, skill_id="add")
             fields = {
@@ -360,7 +360,7 @@ class TestSkillMode:
             hub.close()
 
     def test_no_make_result_and_no_hook_overrides(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, skill_id="add")
             assert not hasattr(tool, "make_result")
@@ -370,7 +370,7 @@ class TestSkillMode:
             hub.close()
 
     def test_to_dict(self, atomic_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             data = A2AProxyTool(hub, skill_id="add").to_dict()
             assert data["skill_id"] == "add"
@@ -386,7 +386,7 @@ class TestSkillMode:
 
 class TestGenericMode:
     def test_construction_defaults_name(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub)
             assert tool.name == "send_parts"
@@ -397,7 +397,7 @@ class TestGenericMode:
             hub.close()
 
     def test_sync_round_trip_mixed_kinds(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub)
             raw = b"payload"
@@ -423,7 +423,7 @@ class TestGenericMode:
             hub.close()
 
     def test_async_round_trip(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub)
             result = asyncio.run(tool.async_invoke({"parts": [{"text": "async hi"}]}))
@@ -432,7 +432,7 @@ class TestGenericMode:
             hub.close()
 
     def test_metadata_passthrough(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub)
             result = tool.invoke({"parts": [{"text": "hi"}], "metadata": {"session": "abc"}})
@@ -442,7 +442,7 @@ class TestGenericMode:
             hub.close()
 
     def test_missing_parts_raises(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(ToolInvocationError):
                 A2AProxyTool(hub).invoke({})
@@ -450,7 +450,7 @@ class TestGenericMode:
             hub.close()
 
     def test_malformed_part_dict_raises(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(ToolInvocationError):
                 A2AProxyTool(hub).invoke({"parts": [{}]})
@@ -458,7 +458,7 @@ class TestGenericMode:
             hub.close()
 
     def test_explicit_name_overrides_default(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             tool = A2AProxyTool(hub, name="custom_send")
             assert tool.name == "custom_send"

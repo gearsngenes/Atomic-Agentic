@@ -1273,7 +1273,7 @@ class TestName:
         with pytest.raises(TypeError, match="name must be a string"):
             MCPClientHub("python", "stdio", name=bad)
 
-    @pytest.mark.parametrize("bad", ["", " ", " a", "a ", "a-b", "1a"])
+    @pytest.mark.parametrize("bad", ["", " ", " a", "a ", "a\n", "a-b", "1a"])
     def test_empty_whitespace_and_non_identifier_raise_value_error(self, bad: str) -> None:
         with pytest.raises(ValueError, match="name must be a valid identifier"):
             MCPClientHub("python", "stdio", name=bad)

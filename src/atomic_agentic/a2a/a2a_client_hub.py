@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Callable, Mapping, Sequence
+from types import MappingProxyType
+from typing import Any, Callable, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import grpc
@@ -22,7 +23,7 @@ from ..constants.a2a_sdk import (
     TRANSPORT_GRPC,
     VALID_TRANSPORT_MODES,
 )
-from ..constants.core import HeaderValue
+from ..constants.core import IDENTIFIER_PATTERN, HeaderValue
 from ..exceptions import A2AProxyError
 from ..models.a2a_sdk import A2AtomicSkillMetadata
 from ..utils.core import (
@@ -42,7 +43,7 @@ class A2AClientHub:
     """
     Connectivity to one remote A2A server, over the caller's choice of
     JSON-RPC, REST (HTTP+JSON), or gRPC -- and the caller's choice of
-    connection lifetime via the required `persistent` knob.
+    connection lifetime via a `persistent` knob (default False).
 
     Purely mechanical: accepts and returns literal a2a-sdk Part objects with
     zero Python-native type dispatch (Pass 3's A2AProxyTool owns that).
@@ -70,10 +71,16 @@ class A2AClientHub:
     agent_card is still resolved and cached once at construction regardless
     of mode.
 
-    transport_mode/base_url/persistent/include_names/exclude_names are
-    immutable identity, fixed at construction -- constructing a new instance
-    is the only way to change any of them. headers/timeout are mutable only
-    via refresh().
+    Construction takes two required arguments, `location` (the HTTP(S) base
+    URL of the remote agent; the agent card is fetched over HTTP for every
+    transport) and `transport_mode`; every other option is keyword-only.
+    `client_kwargs` are options for the httpx client the hub builds (verify,
+    auth, proxy, ...); `headers` and `timeout_seconds` are explicit and may
+    not be repeated there.
+
+    Immutable identity: location, transport_mode, name, persistent,
+    relative_card_path, include_names, exclude_names. Mutable through
+    refresh() only: headers, timeout_seconds, client_kwargs.
 
     include_names/exclude_names filter get_atomic_skills()'s output only --
     discovery-only, not enforced on call_atomic_skill()/
@@ -84,33 +91,38 @@ class A2AClientHub:
 
     def __init__(
         self,
-        base_url: str,
-        transport_mode: str,
-        persistent: bool,
+        location: str,
+        transport_mode: Literal["JSONRPC", "HTTP+JSON", "GRPC"],
+        *,
+        name: str | None = None,
+        persistent: bool = False,
         headers: Mapping[str, HeaderValue] | None = None,
-        timeout: float = 600,
+        timeout_seconds: float = 600,
         relative_card_path: str | None = None,
         include_names: list[str] | None = None,
         exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         """
         Validate identity/config, then build the underlying connection.
 
-        1. Validate base_url is non-empty.
+        1. Validate location is a non-empty string.
         2. Validate transport_mode against VALID_TRANSPORT_MODES.
         3. Validate persistent is a bool.
-        4-8. Normalize and store headers/timeout/relative_card_path, the
-           frozen identity triple (base_url/transport_mode/persistent), an
-           unconditional refresh lock, and the frozen include_names/
-           exclude_names filter (via validate_name_filter).
-        9. persistent=True: start_background_loop(), connect on it, roll the
+        4. Validate name.
+        5. Normalize headers, timeout_seconds and client_kwargs.
+        6. Store the identity, an unconditional refresh lock, and the frozen
+           include_names/exclude_names filter (via validate_name_filter).
+        7. persistent=True: start_background_loop(), connect on it, roll the
            loop back if connection fails. persistent=False: self._bg_loop/
            _bg_thread/_client are all None; a plain run_coro_sync
            connect/resolve/close cycle resolves only the agent card.
         """
-        resolved_base_url = str(base_url).strip()
-        if not resolved_base_url:
-            raise ValueError("base_url must be a non-empty string.")
+        if not isinstance(location, str):
+            raise ValueError("location must be a string.")
+        resolved_location = location.strip()
+        if not resolved_location:
+            raise ValueError("location must be a non-empty string.")
 
         mode = str(transport_mode).strip()
         if mode not in VALID_TRANSPORT_MODES:
@@ -121,10 +133,12 @@ class A2AClientHub:
         if not isinstance(persistent, bool):
             raise TypeError("persistent must be a bool.")
 
+        self._name: str | None = self._normalize_name(name)
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
-        self._timeout: float = float(timeout)
+        self._timeout_seconds: float = float(timeout_seconds)
+        self._client_kwargs: dict[str, Any] | None = self._normalize_client_kwargs(client_kwargs)
         self._relative_card_path: str | None = relative_card_path
-        self._base_url: str = resolved_base_url
+        self._location: str = resolved_location
         self._transport_mode: str = mode
         self._persistent: bool = persistent
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
@@ -136,7 +150,8 @@ class A2AClientHub:
             self._bg_loop, self._bg_thread = start_background_loop()
             try:
                 self._client, self._agent_card = run_coro_sync(
-                    self._connect(self._headers, self._timeout), loop=self._bg_loop
+                    self._connect(self._headers, self._timeout_seconds, self._client_kwargs),
+                    loop=self._bg_loop,
                 )
                 self._atomic_skills = self._build_atomic_skills(
                     self._agent_card, self._include_names, self._exclude_names
@@ -148,7 +163,9 @@ class A2AClientHub:
             self._bg_loop = None
             self._bg_thread = None
             self._client = None
-            self._agent_card = run_coro_sync(self._resolve_card(self._headers, self._timeout))
+            self._agent_card = run_coro_sync(
+                self._resolve_card(self._headers, self._timeout_seconds, self._client_kwargs)
+            )
             self._atomic_skills = self._build_atomic_skills(
                 self._agent_card, self._include_names, self._exclude_names
             )
@@ -156,47 +173,63 @@ class A2AClientHub:
     @classmethod
     async def async_create(
         cls,
-        base_url: str,
-        transport_mode: str,
-        persistent: bool,
-        headers: Mapping[str, HeaderValue] | None = None,
-        timeout: float = 600,
-        relative_card_path: str | None = None,
-        include_names: list[str] | None = None,
-        exclude_names: list[str] | None = None,
+        location: str,
+        transport_mode: Literal["JSONRPC", "HTTP+JSON", "GRPC"],
+        **options: Any,
     ) -> "A2AClientHub":
         """
         Non-blocking construction. __init__ performs blocking async-bridging
         internally (run_coro_sync), so this runs it in a worker thread rather
-        than stalling the caller's event loop.
+        than stalling the caller's event loop. Takes the same options as
+        __init__.
         """
-        return await asyncio.to_thread(
-            cls,
-            base_url,
-            transport_mode,
-            persistent,
-            headers=headers,
-            timeout=timeout,
-            relative_card_path=relative_card_path,
-            include_names=include_names,
-            exclude_names=exclude_names,
-        )
+        return await asyncio.to_thread(cls, location, transport_mode, **options)
+
+    @staticmethod
+    def _normalize_name(name: str | None) -> str | None:
+        """None passes through; otherwise name must be an identifier."""
+        if name is None:
+            return None
+        if not isinstance(name, str):
+            raise TypeError("name must be a string when provided.")
+        if not IDENTIFIER_PATTERN.fullmatch(name):
+            raise ValueError(
+                "name must be a valid identifier (letters, digits, underscores) "
+                "when provided."
+            )
+        return name
+
+    @staticmethod
+    def _normalize_client_kwargs(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        """Validate the httpx options bucket: a mapping (or None) that does not repeat headers/timeout."""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("client_kwargs must be a mapping when provided.")
+        for key in ("headers", "timeout"):
+            if key in value:
+                raise ValueError(
+                    f"client_kwargs may not set {key!r}; use the named option instead."
+                )
+        return dict(value)
 
     async def _connect(
         self,
         headers: Mapping[str, str] | None,
-        timeout: float,
+        timeout_seconds: float,
+        client_kwargs: Mapping[str, Any] | None,
     ) -> tuple[Client, AgentCard]:
         """
         Build one fresh Client and resolve its AgentCard.
 
-        Takes headers/timeout explicitly (rather than always reading
-        self._headers/self._timeout) so refresh() can build-and-validate a
+        Takes headers/timeout_seconds/client_kwargs explicitly (rather than
+        always reading self.*) so refresh() can build-and-validate a
         candidate connection before committing it.
         """
         httpx_client = httpx.AsyncClient(
             headers=dict(headers) if headers is not None else None,
-            timeout=timeout,
+            timeout=timeout_seconds,
+            **dict(client_kwargs or {}),
         )
         grpc_channel_factory = (
             self._build_grpc_channel_factory() if self._transport_mode == TRANSPORT_GRPC else None
@@ -210,7 +243,7 @@ class A2AClientHub:
         )
         try:
             client = await create_client(
-                self._base_url,
+                self._location,
                 client_config=config,
                 relative_card_path=self._relative_card_path,
             )
@@ -222,7 +255,7 @@ class A2AClientHub:
             ValueError,
         ) as exc:
             raise A2AProxyError(
-                f"{type(self).__name__}: failed to connect to {self._base_url!r} "
+                f"{type(self).__name__}: failed to connect to {self._location!r} "
                 f"via {self._transport_mode}: {exc}"
             ) from exc
 
@@ -236,7 +269,8 @@ class A2AClientHub:
     async def _resolve_card(
         self,
         headers: Mapping[str, str] | None,
-        timeout: float,
+        timeout_seconds: float,
+        client_kwargs: Mapping[str, Any] | None,
     ) -> AgentCard:
         """
         One-shot connect -> resolve -> close, used by non-persistent
@@ -248,7 +282,7 @@ class A2AClientHub:
         reproduction), the same cross-loop hazard that already forced
         persistent mode onto one dedicated background loop.
         """
-        client, card = await self._connect(headers, timeout)
+        client, card = await self._connect(headers, timeout_seconds, client_kwargs)
         await client.close()
         return card
 
@@ -286,11 +320,11 @@ class A2AClientHub:
         """
         Build this hub's gRPC channel factory (a2a-sdk ships none).
 
-        Insecure-vs-TLS is inferred once from self._base_url's scheme (bare
+        Insecure-vs-TLS is inferred once from self._location's scheme (bare
         host:port or grpc:// -> insecure; grpcs:///https:// -> system-trust
         TLS) -- not a per-call decision.
         """
-        parsed = urlsplit(self._base_url)
+        parsed = urlsplit(self._location)
         is_secure = parsed.scheme in {"grpcs", "https"}
 
         def _factory(url: str) -> "grpc.aio.Channel":
@@ -310,8 +344,17 @@ class A2AClientHub:
         return self._transport_mode
 
     @property
+    def location(self) -> str:
+        return self._location
+
+    @property
+    def name(self) -> str | None:
+        return self._name
+
+    @property
     def base_url(self) -> str:
-        return self._base_url
+        """Alias of location, kept until the proxy tool collapses to location."""
+        return self._location
 
     @property
     def persistent(self) -> bool:
@@ -322,8 +365,13 @@ class A2AClientHub:
         return self._headers
 
     @property
-    def timeout(self) -> float:
-        return self._timeout
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
+    @property
+    def client_kwargs(self) -> Mapping[str, Any] | None:
+        """Read-only view; mutate via refresh(client_kwargs=...)."""
+        return MappingProxyType(self._client_kwargs) if self._client_kwargs is not None else None
 
     @property
     def agent_card(self) -> AgentCard:
@@ -391,26 +439,33 @@ class A2AClientHub:
     def refresh(
         self,
         headers: Mapping[str, HeaderValue] | None = None,
-        timeout: float | None = None,
+        timeout_seconds: float | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         """
-        Update stored headers/timeout and re-resolve the agent card.
+        Update stored headers/timeout_seconds/client_kwargs (client_kwargs is
+        replaced wholesale) and re-resolve the agent card. A failed refresh
+        leaves stored config, the live client and the cached skills untouched.
 
-        transport_mode/base_url/persistent are not refreshable -- immutable
-        identity; construct a new A2AClientHub to change them. Raises
-        ValueError if called with neither argument (a no-op refresh is a
+        location/transport_mode/name/persistent are not refreshable --
+        immutable identity; construct a new A2AClientHub to change them.
+        Raises ValueError if called with no argument (a no-op refresh is a
         caller bug).
         """
-        if headers is None and timeout is None:
+        if headers is None and timeout_seconds is None and client_kwargs is None:
             raise ValueError(
-                "refresh() requires at least one of headers or timeout; neither was provided."
+                "refresh() requires at least one of headers, timeout_seconds or "
+                "client_kwargs; none were provided."
             )
-        run_coro_sync(self._do_refresh(headers, timeout), loop=self._bg_loop)
+        run_coro_sync(
+            self._do_refresh(headers, timeout_seconds, client_kwargs), loop=self._bg_loop
+        )
 
     async def _do_refresh(
         self,
         headers: Mapping[str, HeaderValue] | None,
-        timeout: float | None,
+        timeout_seconds: float | None,
+        client_kwargs: Mapping[str, Any] | None,
     ) -> None:
         """
         Core refresh logic, shared by both modes -- guarded by
@@ -422,9 +477,18 @@ class A2AClientHub:
         """
         async with self._refresh_lock:
             resolved_headers = normalize_headers(headers) if headers is not None else self._headers
-            resolved_timeout = float(timeout) if timeout is not None else self._timeout
+            resolved_timeout = (
+                float(timeout_seconds) if timeout_seconds is not None else self._timeout_seconds
+            )
+            resolved_client_kwargs = (
+                self._normalize_client_kwargs(client_kwargs)
+                if client_kwargs is not None
+                else self._client_kwargs
+            )
 
-            new_client, new_card = await self._connect(resolved_headers, resolved_timeout)
+            new_client, new_card = await self._connect(
+                resolved_headers, resolved_timeout, resolved_client_kwargs
+            )
             # Built before any commit -- a malformed extension payload on
             # the refreshed card raises here and the whole refresh rolls
             # back, leaving self._atomic_skills (and everything else)
@@ -448,7 +512,8 @@ class A2AClientHub:
             else:
                 await new_client.close()
 
-            self._agent_card, self._headers, self._timeout = new_card, resolved_headers, resolved_timeout
+            self._agent_card, self._headers = new_card, resolved_headers
+            self._timeout_seconds, self._client_kwargs = resolved_timeout, resolved_client_kwargs
             self._atomic_skills = new_atomic_skills
 
     def close(self) -> None:
@@ -515,7 +580,9 @@ class A2AClientHub:
 
         owns_client = client is None
         if owns_client:
-            client, _ = await self._connect(self._headers, self._timeout)
+            client, _ = await self._connect(
+                self._headers, self._timeout_seconds, self._client_kwargs
+            )
 
         try:
             # Built directly rather than via the a2a-sdk's new_message()
@@ -580,12 +647,18 @@ class A2AClientHub:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "name": self.name,
+            "location": self.location,
             "base_url": self.base_url,
             "transport_mode": self.transport_mode,
             "persistent": self.persistent,
             "has_headers": self._headers is not None,
             "header_keys": sorted(self._headers.keys()) if self._headers is not None else [],
-            "timeout": self.timeout,
+            "has_client_kwargs": self._client_kwargs is not None,
+            "client_kwargs_keys": (
+                sorted(self._client_kwargs) if self._client_kwargs is not None else []
+            ),
+            "timeout_seconds": self.timeout_seconds,
             "agent_name": getattr(self._agent_card, "name", None),
             "include_names": sorted(self.include_names) if self.include_names is not None else None,
             "exclude_names": sorted(self.exclude_names) if self.exclude_names is not None else None,

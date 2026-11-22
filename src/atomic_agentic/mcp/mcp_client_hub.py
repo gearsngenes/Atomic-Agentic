@@ -216,7 +216,7 @@ class MCPClientHub:
             return None
         if not isinstance(name, str):
             raise TypeError("name must be a string when provided.")
-        if not IDENTIFIER_PATTERN.match(name):
+        if not IDENTIFIER_PATTERN.fullmatch(name):
             raise ValueError(
                 "name must be a valid identifier (letters, digits, underscores) "
                 "when provided."
