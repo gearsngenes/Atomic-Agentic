@@ -48,12 +48,6 @@ dev = [
   "a2a-sdk[http-server]>=1.1.2,<2",
 ]
 
-# Deprecated: removed in the final 2.0.0 release.
-python-a2a = ["python-a2a>=0.5.10,<0.6"]
-
-# python-a2a plus the test tooling.
-extras = ["atomic-agentic[python-a2a,dev]"]
-
 [project.urls]
 Homepage = "https://github.com/gearsngenes/Atomic-Agentic"
 Issues   = "https://github.com/gearsngenes/Atomic-Agentic/issues"

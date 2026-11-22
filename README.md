@@ -52,9 +52,7 @@ pip install "atomic-agentic[all_llm]"     # every provider above
 ```
 
 Constructing an engine whose SDK is missing raises an error that names the
-extra to install. Other extras: `dev` (test tooling) and `python-a2a`
-(deprecated; the `python-a2a` client and host are removed in the final 2.0.0
-release, use `A2AClientHub` and `A2AtomicExecutor` instead).
+extra to install. The only other extra is `dev` (test tooling).
 
 `LiteLLMEngine` can also talk to a LiteLLM proxy over HTTP (`base_url`). The
 proxy server is a separate program: install it with `litellm[proxy]`, ideally

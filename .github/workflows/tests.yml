@@ -23,7 +23,6 @@ jobs:
           - gemini,dev
           - mistral,dev
           - litellm,dev
-          - python-a2a,dev
           # All providers together except llama (checks the caps coexist).
           - openai,anthropic,gemini,mistral,litellm,dev
     steps:
