@@ -10,7 +10,7 @@ from ..tools.a2a_sdk import A2AProxyTool
 from ..tools.base import Tool
 from ..tools.mcp import MCPProxyTool
 
-__all__ = ["to_tool", "to_tools", "tool"]
+__all__ = ["to_tool", "to_tools"]
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -192,54 +192,6 @@ def to_tool(
         "to_tool: unsupported `component` type. Expected Tool | AtomicInvokable | "
         "Callable | MCPClientHub | A2AClientHub."
     )
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# tool
-# ───────────────────────────────────────────────────────────────────────────────
-def tool(
-    fn: Callable[..., Any] | None = None,
-    /,
-    *,
-    name: str | None = None,
-    description: str | None = None,
-) -> Tool | Callable[[Callable[..., Any]], Tool]:
-    """
-    Decorator sugar over ``to_tool``: turn a callable into a plain ``Tool``.
-
-    Forms: ``@tool``, ``@tool()``, ``@tool(name=..., description=...)`` and the
-    direct call ``tool(fn)``. ``name`` and ``description`` are keyword-only;
-    left out, they come from the callable's ``__name__`` and docstring exactly
-    as in ``to_tool``. The decorated name is bound to the ``Tool``, not the
-    function. Sync and async callables both work.
-
-    Limits: a method loses ``self`` binding (``Tool`` is not a descriptor);
-    decorate a module-level function or bind the method first. ``remote_name``
-    is not exposed; use ``to_tool`` for remote components.
-
-    1) If ``fn`` is None, return a decorator that calls
-       ``to_tool(f, name, description)`` on the function it receives.
-    2) If ``fn`` is not callable (e.g. ``@tool("name")``), raise ``TypeError``.
-    3) Otherwise return ``to_tool(fn, name, description)``;
-       ``ToolDefinitionError`` from ``to_tool`` propagates unchanged and an
-       existing ``Tool`` or invokable follows ``to_tool``'s routing.
-    """
-    # 1) Keyword form: configure now, convert when the function arrives.
-    if fn is None:
-        def decorator(f: Callable[..., Any]) -> Tool:
-            return to_tool(f, name, description)
-
-        return decorator
-
-    # 2) A positional non-callable is almost certainly @tool("name").
-    if not callable(fn):
-        raise TypeError(
-            "tool: keyword arguments only; use @tool(name=...), not a "
-            f"positional value (got {type(fn).__name__})."
-        )
-
-    # 3) Bare form.
-    return to_tool(fn, name, description)
 
 
 def to_tools(

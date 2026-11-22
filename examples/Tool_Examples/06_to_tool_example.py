@@ -12,7 +12,7 @@ from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
-from atomic_agentic.adapters import to_tools, to_tool, tool
+from atomic_agentic.adapters import to_tools, to_tool
 from atomic_agentic.tools import Tool
 
 load_dotenv()
@@ -232,14 +232,14 @@ def main() -> None:
     except Exception as exc:
         print("[A2A-sdk] Skipping batch A2A-sdk demo due to error:", exc)
 
-    print("\n[8] @tool -> decorator sugar over to_tool; the name is bound to a plain Tool")
+    print("\n[8] @Tool.of -> decorator form of the Tool constructor; the name is bound to a Tool")
 
-    @tool
+    @Tool.of
     def shout(text: str) -> str:
         """Upper-case the text."""
         return text.upper()
 
-    @tool(name="join_words", description="Join words with a separator.")
+    @Tool.of(name="join_words", description="Join words with a separator.")
     def join(words: list[str], sep: str = " ") -> str:
         return sep.join(words)
 
