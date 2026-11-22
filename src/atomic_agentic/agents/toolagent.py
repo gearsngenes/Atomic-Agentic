@@ -52,7 +52,7 @@ from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..adapters import toolify, to_invokable
+from ..adapters import batch_to_invokable, to_invokable
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult
@@ -369,8 +369,8 @@ class ToolAgent(Agent, ABC):
         ``full_name``, which only confuses an LLM asked to copy a tool id
         verbatim. An ``AtomicInvokable`` is stored as-is (never wrapped or
         renamed; build a differently named tool with ``toolify`` first). A
-        callable (function or bound method) goes through ``toolify``: its
-        name comes from ``__name__``, its description from its docstring and
+        callable (function or bound method) goes through the shared
+        ``to_invokable`` converter: its name comes from ``__name__``, its description from its docstring and
         its parameters from its signature.
 
         A name collision follows ``name_collision_policy``.
@@ -380,24 +380,12 @@ class ToolAgent(Agent, ABC):
         """
         policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
-        if isinstance(tool, AtomicInvokable):
-            invokable = tool
-        elif callable(tool):
-            try:
-                invokable = toolify(
-                    component=tool,
-                    name=tool.__name__,
-                    description=tool.__doc__,
-                )
-            except Exception as exc:
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: failed to toolify component: {exc}"
-                ) from exc
-        else:
+        try:
+            invokable = to_invokable(tool)
+        except Exception as exc:
             raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: unsupported component type "
-                f"{type(tool).__name__!r}. Expected AtomicInvokable or Callable."
-            )
+                f"{type(self).__name__}.{self.name}: failed to convert component: {exc}"
+            ) from exc
 
         self._validate_tool_name(invokable.name)
 
@@ -420,7 +408,8 @@ class ToolAgent(Agent, ABC):
     ) -> bool:
         """
         Register a mixed batch of plain invokables/callables and hub objects
-        (``MCPClientHub``/``A2AClientHub``) in one pass. A hub entry expands
+        (``MCPClientHub``/``A2AClientHub``) in one pass, converting it with
+        ``batch_to_invokable``. A hub entry expands
         into every tool it exposes, each under its own intrinsic bare ``name``
         -- never the dotted ``full_name``. Every candidate's name is validated
         via ``_validate_tool_name`` as soon as it's computed, during this
@@ -435,65 +424,18 @@ class ToolAgent(Agent, ABC):
         """
         policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
-        # Expand every entry into (name, invokable) candidates without
-        # mutating self._toolbox yet.
+        # Convert the whole batch (hubs expanded) before touching self._toolbox.
+        try:
+            converted = batch_to_invokable(tools)
+        except Exception as exc:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: failed to convert tools: {exc}"
+            ) from exc
+
         candidates: list[tuple[str, AtomicInvokable]] = []
-        for index, item in enumerate(tools):
-            if isinstance(item, (MCPClientHub, A2AClientHub)):
-                if isinstance(item, MCPClientHub):
-                    remote_names = item.list_tools()
-                else:
-                    remote_names = list(item.get_atomic_skills())
-
-                for remote_name in remote_names:
-                    try:
-                        proxy = toolify(
-                            component=item,
-                            remote_name=remote_name,
-                        )
-                    except Exception as exc:
-                        raise ToolRegistrationError(
-                            f"{type(self).__name__}.{self.name}: failed to toolify "
-                            f"remote {remote_name!r}: {exc}"
-                        ) from exc
-                    self._validate_tool_name(proxy.name)
-                    candidates.append((proxy.name, proxy))
-
-                if isinstance(item, A2AClientHub):
-                    try:
-                        generic_proxy = toolify(component=item)
-                    except Exception as exc:
-                        raise ToolRegistrationError(
-                            f"{type(self).__name__}.{self.name}: failed to toolify "
-                            f"generic A2A tool: {exc}"
-                        ) from exc
-                    self._validate_tool_name(generic_proxy.name)
-                    candidates.append((generic_proxy.name, generic_proxy))
-
-            elif isinstance(item, AtomicInvokable):
-                self._validate_tool_name(item.name)
-                candidates.append((item.name, item))
-
-            elif callable(item):
-                try:
-                    invokable = toolify(
-                        component=item,
-                        name=item.__name__,
-                        description=item.__doc__,
-                    )
-                except Exception as exc:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: failed to toolify "
-                        f"{item!r}: {exc}"
-                    ) from exc
-                self._validate_tool_name(invokable.name)
-                candidates.append((invokable.name, invokable))
-
-            else:
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: unsupported item type "
-                    f"{type(item).__name__!r} at index {index}."
-                )
+        for invokable in converted:
+            self._validate_tool_name(invokable.name)
+            candidates.append((invokable.name, invokable))
 
         # Intra-batch dedup -- always raises regardless of name_collision_policy.
         seen: set[str] = set()
@@ -608,15 +550,7 @@ class ToolAgent(Agent, ABC):
         ``super().__init__()``, once per reserved name that subclass
         declares.
         """
-        if isinstance(tool, AtomicInvokable):
-            invokable = tool
-        else:
-            invokable = toolify(
-                component=tool,
-                name=name,
-                description=description or tool.__doc__,
-            )
-        self._toolbox[name] = invokable
+        self._toolbox[name] = to_invokable(tool, name=name, description=description)
 
     # ------------------------------------------------------------------ #
     # Docstring rendering
