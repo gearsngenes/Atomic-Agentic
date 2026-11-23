@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ..constants.agents import TASK_RESULT_PREFIX
-from ..constants.core import HeaderValue, T
+from ..constants.core import IDENTIFIER_PATTERN, HeaderValue, T
 
 __all__ = [
     "apply_name_filter",
@@ -17,6 +17,7 @@ __all__ = [
     "format_missing_dependency",
     "is_reserved_name",
     "normalize_headers",
+    "normalize_optional_identifier",
     "run_coro_async",
     "run_coro_sync",
     "start_background_loop",
@@ -73,6 +74,20 @@ def is_reserved_name(name: str) -> bool:
     types. Pure name rule, so ``ContextVariable`` itself stays name-neutral.
     """
     return name.startswith(TASK_RESULT_PREFIX)
+
+
+def normalize_optional_identifier(name: str | None) -> str | None:
+    """None passes through; otherwise name must be a str matching IDENTIFIER_PATTERN."""
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise TypeError("name must be a string when provided.")
+    if not IDENTIFIER_PATTERN.fullmatch(name):
+        raise ValueError(
+            "name must be a valid identifier (letters, digits, underscores) "
+            "when provided."
+        )
+    return name
 
 
 async def _await_value(awaitable: Awaitable[T]) -> T:

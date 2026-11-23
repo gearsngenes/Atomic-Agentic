@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from atomic_agentic.utils.core import normalize_headers
+from atomic_agentic.utils.core import normalize_headers, normalize_optional_identifier
 
 
 class TestNormalizeHeaders:
@@ -51,3 +51,22 @@ class TestNormalizeHeaders:
     def test_invalid_headers_raise_value_error(self, headers: object, match: str) -> None:
         with pytest.raises(ValueError, match=match):
             normalize_headers(headers)  # type: ignore[arg-type]
+
+
+class TestNormalizeOptionalIdentifier:
+    def test_none_passes_through(self) -> None:
+        assert normalize_optional_identifier(None) is None
+
+    @pytest.mark.parametrize("value", ["hub", "_hub", "Hub_2", "a1_b2"])
+    def test_valid_identifier_returned_unchanged(self, value: str) -> None:
+        assert normalize_optional_identifier(value) == value
+
+    @pytest.mark.parametrize("value", [1, b"hub", ["hub"], object()])
+    def test_non_str_raises_type_error(self, value: object) -> None:
+        with pytest.raises(TypeError, match="name must be a string when provided."):
+            normalize_optional_identifier(value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["", " hub", "hub ", "1hub", "a-b", "a b", "hub\n"])
+    def test_bad_identifier_raises_value_error(self, value: str) -> None:
+        with pytest.raises(ValueError, match="name must be a valid identifier"):
+            normalize_optional_identifier(value)

@@ -10,7 +10,7 @@ from typing import (
     Optional,
 )
 
-from ..exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..mcp.mcp_client_hub import MCPClientHub
 from ..models.results.tools import MCPToolResult
@@ -22,7 +22,10 @@ class MCPProxyTool(Tool):
     """
     Proxy a single remote MCP tool as a normal AA Tool.
 
-    Built from an `MCPClientHub` and the remote tool's name. The Tool's own
+    Built from an `MCPClientHub` and the remote tool's name; the tool's
+    metadata is read from the hub's stored catalog (`hub.get_tool(name)`, which
+    raises `MCPToolError` for an unknown name) with no checks of its own and no
+    network call. The Tool's own
     name is `<hub.name>_<name>` (the raw name when the hub is unnamed); the raw
     remote name is kept as `remote_name` and is what calls use. The description
     comes from the remote tool and may be replaced through the `description`
@@ -41,34 +44,19 @@ class MCPProxyTool(Tool):
         )
 
     def __init__(self, client_hub: MCPClientHub, name: str) -> None:
-        if not isinstance(client_hub, MCPClientHub):
-            raise TypeError(
-                f"client_hub must be an MCPClientHub, got {type(client_hub)!r}."
-            )
-
-        remote = str(name).strip()
-        if not remote:
-            raise ToolDefinitionError("name must be a non-empty string.")
-
-        self._client_hub: MCPClientHub = client_hub
-        self._remote_name: str = remote
-
-        all_tools = client_hub.list_tools()
-        if remote not in all_tools:
-            raise ToolDefinitionError(
-                f"MCPProxyTool: remote tool {remote!r} not found for "
-                f"{client_hub.transport_mode!r} transport."
-            )
-        self._mcpdata: Dict[str, Any] = dict(all_tools[remote])
-
-        tool_name = f"{client_hub.name}_{remote}" if client_hub.name is not None else remote
+        # State is set before Tool.__init__ runs (it reads _mcpdata). The
+        # remote metadata comes from the hub's stored catalog; an unknown
+        # name fails in get_tool.
+        self._client_hub = client_hub
+        self._remote_name = name
+        self._mcpdata: Dict[str, Any] = dict(client_hub.get_tool(name))
+        tool_name = f"{client_hub.name}_{name}" if client_hub.name is not None else name
         description = (
             str(self._mcpdata.get("description") or "").strip()
             or f"MCP proxy tool '{tool_name}'"
         )
-
         super().__init__(
-            function=functools.partial(client_hub.call_tool, remote),
+            function=functools.partial(client_hub.call_tool, name),
             name=tool_name,
             description=description,
         )

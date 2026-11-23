@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Dict, Mapping, Optional
 from ..a2a.a2a_client_hub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
 from ..constants.core import NO_VAL
-from ..exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..models.results.tools import A2AProxyToolResult
 from ..utils.a2a import _dict_to_part, _part_to_dict
@@ -35,7 +35,9 @@ class A2AProxyTool(Tool):
     raw name when the hub is unnamed; ``remote_name`` is the raw skill name
     (``None`` in generic mode). Only hub-based construction is supported. Has
     no ``refresh()`` of its own; call ``client_hub.refresh(...)`` to pick up
-    remote-side changes.
+    remote-side changes. Skill metadata is read from the hub's cached skills
+    via ``client_hub.get_skill(name)``, which raises ``A2AProxyError`` for an
+    unknown name; the proxy adds no checks of its own.
     """
 
     result_cls: ClassVar[type[A2AProxyToolResult]] = A2AProxyToolResult
@@ -49,22 +51,9 @@ class A2AProxyTool(Tool):
         )
 
     def __init__(self, client_hub: A2AClientHub, name: Optional[str] = None) -> None:
-        if not isinstance(client_hub, A2AClientHub):
-            raise TypeError(f"client_hub must be an A2AClientHub, got {type(client_hub)!r}.")
-
-        remote: Optional[str] = None
-        skill_metadata = None
-        if name is not None:
-            remote = str(name).strip()
-            if not remote:
-                raise ValueError("name must be a non-empty string when provided.")
-            skills = client_hub.list_skills()
-            if remote not in skills:
-                raise ToolDefinitionError(
-                    f"A2AProxyTool: skill {remote!r} not found; "
-                    f"available skills: {sorted(skills)!r}."
-                )
-            skill_metadata = skills[remote]
+        # An unknown skill name fails in the hub's get_skill.
+        skill_metadata = client_hub.get_skill(name) if name is not None else None
+        remote: Optional[str] = name
 
         # Set before super().__init__() -- _build_tool_signature/_get_mod_qual
         # (called from within it) read these attributes.

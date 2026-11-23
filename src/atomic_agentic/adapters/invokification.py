@@ -74,7 +74,9 @@ def to_invokables(
 
     1. An ``MCPClientHub`` or ``A2AClientHub`` expands in place through
        ``to_tools([hub])`` (MCP in ``list_tools()`` order; A2A skills
-       first, then the one generic tool).
+       first, then the one generic tool). Each tool is named
+       ``<hub.name>_<remote name>``, or the raw name for an unnamed hub;
+       duplicates are not checked here (registration does).
     2. A ``str`` raises ``TypeError`` naming its index: nothing can name the
        template in a batch.
     3. Any other item goes through ``to_invokable(item)`` with no name or

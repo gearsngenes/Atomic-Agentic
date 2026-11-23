@@ -438,11 +438,32 @@ class TestRefresh:
         finally:
             hub.close()
 
-    def test_refresh_with_no_arguments_raises(self, fixture_server: FixtureServer, persistent: bool) -> None:
+    def test_bare_refresh_re_resolves_card_and_rebuilds_skills(
+        self, fixture_server: FixtureServer, persistent: bool
+    ) -> None:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
-            with pytest.raises(ValueError, match="requires at least one of headers, timeout_seconds"):
-                hub.refresh()
+            connects: list[int] = []
+            builds: list[int] = []
+            real_connect = hub._connect
+            real_build = A2AClientHub._build_atomic_skills
+
+            async def counting_connect(*args: Any, **kwargs: Any) -> Any:
+                connects.append(1)
+                return await real_connect(*args, **kwargs)
+
+            def counting_build(*args: Any, **kwargs: Any) -> Any:
+                builds.append(1)
+                return real_build(*args, **kwargs)
+
+            hub._connect = counting_connect  # type: ignore[method-assign]
+            hub._build_atomic_skills = counting_build  # type: ignore[method-assign]
+
+            hub.refresh()
+
+            assert connects == [1]
+            assert builds == [1]
+            assert hub.list_skills() == {}
         finally:
             hub.close()
 
@@ -517,6 +538,21 @@ class TestAtomicSkillDetection:
         try:
             hub.refresh(timeout_seconds=123.0)
             assert hub.list_skills() == {}
+        finally:
+            hub.close()
+
+    def test_get_skill_hit_and_miss(
+        self, fixture_server: FixtureServer, persistent: bool
+    ) -> None:
+        hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
+        try:
+            sentinel = object()
+            hub._atomic_skills = {"add": sentinel}  # type: ignore[dict-item]
+
+            assert hub.get_skill("add") is sentinel
+            with pytest.raises(A2AProxyError, match="'nope'") as excinfo:
+                hub.get_skill("nope")
+            assert "['add']" in str(excinfo.value)
         finally:
             hub.close()
 
@@ -772,14 +808,11 @@ class TestClientKwargs:
 
 
 class TestRefreshContract:
-    def test_refresh_requires_one_argument(self, fixture_server: FixtureServer, persistent: bool) -> None:
+    def test_bare_refresh_is_valid(self, fixture_server: FixtureServer, persistent: bool) -> None:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
-            with pytest.raises(
-                ValueError,
-                match="requires at least one of headers, timeout_seconds or client_kwargs",
-            ):
-                hub.refresh()
+            hub.refresh()
+            assert len(hub.send_parts([new_text_part("after-bare-refresh")])) == 1
         finally:
             hub.close()
 
@@ -922,3 +955,214 @@ class TestSecondaryConstructors:
             assert hub.transport_mode == transport
         finally:
             hub.close()
+
+
+# --------------------------------------------------------------------------- #
+# Stage 9 Pass 6: close-always-clears, atexit, `with`, leak fixes, remote_name
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingClient:
+    """Stand-in for an a2a Client that records close() and can raise from it."""
+
+    def __init__(self, real: Any = None, error: Exception | None = None) -> None:
+        self.real = real
+        self.error = error
+        self.closed = 0
+
+    async def close(self) -> None:
+        self.closed += 1
+        if self.real is not None:
+            await self.real.close()
+        if self.error is not None:
+            raise self.error
+
+
+class TestCloseAlwaysClears:
+    def test_close_whose_client_close_raises_still_resets_state(
+        self, fixture_server: FixtureServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stops: list[Any] = []
+        real_stop = a2a_client_hub_module.stop_background_loop
+
+        def recording_stop(loop: Any, thread: Any) -> None:
+            stops.append((loop, thread))
+            real_stop(loop, thread)
+
+        monkeypatch.setattr(a2a_client_hub_module, "stop_background_loop", recording_stop)
+
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
+        loop, thread = hub._bg_loop, hub._bg_thread
+        hub._client = _RecordingClient(real=hub._client, error=RuntimeError("close boom"))
+
+        with pytest.raises(RuntimeError, match="close boom"):
+            hub.close()
+
+        assert stops == [(loop, thread)]
+        assert hub._bg_loop is None
+        assert hub._bg_thread is None
+        assert hub._client is None
+
+        hub.close()  # no-op
+        assert stops == [(loop, thread)]
+
+
+class TestAtexit:
+    def test_persistent_registers_and_close_unregisters(
+        self, fixture_server: FixtureServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registered: list[Any] = []
+        unregistered: list[Any] = []
+        monkeypatch.setattr(a2a_client_hub_module.atexit, "register", registered.append)
+        monkeypatch.setattr(a2a_client_hub_module.atexit, "unregister", unregistered.append)
+
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
+        assert registered == [hub.close]
+
+        hub.close()
+        assert unregistered == [hub.close]
+
+    def test_non_persistent_registers_nothing(
+        self, fixture_server: FixtureServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registered: list[Any] = []
+        monkeypatch.setattr(a2a_client_hub_module.atexit, "register", registered.append)
+
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        hub.close()
+
+        assert registered == []
+
+    def test_failed_persistent_construction_leaves_no_loop_and_registers_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registered: list[Any] = []
+        monkeypatch.setattr(a2a_client_hub_module.atexit, "register", registered.append)
+
+        hub = A2AClientHub.__new__(A2AClientHub)
+        with pytest.raises(A2AProxyError):
+            hub.__init__("http://127.0.0.1:1", TRANSPORT_JSON_RPC, persistent=True)
+
+        assert hub._bg_loop is None
+        assert hub._bg_thread is None
+        assert registered == []
+
+
+class TestContextManager:
+    def test_with_closes_on_exit(self, fixture_server: FixtureServer) -> None:
+        with A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True) as hub:
+            assert hub._bg_loop is not None
+            thread = hub._bg_thread
+
+        assert hub._bg_loop is None
+        assert not thread.is_alive()
+
+    def test_with_closes_on_exception(self, fixture_server: FixtureServer) -> None:
+        with pytest.raises(RuntimeError, match="body boom"):
+            with A2AClientHub(
+                fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True
+            ) as hub:
+                raise RuntimeError("body boom")
+
+        assert hub._bg_loop is None
+
+    def test_enter_returns_self_for_non_persistent(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        with hub as entered:
+            assert entered is hub
+
+
+class TestLeakFixes:
+    def test_connect_failure_closes_httpx_client(
+        self, fixture_server: FixtureServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        created: list[Any] = []
+        base = httpx.AsyncClient
+
+        class RecordingAsyncClient(base):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.aclose_calls = 0
+                created.append(self)
+
+            async def aclose(self) -> None:
+                self.aclose_calls += 1
+                await super().aclose()
+
+        async def failing_create_client(*args: Any, **kwargs: Any) -> Any:
+            raise ValueError("create boom")
+
+        monkeypatch.setattr(a2a_client_hub_module.httpx, "AsyncClient", RecordingAsyncClient)
+        monkeypatch.setattr(a2a_client_hub_module, "create_client", failing_create_client)
+
+        with pytest.raises(A2AProxyError, match="create boom"):
+            run_coro_sync(hub._connect(None, 5.0, None))
+        assert [c.aclose_calls for c in created] == [1]
+
+        async def unexpected_create_client(*args: Any, **kwargs: Any) -> Any:
+            raise KeyError("unexpected")
+
+        monkeypatch.setattr(a2a_client_hub_module, "create_client", unexpected_create_client)
+
+        with pytest.raises(KeyError):
+            run_coro_sync(hub._connect(None, 5.0, None))
+        assert [c.aclose_calls for c in created] == [1, 1]
+
+    def test_refresh_closes_new_client_when_skill_build_raises(
+        self, fixture_server: FixtureServer, persistent: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
+        try:
+            old_client = hub._client
+            old_card = hub._agent_card
+            old_headers = hub.headers
+            old_skills = hub._atomic_skills
+            new_client = _RecordingClient()
+
+            async def fake_connect(*args: Any, **kwargs: Any) -> Any:
+                return new_client, old_card
+
+            def failing_build(*args: Any, **kwargs: Any) -> Any:
+                raise ValueError("skills boom")
+
+            monkeypatch.setattr(hub, "_connect", fake_connect)
+            monkeypatch.setattr(hub, "_build_atomic_skills", failing_build)
+
+            with pytest.raises(ValueError, match="skills boom"):
+                hub.refresh(headers={"X-New": "1"})
+
+            assert new_client.closed == 1
+            assert hub._client is old_client
+            assert hub._agent_card is old_card
+            assert hub.headers == old_headers
+            assert hub._atomic_skills is old_skills
+        finally:
+            monkeypatch.undo()
+            hub.close()
+
+
+class TestCallAtomicSkillRemoteName:
+    def test_keyword_remote_name_routes_and_blank_raises(
+        self, fixture_server: FixtureServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        sent: list[Any] = []
+
+        def fake_send_parts(parts: Any, metadata: Any = None) -> Any:
+            sent.append(metadata)
+            return (new_data_part({"__atomic_result__": 5}),)
+
+        monkeypatch.setattr(hub, "send_parts", fake_send_parts)
+
+        assert hub.call_atomic_skill(remote_name="add", inputs={"a": 1}) == 5
+        assert sent == [{"skill_id": "add"}]
+
+        with pytest.raises(ValueError, match="remote_name must be a non-empty string."):
+            hub.call_atomic_skill(remote_name="  ", inputs={})
+
+        async def fake_async_send_parts(parts: Any, metadata: Any = None) -> Any:
+            return (new_data_part({"__atomic_result__": 6}),)
+
+        monkeypatch.setattr(hub, "async_send_parts", fake_async_send_parts)
+        assert asyncio.run(hub.async_call_atomic_skill(remote_name="add", inputs={})) == 6

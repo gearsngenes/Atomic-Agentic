@@ -23,12 +23,14 @@ from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
 from atomic_agentic.a2a.a2atomic_executor import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
-from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import A2AProxyError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import A2AProxyToolResult
 from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.utils.a2a import _dict_to_part, _part_to_dict
 from atomic_agentic.utils.core import run_coro_sync, start_background_loop, stop_background_loop
+
+from ..agents.conftest import make_stub_tool_agent
 
 
 # --------------------------------------------------------------------------- #
@@ -306,7 +308,7 @@ class TestSkillMode:
     def test_unknown_skill_raises(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            with pytest.raises(ToolDefinitionError):
+            with pytest.raises(A2AProxyError, match="not found"):
                 A2AProxyTool(hub, "does_not_exist")
         finally:
             hub.close()
@@ -462,5 +464,28 @@ class TestGenericMode:
         try:
             tool = A2AProxyTool(hub)
             assert tool.name == "echo_send_parts"
+        finally:
+            hub.close()
+
+
+class TestRegistrationNaming:
+    def test_named_hub_registers_skills_and_generic_prefixed(self, atomic_fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, name="rem")
+        try:
+            agent = make_stub_tool_agent()
+            agent.register_tools([hub])
+            tools = agent.list_tools()
+            assert set(tools) == {"rem_add", "rem_boom", "rem_send_parts"}
+            assert tools["rem_send_parts"].remote_name is None
+            assert tools["rem_add"].remote_name == "add"
+        finally:
+            hub.close()
+
+    def test_unnamed_hub_registers_raw_names(self, atomic_fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
+        try:
+            agent = make_stub_tool_agent()
+            agent.register_tools([hub])
+            assert set(agent.list_tools()) == {"add", "boom", "send_parts"}
         finally:
             hub.close()

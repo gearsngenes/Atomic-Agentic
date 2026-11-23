@@ -135,8 +135,8 @@ class FakeA2AClientHub(A2AClientHub):
     def list_skills(self) -> dict[str, A2AtomicSkillMetadata]:
         return dict(self._skills)
 
-    def call_atomic_skill(self, skill_id: str, inputs: dict) -> Any:
-        self.skill_calls.append((skill_id, dict(inputs)))
+    def call_atomic_skill(self, remote_name: str, inputs: dict) -> Any:
+        self.skill_calls.append((remote_name, dict(inputs)))
         return 17
 
 

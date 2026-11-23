@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import MCPToolError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import MCPToolResult
 from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
@@ -133,12 +133,6 @@ class TestMCPProxyToolConstruction:
         assert tool.description == "Remote search tool."
         assert tool.full_name == "MCPProxyTool.search"
 
-    def test_remote_name_is_stripped(self) -> None:
-        tool = make_tool(remote_name="  search  ")
-
-        assert tool.remote_name == "search"
-        assert tool.name == "search"
-
     def test_description_is_replaceable_through_setter(self) -> None:
         tool = make_tool()
 
@@ -157,13 +151,9 @@ class TestMCPProxyToolConstruction:
 
         assert tool.description == "MCP proxy tool 'search'"
 
-    def test_missing_remote_name_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="name"):
+    def test_blank_remote_name_raises_hub_not_found(self) -> None:
+        with pytest.raises(MCPToolError, match="not found"):
             make_tool(remote_name="   ")
-
-    def test_non_hub_client_hub_raises(self) -> None:
-        with pytest.raises(TypeError, match="client_hub"):
-            MCPProxyTool(object(), "search")  # type: ignore[arg-type]
 
     def test_constructor_takes_only_hub_and_name(self) -> None:
         hub = FakeMCPClientHub()
@@ -176,7 +166,7 @@ class TestMCPProxyToolConstruction:
     def test_missing_remote_tool_raises(self) -> None:
         hub = FakeMCPClientHub(tools={})
 
-        with pytest.raises(ToolDefinitionError, match="not found"):
+        with pytest.raises(MCPToolError, match="not found"):
             make_tool(hub=hub)
 
 
@@ -558,11 +548,11 @@ class TestNaming:
         assert hub.calls[0][0] == "search"
 
     def test_unknown_name_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError):
+        with pytest.raises(MCPToolError, match="missing"):
             make_tool(remote_name="missing")
 
     def test_blank_name_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError):
+        with pytest.raises(MCPToolError):
             make_tool(remote_name="  ")
 
     def test_description_remote_fallback_and_setter(self) -> None:

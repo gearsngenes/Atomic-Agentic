@@ -411,6 +411,7 @@ class ToolAgent(Agent, ABC):
         (``MCPClientHub``/``A2AClientHub``) in one pass, converting it with
         ``to_invokables``. A hub entry expands
         into every tool it exposes, each under its own intrinsic bare ``name``
+        (``<hub.name>_<remote name>``, or the raw remote name for an unnamed hub)
         -- never the dotted ``full_name``. Every candidate's name is validated
         via ``_validate_tool_name`` as soon as it's computed, during this
         same expansion pass -- not a second, separate pass afterward.

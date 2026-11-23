@@ -10,7 +10,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
-from atomic_agentic.exceptions import ToolDefinitionError
+from atomic_agentic.exceptions import A2AProxyError
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import A2AProxyToolResult
@@ -94,11 +94,12 @@ class TestNaming:
         assert named.remote_name is None
 
     def test_unknown_skill_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError):
+        with pytest.raises(A2AProxyError):
             A2AProxyTool(_FakeHub(), "missing")
 
     def test_blank_name_raises(self) -> None:
-        with pytest.raises(ValueError):
+        # No check of its own: a blank name is just an unknown skill.
+        with pytest.raises(A2AProxyError):
             A2AProxyTool(_FakeHub(), "  ")
 
     def test_constructor_takes_only_hub_and_name(self) -> None:

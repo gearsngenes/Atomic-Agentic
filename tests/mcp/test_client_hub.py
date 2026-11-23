@@ -20,6 +20,22 @@ from atomic_agentic.utils.core import start_background_loop, stop_background_loo
 client_hub_module = importlib.import_module("atomic_agentic.mcp.mcp_client_hub")
 
 
+@pytest.fixture(autouse=True)
+def _stub_catalog_io(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every hub fetches its catalog at construction (and refresh() re-lists on
+    a candidate connection); stub both to an empty catalog so constructions do
+    not spawn or connect. Tests that exercise the real listing carry
+    @pytest.mark.live_catalog."""
+    if request.node.get_closest_marker("live_catalog"):
+        return
+
+    async def _no_candidate(self: MCPClientHub, headers: Any, client_kwargs: Any, session_kwargs: Any) -> dict:
+        return {}
+
+    monkeypatch.setattr(MCPClientHub, "_fetch_tools", lambda self: {})
+    monkeypatch.setattr(MCPClientHub, "_list_candidate", _no_candidate)
+
+
 class FakeSession:
     def __init__(self) -> None:
         self.called_tools: list[tuple[str, dict[str, Any]]] = []
@@ -292,12 +308,11 @@ class TestMCPClientHubHeaders:
         with pytest.raises(TypeError):
             hub.headers["Authorization"] = "changed"  # type: ignore[index]
 
-    def test_headers_setter_revalidates(self) -> None:
+    def test_headers_has_no_setter(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
-        hub.headers = {"X-Test": "yes"}
-
-        assert hub.headers == {"X-Test": "yes"}
+        with pytest.raises(AttributeError):
+            hub.headers = {"X-Test": "yes"}  # type: ignore[misc]
 
     @pytest.mark.parametrize(
         ("headers", "match"),
@@ -369,6 +384,7 @@ class TestMCPClientHubLocalHelpers:
 
 
 class TestMCPClientHubOperationsWithoutRealServer:
+    @pytest.mark.live_catalog
     def test_list_tools_uses_fake_session(self) -> None:
         session = FakeSession()
         hub = FakeHub(
@@ -416,13 +432,10 @@ class TestMCPClientHubOperationsWithoutRealServer:
         with pytest.raises(ValueError, match="inputs"):
             hub.call_tool("search", ["not", "mapping"])  # type: ignore[arg-type]
 
-    def test_list_tools_wraps_session_failure_as_connection_error(self) -> None:
-        hub = FakeHub(
-            FailingListSession(), "python", "stdio"
-        )
-
+    @pytest.mark.live_catalog
+    def test_construction_wraps_list_failure_as_connection_error(self) -> None:
         with pytest.raises(MCPConnectionError, match="Failed to list MCP tools"):
-            hub.list_tools()
+            FakeHub(FailingListSession(), "python", "stdio")
 
     def test_call_tool_wraps_session_failure_as_tool_error(self) -> None:
         hub = FakeHub(
@@ -433,9 +446,10 @@ class TestMCPClientHubOperationsWithoutRealServer:
             hub.call_tool("search", {"query": "hello"})
 
 
+@pytest.mark.live_catalog
 class TestMCPClientHubNameFiltering:
-    """include_names/exclude_names filter list_tools()/async_list_tools()'s
-    output only -- construction-time, discovery-only."""
+    """include_names/exclude_names filter the stored catalog only --
+    construction-time, discovery-only."""
 
     def test_include_names_narrows_list_tools(self) -> None:
         hub = FakeHub(
@@ -481,17 +495,15 @@ class TestMCPClientHubNameFiltering:
 
         assert session.called_tools == [("delete", {"query": "x"})]
 
-    def test_async_list_tools_applies_the_filter(self) -> None:
+    def test_filter_is_applied_to_the_stored_catalog(self) -> None:
         hub = FakeHub(
             FakeMultiToolSession(),
             "python",
             "stdio",
-            include_names=["search"],
+            exclude_names=["delete"],
         )
 
-        tools = asyncio.run(hub.async_list_tools())
-
-        assert list(tools) == ["search"]
+        assert list(hub._tools) == ["search"]
 
     def test_empty_include_names_raises_at_construction(self) -> None:
         with pytest.raises(ValueError):
@@ -527,15 +539,16 @@ class TestMCPClientHubNameFiltering:
 
 
 class TestMCPClientHubRefresh:
-    def test_refresh_with_nothing_provided_raises(self) -> None:
+    def test_bare_refresh_is_valid_and_keeps_config(self) -> None:
         hub = MCPClientHub(
             "http://localhost:8000/sse",
             "sse",
             headers={"X-Old": "yes"},
         )
 
-        with pytest.raises(ValueError, match="requires at least one of"):
-            hub.refresh()
+        hub.refresh()
+
+        assert hub.headers == {"X-Old": "yes"}
 
     def test_refresh_with_headers_updates_stored_headers(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
@@ -895,9 +908,9 @@ class TestMCPClientHubPersistentConnect:
 
         hub = MCPClientHub("python", "stdio", persistent=True)
         try:
-            hub.list_tools()
             hub.call_tool("search", {"query": "hi"})
-            hub.list_tools()
+            hub.call_tool("search", {"query": "hi"})
+            hub.call_tool("search", {"query": "hi"})
 
             # One connect at construction, zero more across three calls.
             assert factory.call_count == 1
@@ -911,8 +924,8 @@ class TestMCPClientHubPersistentConnect:
 
         hub = MCPClientHub("python", "stdio")
 
-        hub.list_tools()
-        hub.list_tools()
+        hub.call_tool("search", {"query": "hi"})
+        hub.call_tool("search", {"query": "hi"})
 
         assert factory.call_count == 2
 
@@ -957,9 +970,9 @@ class TestMCPClientHubClose:
         hub.close()
         assert factory.call_count == 1
 
-        result = hub.list_tools()
+        result = hub.call_tool("search", {"query": "hi"})
 
-        assert list(result) == ["search"]
+        assert result["isError"] is False
         assert factory.call_count == 2  # a fresh, one-off connect, not a raise
         assert hub.is_connected is False  # still not held open afterward
 
@@ -985,6 +998,48 @@ class TestMCPClientHubClose:
 
         hub.close()
         assert unregistered == [hub.close]
+
+    @pytest.mark.parametrize("use_async", [False, True], ids=["close", "async_close"])
+    def test_close_clears_state_even_when_teardown_raises(
+        self, monkeypatch: pytest.MonkeyPatch, use_async: bool
+    ) -> None:
+        _patch_stdio_fakes(monkeypatch)
+        unregistered: list[Any] = []
+        monkeypatch.setattr(client_hub_module.atexit, "unregister", unregistered.append)
+        stops: list[Any] = []
+        real_stop = client_hub_module.stop_background_loop
+
+        def recording_stop(loop: Any, thread: Any) -> None:
+            stops.append((loop, thread))
+            real_stop(loop, thread)
+
+        monkeypatch.setattr(client_hub_module, "stop_background_loop", recording_stop)
+
+        hub = MCPClientHub("python", "stdio", persistent=True)
+        loop, thread = hub._bg_loop, hub._bg_thread
+
+        real_do_close = hub._do_close
+
+        async def failing_close() -> None:
+            await real_do_close()
+            raise RuntimeError("teardown boom")
+
+        monkeypatch.setattr(hub, "_do_close", failing_close)
+
+        with pytest.raises(RuntimeError, match="teardown boom"):
+            if use_async:
+                asyncio.run(hub.async_close())
+            else:
+                hub.close()
+
+        assert stops == [(loop, thread)]
+        assert hub._bg_loop is None
+        assert hub._bg_thread is None
+        assert hub.is_connected is False
+        assert unregistered == [hub.close]
+
+        hub.close()  # second close is a no-op
+        assert stops == [(loop, thread)]
 
 
 class TestMCPClientHubPersistentRefresh:
@@ -1200,14 +1255,6 @@ class TestConstructionContract:
     def test_headers_on_stdio_raises(self) -> None:
         with pytest.raises(ValueError, match="headers are not valid for the stdio transport"):
             MCPClientHub("python", "stdio", headers={"X-Test": "yes"})
-
-    def test_headers_setter_rejects_stdio(self) -> None:
-        hub = MCPClientHub("python", "stdio")
-
-        with pytest.raises(ValueError, match="headers are not valid for the stdio transport"):
-            hub.headers = {"X-Test": "yes"}
-
-        assert hub.headers is None
 
     def test_refresh_headers_rejected_for_stdio_non_persistent(self) -> None:
         hub = MCPClientHub("python", "stdio")
@@ -1553,3 +1600,251 @@ class TestSecondaryConstructors:
 
         stdio_args = inspect.signature(MCPClientHub.stdio).parameters["args"]
         assert stdio_args.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+
+class _MultiToolRealSession(FakeMultiToolSession, FakeRealSession):
+    """list_tools() of FakeMultiToolSession plus the async-context protocol."""
+
+
+class _FailingListRealSession(FailingListSession, FakeRealSession):
+    """A connectable session whose list_tools() raises."""
+
+
+class _CountingCM(FakeAsyncCM):
+    """Transport stand-in that counts exits (a closed candidate connection)."""
+
+    exits = 0
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        type(self).exits += 1
+        return False
+
+
+_STUB_CATALOG: dict[str, dict[str, Any]] = {
+    "search": {"description": "Search documents."},
+    "delete": {"description": "Delete a document."},
+}
+
+
+class _FetchRecorder:
+    """Replaces MCPClientHub._fetch_tools, counting calls and returning a copy
+    of a fixed catalog."""
+
+    def __init__(self, catalog: dict[str, dict[str, Any]] | None = None) -> None:
+        self.catalog = dict(_STUB_CATALOG if catalog is None else catalog)
+        self.calls = 0
+
+    def __call__(self) -> dict[str, dict[str, Any]]:
+        self.calls += 1
+        return dict(self.catalog)
+
+
+class TestCatalogAtConstruction:
+    def test_non_persistent_construction_fetches_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = _FetchRecorder()
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", recorder)
+
+        hub = MCPClientHub("python", "stdio")
+
+        assert recorder.calls == 1
+        assert list(hub.list_tools()) == ["search", "delete"]
+
+    def test_persistent_construction_fetches_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_stdio_fakes(monkeypatch)
+        recorder = _FetchRecorder()
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", recorder)
+
+        hub = MCPClientHub("python", "stdio", persistent=True)
+        try:
+            assert recorder.calls == 1
+            assert list(hub.list_tools()) == ["search", "delete"]
+        finally:
+            hub.close()
+
+    @pytest.mark.parametrize("persistent", [False, True], ids=["non_persistent", "persistent"])
+    def test_list_tools_afterwards_makes_no_fetch_and_no_connection(
+        self, monkeypatch: pytest.MonkeyPatch, persistent: bool
+    ) -> None:
+        factory = _patch_stdio_fakes(monkeypatch)
+        recorder = _FetchRecorder()
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", recorder)
+
+        hub = MCPClientHub("python", "stdio", persistent=persistent)
+        try:
+            connects_before = factory.call_count
+            hub.list_tools()
+            hub.list_tools()
+
+            assert recorder.calls == 1
+            assert factory.call_count == connects_before
+        finally:
+            hub.close()
+
+    def test_list_tools_returns_a_copy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", _FetchRecorder())
+        hub = MCPClientHub("python", "stdio")
+
+        tools = hub.list_tools()
+        tools["injected"] = {}
+        del tools["search"]
+
+        assert list(hub.list_tools()) == ["search", "delete"]
+
+    def test_async_list_tools_is_gone(self) -> None:
+        assert not hasattr(MCPClientHub, "async_list_tools")
+
+    @pytest.mark.live_catalog
+    @pytest.mark.parametrize("persistent", [False, True], ids=["non_persistent", "persistent"])
+    def test_real_fetch_applies_filters_to_stored_catalog(
+        self, monkeypatch: pytest.MonkeyPatch, persistent: bool
+    ) -> None:
+        _patch_stdio_fakes(
+            monkeypatch, session_factory=RecordingSessionFactory(_MultiToolRealSession)
+        )
+
+        hub = MCPClientHub(
+            "python", "stdio", persistent=persistent, exclude_names=["delete"]
+        )
+        try:
+            assert list(hub.list_tools()) == ["search"]
+            assert list(hub._tools) == ["search"]
+        finally:
+            hub.close()
+
+    def test_failing_fetch_non_persistent_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def failing(self: MCPClientHub) -> Any:
+            raise MCPConnectionError("unreachable")
+
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", failing)
+
+        with pytest.raises(MCPConnectionError, match="unreachable"):
+            MCPClientHub("python", "stdio")
+
+    def test_failing_fetch_persistent_tears_down_and_raises_original(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_stdio_fakes(monkeypatch)
+        registered: list[Any] = []
+        monkeypatch.setattr(client_hub_module.atexit, "register", registered.append)
+        created: list[MCPClientHub] = []
+
+        def failing(self: MCPClientHub) -> Any:
+            created.append(self)
+            raise MCPConnectionError("list boom")
+
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", failing)
+
+        before = threading.active_count()
+        with pytest.raises(MCPConnectionError, match="list boom"):
+            MCPClientHub("python", "stdio", persistent=True)
+
+        hub = created[0]
+        assert hub._bg_loop is None
+        assert hub._bg_thread is None
+        assert hub.is_connected is False
+        assert registered == []
+        assert threading.active_count() == before
+
+
+class TestGetTool:
+    def test_hit_returns_the_stored_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", _FetchRecorder())
+        hub = MCPClientHub("python", "stdio")
+
+        assert hub.get_tool("search") == {"description": "Search documents."}
+
+    def test_miss_names_the_tool_and_lists_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", _FetchRecorder())
+        hub = MCPClientHub("python", "stdio")
+
+        with pytest.raises(MCPToolError, match="'nope'") as excinfo:
+            hub.get_tool("nope")
+
+        assert "['delete', 'search']" in str(excinfo.value)
+
+    def test_get_tool_does_not_fetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recorder = _FetchRecorder()
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", recorder)
+        hub = MCPClientHub("python", "stdio")
+
+        hub.get_tool("search")
+
+        assert recorder.calls == 1
+
+
+@pytest.mark.live_catalog
+class TestRefreshRelists:
+    @pytest.mark.parametrize("persistent", [False, True], ids=["non_persistent", "persistent"])
+    def test_bare_refresh_replaces_the_catalog(
+        self, monkeypatch: pytest.MonkeyPatch, persistent: bool
+    ) -> None:
+        factory = _patch_stdio_fakes(
+            monkeypatch, session_factory=RecordingSessionFactory(_MultiToolRealSession)
+        )
+        hub = MCPClientHub("python", "stdio", persistent=persistent)
+        try:
+            assert list(hub.list_tools()) == ["search", "delete"]
+            hub._tools = {"stale": {}}
+
+            hub.refresh()
+
+            assert list(hub.list_tools()) == ["search", "delete"]
+            assert factory.call_count == 2  # construction + the re-list connection
+        finally:
+            hub.close()
+
+    def test_non_persistent_failed_relist_leaves_everything_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        factory = _patch_stdio_fakes(
+            monkeypatch, session_factory=RecordingSessionFactory(_MultiToolRealSession)
+        )
+        hub = MCPClientHub("python", "stdio", client_kwargs={"cwd": "/orig"})
+        catalog_before = hub.list_tools()
+        factory.session_cls = _FailingListRealSession
+
+        with pytest.raises(MCPConnectionError, match="Failed to list MCP tools"):
+            hub.refresh(client_kwargs={"cwd": "/new"})
+
+        assert hub.client_kwargs == {"cwd": "/orig"}
+        assert hub.list_tools() == catalog_before
+
+    def test_persistent_failed_relist_rolls_back_and_closes_candidate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _CountingCM.exits = 0
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server_params: _CountingCM(("read", "write")),
+        )
+        factory = RecordingSessionFactory(_MultiToolRealSession)
+        monkeypatch.setattr(client_hub_module, "ClientSession", factory)
+
+        hub = MCPClientHub("python", "stdio", persistent=True, client_kwargs={"cwd": "/orig"})
+        try:
+            original_session = hub._session
+            original_holder = hub._holder_task
+            catalog_before = hub.list_tools()
+            factory.session_cls = _FailingListRealSession
+
+            with pytest.raises(MCPConnectionError, match="Failed to list MCP tools"):
+                hub.refresh(client_kwargs={"cwd": "/new"})
+
+            assert hub.client_kwargs == {"cwd": "/orig"}
+            assert hub.list_tools() == catalog_before
+            assert hub._session is original_session
+            assert hub._holder_task is original_holder
+            assert hub.is_connected is True
+            # Only the candidate connection was closed; the live one is open.
+            assert _CountingCM.exits == 1
+        finally:
+            hub.close()

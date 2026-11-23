@@ -39,20 +39,16 @@ def to_tool(
        - wrap it the same way — a new ``Tool`` delegating to ``component``
          by reference under the requested (or inferred) identity.
 
-    3) If ``component`` is an ``MCPClientHub``:
-       - ``name`` is required and selects the remote tool;
-       - construct and return ``MCPProxyTool``; ``description``, when given,
+    3) If ``component`` is an ``MCPClientHub`` or ``A2AClientHub``:
+       - MCP: ``name`` selects the remote tool from the hub's stored catalog;
+         a missing or unknown name raises the hub's ``MCPToolError``;
+       - A2A: a present, non-blank ``name`` selects skill mode (bound to that
+         skill; an unknown one raises the hub's ``A2AProxyError``);
+         absent/blank selects generic mode;
+       - construct and return the proxy; ``description``, when given,
          replaces the remote description through the proxy's setter.
 
-    4) If ``component`` is an ``A2AClientHub``:
-       - ``name`` is OPTIONAL here — the one deliberate asymmetry vs. route 3.
-         Present & non-blank selects skill mode (bound to that skill);
-         absent/blank selects generic mode;
-       - construct and return ``A2AProxyTool``, with ``description`` applied
-         as in route 3. Its own ``ToolDefinitionError`` (unknown skill)
-         propagates unwrapped.
-
-    5) If ``component`` is a plain callable:
+    4) If ``component`` is a plain callable:
        - construct and return a plain ``Tool``; the name defaults to
          ``__name__`` and the description to the docstring (inference and the
          nameless-callable error are the ``Tool`` constructor's).
@@ -98,30 +94,19 @@ def to_tool(
     if isinstance(component, AtomicInvokable):
         return Tool(component, name, description)
 
-    # 3) MCP client hub -> MCPProxyTool.
-    if isinstance(component, MCPClientHub):
-        remote = str(name or "").strip()
-        if not remote:
-            raise ToolDefinitionError(
-                "to_tool: `name` is required when `component` is an MCPClientHub."
-            )
-
-        proxy = MCPProxyTool(component, remote)
+    # 3) Client hub -> proxy tool. A blank/absent name is passed on as None:
+    # an A2A hub reads it as generic mode, an MCP hub's get_tool rejects it.
+    if isinstance(component, (MCPClientHub, A2AClientHub)):
+        remote = str(name or "").strip() or None
+        if isinstance(component, MCPClientHub):
+            proxy = MCPProxyTool(component, remote)
+        else:
+            proxy = A2AProxyTool(component, remote)
         if description is not None:
             proxy.description = description  # setter validates
         return proxy
 
-    # 4) A2AClientHub -> A2AProxyTool. Unlike route 3, name is optional:
-    # absent/blank selects generic mode, a deliberate outcome.
-    if isinstance(component, A2AClientHub):
-        remote = str(name).strip() if name is not None and str(name).strip() else None
-
-        proxy = A2AProxyTool(component, remote)
-        if description is not None:
-            proxy.description = description
-        return proxy
-
-    # 5) Raw callable -> Tool.
+    # 4) Raw callable -> Tool.
     if callable(component):
         if name is not None and not isinstance(name, str):
             raise ToolDefinitionError(
@@ -154,8 +139,8 @@ def to_tools(
     - Callables and AtomicInvokables are each converted into one Tool
       (AtomicInvokable-backed Tools delegate to the original by reference).
     - Existing Tool instances are returned unchanged.
-    - Each MCPClientHub is expanded by listing all remote tools and converting
-      each one into its own MCPProxyTool.
+    - Each MCPClientHub is expanded from its stored catalog (no network)
+      into one MCPProxyTool per remote tool.
     - No collision check is made here; duplicate names across hubs are caught
       at registration.
     - Each A2AClientHub is expanded into one skill-mode A2AProxyTool per
@@ -181,23 +166,12 @@ def to_tools(
 
     for source in sources or []:
         if isinstance(source, MCPClientHub):
-            remote_tools = source.list_tools()
-            hub_tools: list[Tool] = []
-
-            for remote_name in remote_tools:
-                hub_tools.append(to_tool(source, name=remote_name))
-
-            tools.extend(hub_tools)
+            tools.extend(MCPProxyTool(source, n) for n in source.list_tools())
             continue
 
         if isinstance(source, A2AClientHub):
-            skill_tools = [
-                to_tool(source, name=skill)
-                for skill in source.list_skills()
-            ]
-            generic_tool = to_tool(source)
-
-            tools.extend([*skill_tools, generic_tool])
+            tools.extend(A2AProxyTool(source, s) for s in source.list_skills())
+            tools.append(A2AProxyTool(source))
             continue
 
         tools.append(

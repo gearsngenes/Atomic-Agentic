@@ -5,7 +5,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
-from atomic_agentic.exceptions import ToolDefinitionError
+from atomic_agentic.exceptions import A2AProxyError, MCPToolError, ToolDefinitionError
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
@@ -224,12 +224,12 @@ class FakeA2AClientHub(A2AClientHub):
     def list_skills(self) -> dict[str, A2AtomicSkillMetadata]:
         return dict(self._skills)
 
-    def call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
-        self.skill_calls.append((skill_id, dict(inputs)))
+    def call_atomic_skill(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+        self.skill_calls.append((remote_name, dict(inputs)))
         return self.result
 
-    async def async_call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
-        return self.call_atomic_skill(skill_id, inputs)
+    async def async_call_atomic_skill(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+        return self.call_atomic_skill(remote_name, inputs)
 
 
 class TestToToolCallable:
@@ -474,8 +474,8 @@ class TestToToolReturnToolIdentity:
 
 
 class TestToToolMCPClientHub:
-    def test_mcp_client_hub_requires_name(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="name"):
+    def test_mcp_client_hub_without_name_raises_hub_not_found(self) -> None:
+        with pytest.raises(MCPToolError, match="not found"):
             to_tool(FakeMCPClientHub())
 
     def test_mcp_client_hub_becomes_mcp_proxy_tool(self) -> None:
@@ -502,8 +502,8 @@ class TestToToolMCPClientHub:
         assert tool.description == "Local search."
 
     def test_unknown_name_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError):
-            to_tool(FakeMCPClientHub(), name="missing")
+        with pytest.raises(MCPToolError):
+            to_tool(FakeMCPClientHub(), name="nonexistent")
 
     def test_mcp_proxy_tool_invokes_fake_hub(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "ok"}})
@@ -543,10 +543,10 @@ class TestToToolA2AClientHub:
 
         assert tool.remote_name is None
 
-    def test_unknown_skill_raises_tool_definition_error(self) -> None:
+    def test_unknown_skill_raises_a2a_proxy_error(self) -> None:
         hub = FakeA2AClientHub()
 
-        with pytest.raises(ToolDefinitionError, match="not found"):
+        with pytest.raises(A2AProxyError, match="not found"):
             to_tool(hub, name="does_not_exist")
 
     def test_description_applied_through_setter_keeps_proxy_class(self) -> None:
@@ -621,6 +621,49 @@ class TestToToolsRemoteExpansion:
         assert len(tools) == 2
         assert all(isinstance(tool, MCPProxyTool) for tool in tools)
         assert [tool.remote_name for tool in tools] == ["search", "summarize"]
+
+    def test_to_tools_keeps_names_and_prefixes_for_mcp_hub(self) -> None:
+        hub = FakeMCPClientHub(hub_name="files")
+
+        tools = to_tools([hub])
+
+        assert [tool.name for tool in tools] == ["files_search", "files_summarize"]
+        assert [tool.remote_name for tool in tools] == ["search", "summarize"]
+
+    def test_to_tools_on_real_hub_adds_no_fetch_beyond_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetches: list[int] = []
+
+        def fake_fetch(self: MCPClientHub) -> dict[str, dict[str, Any]]:
+            fetches.append(1)
+            return {
+                "search": mcp_metadata(description="Remote MCP search."),
+                "summarize": mcp_metadata(description="Remote MCP summarize."),
+            }
+
+        monkeypatch.setattr(MCPClientHub, "_fetch_tools", fake_fetch)
+        hub = MCPClientHub("python", "stdio", name="files")
+        assert len(fetches) == 1
+
+        tools = to_tools([hub])
+        single = to_tool(hub, "search", description="Local search.")
+
+        assert len(fetches) == 1
+        assert [tool.name for tool in tools] == ["files_search", "files_summarize"]
+        assert [tool.remote_name for tool in tools] == ["search", "summarize"]
+        assert single.description == "Local search."
+
+    def test_to_tool_on_real_hub_unknown_name_raises_mcp_tool_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            MCPClientHub, "_fetch_tools", lambda self: {"search": mcp_metadata()}
+        )
+        hub = MCPClientHub("python", "stdio")
+
+        with pytest.raises(MCPToolError, match="nonexistent"):
+            to_tool(hub, "nonexistent")
 
     def test_to_tools_mixed_sources_preserves_expanded_order(self) -> None:
         hub = FakeMCPClientHub()

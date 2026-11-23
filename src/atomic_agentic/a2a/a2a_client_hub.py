@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import uuid
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -25,12 +26,13 @@ from ..constants.a2a_sdk import (
     TRANSPORT_REST,
     VALID_TRANSPORT_MODES,
 )
-from ..constants.core import IDENTIFIER_PATTERN, HeaderValue
+from ..constants.core import HeaderValue
 from ..exceptions import A2AProxyError
 from ..models.a2a_sdk import A2AtomicSkillMetadata
 from ..utils.core import (
     apply_name_filter,
     normalize_headers,
+    normalize_optional_identifier,
     run_coro_async,
     run_coro_sync,
     start_background_loop,
@@ -93,6 +95,11 @@ class A2AClientHub:
     async_call_atomic_skill() or the always-available generic-mode
     A2AProxyTool path, both of which remain reachable by any skill id
     regardless of this filter.
+
+    Limits: a persistent hub whose server dies still reports connected and
+    its calls fail until refresh(...) reconnects (there is no automatic
+    reconnect); refresh()/close() can fail a call already in flight on the
+    old connection.
     """
 
     def __init__(
@@ -139,7 +146,7 @@ class A2AClientHub:
         if not isinstance(persistent, bool):
             raise TypeError("persistent must be a bool.")
 
-        self._name: str | None = self._normalize_name(name)
+        self._name: str | None = normalize_optional_identifier(name)
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
         self._timeout_seconds: float = float(timeout_seconds)
         self._client_kwargs: dict[str, Any] | None = self._normalize_client_kwargs(client_kwargs)
@@ -164,7 +171,12 @@ class A2AClientHub:
                 )
             except Exception:
                 stop_background_loop(self._bg_loop, self._bg_thread)
+                self._bg_loop = None
+                self._bg_thread = None
                 raise
+            # Safety net: tear down a forgotten persistent hub at normal
+            # process exit; unregistered by close().
+            atexit.register(self.close)
         else:
             self._bg_loop = None
             self._bg_thread = None
@@ -281,20 +293,6 @@ class A2AClientHub:
         )
 
     @staticmethod
-    def _normalize_name(name: str | None) -> str | None:
-        """None passes through; otherwise name must be an identifier."""
-        if name is None:
-            return None
-        if not isinstance(name, str):
-            raise TypeError("name must be a string when provided.")
-        if not IDENTIFIER_PATTERN.fullmatch(name):
-            raise ValueError(
-                "name must be a valid identifier (letters, digits, underscores) "
-                "when provided."
-            )
-        return name
-
-    @staticmethod
     def _normalize_client_kwargs(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
         """Validate the httpx options bucket: a mapping (or None) that does not repeat headers/timeout."""
         if value is None:
@@ -349,10 +347,14 @@ class A2AClientHub:
             httpx.HTTPError,
             ValueError,
         ) as exc:
+            await httpx_client.aclose()
             raise A2AProxyError(
                 f"{type(self).__name__}: failed to connect to {self._location!r} "
                 f"via {self._transport_mode}: {exc}"
             ) from exc
+        except BaseException:
+            await httpx_client.aclose()
+            raise
 
         # create_client(agent=location) is used (not a pre-resolved
         # AgentCard) specifically so each transport resolves its card
@@ -485,33 +487,43 @@ class A2AClientHub:
         """
         return dict(self._atomic_skills)
 
-    def call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+    def get_skill(self, name: str) -> A2AtomicSkillMetadata:
+        """The stored metadata for one remote skill; raises A2AProxyError
+        naming the skill when it is not in the cached skills."""
+        skills = self.list_skills()
+        if name not in skills:
+            raise A2AProxyError(
+                f"A2AClientHub: skill {name!r} not found; available: {sorted(skills)!r}."
+            )
+        return skills[name]
+
+    def call_atomic_skill(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
         """
-        Invoke one remote Atomic skill by name with a plain input dict,
+        Invoke one remote Atomic skill by remote_name with a plain input dict,
         returning the raw result value. Thin wrapper over send_parts: builds
         one DataPart from inputs, routes via
         Message.metadata[SKILL_ROUTING_KEY], and unwraps the single-key
         result DataPart the remote A2AtomicExecutor wraps its result in.
         """
-        part, metadata = self._prepare_atomic_call(skill_id, inputs)
+        part, metadata = self._prepare_atomic_call(remote_name, inputs)
         parts = self.send_parts([part], metadata=metadata)
         return self._unwrap_atomic_result(parts)
 
-    async def async_call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+    async def async_call_atomic_skill(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
         """Async counterpart to call_atomic_skill."""
-        part, metadata = self._prepare_atomic_call(skill_id, inputs)
+        part, metadata = self._prepare_atomic_call(remote_name, inputs)
         parts = await self.async_send_parts([part], metadata=metadata)
         return self._unwrap_atomic_result(parts)
 
     @staticmethod
-    def _prepare_atomic_call(skill_id: str, inputs: Mapping[str, Any]) -> tuple[Part, dict[str, str]]:
+    def _prepare_atomic_call(remote_name: str, inputs: Mapping[str, Any]) -> tuple[Part, dict[str, str]]:
         """Shared validation + Part/metadata construction for both call_atomic_skill entry points."""
-        if not isinstance(skill_id, str) or not skill_id.strip():
-            raise ValueError("skill_id must be a non-empty string.")
+        if not isinstance(remote_name, str) or not remote_name.strip():
+            raise ValueError("remote_name must be a non-empty string.")
         if not isinstance(inputs, Mapping):
             raise TypeError("inputs must be a Mapping.")
 
-        return new_data_part(dict(inputs)), {SKILL_ROUTING_KEY: skill_id}
+        return new_data_part(dict(inputs)), {SKILL_ROUTING_KEY: remote_name}
 
     @staticmethod
     def _unwrap_atomic_result(parts: tuple[Part, ...]) -> Any:
@@ -539,14 +551,9 @@ class A2AClientHub:
 
         location/transport_mode/name/persistent are not refreshable --
         immutable identity; construct a new A2AClientHub to change them.
-        Raises ValueError if called with no argument (a no-op refresh is a
-        caller bug).
+        A bare refresh() is valid: it re-resolves the card and rebuilds the
+        skills with the stored configuration.
         """
-        if headers is None and timeout_seconds is None and client_kwargs is None:
-            raise ValueError(
-                "refresh() requires at least one of headers, timeout_seconds or "
-                "client_kwargs; none were provided."
-            )
         run_coro_sync(
             self._do_refresh(headers, timeout_seconds, client_kwargs), loop=self._bg_loop
         )
@@ -585,9 +592,13 @@ class A2AClientHub:
             # untouched, same guarantee _connect's own failure already gives
             # self._agent_card. include_names/exclude_names are frozen, not
             # a refresh() parameter -- the same stored filter applies again.
-            new_atomic_skills = self._build_atomic_skills(
-                new_card, self._include_names, self._exclude_names
-            )
+            try:
+                new_atomic_skills = self._build_atomic_skills(
+                    new_card, self._include_names, self._exclude_names
+                )
+            except BaseException:
+                await new_client.close()
+                raise
 
             if self._bg_loop is not None:
                 old_client = self._client
@@ -615,11 +626,24 @@ class A2AClientHub:
         """
         if self._bg_loop is None:
             return
-        run_coro_sync(self._client.close(), loop=self._bg_loop)
-        stop_background_loop(self._bg_loop, self._bg_thread)
-        self._bg_loop = None
-        self._bg_thread = None
-        self._client = None
+        loop, thread, client = self._bg_loop, self._bg_thread, self._client
+        try:
+            run_coro_sync(client.close(), loop=loop)
+        finally:
+            stop_background_loop(loop, thread)
+            atexit.unregister(self.close)
+            self._bg_loop = None
+            self._bg_thread = None
+            self._client = None
+
+    def __enter__(self) -> "A2AClientHub":
+        """No-op: a persistent hub is connected by construction, a
+        non-persistent one has nothing to open. Returns self."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Calls close() (a no-op for a non-persistent hub)."""
+        self.close()
 
     def send_parts(
         self,

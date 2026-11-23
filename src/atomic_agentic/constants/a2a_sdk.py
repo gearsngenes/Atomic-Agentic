@@ -59,7 +59,7 @@ TERMINAL_FAILURE_STATES: frozenset[TaskState] = frozenset(
 #   async_call_atomic_skill routing and result unwrapping
 #
 # PARAM_SCHEMA_EXT_URI identifies AA's own AgentExtension on a published
-# AgentCard; its Struct payload is a skill_id -> A2AtomicSkillMetadata.to_dict()
+# AgentCard; its Struct payload is a remote_name -> A2AtomicSkillMetadata.to_dict()
 # map. SKILL_ROUTING_KEY is the Message.metadata key naming which registered
 # skill a call targets -- lives in metadata, not inside the DataPart's own
 # content, since no skill-selection field exists anywhere on Message itself

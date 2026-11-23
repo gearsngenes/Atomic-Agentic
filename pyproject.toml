@@ -71,6 +71,7 @@ addopts = "-ra --basetemp=.pytest_tmp"
 tmp_path_retention_policy = "none"
 markers = [
   "integration: multi-component integration tests",
+  "live_catalog: MCPClientHub tests that need the real catalog fetch (default is a stubbed empty catalog)",
   "llm: tests that make real LLM API calls",
   "network: tests that require network access",
   "slow: tests with long runtimes",
