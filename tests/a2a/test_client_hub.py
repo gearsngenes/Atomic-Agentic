@@ -31,6 +31,7 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentInterface,
     AgentSkill,
     Role,
@@ -42,8 +43,15 @@ from starlette.applications import Starlette
 from atomic_agentic.a2a.a2a_client_hub import A2AClientHub
 
 a2a_client_hub_module = importlib.import_module("atomic_agentic.a2a.a2a_client_hub")
-from atomic_agentic.constants.a2a_sdk import TRANSPORT_GRPC, TRANSPORT_JSON_RPC, TRANSPORT_REST
+from atomic_agentic.constants.a2a_sdk import (
+    PARAM_SCHEMA_EXT_URI,
+    SKILL_ROUTING_KEY,
+    TRANSPORT_GRPC,
+    TRANSPORT_JSON_RPC,
+    TRANSPORT_REST,
+)
 from atomic_agentic.exceptions import A2AProxyError
+from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.utils.core import run_coro_sync, start_background_loop, stop_background_loop
 
 
@@ -470,14 +478,44 @@ class TestRefresh:
     def test_persistent_concurrent_refresh_does_not_corrupt_state(self, fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
         try:
-            def worker(index: int) -> None:
-                hub.refresh(timeout_seconds=100.0 + index)
+            real_connect = hub._connect
+            tracked: list[_TrackedClient] = []
+            gauge = _ConcurrencyGauge()
 
-            threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+            async def instrumented_connect(*args: Any, **kwargs: Any) -> Any:
+                gauge.enter()
+                try:
+                    await asyncio.sleep(0.05)  # widens the overlap window
+                    client, card = await real_connect(*args, **kwargs)
+                finally:
+                    gauge.leave()
+                wrapped = _TrackedClient(client)
+                tracked.append(wrapped)
+                return wrapped, card
+
+            hub._connect = instrumented_connect  # type: ignore[method-assign]
+            errors: list[BaseException] = []
+
+            def worker(index: int) -> None:
+                try:
+                    hub.refresh(timeout_seconds=100.0 + index)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(3)]
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join()
+                thread.join(timeout=30)
+
+            assert not any(thread.is_alive() for thread in threads)
+            assert errors == []
+            # Only one refresh was ever inside its critical section.
+            assert gauge.max == 1
+            assert len(tracked) == 3
+            # Every client created was closed except the final live one.
+            assert [c.closed for c in tracked] == [1, 1, 0]
+            assert hub._client is tracked[-1]
 
             # No corruption: client/card pairing is still usable afterward.
             hub.send_parts([new_text_part("after-concurrent-refresh")])
@@ -531,14 +569,28 @@ class TestAtomicSkillDetection:
         finally:
             hub.close()
 
-    def test_refresh_rebuilds_atomic_skills_without_error(
-        self, fixture_server: FixtureServer, persistent: bool
+    def test_refresh_rebuilds_atomic_skills_from_the_refreshed_card(
+        self, fixture_server: FixtureServer, persistent: bool, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
-            hub.refresh(timeout_seconds=123.0)
             assert hub.list_skills() == {}
+            new_client = _RecordingClient()
+            card = _atomic_card({"add": _skill_metadata("add")})
+
+            async def fake_connect(*args: Any, **kwargs: Any) -> Any:
+                return new_client, card
+
+            monkeypatch.setattr(hub, "_connect", fake_connect)
+
+            hub.refresh(timeout_seconds=123.0)
+
+            assert sorted(hub.list_skills()) == ["add"]
+            assert hub.get_skill("add").remote_name == "add"
+            assert hub.agent_card is card
+            assert hub.timeout_seconds == 123.0
         finally:
+            monkeypatch.undo()
             hub.close()
 
     def test_get_skill_hit_and_miss(
@@ -1166,3 +1218,251 @@ class TestCallAtomicSkillRemoteName:
 
         monkeypatch.setattr(hub, "async_send_parts", fake_async_send_parts)
         assert asyncio.run(hub.async_call_atomic_skill(remote_name="add", inputs={})) == 6
+
+
+# --------------------------------------------------------------------------- #
+# Stage 9 Pass 6b: hardening -- construction leak, close/refresh serialization,
+# non-persistent refresh thread safety, async_close/is_connected, name strip
+# --------------------------------------------------------------------------- #
+
+
+class _TrackedClient:
+    """Wraps a real client: counts close() calls, forwards everything else."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+        self.closed = 0
+
+    async def close(self) -> None:
+        self.closed += 1
+        await self.real.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.real, name)
+
+
+class _ConcurrencyGauge:
+    """Thread-safe count of how many callers are inside a section at once."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max = 0
+        self.entries = 0
+
+    def enter(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.entries += 1
+            self.max = max(self.max, self.active)
+
+    def leave(self) -> None:
+        with self._lock:
+            self.active -= 1
+
+
+def _skill_metadata(name: str) -> A2AtomicSkillMetadata:
+    return A2AtomicSkillMetadata(
+        remote_name=name,
+        description=f"Skill {name}.",
+        extra_description="",
+        params=(),
+        return_type="int",
+    )
+
+
+def _atomic_card(skills: dict[str, A2AtomicSkillMetadata]) -> AgentCard:
+    extension = AgentExtension(
+        uri=PARAM_SCHEMA_EXT_URI,
+        description="Atomic-Agentic per-skill parameter schema.",
+        required=False,
+        params={name: metadata.to_dict() for name, metadata in skills.items()},
+    )
+    return AgentCard(
+        name="AtomicTestAgent",
+        description="Card carrying the Atomic extension.",
+        version="1.0.0",
+        capabilities=AgentCapabilities(extensions=[extension]),
+    )
+
+
+class TestConstructionLeak:
+    def test_skill_build_failure_closes_the_created_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registered: list[Any] = []
+        monkeypatch.setattr(a2a_client_hub_module.atexit, "register", registered.append)
+        created: list[_RecordingClient] = []
+
+        async def fake_connect(self: A2AClientHub, *args: Any, **kwargs: Any) -> Any:
+            client = _RecordingClient()
+            created.append(client)
+            return client, object()
+
+        def failing_build(*args: Any, **kwargs: Any) -> Any:
+            raise ValueError("skills boom")
+
+        monkeypatch.setattr(A2AClientHub, "_connect", fake_connect)
+        monkeypatch.setattr(A2AClientHub, "_build_atomic_skills", staticmethod(failing_build))
+
+        hub = A2AClientHub.__new__(A2AClientHub)
+        with pytest.raises(ValueError, match="skills boom"):
+            hub.__init__("http://127.0.0.1:1", TRANSPORT_JSON_RPC, persistent=True)
+
+        assert [c.closed for c in created] == [1]
+        assert hub._bg_loop is None
+        assert hub._bg_thread is None
+        assert registered == []
+
+    def test_connect_failure_has_no_client_to_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def failing_connect(self: A2AClientHub, *args: Any, **kwargs: Any) -> Any:
+            raise A2AProxyError("connect boom")
+
+        monkeypatch.setattr(A2AClientHub, "_connect", failing_connect)
+
+        hub = A2AClientHub.__new__(A2AClientHub)
+        with pytest.raises(A2AProxyError, match="connect boom"):
+            hub.__init__("http://127.0.0.1:1", TRANSPORT_JSON_RPC, persistent=True)
+
+        assert hub._bg_loop is None
+        assert hub._client is None
+
+
+class TestCloseRacingRefresh:
+    def test_close_during_a_mid_flight_refresh_leaves_no_live_client(
+        self, fixture_server: FixtureServer
+    ) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
+        thread = hub._bg_thread
+        first = _TrackedClient(hub._client)
+        hub._client = first
+        tracked: list[_TrackedClient] = [first]
+        real_connect = hub._connect
+        entered = threading.Event()
+        release = threading.Event()
+
+        async def gated_connect(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            deadline = time.monotonic() + 15
+            while not release.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            client, card = await real_connect(*args, **kwargs)
+            wrapped = _TrackedClient(client)
+            tracked.append(wrapped)
+            return wrapped, card
+
+        hub._connect = gated_connect  # type: ignore[method-assign]
+        errors: list[BaseException] = []
+
+        def run(action: Any) -> None:
+            try:
+                action()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        refresher = threading.Thread(target=run, args=(hub.refresh,), daemon=True)
+        closer = threading.Thread(target=run, args=(hub.close,), daemon=True)
+        try:
+            refresher.start()
+            assert entered.wait(timeout=15)  # refresh is now holding the lock
+            closer.start()
+            time.sleep(0.2)  # let close() queue behind the refresh
+            release.set()
+            refresher.join(timeout=30)
+            closer.join(timeout=30)
+
+            assert not refresher.is_alive()
+            assert not closer.is_alive()
+            assert errors == []
+            assert hub._client is None
+            assert hub._bg_loop is None
+            assert not thread.is_alive()
+            assert len(tracked) == 2
+            assert [c.closed for c in tracked] == [1, 1]
+        finally:
+            release.set()
+            hub.close()
+
+
+class TestNonPersistentRefreshThreadSafety:
+    def test_concurrent_refreshes_run_one_at_a_time(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        real_connect = hub._connect
+        gauge = _ConcurrencyGauge()
+
+        async def instrumented_connect(*args: Any, **kwargs: Any) -> Any:
+            gauge.enter()
+            try:
+                await asyncio.sleep(0.05)  # widens the overlap window
+                return await real_connect(*args, **kwargs)
+            finally:
+                gauge.leave()
+
+        hub._connect = instrumented_connect  # type: ignore[method-assign]
+        errors: list[BaseException] = []
+
+        def worker(index: int) -> None:
+            try:
+                hub.refresh(timeout_seconds=200.0 + index)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        try:
+            threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            assert not any(t.is_alive() for t in threads)
+            assert errors == []
+            assert gauge.entries == 4
+            assert gauge.max == 1
+            # The committed timeout is one whole refresh's value, not a mix.
+            assert hub.timeout_seconds in {200.0, 201.0, 202.0, 203.0}
+        finally:
+            hub.close()
+
+
+class TestAsyncCloseAndIsConnected:
+    def test_async_close_closes_and_is_idempotent(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
+        thread = hub._bg_thread
+        assert hub.is_connected is True
+
+        async def _close_twice() -> None:
+            await hub.async_close()
+            await hub.async_close()
+
+        asyncio.run(_close_twice())
+
+        assert hub.is_connected is False
+        assert hub._bg_loop is None
+        assert hub._client is None
+        assert not thread.is_alive()
+
+    def test_async_close_on_non_persistent_is_a_no_op(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+
+        asyncio.run(hub.async_close())
+
+        hub.send_parts([new_text_part("still works")])
+
+    def test_is_connected_tracks_the_held_client(self, fixture_server: FixtureServer) -> None:
+        persistent_hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, persistent=True)
+        plain_hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
+        try:
+            assert persistent_hub.is_connected is True
+            assert plain_hub.is_connected is False
+        finally:
+            persistent_hub.close()
+            plain_hub.close()
+
+        assert persistent_hub.is_connected is False
+
+
+class TestPrepareAtomicCallStrips:
+    def test_padded_remote_name_routes_stripped(self) -> None:
+        _, metadata = A2AClientHub._prepare_atomic_call(" add ", {})
+
+        assert metadata == {SKILL_ROUTING_KEY: "add"}

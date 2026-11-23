@@ -56,7 +56,7 @@ agent = BasicAgent(
 )
 
 
-MCP_ENDPOINT = "http://127.0.0.1:8000/mcp"
+MCP_URL = "http://127.0.0.1:8000/mcp"
 MCP_HEADERS: Mapping[str, str] | None = None
 
 # a2a-sdk-backed targets -- see a2a_sdk_atomic_host_server.py (invokable,
@@ -149,10 +149,10 @@ def main() -> None:
     )
 
     print("\n[4] MCPClientHub + name -> MCPProxyTool")
-    print("[MCP] Connecting to:", MCP_ENDPOINT)
+    print("[MCP] Connecting to:", MCP_URL)
     try:
         mcp_hub = MCPClientHub(
-            MCP_ENDPOINT,
+            MCP_URL,
             "streamable_http",
             headers=MCP_HEADERS,
         )

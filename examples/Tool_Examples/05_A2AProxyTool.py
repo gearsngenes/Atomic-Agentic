@@ -25,7 +25,7 @@ from typing import Any, Mapping
 from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.constants.a2a_sdk import ATOMIC_RESULT_KEY, SKILL_ROUTING_KEY, TRANSPORT_JSON_RPC
 from atomic_agentic import NO_VAL
-from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import A2AProxyError, ToolDefinitionError, ToolInvocationError
 from atomic_agentic.tools import A2AProxyTool
 
 ATOMIC_URL = "http://127.0.0.1:9000"
@@ -85,8 +85,8 @@ def main() -> None:
     print("\n[1b] Unknown skill -- caught at construction, not invocation")
     try:
         A2AProxyTool(atomic_hub, "does_not_exist")
-    except ToolDefinitionError as exc:
-        print("ToolDefinitionError:", exc)
+    except A2AProxyError as exc:
+        print("A2AProxyError:", exc)
 
     # ------------------------------------------------------------------ #
     # [2] Generic mode -- a plain, non-Atomic a2a-sdk agent (not invokable)

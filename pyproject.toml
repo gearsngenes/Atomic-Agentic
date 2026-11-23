@@ -21,7 +21,7 @@ classifiers = [
 
 # Core: protocol/transport libraries only. No LLM provider SDKs.
 dependencies = [
-  "mcp>=1.25,<3",
+  "mcp>=2,<3",
   "a2a-sdk[grpc]>=1.1.2,<2",
   "httpx>=0.28.1,<1",
 ]

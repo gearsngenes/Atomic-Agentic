@@ -6,7 +6,6 @@ import inspect
 import os
 import sys
 import threading
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -29,8 +28,13 @@ def _stub_catalog_io(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     if request.node.get_closest_marker("live_catalog"):
         return
 
+    refresh_calls = {"n": 0}
+
     async def _no_candidate(self: MCPClientHub, headers: Any, client_kwargs: Any, session_kwargs: Any) -> dict:
-        return {}
+        # A distinct catalog per call, so a test can tell that refresh()
+        # actually re-listed and committed the result.
+        refresh_calls["n"] += 1
+        return {"refreshed": {"n": refresh_calls["n"]}}
 
     monkeypatch.setattr(MCPClientHub, "_fetch_tools", lambda self: {})
     monkeypatch.setattr(MCPClientHub, "_list_candidate", _no_candidate)
@@ -546,9 +550,12 @@ class TestMCPClientHubRefresh:
             headers={"X-Old": "yes"},
         )
 
+        assert hub.list_tools() == {}
+
         hub.refresh()
 
         assert hub.headers == {"X-Old": "yes"}
+        assert hub.list_tools() == {"refreshed": {"n": 1}}
 
     def test_refresh_with_headers_updates_stored_headers(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
@@ -556,6 +563,7 @@ class TestMCPClientHubRefresh:
         hub.refresh(headers={"X-New": "yes"})
 
         assert hub.headers == {"X-New": "yes"}
+        assert hub.list_tools() == {"refreshed": {"n": 1}}
 
     def test_refresh_header_validation_applies(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
@@ -576,6 +584,7 @@ class TestMCPClientHubRefresh:
         assert hub.client_kwargs == {"timeout": 10}
         assert hub.headers == {"X-Old": "yes"}
         assert hub.session_kwargs == {"client_info": None}
+        assert hub.list_tools() == {"refreshed": {"n": 1}}
 
     def test_refresh_session_kwargs_alone_updates_only_session_kwargs(self) -> None:
         hub = MCPClientHub(
@@ -590,6 +599,7 @@ class TestMCPClientHubRefresh:
         assert hub.session_kwargs == {"client_info": None}
         assert hub.headers == {"X-Old": "yes"}
         assert hub.client_kwargs == {"timeout": 10}
+        assert hub.list_tools() == {"refreshed": {"n": 1}}
 
     def test_refresh_replaces_client_kwargs_wholesale_not_merged(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
@@ -598,6 +608,7 @@ class TestMCPClientHubRefresh:
         hub.refresh(client_kwargs={"b": 2})
 
         assert hub.client_kwargs == {"b": 2}
+        assert hub.list_tools() == {"refreshed": {"n": 2}}
 
     def test_refresh_client_kwargs_validation_applies(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
@@ -817,7 +828,7 @@ class TestDoOperationKwargsForwarding:
         asyncio.run(hub._do_operation(_identity_op))
 
         _, kwargs = recorder.calls[0]
-        assert kwargs["read_timeout_seconds"] == timedelta(seconds=12.5)
+        assert kwargs["read_timeout_seconds"] == 12.5
         assert kwargs["client_info"] is None
 
     def test_foreign_client_kwargs_key_is_wrapped_as_connection_error(
@@ -1846,5 +1857,189 @@ class TestRefreshRelists:
             assert hub.is_connected is True
             # Only the candidate connection was closed; the live one is open.
             assert _CountingCM.exits == 1
+        finally:
+            hub.close()
+
+
+def _page_tool(name: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        description=f"Tool {name}.",
+        inputSchema={"type": "object", "properties": {}, "required": []},
+        outputSchema=None,
+    )
+
+
+class _TwoPageRealSession(FakeRealSession):
+    """list_tools() serves page 1 (cursor 'page-2') and, when asked with that
+    cursor through params, page 2 (no cursor)."""
+
+    requests: list[Any] = []
+
+    async def list_tools(self, params: Any = None) -> Any:
+        cursor = getattr(params, "cursor", None)
+        type(self).requests.append(cursor)
+        if cursor is None:
+            return SimpleNamespace(tools=[_page_tool("one")], next_cursor="page-2")
+        assert cursor == "page-2"
+        return SimpleNamespace(tools=[_page_tool("two")], next_cursor=None)
+
+
+@pytest.mark.live_catalog
+class TestListToolsPagination:
+    def test_construction_and_refresh_merge_every_page(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _TwoPageRealSession.requests = []
+        _patch_stdio_fakes(
+            monkeypatch, session_factory=RecordingSessionFactory(_TwoPageRealSession)
+        )
+
+        hub = MCPClientHub("python", "stdio")
+        try:
+            assert sorted(hub.list_tools()) == ["one", "two"]
+            assert _TwoPageRealSession.requests == [None, "page-2"]
+
+            hub._tools = {}
+            hub.refresh()
+
+            assert sorted(hub.list_tools()) == ["one", "two"]
+            assert _TwoPageRealSession.requests == [None, "page-2", None, "page-2"]
+        finally:
+            hub.close()
+
+    def test_single_page_session_without_params_support_still_works(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FakeSession.list_tools() takes no arguments and returns no cursor.
+        _patch_stdio_fakes(
+            monkeypatch, session_factory=RecordingSessionFactory(FakeRealCallableSession)
+        )
+
+        hub = MCPClientHub("python", "stdio")
+        try:
+            assert list(hub.list_tools()) == ["search"]
+        finally:
+            hub.close()
+
+
+class TestCatalogCopies:
+    @staticmethod
+    def _nested_catalog() -> dict[str, dict[str, Any]]:
+        return {
+            "search": {
+                "description": "Search.",
+                "parameters": [{"name": "query"}],
+                "raw_metadata": {"title": "Search", "tags": ["a"]},
+            }
+        }
+
+    @pytest.mark.parametrize("via", ["list_tools", "get_tool"])
+    def test_edits_to_returned_entries_never_reach_the_hub(
+        self, monkeypatch: pytest.MonkeyPatch, via: str
+    ) -> None:
+        monkeypatch.setattr(
+            MCPClientHub,
+            "_fetch_tools",
+            _FetchRecorder(self._nested_catalog()),
+        )
+        hub = MCPClientHub("python", "stdio")
+
+        entry = hub.list_tools()["search"] if via == "list_tools" else hub.get_tool("search")
+        entry["description"] = "changed"
+        entry["parameters"].append({"name": "extra"})
+        entry["parameters"][0]["name"] = "renamed"
+        entry["raw_metadata"]["title"] = "changed"
+        entry["raw_metadata"]["tags"].append("b")
+
+        assert hub.get_tool("search") == self._nested_catalog()["search"]
+        assert hub.list_tools() == self._nested_catalog()
+
+
+class TestNonPersistentRefreshThreadSafety:
+    def test_concurrent_refreshes_are_serialized_and_commit_one_whole_catalog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = {"active": 0, "max": 0, "n": 0}
+        state_lock = threading.Lock()
+
+        async def slow_candidate(
+            self: MCPClientHub, headers: Any, client_kwargs: Any, session_kwargs: Any
+        ) -> dict:
+            with state_lock:
+                state["active"] += 1
+                state["max"] = max(state["max"], state["active"])
+                state["n"] += 1
+                mine = state["n"]
+            await asyncio.sleep(0.05)
+            with state_lock:
+                state["active"] -= 1
+            return {f"cat{mine}": {"n": mine}}
+
+        monkeypatch.setattr(MCPClientHub, "_list_candidate", slow_candidate)
+        hub = MCPClientHub("python", "stdio")
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                hub.refresh()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        try:
+            threads = [threading.Thread(target=worker, daemon=True) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=15)
+
+            assert not any(t.is_alive() for t in threads)
+            assert errors == []
+            assert state["n"] == 4
+            assert state["max"] == 1
+            final = hub.list_tools()
+            assert len(final) == 1
+            ((name, entry),) = final.items()
+            assert name == f"cat{entry['n']}"
+        finally:
+            hub.close()
+
+
+class _ExitRecordingCM(FakeAsyncCM):
+    exits: list[Any] = []
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        type(self).exits.append(exc_info[0])
+        return False
+
+
+class _BlockingEnterSession(FakeRealSession):
+    async def __aenter__(self) -> Any:
+        await asyncio.Event().wait()  # never set; only cancellation ends this
+        return self
+
+
+class TestConnectCancellation:
+    def test_cancelled_connect_closes_the_exit_stack(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _ExitRecordingCM.exits = []
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server_params: _ExitRecordingCM(("read", "write")),
+        )
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: _BlockingEnterSession()
+        )
+        hub = MCPClientHub("python", "stdio")
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                asyncio.run(
+                    asyncio.wait_for(hub._connect_session(None, None, None), timeout=0.3)
+                )
+
+            # The transport that was already entered was unwound on cancellation.
+            assert len(_ExitRecordingCM.exits) == 1
         finally:
             hub.close()

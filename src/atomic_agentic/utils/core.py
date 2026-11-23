@@ -105,7 +105,7 @@ def run_coro_sync(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoop | Non
       ``asyncio.run_coroutine_threadsafe`` and block the calling thread
       until it completes. Intended for a loop started by
       ``start_background_loop`` and kept alive across multiple calls (e.g.
-      A2AClientHub's persistent mode) -- some asyncio-native resources
+      the persistent mode of MCPClientHub and A2AClientHub) -- some asyncio-native resources
       (a grpc.aio.Channel in particular) break when reused across
       independently-created event loops, so anything meant to outlive one
       call must always dispatch onto the *same* loop.
@@ -167,7 +167,8 @@ async def run_coro_async(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoo
 
     ``loop`` is required, not optional: this exists specifically to target a
     *different* loop than the one the caller is currently running on (e.g.
-    A2AClientHub persistent mode's dedicated background loop). A caller with
+    the persistent mode of MCPClientHub or A2AClientHub, whose dedicated
+    background loop). A caller with
     no other loop to target should just await the awaitable directly --
     there is nothing to bridge cross-thread in that case.
 
@@ -333,7 +334,7 @@ def _validate_name_list(
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"{param_name} entries must be non-empty strings.")
 
-    return frozenset(value)
+    return frozenset(item.strip() for item in value)
 
 
 def apply_name_filter(
@@ -367,7 +368,8 @@ def start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread
     run_coro_sync/run_coro_async's ``loop`` param by the time this returns.
     Daemon so a caller that never calls stop_background_loop doesn't hang
     process exit -- it only leaks the thread/loop/whatever was dispatched
-    onto it for the rest of the process's life. Needed by anything holding
+    onto it for the rest of the process's life. Used by MCPClientHub and
+    A2AClientHub in persistent mode; needed by anything holding
     an asyncio-native resource that must stay bound to the same loop for
     its whole lifetime -- confirmed necessary because grpc.aio.Channel
     breaks when reused across independently-created event loops (a channel

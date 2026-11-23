@@ -126,7 +126,6 @@ class TestExecutePayload:
         assert payload == {
             "transport_mode": "JSONRPC",
             "location": "http://example.test/a2a-sdk",
-            "persistent": False,
             "remote_name": "add",
             "result": 3,
         }
@@ -186,3 +185,21 @@ class TestExtraDescription:
 
     def test_generic_mode_is_empty(self) -> None:
         assert A2AProxyTool(_FakeHub())._extra_description() == ""
+
+
+class TestPayload:
+    def test_payload_keys_have_no_persistent(self) -> None:
+        tool = A2AProxyTool(_FakeHub(hub_name="calc"), "add")
+
+        assert tool._payload(7) == {
+            "transport_mode": "JSONRPC",
+            "location": "http://example.test/a2a-sdk",
+            "remote_name": "add",
+            "result": 7,
+        }
+
+    def test_generic_mode_payload_has_no_remote_name_value(self) -> None:
+        payload = A2AProxyTool(_FakeHub())._payload([])
+
+        assert payload["remote_name"] is None
+        assert set(payload) == {"transport_mode", "location", "remote_name", "result"}

@@ -74,15 +74,12 @@ class A2AProxyToolResult(ToolResult):
         "GRPC").
     location:
         The remote A2A server's URL this proxy is bound to.
-    persistent:
-        Whether the backing A2AClientHub holds a persistent connection.
     remote_name:
         The bound skill's name in skill mode; None in generic mode.
     """
 
     transport_mode: str
     location: str
-    persistent: bool
     remote_name: str | None = None
 
     def __post_init__(self) -> None:
@@ -90,8 +87,6 @@ class A2AProxyToolResult(ToolResult):
             raise TypeError("transport_mode must be a non-empty string.")
         if not isinstance(self.location, str) or not self.location.strip():
             raise TypeError("location must be a non-empty string.")
-        if not isinstance(self.persistent, bool):
-            raise TypeError("persistent must be a bool.")
         if self.remote_name is not None:
             if not isinstance(self.remote_name, str) or not self.remote_name.strip():
                 raise TypeError("remote_name must be a non-empty string when provided.")
@@ -106,7 +101,6 @@ class A2AProxyToolResult(ToolResult):
             {
                 "transport_mode": self.transport_mode,
                 "location": self.location,
-                "persistent": self.persistent,
                 "remote_name": self.remote_name,
             }
         )

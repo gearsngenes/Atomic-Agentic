@@ -32,6 +32,17 @@ class _NoValSentinel:
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return NO_VAL_REPR
 
+    # Copying or pickling must hand back the one instance, or every
+    # `is NO_VAL` check on a copied ParamSpec silently fails.
+    def __copy__(self) -> "_NoValSentinel":
+        return self
+
+    def __deepcopy__(self, memo: Any) -> "_NoValSentinel":
+        return self
+
+    def __reduce__(self) -> str:
+        return "NO_VAL"
+
 
 NO_VAL: Any = _NoValSentinel()
 

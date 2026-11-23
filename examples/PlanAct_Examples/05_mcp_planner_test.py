@@ -2,7 +2,7 @@
 
 PlanActAgent planning against a local MCP server.
 
-Expected local MCP endpoint:
+Expected local MCP server location (URL):
   http://localhost:8000/mcp
 
 Updated to use PlanActAgent (formerly PlannerAgent).

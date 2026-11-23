@@ -349,7 +349,6 @@ class TestSkillMode:
             fields = {
                 "transport_mode": hub.transport_mode,
                 "location": hub.location,
-                "persistent": hub.persistent,
                 "remote_name": tool.remote_name,
             }
             assert tool.execute((), {"a": 1, "b": 2}) == {**fields, "result": 3}

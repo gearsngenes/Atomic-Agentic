@@ -125,3 +125,18 @@ class TestRealHubRegistrationNaming:
         finally:
             hub_a.close()
             hub_b.close()
+
+
+class TestRealHubReadTimeout:
+    """The read timeout must be handed to the SDK as float seconds (mcp 2.x);
+    the unit tests fake ClientSession, so only a real session proves it."""
+
+    def test_read_timeout_with_real_session(self) -> None:
+        hub = MCPClientHub(
+            sys.executable,
+            "stdio",
+            args=[_FIXTURE_SERVER],
+            read_timeout_seconds=30.0,
+        )
+        assert list(hub.list_tools()) == ["echo"]
+        assert hub.call_tool("echo", {"value": "hi"})["isError"] is False

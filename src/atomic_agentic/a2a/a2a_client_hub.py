@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import threading
 import uuid
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -50,7 +51,7 @@ class A2AClientHub:
     connection lifetime via a `persistent` knob (default False).
 
     Purely mechanical: accepts and returns literal a2a-sdk Part objects with
-    zero Python-native type dispatch (Pass 3's A2AProxyTool owns that).
+    zero Python-native type dispatch (A2AProxyTool owns that).
 
     persistent=True: one connection is opened at construction and held for
     the instance's whole lifetime. Owns one background (loop, thread) pair
@@ -64,8 +65,10 @@ class A2AClientHub:
     loop + connection for the process's remaining life (the thread is a
     daemon, so it won't hang process exit). close() is idempotent, and after
     it runs this hub transparently behaves like a non-persistent one for any
-    further calls (self._bg_loop is None is the single source of truth,
-    checked the same way by send_parts/async_send_parts/_do_refresh).
+    further calls (self._bg_loop is None is the single source of truth:
+    async_send_parts and _do_refresh check it, and send_parts passes
+    loop=self._bg_loop to run_coro_sync, which runs on a fresh loop when it
+    is None).
 
     persistent=False: no connection is held between calls (httpx.AsyncClient
     and grpc.aio.Channel are both terminal once closed -- there is no
@@ -95,6 +98,13 @@ class A2AClientHub:
     async_call_atomic_skill() or the always-available generic-mode
     A2AProxyTool path, both of which remain reachable by any skill id
     regardless of this filter.
+
+    Lifecycle: a persistent hub holds a background thread, an event loop and
+    a live client connection until close(). Use the hub in a `with` block or
+    call close() yourself. A forgotten hub is closed at normal process exit
+    through its atexit registration, which also keeps the hub alive until
+    then. That close() waits for teardown, so an unresponsive server can slow
+    process exit.
 
     Limits: a persistent hub whose server dies still reports connected and
     its calls fail until refresh(...) reconnects (there is no automatic
@@ -154,13 +164,20 @@ class A2AClientHub:
         self._location: str = resolved_location
         self._transport_mode: str = mode
         self._persistent: bool = persistent
+        # Persistent mode: serializes refresh() and close() on the one
+        # background loop. Not shared across non-persistent calls, which each
+        # run on their own throwaway loop.
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
+        # Serializes non-persistent refresh() calls; an asyncio lock cannot
+        # span separate loops, a thread lock can.
+        self._refresh_thread_lock: threading.Lock = threading.Lock()
         self._include_names, self._exclude_names = validate_name_filter(
             include_names, exclude_names
         )
 
         if persistent:
             self._bg_loop, self._bg_thread = start_background_loop()
+            self._client: Client | None = None
             try:
                 self._client, self._agent_card = run_coro_sync(
                     self._connect(self._headers, self._timeout_seconds, self._client_kwargs),
@@ -170,6 +187,13 @@ class A2AClientHub:
                     self._agent_card, self._include_names, self._exclude_names
                 )
             except Exception:
+                # _client is only set once _connect succeeded; close it if
+                # the skill build is what failed.
+                if self._client is not None:
+                    try:
+                        run_coro_sync(self._client.close(), loop=self._bg_loop)
+                    except Exception:
+                        pass
                 stop_background_loop(self._bg_loop, self._bg_thread)
                 self._bg_loop = None
                 self._bg_thread = None
@@ -390,14 +414,13 @@ class A2AClientHub:
         exclude_names: frozenset[str] | None,
     ) -> dict[str, A2AtomicSkillMetadata]:
         """
-        Detection only -- no Tool-building here (that's a later track's job).
+        Detection only -- no Tool-building here.
         Empty dict, not an error, when the extension is absent: a plain
         spec-compliant A2A server that never published AA's extension is a
         legitimate, expected case, not a malformed one. A malformed *present*
         entry (bad shape once the extension IS there) raises naturally out of
         A2AtomicSkillMetadata.from_dict/ParamSpec.from_dict and propagates to
-        the caller (constructor or _do_refresh), per doc1's "let natural
-        exceptions surface" discipline.
+        the caller (constructor or refresh).
 
         include_names/exclude_names (already validated) prune the raw
         extension payload before any A2AtomicSkillMetadata is built, so a
@@ -523,7 +546,7 @@ class A2AClientHub:
         if not isinstance(inputs, Mapping):
             raise TypeError("inputs must be a Mapping.")
 
-        return new_data_part(dict(inputs)), {SKILL_ROUTING_KEY: remote_name}
+        return new_data_part(dict(inputs)), {SKILL_ROUTING_KEY: remote_name.strip()}
 
     @staticmethod
     def _unwrap_atomic_result(parts: tuple[Part, ...]) -> Any:
@@ -554,9 +577,13 @@ class A2AClientHub:
         A bare refresh() is valid: it re-resolves the card and rebuilds the
         skills with the stored configuration.
         """
-        run_coro_sync(
-            self._do_refresh(headers, timeout_seconds, client_kwargs), loop=self._bg_loop
-        )
+        if self._bg_loop is None:
+            with self._refresh_thread_lock:
+                run_coro_sync(self._refresh_core(headers, timeout_seconds, client_kwargs))
+        else:
+            run_coro_sync(
+                self._do_refresh(headers, timeout_seconds, client_kwargs), loop=self._bg_loop
+            )
 
     async def _do_refresh(
         self,
@@ -564,58 +591,78 @@ class A2AClientHub:
         timeout_seconds: float | None,
         client_kwargs: Mapping[str, Any] | None,
     ) -> None:
-        """
-        Core refresh logic, shared by both modes -- guarded by
-        self._refresh_lock so two concurrent refresh() calls can't interleave
-        inconsistently. Branches on self._bg_loop is not None (not
-        self._persistent directly) so a closed persistent hub's refresh()
-        degrades the same way send_parts does, instead of touching a client
-        that no longer exists.
-        """
+        """Persistent-mode refresh: _refresh_core under self._refresh_lock,
+        so concurrent refresh() and close() calls on the background loop
+        cannot interleave."""
         async with self._refresh_lock:
-            resolved_headers = normalize_headers(headers) if headers is not None else self._headers
-            resolved_timeout = (
-                float(timeout_seconds) if timeout_seconds is not None else self._timeout_seconds
-            )
-            resolved_client_kwargs = (
-                self._normalize_client_kwargs(client_kwargs)
-                if client_kwargs is not None
-                else self._client_kwargs
-            )
+            await self._refresh_core(headers, timeout_seconds, client_kwargs)
 
-            new_client, new_card = await self._connect(
-                resolved_headers, resolved_timeout, resolved_client_kwargs
+    async def _refresh_core(
+        self,
+        headers: Mapping[str, HeaderValue] | None,
+        timeout_seconds: float | None,
+        client_kwargs: Mapping[str, Any] | None,
+    ) -> None:
+        """
+        Resolve candidate config, connect, build the skills, then commit.
+        Callers serialize it (the asyncio lock when persistent, the thread
+        lock otherwise). Branches on self._bg_loop is not None (not
+        self._persistent) so a closed persistent hub's refresh() degrades
+        like send_parts does, instead of touching a client that no longer
+        exists.
+        """
+        resolved_headers = normalize_headers(headers) if headers is not None else self._headers
+        resolved_timeout = (
+            float(timeout_seconds) if timeout_seconds is not None else self._timeout_seconds
+        )
+        resolved_client_kwargs = (
+            self._normalize_client_kwargs(client_kwargs)
+            if client_kwargs is not None
+            else self._client_kwargs
+        )
+
+        new_client, new_card = await self._connect(
+            resolved_headers, resolved_timeout, resolved_client_kwargs
+        )
+        # Built before any commit -- a malformed extension payload on the
+        # refreshed card raises here and the whole refresh rolls back.
+        # include_names/exclude_names are frozen, not a refresh() parameter.
+        try:
+            new_atomic_skills = self._build_atomic_skills(
+                new_card, self._include_names, self._exclude_names
             )
-            # Built before any commit -- a malformed extension payload on
-            # the refreshed card raises here and the whole refresh rolls
-            # back, leaving self._atomic_skills (and everything else)
-            # untouched, same guarantee _connect's own failure already gives
-            # self._agent_card. include_names/exclude_names are frozen, not
-            # a refresh() parameter -- the same stored filter applies again.
+        except BaseException:
+            await new_client.close()
+            raise
+
+        if self._bg_loop is not None:
+            old_client = self._client
+            self._client = new_client
             try:
-                new_atomic_skills = self._build_atomic_skills(
-                    new_card, self._include_names, self._exclude_names
-                )
-            except BaseException:
-                await new_client.close()
-                raise
+                await old_client.close()
+            except Exception:
+                # Best-effort; the refresh itself already succeeded, a
+                # failure closing the now-discarded old client shouldn't
+                # surface as a refresh() failure.
+                pass
+        else:
+            await new_client.close()
 
-            if self._bg_loop is not None:
-                old_client = self._client
-                self._client = new_client
-                try:
-                    await old_client.close()
-                except Exception:
-                    # Best-effort; the refresh itself already succeeded, a
-                    # failure closing the now-discarded old client shouldn't
-                    # surface as a refresh() failure.
-                    pass
-            else:
-                await new_client.close()
+        self._agent_card, self._headers = new_card, resolved_headers
+        self._timeout_seconds, self._client_kwargs = resolved_timeout, resolved_client_kwargs
+        self._atomic_skills = new_atomic_skills
 
-            self._agent_card, self._headers = new_card, resolved_headers
-            self._timeout_seconds, self._client_kwargs = resolved_timeout, resolved_client_kwargs
-            self._atomic_skills = new_atomic_skills
+    @property
+    def is_connected(self) -> bool:
+        """True while a persistent hub holds a live client; False for a
+        non-persistent hub and after close()."""
+        return self._client is not None
+
+    async def _do_close(self) -> None:
+        """Close the held client under the refresh lock, so a close() racing a
+        mid-flight refresh closes whichever client the refresh left in place."""
+        async with self._refresh_lock:
+            await self._client.close()
 
     def close(self) -> None:
         """
@@ -626,9 +673,23 @@ class A2AClientHub:
         """
         if self._bg_loop is None:
             return
-        loop, thread, client = self._bg_loop, self._bg_thread, self._client
+        loop, thread = self._bg_loop, self._bg_thread
         try:
-            run_coro_sync(client.close(), loop=loop)
+            run_coro_sync(self._do_close(), loop=loop)
+        finally:
+            stop_background_loop(loop, thread)
+            atexit.unregister(self.close)
+            self._bg_loop = None
+            self._bg_thread = None
+            self._client = None
+
+    async def async_close(self) -> None:
+        """Async counterpart to close()."""
+        if self._bg_loop is None:
+            return
+        loop, thread = self._bg_loop, self._bg_thread
+        try:
+            await run_coro_async(self._do_close(), loop=loop)
         finally:
             stop_background_loop(loop, thread)
             atexit.unregister(self.close)

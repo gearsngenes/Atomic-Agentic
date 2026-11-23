@@ -505,6 +505,14 @@ class TestToToolMCPClientHub:
         with pytest.raises(MCPToolError):
             to_tool(FakeMCPClientHub(), name="nonexistent")
 
+    def test_untrimmed_name_raises_showing_what_was_typed(self) -> None:
+        with pytest.raises(MCPToolError, match=r"' search '"):
+            to_tool(FakeMCPClientHub(), name=" search ")
+
+    def test_blank_name_raises(self) -> None:
+        with pytest.raises(MCPToolError):
+            to_tool(FakeMCPClientHub(), name="")
+
     def test_mcp_proxy_tool_invokes_fake_hub(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "ok"}})
         tool = to_tool(hub, name="search")
@@ -538,10 +546,14 @@ class TestToToolA2AClientHub:
         assert tool.remote_name is None
         assert tool.name == "send_parts"
 
-    def test_name_blank_selects_generic_mode(self) -> None:
-        tool = to_tool(FakeA2AClientHub(), name="   ")
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_name_blank_raises_a2a_proxy_error(self, blank: str) -> None:
+        with pytest.raises(A2AProxyError):
+            to_tool(FakeA2AClientHub(), name=blank)
 
-        assert tool.remote_name is None
+    def test_name_is_not_stripped(self) -> None:
+        with pytest.raises(A2AProxyError):
+            to_tool(FakeA2AClientHub(), name=" add ")
 
     def test_unknown_skill_raises_a2a_proxy_error(self) -> None:
         hub = FakeA2AClientHub()

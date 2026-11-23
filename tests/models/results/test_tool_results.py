@@ -24,9 +24,7 @@ def make_mcp(**overrides) -> MCPToolResult:
 
 
 def make_a2a(**overrides) -> A2AProxyToolResult:
-    kwargs = dict(
-        _envelope(), transport_mode="JSONRPC", location="http://example.test", persistent=False
-    )
+    kwargs = dict(_envelope(), transport_mode="JSONRPC", location="http://example.test")
     kwargs.update(overrides)
     return A2AProxyToolResult(**kwargs)
 
@@ -69,7 +67,7 @@ class TestA2AProxyToolResult:
         assert make_a2a(remote_name=" add ").remote_name == "add"
 
     def test_location_is_required(self) -> None:
-        kwargs = dict(_envelope(), transport_mode="JSONRPC", persistent=False)
+        kwargs = dict(_envelope(), transport_mode="JSONRPC")
 
         with pytest.raises(TypeError):
             A2AProxyToolResult(**kwargs)
@@ -85,16 +83,17 @@ class TestA2AProxyToolResult:
         with pytest.raises(TypeError, match="remote_name"):
             make_a2a(remote_name=value)
 
-    def test_persistent_must_be_bool(self) -> None:
-        with pytest.raises(TypeError, match="persistent"):
-            make_a2a(persistent="no")
+    def test_persistent_field_is_gone(self) -> None:
+        assert not hasattr(make_a2a(), "persistent")
+        with pytest.raises(TypeError):
+            make_a2a(persistent=False)
 
     def test_to_dict_keys(self) -> None:
         data = make_a2a(remote_name="add").to_dict()
 
         assert data["transport_mode"] == "JSONRPC"
         assert data["location"] == "http://example.test"
-        assert data["persistent"] is False
+        assert "persistent" not in data
         assert data["remote_name"] == "add"
         assert "base_url" not in data
         assert "skill_id" not in data

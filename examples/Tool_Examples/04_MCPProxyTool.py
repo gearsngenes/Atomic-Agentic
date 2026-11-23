@@ -64,8 +64,6 @@ EXAMPLE_INPUTS: dict[str, dict[str, Any]] = {
     "derivative": {"func": "x**2 + 2*x + 1", "x": 3.0},
 }
 
-client = MCPClientHub(**CLIENT_CONFIGS[TRANSPORT_MODE])
-
 def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
     print("description:", proxy.description)
@@ -87,16 +85,20 @@ def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
         print("invoke error:", e)
 
 def main() -> None:
-    print(f"Connecting via {TRANSPORT_MODE}:", client.location)
-    tool_names = client.list_tools()
-    print("Discovered tools:", tool_names.keys())
+    with MCPClientHub(**CLIENT_CONFIGS[TRANSPORT_MODE]) as client:
+        print(f"Connected via {TRANSPORT_MODE}:", client.location)
+        tool_names = list(client.list_tools())
+        print("Discovered tools:", tool_names)
 
-    for name in tool_names:
-        proxy = MCPProxyTool(client, name)
-        _show_plan(proxy)
+        for name in tool_names:
+            proxy = MCPProxyTool(client, name)
+            _show_plan(proxy)
 
-        inputs = EXAMPLE_INPUTS.get(name)
-        _invoke(proxy, inputs)
+            inputs = EXAMPLE_INPUTS.get(name)
+            if inputs is None:
+                print(f"(no example inputs for {name!r}; skipping invocation)")
+                continue
+            _invoke(proxy, inputs)
 
 if __name__ == "__main__":
     main()

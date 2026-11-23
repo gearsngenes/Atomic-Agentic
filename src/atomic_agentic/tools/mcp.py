@@ -122,16 +122,17 @@ class MCPProxyTool(Tool):
         except Exception as e:
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
+        return self._package(raw_result)
+
+    def _package(self, raw_result: Any) -> Dict[str, Any]:
+        """Check the hub's result envelope (mapping, isError) and build the
+        proxy payload; shared by execute and async_execute."""
         if not isinstance(raw_result, Mapping):
             raise ToolInvocationError(
                 f"{self.full_name}: MCP client hub returned a non-mapping result envelope."
             )
 
-        is_error = raw_result.get("isError")
-        if is_error is None:
-            is_error = False
-
-        if bool(is_error):
+        if bool(raw_result.get("isError")):
             self._raise_mcp_tool_error(raw_result)
 
         return {
@@ -160,24 +161,7 @@ class MCPProxyTool(Tool):
                 f"{self.full_name}: async MCP invocation failed: {exc}"
             ) from exc
 
-        if not isinstance(raw_result, Mapping):
-            raise ToolInvocationError(
-                f"{self.full_name}: MCP client hub returned a non-mapping result envelope."
-            )
-
-        is_error = raw_result.get("isError")
-        if is_error is None:
-            is_error = False
-
-        if bool(is_error):
-            self._raise_mcp_tool_error(raw_result)
-
-        return {
-            "transport_mode": self.client_hub.transport_mode,
-            "remote_name": self.remote_name,
-            "location": self.client_hub.location,
-            "result": self._extract_proxy_result(raw_result),
-        }
+        return self._package(raw_result)
 
     def _extract_proxy_result(self, raw_result: Mapping[str, Any]) -> Any:
         mode = self._mcpdata.get("extraction_mode")

@@ -34,8 +34,10 @@ class A2AProxyTool(Tool):
     The Tool name is ``<hub.name>_<name>`` or ``<hub.name>_send_parts``, the
     raw name when the hub is unnamed; ``remote_name`` is the raw skill name
     (``None`` in generic mode). Only hub-based construction is supported. Has
-    no ``refresh()`` of its own; call ``client_hub.refresh(...)`` to pick up
-    remote-side changes. Skill metadata is read from the hub's cached skills
+    no ``refresh()`` of its own: ``client_hub.refresh(...)`` updates the hub's
+    catalog, but an existing proxy keeps the signature it was built with, so
+    rebuild proxies (via ``to_tool``/``to_tools``) after a refresh. Skill
+    metadata is read from the hub's cached skills
     via ``client_hub.get_skill(name)``, which raises ``A2AProxyError`` for an
     unknown name; the proxy adds no checks of its own.
     """
@@ -190,10 +192,13 @@ class A2AProxyTool(Tool):
                 raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
             result = [_part_to_dict(p) for p in result_parts]
 
+        return self._payload(result)
+
+    def _payload(self, result: Any) -> Dict[str, Any]:
+        """The proxy result payload shared by execute and async_execute."""
         return {
             "transport_mode": self.client_hub.transport_mode,
             "location": self.client_hub.location,
-            "persistent": self.client_hub.persistent,
             "remote_name": self.remote_name,
             "result": result,
         }
@@ -226,13 +231,7 @@ class A2AProxyTool(Tool):
                 raise ToolInvocationError(f"{self.full_name}: async invocation failed: {e}") from e
             result = [_part_to_dict(p) for p in result_parts]
 
-        return {
-            "transport_mode": self.client_hub.transport_mode,
-            "location": self.client_hub.location,
-            "persistent": self.client_hub.persistent,
-            "remote_name": self.remote_name,
-            "result": result,
-        }
+        return self._payload(result)
 
     # ------------------------------------------------------------------ #
     # Serialization

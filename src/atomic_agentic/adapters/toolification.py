@@ -41,10 +41,11 @@ def to_tool(
 
     3) If ``component`` is an ``MCPClientHub`` or ``A2AClientHub``:
        - MCP: ``name`` selects the remote tool from the hub's stored catalog;
-         a missing or unknown name raises the hub's ``MCPToolError``;
-       - A2A: a present, non-blank ``name`` selects skill mode (bound to that
-         skill; an unknown one raises the hub's ``A2AProxyError``);
-         absent/blank selects generic mode;
+         a missing, blank or unknown name raises the hub's ``MCPToolError``
+         showing what was given;
+       - A2A: a given ``name`` selects skill mode (bound to that skill; an
+         unknown or blank one raises the hub's ``A2AProxyError``); only
+         ``None`` selects generic mode;
        - construct and return the proxy; ``description``, when given,
          replaces the remote description through the proxy's setter.
 
@@ -94,14 +95,12 @@ def to_tool(
     if isinstance(component, AtomicInvokable):
         return Tool(component, name, description)
 
-    # 3) Client hub -> proxy tool. A blank/absent name is passed on as None:
-    # an A2A hub reads it as generic mode, an MCP hub's get_tool rejects it.
+    # 3) Client hub -> proxy tool. `name` goes to the proxy untouched: only
+    # None means generic mode (A2A); any other bad name fails in the hub's
+    # get_tool/get_skill showing what was typed.
     if isinstance(component, (MCPClientHub, A2AClientHub)):
-        remote = str(name or "").strip() or None
-        if isinstance(component, MCPClientHub):
-            proxy = MCPProxyTool(component, remote)
-        else:
-            proxy = A2AProxyTool(component, remote)
+        proxy_cls = MCPProxyTool if isinstance(component, MCPClientHub) else A2AProxyTool
+        proxy = proxy_cls(component, name)
         if description is not None:
             proxy.description = description  # setter validates
         return proxy

@@ -595,3 +595,29 @@ class TestMCPProxyToolHeadersAndSerialization:
         assert data["remote_name"] == "search"
         assert data["raw_metadata"] == {"title": "Search"}
         assert data["client_hub"]["transport_mode"] == "stdio"
+
+
+class TestPackage:
+    def test_package_builds_the_payload(self) -> None:
+        tool = make_tool()
+
+        payload = tool._package({"structuredContent": {"result": "ok"}, "isError": False})
+
+        assert payload == {
+            "transport_mode": "stdio",
+            "remote_name": "search",
+            "location": "python",
+            "result": "ok",
+        }
+
+    def test_package_rejects_a_non_mapping_envelope(self) -> None:
+        with pytest.raises(ToolInvocationError, match="non-mapping result envelope"):
+            make_tool()._package(["not", "a", "mapping"])
+
+    def test_package_raises_on_is_error_and_treats_missing_flag_as_success(self) -> None:
+        tool = make_tool()
+
+        with pytest.raises(ToolInvocationError, match="isError=True"):
+            tool._package({"structuredContent": {"result": "x"}, "isError": True})
+
+        assert tool._package({"structuredContent": {"result": "x"}})["result"] == "x"

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import copy
 import logging
 import os
 import threading
 from contextlib import AsyncExitStack
-from datetime import timedelta
 from types import MappingProxyType
 from typing import (
     Any,
@@ -18,7 +18,7 @@ from typing import (
 )
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -91,6 +91,13 @@ class MCPClientHub:
     include_names/exclude_names filter the stored catalog only --
     discovery-only, not enforced on call_tool()/async_call_tool(), which
     remain callable by any remote name regardless of this filter.
+
+    Lifecycle: a persistent hub holds a background thread, an event loop and
+    (for stdio) a server subprocess until close(). Use the hub in a `with`
+    block or call close() yourself. A forgotten hub is closed at normal
+    process exit through its atexit registration, which also keeps the hub
+    alive until then. That close() waits for teardown, so an unresponsive
+    server can slow process exit.
 
     Limits: a persistent hub whose server dies still reports connected and
     its calls fail until refresh(...) reconnects (there is no automatic
@@ -193,6 +200,10 @@ class MCPClientHub:
         # even though it may later be awaited from the background loop's
         # own thread. Guards close()/refresh() against racing each other.
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Serializes non-persistent refresh() calls. An asyncio lock cannot do
+        # that: each such call runs on its own throwaway loop, so a thread
+        # lock is needed.
+        self._refresh_thread_lock: threading.Lock = threading.Lock()
 
         if not persistent:
             self._tools = self._fetch_tools()
@@ -490,19 +501,20 @@ class MCPClientHub:
         to apply new stdio launch config to an already-running process.
         """
         if self._bg_loop is None:
-            resolved_headers, resolved_client_kwargs, resolved_session_kwargs = (
-                self._resolve_refresh(headers, client_kwargs, session_kwargs)
-            )
-            tools = run_coro_sync(
-                self._list_candidate(
-                    resolved_headers, resolved_client_kwargs, resolved_session_kwargs
+            with self._refresh_thread_lock:
+                resolved_headers, resolved_client_kwargs, resolved_session_kwargs = (
+                    self._resolve_refresh(headers, client_kwargs, session_kwargs)
                 )
-            )
+                tools = run_coro_sync(
+                    self._list_candidate(
+                        resolved_headers, resolved_client_kwargs, resolved_session_kwargs
+                    )
+                )
 
-            self._headers = resolved_headers
-            self._client_kwargs = resolved_client_kwargs
-            self._session_kwargs = resolved_session_kwargs
-            self._tools = tools
+                self._headers = resolved_headers
+                self._client_kwargs = resolved_client_kwargs
+                self._session_kwargs = resolved_session_kwargs
+                self._tools = tools
             return
 
         run_coro_sync(
@@ -716,16 +728,11 @@ class MCPClientHub:
             read_stream, write_stream = self._unpack_transport_streams(transport)
 
             resolved_session_kwargs = dict(session_kwargs) if session_kwargs is not None else {}
-            resolved_timeout = (
-                timedelta(seconds=self._read_timeout_seconds)
-                if self._read_timeout_seconds is not None
-                else None
-            )
             session = await stack.enter_async_context(
                 ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=resolved_timeout,
+                    read_timeout_seconds=self._read_timeout_seconds,
                     **resolved_session_kwargs,
                 )
             )
@@ -743,6 +750,11 @@ class MCPClientHub:
             raise MCPConnectionError(
                 f"Failed to establish MCP session ({self.transport_mode}): {exc}"
             ) from exc
+        except BaseException:
+            # Cancellation must not orphan an already-entered transport
+            # (e.g. a stdio subprocess).
+            await stack.aclose()
+            raise
 
     async def _run_persistent_session(
         self,
@@ -835,10 +847,9 @@ class MCPClientHub:
 
         A typed MCPConnectionError/MCPToolError raised by operation is
         already meaningful and passes through unwrapped; any other
-        exception is wrapped as MCPConnectionError -- the same blanket
-        safety net the old _awith_session provided around every operation
-        it ran, preserved here even though list_tools()/call_tool()'s own
-        `_op` closures already wrap their specific failure points too.
+        exception is wrapped as MCPConnectionError -- a blanket safety net
+        around every operation, even though _list_tools_op/_call_tool_op
+        already wrap their specific failure points too.
         """
         if self._session is not None:
             return await self._run_operation(operation, self._session)
@@ -929,19 +940,28 @@ class MCPClientHub:
         """The list-tools operation shared by the construction fetch and refresh()."""
 
         async def _op(session: ClientSession) -> Dict[str, Dict[str, Any]]:
-            try:
-                tools_result = await session.list_tools()
-            except Exception as exc:
-                raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
-
-            raw_tools = getattr(tools_result, "tools", tools_result)
             result: dict[str, dict[str, Any]] = {}
+            cursor: str | None = None
+            while True:
+                try:
+                    tools_result = await (
+                        session.list_tools()
+                        if cursor is None
+                        else session.list_tools(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        )
+                    )
+                except Exception as exc:
+                    raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
 
-            if raw_tools is None:
-                return result
+                raw_tools = getattr(tools_result, "tools", tools_result)
+                if raw_tools is not None:
+                    for raw_tool in raw_tools:
+                        result[raw_tool.name] = _build_mcp_tool_metadata(raw_tool)
 
-            for raw_tool in raw_tools:
-                result[raw_tool.name] = _build_mcp_tool_metadata(raw_tool)
+                cursor = getattr(tools_result, "next_cursor", None)
+                if not cursor:
+                    break
 
             return result
 
@@ -976,20 +996,20 @@ class MCPClientHub:
         return _op
 
     def list_tools(self) -> Dict[str, Dict[str, Any]]:
-        """A copy of the stored, name-filtered {name: metadata} catalog.
-        Local read; no network."""
-        return dict(self._tools)
+        """The stored, name-filtered {name: metadata} catalog, as deep copies:
+        editing them never changes the hub. Local read; no network."""
+        return {name: copy.deepcopy(entry) for name, entry in self._tools.items()}
 
     def get_tool(self, name: str) -> Dict[str, Any]:
-        """The stored metadata for one remote tool; raises MCPToolError
-        naming the tool when it is not in the catalog."""
-        tools = self.list_tools()
-        if name not in tools:
+        """A deep copy of the stored metadata for one remote tool (editing it
+        never changes the hub); raises MCPToolError naming the tool when it
+        is not in the catalog."""
+        if name not in self._tools:
             raise MCPToolError(
                 f"MCPClientHub: remote tool {name!r} not found; "
-                f"available: {sorted(tools)!r}."
+                f"available: {sorted(self._tools)!r}."
             )
-        return tools[name]
+        return copy.deepcopy(self._tools[name])
 
     def call_tool(
         self,
