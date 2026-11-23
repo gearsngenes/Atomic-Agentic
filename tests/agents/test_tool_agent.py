@@ -93,7 +93,7 @@ class FakeA2AClientHub(A2AClientHub):
     """Minimal A2AClientHub subclass that skips real network construction --
     same precedent as FakeMCPClientHub elsewhere in this
     test suite. Re-verified against the current A2AClientHub/A2AProxyTool
-    interface (agent_card/transport_mode/get_atomic_skills/call_atomic_skill)
+    interface (agent_card/transport_mode/list_skills/call_atomic_skill)
     before reuse -- A2AClientHub is a plain class (not ABC), so overriding
     __init__ wholesale and never calling super().__init__() is safe."""
 
@@ -121,14 +121,18 @@ class FakeA2AClientHub(A2AClientHub):
         return "JSONRPC"
 
     @property
-    def base_url(self) -> str:
+    def location(self) -> str:
         return "http://example.test/a2a-sdk"
+
+    @property
+    def name(self) -> str | None:
+        return None
 
     @property
     def persistent(self) -> bool:
         return False
 
-    def get_atomic_skills(self) -> dict[str, A2AtomicSkillMetadata]:
+    def list_skills(self) -> dict[str, A2AtomicSkillMetadata]:
         return dict(self._skills)
 
     def call_atomic_skill(self, skill_id: str, inputs: dict) -> Any:
@@ -505,6 +509,14 @@ class TestToolRegistration:
         with pytest.raises(ToolRegistrationError, match="duplicate tool name"):
             agent.register_tools([add, add])
 
+    @pytest.mark.parametrize("policy", ["raise", "skip", "replace"])
+    def test_register_tools_same_named_proxies_in_one_batch_raise(self, policy: str) -> None:
+        agent = make_stub_tool_agent()
+        hubs = [FakeA2AClientHub(), FakeA2AClientHub()]
+
+        with pytest.raises(ToolRegistrationError, match="duplicate tool name"):
+            agent.register_tools(hubs, name_collision_policy=policy)  # type: ignore[arg-type]
+
     def test_register_tools_skip_mode_excludes_existing_from_outcome(self) -> None:
         agent = make_stub_tool_agent()
         agent.register_tool(add)
@@ -572,7 +584,7 @@ class TestA2AHubRegistration:
 
     def test_register_tools_hub_include_names_filters_skills_only(self) -> None:
         """include_names is a hub-construction-time filter on
-        get_atomic_skills() only -- the trailing generic tool is unaffected."""
+        list_skills() only -- the trailing generic tool is unaffected."""
         agent = make_stub_tool_agent()
         hub = FakeA2AClientHub(
             skills={

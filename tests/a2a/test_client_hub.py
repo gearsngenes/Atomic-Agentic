@@ -226,7 +226,7 @@ class TestConstruction:
         hub = _make_hub(fixture_server, transport_mode, persistent)
         try:
             assert hub.transport_mode == transport_mode
-            assert hub.base_url == fixture_server.http_url
+            assert hub.location == fixture_server.http_url
             assert hub.persistent is persistent
             assert hub.agent_card.name == "EchoFixtureAgent"
         finally:
@@ -236,7 +236,7 @@ class TestConstruction:
         with pytest.raises(ValueError, match="transport_mode"):
             A2AClientHub(fixture_server.http_url, "bogus", persistent=True)
 
-    def test_unreachable_base_url_raises_a2a_proxy_error(self) -> None:
+    def test_unreachable_location_raises_a2a_proxy_error(self) -> None:
         with pytest.raises(A2AProxyError):
             A2AClientHub("http://127.0.0.1:1", TRANSPORT_JSON_RPC, persistent=True)
 
@@ -420,18 +420,18 @@ class TestRefresh:
         try:
             original_headers = hub.headers
             original_timeout = hub.timeout_seconds
-            original_base_url = hub._location
+            original_location = hub._location
 
-            # Point the hub at an unreachable base_url so the refresh's own
+            # Point the hub at an unreachable location so the refresh's own
             # _connect() call fails before anything is committed, then
-            # restore it -- base_url itself is not meant to be mutated
+            # restore it -- location itself is not meant to be mutated
             # outside this reproduction of a real transport failure.
             hub._location = "http://127.0.0.1:1"
             try:
                 with pytest.raises(A2AProxyError):
                     hub.refresh(headers={"X-Broken": "1"})
             finally:
-                hub._location = original_base_url
+                hub._location = original_location
 
             assert hub.headers == original_headers
             assert hub.timeout_seconds == original_timeout
@@ -483,7 +483,7 @@ class TestToDict:
             data = hub.to_dict()
             assert data["transport_mode"] == TRANSPORT_JSON_RPC
             assert data["location"] == fixture_server.http_url
-            assert data["base_url"] == fixture_server.http_url
+            assert "base_url" not in data
             assert data["persistent"] is persistent
             assert data["has_headers"] is True
             assert data["header_keys"] == ["Authorization"]
@@ -496,17 +496,17 @@ class TestToDict:
 class TestAtomicSkillDetection:
     """The fixture server here is a plain, non-AA-aware AgentExecutor that
     never publishes PARAM_SCHEMA_EXT_URI -- exactly the "extension absent"
-    case get_atomic_skills() is scoped to degrade gracefully on. Detection
+    case list_skills() is scoped to degrade gracefully on. Detection
     against a real A2AtomicExecutor-backed server (extension present, real
     skills) is covered end-to-end in test_atomic_executor.py, which owns its
     own atomic-aware fixture server."""
 
-    def test_get_atomic_skills_is_empty_when_extension_absent(
+    def test_list_skills_is_empty_when_extension_absent(
         self, fixture_server: FixtureServer, persistent: bool
     ) -> None:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
-            assert hub.get_atomic_skills() == {}
+            assert hub.list_skills() == {}
         finally:
             hub.close()
 
@@ -516,18 +516,18 @@ class TestAtomicSkillDetection:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
             hub.refresh(timeout_seconds=123.0)
-            assert hub.get_atomic_skills() == {}
+            assert hub.list_skills() == {}
         finally:
             hub.close()
 
-    def test_get_atomic_skills_returns_a_copy(
+    def test_list_skills_returns_a_copy(
         self, fixture_server: FixtureServer, persistent: bool
     ) -> None:
         hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
         try:
-            skills = hub.get_atomic_skills()
+            skills = hub.list_skills()
             skills["injected"] = None  # type: ignore[assignment]
-            assert hub.get_atomic_skills() == {}
+            assert hub.list_skills() == {}
         finally:
             hub.close()
 
@@ -598,11 +598,15 @@ class TestConstructionContract:
         finally:
             hub.close()
 
-    def test_base_url_is_an_alias_of_location(self, fixture_server: FixtureServer) -> None:
+    def test_removed_views_are_gone_and_skills_verb_is_list_skills(
+        self, fixture_server: FixtureServer
+    ) -> None:
         hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             assert hub.location == fixture_server.http_url
-            assert hub.base_url == hub.location
+            assert not hasattr(hub, "base_url")
+            assert not hasattr(hub, "get_atomic_skills")
+            assert isinstance(hub.list_skills(), dict)
         finally:
             hub.close()
 
@@ -749,7 +753,7 @@ class TestClientKwargs:
         try:
             original_client = hub._client
             original_card = hub.agent_card
-            original_skills = hub.get_atomic_skills()
+            original_skills = hub.list_skills()
 
             with pytest.raises(ValueError, match="client_kwargs may not set"):
                 hub.refresh(client_kwargs={"headers": {"X": "1"}})
@@ -761,7 +765,7 @@ class TestClientKwargs:
             assert hub.timeout_seconds == 600.0
             assert hub._client is original_client
             assert hub.agent_card == original_card
-            assert hub.get_atomic_skills() == original_skills
+            assert hub.list_skills() == original_skills
             assert len(hub.send_parts([new_text_part("still-works")])) == 1
         finally:
             hub.close()
@@ -819,7 +823,7 @@ class TestToDictExtended:
             data = hub.to_dict()
             assert data["name"] == "echo"
             assert data["location"] == fixture_server.http_url
-            assert data["base_url"] == fixture_server.http_url
+            assert "base_url" not in data
             assert data["timeout_seconds"] == 7.0
             assert "timeout" not in data
             assert data["has_client_kwargs"] is True

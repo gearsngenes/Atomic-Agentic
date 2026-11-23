@@ -87,7 +87,7 @@ def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
         print("invoke error:", e)
 
 def main() -> None:
-    print(f"Connecting via {TRANSPORT_MODE}:", client.endpoint or client.command)
+    print(f"Connecting via {TRANSPORT_MODE}:", client.location)
     tool_names = client.list_tools()
     print("Discovered tools:", tool_names.keys())
 

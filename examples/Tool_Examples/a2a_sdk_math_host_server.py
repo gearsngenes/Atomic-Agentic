@@ -7,7 +7,7 @@ Start it first, in its own terminal:
     python a2a_sdk_math_host_server.py
 then reach it from another script (see 05_A2AProxyTool.py for the pattern):
     hub = A2AClientHub("http://127.0.0.1:7000", TRANSPORT_JSON_RPC, persistent=False)
-    tool = to_tool(hub, remote_name="MathPlannerAgent")
+    tool = to_tool(hub, name="MathPlannerAgent")
 Also the math backend for a2a_sdk_inter_agent_host_server.py.
 """
 from __future__ import annotations

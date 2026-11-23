@@ -5,10 +5,10 @@ vs. generic (send-parts) mode, against two separately-run servers:
 
 - a2a_sdk_atomic_host_server.py (port 9000): an A2AtomicExecutor host that
   publishes Atomic-Agentic's param-schema extension. Reachable through
-  A2AProxyTool's skill mode (skill_id=<tool name>) with a fully typed,
+  A2AProxyTool's skill mode (name=<skill name>) with a fully typed,
   auto-derived signature -- no re-derivation needed on the client side.
 - a2a_sdk_foreign_host_server.py (port 9001): a plain a2a-sdk agent with no
-  Atomic-Agentic extension at all. Not invokable -- there is no skill_id to
+  Atomic-Agentic extension at all. Not invokable -- there is no skill to
   bind to -- so it is only reachable through generic mode's fixed
   (parts, metadata) signature.
 
@@ -42,9 +42,9 @@ def _jsonable(value: Any) -> Any:
 
 def show_plan(tool: A2AProxyTool) -> None:
     print(f"\n-- {tool.full_name} --")
-    print("skill_id      :", tool.skill_id)
-    print("transport_mode:", tool.transport_mode)
-    print("base_url      :", tool.base_url)
+    print("remote_name   :", tool.remote_name)
+    print("transport_mode:", tool.client_hub.transport_mode)
+    print("location      :", tool.client_hub.location)
     print("description   :", tool.description)
     print("signature     :", tool.signature)
     print("return_type   :", tool.return_type)
@@ -71,20 +71,20 @@ def main() -> None:
     print("[1] Skill mode against the Atomic host")
     atomic_hub = A2AClientHub(ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
 
-    discovered = atomic_hub.get_atomic_skills()
+    discovered = atomic_hub.list_skills()
     print(f"discovered {len(discovered)} Atomic skill(s): {sorted(discovered.keys())}")
 
-    add_tool = A2AProxyTool(atomic_hub, skill_id="add")
+    add_tool = A2AProxyTool(atomic_hub, "add")
     show_plan(add_tool)
     invoke(add_tool, {"a": 12, "b": 5})
 
-    mean_tool = A2AProxyTool(atomic_hub, skill_id="mean")
+    mean_tool = A2AProxyTool(atomic_hub, "mean")
     show_plan(mean_tool)
     invoke(mean_tool, {"nums": [4, 9, 16, 25]})
 
-    print("\n[1b] Unknown skill_id -- caught at construction, not invocation")
+    print("\n[1b] Unknown skill -- caught at construction, not invocation")
     try:
-        A2AProxyTool(atomic_hub, skill_id="does_not_exist")
+        A2AProxyTool(atomic_hub, "does_not_exist")
     except ToolDefinitionError as exc:
         print("ToolDefinitionError:", exc)
 
@@ -92,10 +92,10 @@ def main() -> None:
     # [2] Generic mode -- a plain, non-Atomic a2a-sdk agent (not invokable)
     # ------------------------------------------------------------------ #
     print("\n" + "=" * 72)
-    print("[2] Generic mode against the foreign host (no skill_id to bind to)")
+    print("[2] Generic mode against the foreign host (no skill to bind to)")
     foreign_hub = A2AClientHub(FOREIGN_URL, TRANSPORT_JSON_RPC, persistent=False)
 
-    print(f"foreign host publishes {len(foreign_hub.get_atomic_skills())} Atomic skill(s) -- not invokable")
+    print(f"foreign host publishes {len(foreign_hub.list_skills())} Atomic skill(s) -- not invokable")
 
     send_parts_tool = A2AProxyTool(foreign_hub)
     show_plan(send_parts_tool)

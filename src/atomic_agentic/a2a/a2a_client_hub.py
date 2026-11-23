@@ -88,7 +88,7 @@ class A2AClientHub:
     relative_card_path, include_names, exclude_names. Mutable through
     refresh() only: headers, timeout_seconds, client_kwargs.
 
-    include_names/exclude_names filter get_atomic_skills()'s output only --
+    include_names/exclude_names filter list_skills()'s output only --
     discovery-only, not enforced on call_atomic_skill()/
     async_call_atomic_skill() or the always-available generic-mode
     A2AProxyTool path, both of which remain reachable by any skill id
@@ -354,7 +354,7 @@ class A2AClientHub:
                 f"via {self._transport_mode}: {exc}"
             ) from exc
 
-        # create_client(agent=base_url) is used (not a pre-resolved
+        # create_client(agent=location) is used (not a pre-resolved
         # AgentCard) specifically so each transport resolves its card
         # through its own native path with zero AA-side custom
         # per-transport logic; reading the cached result off the private
@@ -447,11 +447,6 @@ class A2AClientHub:
         return self._name
 
     @property
-    def base_url(self) -> str:
-        """Alias of location, kept until the proxy tool collapses to location."""
-        return self._location
-
-    @property
     def persistent(self) -> bool:
         return self._persistent
 
@@ -480,7 +475,7 @@ class A2AClientHub:
     def exclude_names(self) -> frozenset[str] | None:
         return self._exclude_names
 
-    def get_atomic_skills(self) -> Mapping[str, A2AtomicSkillMetadata]:
+    def list_skills(self) -> Mapping[str, A2AtomicSkillMetadata]:
         """
         Detection-only view of whatever Atomic skills the remote server's
         card publishes, resolved at construction and rebuilt on refresh().
@@ -744,7 +739,6 @@ class A2AClientHub:
         return {
             "name": self.name,
             "location": self.location,
-            "base_url": self.base_url,
             "transport_mode": self.transport_mode,
             "persistent": self.persistent,
             "has_headers": self._headers is not None,

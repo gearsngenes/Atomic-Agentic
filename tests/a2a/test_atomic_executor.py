@@ -374,7 +374,7 @@ class TestEndToEndDispatch:
     def test_hub_detects_published_atomic_skills(self, fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            skills = hub.get_atomic_skills()
+            skills = hub.list_skills()
             assert set(skills) == {"add", "boom"}
             assert skills["add"].description == "Adds two numbers."
             assert len(skills["add"].params) == 2
@@ -383,7 +383,7 @@ class TestEndToEndDispatch:
 
 
 class TestHubNameFiltering:
-    """include_names/exclude_names filter get_atomic_skills()'s output only
+    """include_names/exclude_names filter list_skills()'s output only
     -- construction-time, discovery-only, per A2AClientHub's own docstring."""
 
     def test_include_names_narrows_to_matching_skill(self, fixture_server: FixtureServer) -> None:
@@ -391,7 +391,7 @@ class TestHubNameFiltering:
             fixture_server.http_url, TRANSPORT_JSON_RPC, include_names=["add"]
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
@@ -400,7 +400,7 @@ class TestHubNameFiltering:
             fixture_server.http_url, TRANSPORT_JSON_RPC, exclude_names=["boom"]
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
@@ -413,18 +413,18 @@ class TestHubNameFiltering:
             include_names=["add", "does_not_exist"],
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
     def test_call_atomic_skill_ignores_the_filter(self, fixture_server: FixtureServer) -> None:
-        # Discovery-only: a name excluded from get_atomic_skills() must
+        # Discovery-only: a name excluded from list_skills() must
         # still be directly callable.
         hub = A2AClientHub(
             fixture_server.http_url, TRANSPORT_JSON_RPC, exclude_names=["add"]
         )
         try:
-            assert "add" not in hub.get_atomic_skills()
+            assert "add" not in hub.list_skills()
             assert hub.call_atomic_skill("add", {"a": 2, "b": 3}) == 5
         finally:
             hub.close()
@@ -435,7 +435,7 @@ class TestHubNameFiltering:
         )
         try:
             hub.refresh(timeout_seconds=123.0)
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 

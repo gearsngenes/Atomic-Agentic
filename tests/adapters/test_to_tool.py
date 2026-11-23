@@ -109,7 +109,9 @@ class FakeMCPClientHub(MCPClientHub):
         *,
         tools: dict[str, dict[str, Any]] | None = None,
         result: Any | None = None,
+        hub_name: str | None = None,
     ) -> None:
+        self._hub_name = hub_name
         self._tools = (
             {
                 "search": mcp_metadata(description="Remote MCP search."),
@@ -127,31 +129,18 @@ class FakeMCPClientHub(MCPClientHub):
             }
         )
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self._headers: Mapping[str, str] | None = None
 
     @property
     def transport_mode(self) -> str:
         return "stdio"
 
     @property
-    def endpoint(self) -> str | None:
-        return None
-
-    @property
-    def command(self) -> str | None:
+    def location(self) -> str:
         return "python"
 
     @property
-    def args(self) -> tuple[str, ...] | None:
-        return ("fake_mcp_server.py",)
-
-    @property
-    def headers(self) -> Mapping[str, str] | None:
-        return self._headers
-
-    @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
-        self._headers = value
+    def name(self) -> str | None:
+        return self._hub_name
 
     def list_tools(self) -> dict[str, dict[str, Any]]:
         return dict(self._tools)
@@ -167,9 +156,7 @@ class FakeMCPClientHub(MCPClientHub):
     def to_dict(self) -> dict[str, Any]:
         return {
             "transport_mode": self.transport_mode,
-            "command": self.command,
-            "args": list(self.args or ()),
-            "has_headers": self.headers is not None,
+            "location": self.location,
         }
 
 
@@ -198,7 +185,9 @@ class FakeA2AClientHub(A2AClientHub):
         card_name: str = "Fake A2A-sdk Agent",
         card_description: str = "Fake A2A-sdk agent.",
         result: Any | None = None,
+        hub_name: str | None = None,
     ) -> None:
+        self._hub_name = hub_name
         self._skills = (
             {"add": a2a_sdk_skill_metadata(remote_name="add")}
             if skills is None
@@ -221,14 +210,18 @@ class FakeA2AClientHub(A2AClientHub):
         return "JSONRPC"
 
     @property
-    def base_url(self) -> str:
+    def location(self) -> str:
         return "http://example.test/a2a-sdk"
+
+    @property
+    def name(self) -> str | None:
+        return self._hub_name
 
     @property
     def persistent(self) -> bool:
         return False
 
-    def get_atomic_skills(self) -> dict[str, A2AtomicSkillMetadata]:
+    def list_skills(self) -> dict[str, A2AtomicSkillMetadata]:
         return dict(self._skills)
 
     def call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
@@ -288,9 +281,9 @@ class TestToToolCallable:
         with pytest.raises(ToolDefinitionError, match="name"):
             to_tool(CallableWithEmptyName())
 
-    def test_to_tool_callable_rejects_remote_name(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
-            to_tool(add, remote_name="remote_add")
+    def test_to_tool_rejects_remote_name_keyword(self) -> None:
+        with pytest.raises(TypeError, match="remote_name"):
+            to_tool(add, remote_name="remote_add")  # type: ignore[call-arg]
 
 
 class TestToToolExistingTool:
@@ -362,20 +355,15 @@ class TestToToolExistingTool:
         assert original.name == "add"
         assert original.description == "Add values."
 
-    def test_existing_tool_rejects_remote_name(self) -> None:
-        original = Tool(
-            function=add,
-            name="add",
-            description="Add values.",
-        )
+    def test_existing_tool_rejects_remote_name_keyword(self) -> None:
+        original = Tool(function=add, name="add", description="Add values.")
 
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
-            to_tool(original, remote_name="remote_add")
+        with pytest.raises(TypeError, match="remote_name"):
+            to_tool(original, remote_name="remote_add")  # type: ignore[call-arg]
 
 
 class TestToToolPositionalOverrides:
-    """`name` and `description` are positional-or-keyword; `remote_name` stays
-    keyword-only."""
+    """`name` and `description` are positional-or-keyword."""
 
     def test_callable_accepts_positional_name_and_description(self) -> None:
         def add(a: int, b: int) -> int:
@@ -398,7 +386,7 @@ class TestToToolPositionalOverrides:
         assert renamed.name == "renamed"
         assert renamed.function is original
 
-    def test_remote_name_is_keyword_only(self) -> None:
+    def test_no_fourth_positional_parameter(self) -> None:
         with pytest.raises(TypeError):
             to_tool(FakeMCPClientHub(), None, None, "search")  # type: ignore[misc]
 
@@ -428,14 +416,14 @@ class TestToToolExistingProxyTool:
         assert result.invoke({"query": "hello"}).result == "mcp result"
 
     def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
-        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+        original = A2AProxyTool(FakeA2AClientHub(), "add")
 
         result = to_tool(original)
 
         assert result is original
 
     def test_a2a_proxy_tool_skill_mode_with_overrides_wraps_by_reference(self) -> None:
-        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+        original = A2AProxyTool(FakeA2AClientHub(), "add")
 
         result = to_tool(original, name="local_add")
 
@@ -486,93 +474,91 @@ class TestToToolReturnToolIdentity:
 
 
 class TestToToolMCPClientHub:
-    def test_mcp_client_hub_requires_remote_name(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
+    def test_mcp_client_hub_requires_name(self) -> None:
+        with pytest.raises(ToolDefinitionError, match="name"):
             to_tool(FakeMCPClientHub())
 
     def test_mcp_client_hub_becomes_mcp_proxy_tool(self) -> None:
         hub = FakeMCPClientHub()
 
-        tool = to_tool(hub, remote_name="search")
+        tool = to_tool(hub, "search")
 
         assert isinstance(tool, MCPProxyTool)
         assert tool.remote_name == "search"
         assert tool.name == "search"
 
-    def test_mcp_client_hub_applies_overrides(self) -> None:
-        hub = FakeMCPClientHub()
+    def test_named_hub_prefixes_proxy_name(self) -> None:
+        tool = to_tool(FakeMCPClientHub(hub_name="files"), name="search")
 
-        tool = to_tool(
-            hub,
-            remote_name="search",
-            name="local_search",
-            description="Local search.",
-        )
+        assert type(tool) is MCPProxyTool
+        assert tool.name == "files_search"
+        assert tool.remote_name == "search"
 
-        assert isinstance(tool, MCPProxyTool)
-        assert tool.name == "local_search"
+    def test_description_applied_through_setter_keeps_proxy_class(self) -> None:
+        tool = to_tool(FakeMCPClientHub(), name="search", description="Local search.")
+
+        assert type(tool) is MCPProxyTool
+        assert tool.name == "search"
         assert tool.description == "Local search."
+
+    def test_unknown_name_raises(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            to_tool(FakeMCPClientHub(), name="missing")
 
     def test_mcp_proxy_tool_invokes_fake_hub(self) -> None:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "ok"}})
-        tool = to_tool(hub, remote_name="search")
+        tool = to_tool(hub, name="search")
 
         assert tool.invoke({"query": "hello"}).result == "ok"
         assert hub.calls == [("search", {"query": "hello"})]
 
 
 class TestToToolA2AClientHub:
-    def test_remote_name_present_selects_skill_mode(self) -> None:
+    def test_name_present_selects_skill_mode(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = to_tool(hub, remote_name="add")
+        tool = to_tool(hub, name="add")
 
         assert isinstance(tool, A2AProxyTool)
-        assert tool.skill_id == "add"
+        assert tool.remote_name == "add"
         assert tool.name == "add"
 
-    def test_remote_name_absent_selects_generic_mode_not_an_error(self) -> None:
+    def test_named_hub_prefixes_skill_and_generic_names(self) -> None:
+        hub = FakeA2AClientHub(hub_name="calc")
+
+        assert to_tool(hub, name="add").name == "calc_add"
+        assert to_tool(hub).name == "calc_send_parts"
+
+    def test_name_absent_selects_generic_mode_not_an_error(self) -> None:
         hub = FakeA2AClientHub()
 
         tool = to_tool(hub)
 
         assert isinstance(tool, A2AProxyTool)
-        assert tool.skill_id is None
+        assert tool.remote_name is None
         assert tool.name == "send_parts"
 
-    def test_remote_name_blank_selects_generic_mode(self) -> None:
+    def test_name_blank_selects_generic_mode(self) -> None:
+        tool = to_tool(FakeA2AClientHub(), name="   ")
+
+        assert tool.remote_name is None
+
+    def test_unknown_skill_raises_tool_definition_error(self) -> None:
         hub = FakeA2AClientHub()
 
-        tool = to_tool(hub, remote_name="   ")
+        with pytest.raises(ToolDefinitionError, match="not found"):
+            to_tool(hub, name="does_not_exist")
 
-        assert tool.skill_id is None
+    def test_description_applied_through_setter_keeps_proxy_class(self) -> None:
+        tool = to_tool(FakeA2AClientHub(), name="add", description="Local add.")
 
-    def test_unknown_skill_id_raises_tool_definition_error(self) -> None:
-        hub = FakeA2AClientHub()
-
-        with pytest.raises(ToolDefinitionError, match="skill_id"):
-            to_tool(hub, remote_name="does_not_exist")
-
-    def test_applies_overrides(self) -> None:
-        hub = FakeA2AClientHub()
-
-        tool = to_tool(
-            hub,
-            remote_name="add",
-            name="local_add",
-            description="Local add.",
-        )
-
-        assert isinstance(tool, A2AProxyTool)
-        assert tool.name == "local_add"
+        assert type(tool) is A2AProxyTool
+        assert tool.name == "add"
         assert tool.description == "Local add."
-
-
-
 
     def test_skill_mode_invokes_fake_hub(self) -> None:
         hub = FakeA2AClientHub(result=17)
-        tool = to_tool(hub, remote_name="add")
+        tool = to_tool(hub, name="add")
 
         assert tool.invoke({"a": 12, "b": 5}).result == 17
         assert hub.skill_calls == [("add", {"a": 12, "b": 5})]
@@ -670,6 +656,23 @@ class TestToToolsRemoteExpansion:
         assert a2a_hub.skill_calls == [("add", {"a": 1, "b": 2})]
 
 
+class TestToToolsHubPrefixAndDuplicates:
+    def test_named_hubs_prefix_names_in_order(self) -> None:
+        tools = to_tools([FakeMCPClientHub(hub_name="m"), FakeA2AClientHub(hub_name="a")])
+
+        assert [t.name for t in tools] == [
+            "m_search",
+            "m_summarize",
+            "a_add",
+            "a_send_parts",
+        ]
+
+    def test_unnamed_hubs_keep_duplicates_without_raising(self) -> None:
+        tools = to_tools([FakeA2AClientHub(), FakeA2AClientHub()])
+
+        assert [t.name for t in tools] == ["add", "send_parts", "add", "send_parts"]
+
+
 class TestToToolsA2AClientHub:
     def test_expands_skills_plus_one_trailing_generic_tool(self) -> None:
         hub = FakeA2AClientHub(
@@ -683,7 +686,7 @@ class TestToToolsA2AClientHub:
 
         assert len(tools) == 3
         assert all(isinstance(tool, A2AProxyTool) for tool in tools)
-        assert [tool.skill_id for tool in tools] == ["add", "multiply", None]
+        assert [tool.remote_name for tool in tools] == ["add", "multiply", None]
         assert tools[-1].name == "send_parts"
 
     def test_zero_skill_hub_still_yields_one_generic_tool(self) -> None:
@@ -692,7 +695,7 @@ class TestToToolsA2AClientHub:
         tools = to_tools([hub])
 
         assert len(tools) == 1
-        assert tools[0].skill_id is None
+        assert tools[0].remote_name is None
 
 
     def test_mixed_sources_preserves_expanded_order(self) -> None:

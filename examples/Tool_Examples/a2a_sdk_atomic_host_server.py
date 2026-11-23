@@ -47,8 +47,8 @@ def main() -> None:
         name="a2a_sdk_atomic_host",
         description=(
             "A2AtomicExecutor host exposing math Tools as Atomic skills. "
-            "Reachable through A2AProxyTool's skill mode (skill_id=<tool name>) "
-            "as well as its generic mode (skill_id=None), provided the caller "
+            "Reachable through A2AProxyTool's skill mode (name=<skill name>) "
+            "as well as its generic mode (name=None), provided the caller "
             "supplies the skill_id routing metadata by hand."
         ),
         transport_mode=TRANSPORT_JSON_RPC,

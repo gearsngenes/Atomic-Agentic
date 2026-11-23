@@ -148,7 +148,7 @@ def main() -> None:
         },
     )
 
-    print("\n[4] MCPClientHub + remote_name -> MCPProxyTool")
+    print("\n[4] MCPClientHub + name -> MCPProxyTool")
     print("[MCP] Connecting to:", MCP_ENDPOINT)
     try:
         mcp_hub = MCPClientHub(
@@ -173,7 +173,7 @@ def main() -> None:
             remote_name = remote_names[0]
             mcp_tool = to_tool(
                 mcp_hub,
-                remote_name=remote_name,
+                name=remote_name,
             )
             show_plan(mcp_tool)
             invoke_with_inputs(mcp_tool, example_inputs_by_remote_name.get(remote_name))
@@ -181,28 +181,28 @@ def main() -> None:
     except Exception as exc:
         print("[MCP] Skipping MCP demo due to error:", exc)
 
-    print("\n[5] A2AClientHub + remote_name -> A2AProxyTool (skill mode) via to_tool(hub, remote_name=...)")
+    print("\n[5] A2AClientHub + name -> A2AProxyTool (skill mode) via to_tool(hub, name=...)")
     print("[A2A-sdk] Connecting to:", A2A_SDK_ATOMIC_URL)
     try:
         atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
-        skills = atomic_hub.get_atomic_skills()
+        skills = atomic_hub.list_skills()
         print(f"[A2A-sdk] Discovered {len(skills)} Atomic skill(s): {sorted(skills.keys())}")
 
         if skills:
-            skill_id = "add" if "add" in skills else next(iter(skills))
-            skill_tool = to_tool(atomic_hub, remote_name=skill_id)
+            skill_name = "add" if "add" in skills else next(iter(skills))
+            skill_tool = to_tool(atomic_hub, name=skill_name)
             show_plan(skill_tool)
             invoke_with_inputs(skill_tool, {"a": 12, "b": 5})
 
     except Exception as exc:
         print("[A2A-sdk] Skipping skill-mode demo due to error:", exc)
 
-    print("\n[6] A2AClientHub, remote_name omitted -> A2AProxyTool (generic mode) via to_tool(hub)")
+    print("\n[6] A2AClientHub, name omitted -> A2AProxyTool (generic mode) via to_tool(hub)")
     print("[A2A-sdk] Connecting to:", A2A_SDK_FOREIGN_URL)
     try:
         foreign_hub = A2AClientHub(A2A_SDK_FOREIGN_URL, TRANSPORT_JSON_RPC, persistent=False)
         print(f"[A2A-sdk] {foreign_hub.agent_card.name!r} publishes "
-              f"{len(foreign_hub.get_atomic_skills())} Atomic skill(s) -- not invokable, generic mode only")
+              f"{len(foreign_hub.list_skills())} Atomic skill(s) -- not invokable, generic mode only")
 
         generic_tool = to_tool(foreign_hub)
         show_plan(generic_tool)
@@ -226,7 +226,7 @@ def main() -> None:
         )
         print(f"[A2A-sdk] to_tools produced {len(a2a_sdk_tools)} tool(s):")
         for t in a2a_sdk_tools:
-            print(f"  - {t.full_name} (skill_id={t.skill_id!r})")
+            print(f"  - {t.full_name} (remote_name={t.remote_name!r})")
 
     except Exception as exc:
         print("[A2A-sdk] Skipping batch A2A-sdk demo due to error:", exc)

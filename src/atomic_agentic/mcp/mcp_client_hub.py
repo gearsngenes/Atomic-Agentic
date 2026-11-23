@@ -397,16 +397,6 @@ class MCPClientHub:
         return self._name
 
     @property
-    def endpoint(self) -> str | None:
-        """The URL for sse/streamable_http, None for stdio (a view over location)."""
-        return self._location if self._transport_mode != "stdio" else None
-
-    @property
-    def command(self) -> str | None:
-        """The command for stdio, None otherwise (a view over location)."""
-        return self._location if self._transport_mode == "stdio" else None
-
-    @property
     def args(self) -> tuple[str, ...] | None:
         return self._args
 
@@ -588,8 +578,6 @@ class MCPClientHub:
             "name": self.name,
             "location": self.location,
             "transport_mode": self.transport_mode,
-            "endpoint": self.endpoint,
-            "command": self.command,
             "args": list(self.args) if self.args is not None else None,
             "has_headers": self.headers is not None,
             "header_keys": sorted(self.headers.keys()) if self.headers is not None else [],
@@ -646,7 +634,7 @@ class MCPClientHub:
         try:
             if self.transport_mode == "stdio":
                 server_params = StdioServerParameters(
-                    command=self.command,
+                    command=self.location,
                     args=list(self.args or ()),
                     **transport_kwargs,
                 )
@@ -655,7 +643,7 @@ class MCPClientHub:
             elif self.transport_mode == "sse":
                 headers_dict = dict(headers) if headers is not None else None
                 client_context = sse_client(
-                    url=self.endpoint,
+                    url=self.location,
                     headers=headers_dict,
                     **transport_kwargs,
                 )
@@ -669,13 +657,13 @@ class MCPClientHub:
                         )
                     )
                     client_context = streamable_http_client(
-                        url=self.endpoint,
+                        url=self.location,
                         http_client=http_client,
                         **transport_kwargs,
                     )
                 else:
                     client_context = streamable_http_client(
-                        url=self.endpoint,
+                        url=self.location,
                         **transport_kwargs,
                     )
 

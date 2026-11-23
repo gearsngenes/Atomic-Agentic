@@ -115,16 +115,15 @@ class TestMCPClientHubConstruction:
         hub = MCPClientHub("python", "stdio", args=["server.py"])
 
         assert hub.transport_mode == "stdio"
-        assert hub.command == "python"
+        assert hub.location == "python"
         assert hub.args == ("server.py",)
-        assert hub.endpoint is None
         assert hub.persistent is False
 
     def test_valid_sse_construction(self) -> None:
         hub = MCPClientHub("http://localhost:8000/sse", "sse")
 
         assert hub.transport_mode == "sse"
-        assert hub.endpoint == "http://localhost:8000/sse"
+        assert hub.location == "http://localhost:8000/sse"
 
     def test_valid_streamable_http_construction(self) -> None:
         hub = MCPClientHub(
@@ -132,7 +131,7 @@ class TestMCPClientHubConstruction:
         )
 
         assert hub.transport_mode == "streamable_http"
-        assert hub.endpoint == "http://localhost:8000/mcp"
+        assert hub.location == "http://localhost:8000/mcp"
 
     @pytest.mark.parametrize("mode", ["bad", "", "websocket"])
     def test_invalid_transport_mode_raises(self, mode: str) -> None:
@@ -335,8 +334,6 @@ class TestMCPClientHubLocalHelpers:
             "name": None,
             "location": "python",
             "transport_mode": "stdio",
-            "endpoint": None,
-            "command": "python",
             "args": ["server.py"],
             "has_headers": False,
             "header_keys": [],
@@ -1289,15 +1286,15 @@ class TestName:
 
 
 class TestViews:
-    def test_endpoint_and_command_views_per_transport(self) -> None:
-        stdio = MCPClientHub("python", "stdio")
-        assert stdio.command == "python"
-        assert stdio.endpoint is None
-
-        for mode in ("sse", "streamable_http"):
-            hub = MCPClientHub("http://localhost:8000/x", mode)  # type: ignore[arg-type]
-            assert hub.endpoint == "http://localhost:8000/x"
-            assert hub.command is None
+    def test_endpoint_and_command_views_are_gone(self) -> None:
+        for hub in (
+            MCPClientHub("python", "stdio"),
+            MCPClientHub("http://localhost:8000/x", "sse"),
+        ):
+            assert not hasattr(hub, "endpoint")
+            assert not hasattr(hub, "command")
+            assert "endpoint" not in hub.to_dict()
+            assert "command" not in hub.to_dict()
 
     def test_location_property(self) -> None:
         assert MCPClientHub("python", "stdio").location == "python"
@@ -1354,8 +1351,6 @@ class TestToDict:
 
         assert data["name"] == "remote"
         assert data["location"] == "http://localhost:8000/sse"
-        assert data["endpoint"] == "http://localhost:8000/sse"
-        assert data["command"] is None
         assert data["has_headers"] is True
         assert data["header_keys"] == ["Authorization"]
         assert "Bearer secret" not in str(data)

@@ -146,13 +146,13 @@ class TestToInvokables:
         out = to_invokables([hub])
 
         assert all(isinstance(t, A2AProxyTool) for t in out)
-        assert [t.skill_id for t in out] == ["add", "multiply", None]
+        assert [t.remote_name for t in out] == ["add", "multiply", None]
 
     def test_zero_skill_a2a_hub_yields_one_generic_tool(self) -> None:
         out = to_invokables([FakeA2AClientHub(skills={})])
 
         assert len(out) == 1
-        assert out[0].skill_id is None
+        assert out[0].remote_name is None
 
     def test_str_item_raises_naming_its_index(self) -> None:
         with pytest.raises(TypeError, match="index 1"):

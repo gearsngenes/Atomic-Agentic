@@ -295,30 +295,30 @@ class TestSkillMode:
     def test_construction_defaults_name(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            tool = A2AProxyTool(hub, skill_id="add")
+            tool = A2AProxyTool(hub, "add")
             assert tool.name == "add"
-            assert tool.skill_id == "add"
+            assert tool.remote_name == "add"
             assert [p.name for p in tool.parameters] == ["a", "b"]
             assert tool.return_type == ("int",)
         finally:
             hub.close()
 
-    def test_unknown_skill_id_raises(self, atomic_fixture_server: FixtureServer) -> None:
+    def test_unknown_skill_raises(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(ToolDefinitionError):
-                A2AProxyTool(hub, skill_id="does_not_exist")
+                A2AProxyTool(hub, "does_not_exist")
         finally:
             hub.close()
 
     def test_sync_invocation(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            tool = A2AProxyTool(hub, skill_id="add")
+            tool = A2AProxyTool(hub, "add")
             result = tool.invoke({"a": 2, "b": 3})
             assert result.result == 5
             assert isinstance(result, A2AProxyToolResult)
-            assert result.skill_id == "add"
+            assert result.remote_name == "add"
             assert result.transport_mode == TRANSPORT_JSON_RPC
         finally:
             hub.close()
@@ -326,7 +326,7 @@ class TestSkillMode:
     def test_async_invocation(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            result = asyncio.run(A2AProxyTool(hub, skill_id="add").async_invoke({"a": 4, "b": 5}))
+            result = asyncio.run(A2AProxyTool(hub, "add").async_invoke({"a": 4, "b": 5}))
             assert result.result == 9
         finally:
             hub.close()
@@ -334,7 +334,7 @@ class TestSkillMode:
     def test_remote_failure_raises_tool_invocation_error(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            tool = A2AProxyTool(hub, skill_id="boom")
+            tool = A2AProxyTool(hub, "boom")
             with pytest.raises(ToolInvocationError):
                 tool.invoke({})
         finally:
@@ -343,12 +343,12 @@ class TestSkillMode:
     def test_execute_payload_and_result_fields(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            tool = A2AProxyTool(hub, skill_id="add")
+            tool = A2AProxyTool(hub, "add")
             fields = {
-                "transport_mode": tool.transport_mode,
-                "base_url": tool.base_url,
-                "persistent": tool.persistent,
-                "skill_id": tool.skill_id,
+                "transport_mode": hub.transport_mode,
+                "location": hub.location,
+                "persistent": hub.persistent,
+                "remote_name": tool.remote_name,
             }
             assert tool.execute((), {"a": 1, "b": 2}) == {**fields, "result": 3}
             assert asyncio.run(tool.async_execute((), {"a": 1, "b": 2})) == {**fields, "result": 3}
@@ -362,7 +362,7 @@ class TestSkillMode:
     def test_no_make_result_and_no_hook_overrides(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            tool = A2AProxyTool(hub, skill_id="add")
+            tool = A2AProxyTool(hub, "add")
             assert not hasattr(tool, "make_result")
             assert "_invoke_impl" not in A2AProxyTool.__dict__
             assert "_async_invoke_impl" not in A2AProxyTool.__dict__
@@ -372,8 +372,8 @@ class TestSkillMode:
     def test_to_dict(self, atomic_fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            data = A2AProxyTool(hub, skill_id="add").to_dict()
-            assert data["skill_id"] == "add"
+            data = A2AProxyTool(hub, "add").to_dict()
+            assert data["remote_name"] == "add"
             assert "client_hub" in data
         finally:
             hub.close()
@@ -390,7 +390,7 @@ class TestGenericMode:
         try:
             tool = A2AProxyTool(hub)
             assert tool.name == "send_parts"
-            assert tool.skill_id is None
+            assert tool.remote_name is None
             assert {p.name for p in tool.parameters} == {"parts", "metadata"}
             assert tool.return_type == ("list",)
         finally:
@@ -412,7 +412,7 @@ class TestGenericMode:
                 }
             )
             assert isinstance(result, A2AProxyToolResult)
-            assert result.skill_id is None
+            assert result.remote_name is None
             values = result.result
             assert values[0]["text"] == "hello"
             assert values[1]["data"] == {"a": 1}
@@ -457,10 +457,10 @@ class TestGenericMode:
         finally:
             hub.close()
 
-    def test_explicit_name_overrides_default(self, echo_fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC)
+    def test_named_hub_prefixes_generic_name(self, echo_fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(echo_fixture_server.http_url, TRANSPORT_JSON_RPC, name="echo")
         try:
-            tool = A2AProxyTool(hub, name="custom_send")
-            assert tool.name == "custom_send"
+            tool = A2AProxyTool(hub)
+            assert tool.name == "echo_send_parts"
         finally:
             hub.close()
