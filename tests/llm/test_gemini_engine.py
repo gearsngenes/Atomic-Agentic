@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 pytest.importorskip("google.genai")
-from google.genai import errors as genai_errors
 from google.genai import types as _real_genai_types
 
 gemini_module = importlib.import_module("atomic_agentic.llm.gemini_engine")
@@ -258,7 +257,7 @@ class TestGeminiEngine:
             {"role": "system", "content": "Sys."},
             {"role": "user", "content": "Hello"},
         ]
-        payload = engine._build_provider_payload(messages, {})
+        payload = engine._build_provider_payload(messages)
 
         assert payload["system_instruction"] == "Sys."
         assert len(payload["contents"]) == 1
@@ -278,7 +277,7 @@ class TestGeminiEngine:
     ) -> None:
         engine = _make_engine(monkeypatch)
         payload = engine._build_provider_payload(
-            [{"role": "user", "content": "Hi"}], {}
+            [{"role": "user", "content": "Hi"}]
         )
         response = run_coro_sync(engine._call_provider_async(payload))
         fake = FakeGenAIClient.instances[-1]
@@ -376,6 +375,8 @@ class TestGeminiEngine:
         assert data["temperature"] == 0.2
         assert data["max_output_tokens"] == 512
         assert data["thinking_config"] == {"thinking_budget": 100}
+        for removed in ("max_retries", "retry_backoff_base", "attachments"):
+            assert removed not in data
         assert "secret" not in str(data)
 
     def test_collect_system_joins_multiple_messages(
@@ -396,30 +397,6 @@ class TestGeminiEngine:
         engine = _make_engine(monkeypatch)
         messages = [{"role": "user", "content": "Hello"}]
         assert engine._collect_system(messages) is None
-
-    def test_should_retry_server_error_always_retries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        exc = genai_errors.ServerError(500, {"message": "srv"}, None)
-        assert engine._should_retry(exc, attempt=1) is True
-
-    def test_should_retry_client_error_only_on_429(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        rate_limited = genai_errors.ClientError(429, {"message": "rl"}, None)
-        bad_request = genai_errors.ClientError(400, {"message": "bad"}, None)
-
-        assert engine._should_retry(rate_limited, attempt=1) is True
-        assert engine._should_retry(bad_request, attempt=1) is False
-
-    def test_should_retry_respects_max_retries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        exc = genai_errors.ServerError(500, {"message": "srv"}, None)
-        assert engine._should_retry(exc, attempt=3) is False
 
 
 class TestGeminiAttachments:
@@ -454,26 +431,110 @@ class TestGeminiAttachments:
         assert meta["kind"] == "file"
         assert meta["resource_name"] == "gemini_file"
 
-    def test_on_detach_with_resource_name_calls_delete(
+    def test_attach_rejects_blank_and_non_string_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach("")
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach(123)  # type: ignore[arg-type]
+
+    def test_attach_stores_metadata_and_caches_the_same_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "doc.txt"
+        path.write_text("content")
+
+        first = engine.attach(str(path))
+        second = engine.attach(str(path))
+
+        assert first is second
+        assert engine.attachments == {str(path): first}
+
+    def test_attachments_property_returns_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "doc.txt"
+        path.write_text("content")
+        engine.attach(str(path))
+
+        engine.attachments.clear()  # type: ignore[attr-defined]
+
+        assert str(path) in engine.attachments
+
+    def test_payload_reads_the_engine_attachments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "doc.txt"
+        path.write_text("content")
+        engine.attach(str(path))
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "Q?"}])
+
+        assert len(payload["contents"][-1].parts) == 2
+
+    def test_detach_with_resource_name_deletes_the_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         fake = FakeGenAIClient.instances[-1]
+        engine._attachments["doc.txt"] = {"resource_name": "files/abc123"}
 
-        engine._on_detach({"resource_name": "files/abc123"})
+        assert engine.detach("doc.txt") is True
 
         assert "files/abc123" in fake.deleted_files
+        assert engine.attachments == {}
 
-    def test_on_detach_without_resource_name_is_noop(
+    def test_detach_without_resource_name_deletes_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         fake = FakeGenAIClient.instances[-1]
+        engine._attachments["a.txt"] = {}
+        engine._attachments["b.txt"] = {"resource_name": None}
 
-        engine._on_detach({})
-        engine._on_detach({"resource_name": None})
+        assert engine.detach("a.txt") is True
+        assert engine.detach("b.txt") is True
 
         assert fake.deleted_files == []
+
+    def test_detach_returns_false_for_unknown_path_and_swallows_delete_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        def _boom(*, name: str) -> None:
+            raise RuntimeError("delete failed")
+
+        engine._client.files.delete = _boom  # type: ignore[attr-defined]
+        engine._attachments["doc.txt"] = {"resource_name": "files/abc123"}
+
+        assert engine.detach("never_attached.txt") is False
+        assert engine.detach("doc.txt") is True
+
+    def test_clear_attachments_detaches_everything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        fake = FakeGenAIClient.instances[-1]
+        engine._attachments["a.txt"] = {"resource_name": "files/a"}
+        engine._attachments["b.txt"] = {}
+
+        engine.clear_attachments()
+
+        assert engine.attachments == {}
+        assert fake.deleted_files == ["files/a"]
+
+    def test_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        for name in ("_should_retry", "_max_retries", "_on_detach"):
+            assert not hasattr(engine, name)
 
 
 class TestGeminiTokenUsage:

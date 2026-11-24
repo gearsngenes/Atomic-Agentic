@@ -7,13 +7,11 @@ import os
 from typing import Any, Dict, List, Mapping, Optional
 
 try:
-    from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
+    from anthropic import Anthropic, AsyncAnthropic
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     Anthropic = None            # type: ignore[assignment,misc]
     AsyncAnthropic = None       # type: ignore[assignment,misc]
-    APIConnectionError = None   # type: ignore[assignment,misc]
-    APIStatusError = None       # type: ignore[assignment,misc]
     _SDK_IMPORT_ERROR = _exc
 
 from .base import LLMEngine
@@ -68,7 +66,8 @@ class AnthropicEngine(LLMEngine):
       (no base64 required).
 
     Attachment blocks are appended to the last user-turn ``content`` list
-    in ``_build_provider_payload``.  ``_on_detach`` is a no-op.
+    in ``_build_provider_payload``. ``attach``/``detach``/``clear_attachments``
+    are this engine's own API; detach has no provider cleanup.
 
     Invocation
     ----------
@@ -125,12 +124,8 @@ class AnthropicEngine(LLMEngine):
         thinking_config: dict[str, Any] | None = None,
         extra_body: Mapping[str, Any] | None = None,
         block_separator: str = "",
-        inline_cutoff_chars: int = 200_000,
         *,
         timeout_seconds: float = 600.0,
-        max_retries: int = 2,
-        retry_backoff_base: float = 0.5,
-        retry_backoff_max: float = 8.0,
         **client_kwargs: Any,
     ) -> None:
         """
@@ -166,17 +161,13 @@ class AnthropicEngine(LLMEngine):
             Controls how multiple response text blocks are rejoined into the
             returned string (relevant for citation-bearing responses).
             Defaults to ``""`` (no inserted separator).
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
         timeout_seconds:
             Per-call timeout inserted into the client's ``timeout`` option.
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/backoff configuration.
         **client_kwargs:
             Additional keyword arguments forwarded verbatim to
             ``Anthropic(...)`` during client construction. Common uses:
-            ``api_key``, ``base_url``. Not forwarded when ``client`` is
-            injected directly.
+            ``api_key``, ``base_url``, and the SDK's own ``max_retries``. Not
+            forwarded when ``client`` is injected directly.
         """
         # 1. Name sanitization + super init
         sanitized = (name or f"anthropic_{model}").replace(":", "_").replace(
@@ -185,10 +176,8 @@ class AnthropicEngine(LLMEngine):
             name=sanitized,
             description=description or "Anthropic Claude language model engine.",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
 
         # 2. SDK presence check
         if Anthropic is None:
@@ -213,15 +202,41 @@ class AnthropicEngine(LLMEngine):
         self.thinking_config = thinking_config
         self.extra_body = dict(extra_body) if extra_body is not None else None
         self.block_separator = block_separator
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Attachments
     # ------------------------------------------------------------------ #
     @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Read-only copy of attached local path -> provider metadata."""
+        return dict(self._attachments)
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("AnthropicEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return self._attachments[path]
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return meta
+
+    def detach(self, path: str) -> bool:
+        """Detach ``path``; ``True`` when something was removed (no provider cleanup)."""
+        return self._attachments.pop(path, None) is not None
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
 
     # ------------------------------------------------------------------ #
     # Client routing
@@ -239,19 +254,6 @@ class AnthropicEngine(LLMEngine):
             return await self._client.messages.create(**payload)
         return await asyncio.to_thread(self._call_provider, payload)
 
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on Anthropic connection/timeout errors and on retryable HTTP
-        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, APIConnectionError):
-            return True
-        if isinstance(exc, APIStatusError):
-            return exc.status_code in {429, 500, 502, 503, 504}
-        return False
-
     # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
@@ -259,12 +261,11 @@ class AnthropicEngine(LLMEngine):
     def _build_provider_payload(
         self,
         messages: List[Dict[str, Any]],
-        attachments: Dict[str, Any],
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the ``messages.create`` payload from normalized messages and the
-        current attachments snapshot.
+        Build the ``messages.create`` payload from normalized messages and a
+        snapshot of the engine's attachments.
 
         Lifecycle: (1) partition system vs. conversation; (2) convert to
         Anthropic content-list format; (3) append attachment blocks to the
@@ -288,7 +289,7 @@ class AnthropicEngine(LLMEngine):
             anthropic_msgs.append({"role": m["role"], "content": content})
 
         # 3. Append attachment blocks to the last user turn
-        blocks = list(attachments.values())
+        blocks = list(self._attachments.values())
         if blocks:
             idx = next(
                 (i for i in range(len(anthropic_msgs) - 1, -1, -1)
@@ -413,8 +414,7 @@ class AnthropicEngine(LLMEngine):
         Build an inline Anthropic content block for ``path`` (no upload).
 
         Images → base64 ``image`` block; PDFs → base64 ``document`` block;
-        text/code → UTF-8 ``document/text`` block, truncated at
-        ``inline_cutoff_chars``.
+        text/code → UTF-8 ``document/text`` block (whole file).
         """
         try:
             ext = os.path.splitext(path)[1].lower()
@@ -446,8 +446,6 @@ class AnthropicEngine(LLMEngine):
             # Text / code — document/text source (no base64 needed)
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
             return {
                 "type": "document",
                 "source": {
@@ -463,9 +461,6 @@ class AnthropicEngine(LLMEngine):
                 f"AnthropicEngine._prepare_attachment failed for {path!r}"
             ) from exc
 
-    def _on_detach(self, meta: Any) -> None:
-        """No-op — inline attachments leave no server-side state to clean up."""
-
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
@@ -479,6 +474,5 @@ class AnthropicEngine(LLMEngine):
             "thinking_config": self.thinking_config,
             "extra_body": self.extra_body,
             "block_separator": self.block_separator,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return d

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 
 mistral_module = importlib.import_module("atomic_agentic.llm.mistral_engine")
@@ -62,12 +60,13 @@ def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> MistralEngin
     return MistralEngine(model="mistral-small-latest", **kwargs)
 
 
-class TestMistralImmutability:
-    def test_inline_cutoff_chars_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=300)
-        assert engine.inline_cutoff_chars == 300
-        with pytest.raises(AttributeError):
-            engine.inline_cutoff_chars = 999  # type: ignore[misc]
+class TestMistralRemovedSurface:
+    def test_cutoff_and_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
+                     "_max_retries", "_on_detach"):
+            assert not hasattr(engine, name)
 
 
 class TestMistralValidatingProperties:
@@ -165,16 +164,15 @@ class TestMistralEngine:
         assert messages[0]["content"] == [{"type": "text", "text": "hello"}]
 
     def test_mistral_payload_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.6, inline_cutoff_chars=100)
+        engine = _make_engine(monkeypatch, temperature=0.6)
 
-        payload = engine._build_provider_payload(
-            [{"role": "user", "content": "Question"}],
-            {
-                "notes.txt": {"kind": "text", "inlined_text": "Inline notes"},
-                "doc.pdf": {"kind": "pdf", "signed_url": "https://doc"},
-                "image.png": {"kind": "image", "signed_url": "https://image"},
-            },
-        )
+        engine._attachments.update({
+            "notes.txt": {"kind": "text", "inlined_text": "Inline notes"},
+            "doc.pdf": {"kind": "pdf", "signed_url": "https://doc"},
+            "image.png": {"kind": "image", "signed_url": "https://image"},
+        })
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "Question"}])
 
         user_parts = payload["messages"][0]["content"]
 
@@ -213,7 +211,7 @@ class TestMistralEngine:
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
         payload = engine._build_provider_payload(
-            [{"role": "user", "content": "hi"}], {}, schema
+            [{"role": "user", "content": "hi"}], schema
         )
 
         assert payload["response_format"] == {
@@ -229,7 +227,7 @@ class TestMistralEngine:
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
         payload = engine._build_provider_payload(
-            [{"role": "user", "content": "hi"}], {}, schema
+            [{"role": "user", "content": "hi"}], schema
         )
 
         # Proves `strict` is read fresh at call time, not baked at construction.
@@ -240,7 +238,7 @@ class TestMistralEngine:
     ) -> None:
         engine = _make_engine(monkeypatch)
 
-        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}], {})
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
 
         assert "response_format" not in payload
 
@@ -286,16 +284,15 @@ class TestMistralEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _make_engine(
-            monkeypatch, temperature=0.7, inline_cutoff_chars=321, strict=False
-        )
+        engine = _make_engine(monkeypatch, temperature=0.7, strict=False)
         data = engine.to_dict()
 
         assert data["type"] == "MistralEngine"
         assert data["model"] == "mistral-small-latest"
         assert data["temperature"] == 0.7
         assert data["strict"] is False
-        assert data["inline_cutoff_chars"] == 321
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+            assert removed not in data
 
     def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -364,37 +361,115 @@ class TestMistralAttachments:
         assert meta["inlined"] is True
         assert "Hello from text!" in meta["inlined_text"]
 
-    def test_prepare_attachment_text_truncates_at_cutoff(
+    def test_prepare_attachment_text_inlines_whole(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=10)
+        engine = _make_engine(monkeypatch)
         path = tmp_path / "long.txt"
-        path.write_text("X" * 100)
+        path.write_text("X" * 300_000)
 
         meta = engine._prepare_attachment(str(path))
 
-        assert meta["kind"] == "text"
-        assert "truncated" in meta["inlined_text"]
+        assert meta["inlined_text"] == "X" * 300_000
 
-    def test_on_detach_with_file_id_calls_delete(
+    def test_payload_appends_every_text_attachment_whole(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["a.txt"] = {"kind": "text", "inlined_text": "A" * 250_000}
+        engine._attachments["b.txt"] = {"kind": "text", "inlined_text": "B" * 250_000}
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "Q?"}])
+
+        texts = [p["text"] for p in payload["messages"][0]["content"]]
+        assert any(t.endswith("A" * 250_000) for t in texts)
+        assert any(t.endswith("B" * 250_000) for t in texts)
+        assert not any("cutoff" in t or "truncated" in t for t in texts)
+
+    def test_attach_rejects_blank_and_non_string_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach("")
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach(123)  # type: ignore[arg-type]
+
+    def test_attach_stores_metadata_and_caches_the_same_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+
+        first = engine.attach(str(path))
+        second = engine.attach(str(path))
+
+        assert first is second
+        assert engine.attachments == {str(path): first}
+
+    def test_attachments_property_returns_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+        engine.attach(str(path))
+
+        engine.attachments.clear()  # type: ignore[attr-defined]
+
+        assert str(path) in engine.attachments
+
+    def test_detach_with_file_id_deletes_the_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         fake = FakeMistralClient.instances[-1]
+        engine._attachments["doc.pdf"] = {"file_id": "abc123"}
 
-        engine._on_detach({"file_id": "abc123"})
+        assert engine.detach("doc.pdf") is True
 
         assert "abc123" in fake.deleted_files
+        assert engine.attachments == {}
 
-    def test_on_detach_without_file_id_is_noop(
+    def test_detach_without_file_id_deletes_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         fake = FakeMistralClient.instances[-1]
+        engine._attachments["notes.txt"] = {"kind": "text"}
 
-        engine._on_detach({})
+        assert engine.detach("notes.txt") is True
 
         assert fake.deleted_files == []
+
+    def test_detach_returns_false_for_unknown_path_and_swallows_delete_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        def _boom(*, file_id: str, **kwargs: Any) -> None:
+            raise RuntimeError("delete failed")
+
+        engine._client.files.delete = _boom  # type: ignore[attr-defined]
+        engine._attachments["doc.pdf"] = {"file_id": "abc123"}
+
+        assert engine.detach("never_attached.txt") is False
+        assert engine.detach("doc.pdf") is True
+
+    def test_clear_attachments_detaches_everything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        fake = FakeMistralClient.instances[-1]
+        engine._attachments["a.pdf"] = {"file_id": "file_a"}
+        engine._attachments["b.txt"] = {"kind": "text"}
+
+        engine.clear_attachments()
+
+        assert engine.attachments == {}
+        assert fake.deleted_files == ["file_a"]
 
 
 _NO_DETAILS = object()  # sentinel: "attribute genuinely absent", not "set to None"
@@ -485,47 +560,3 @@ class TestMistralTokenUsage:
         result = engine._extract_token_usage(response)
 
         assert result.cached_tokens == 7
-
-
-@pytest.mark.skipif(
-    importlib.util.find_spec("mistralai") is None, reason="requires the mistral extra"
-)
-class TestMistralShouldRetry:
-    def _status_error(self, status_code: int) -> Any:
-        from mistralai.client import errors as mistral_errors
-
-        request = httpx.Request("POST", "https://example.com")
-        response = httpx.Response(status_code=status_code, request=request)
-        return mistral_errors.SDKError("error", raw_response=response)
-
-    def test_no_response_error_always_retries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from mistralai.client import errors as mistral_errors
-
-        engine = _make_engine(monkeypatch, max_retries=2)
-        exc = mistral_errors.NoResponseError()
-        assert engine._should_retry(exc, attempt=1) is True
-
-    def test_raw_transport_errors_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        for exc in (httpx.ConnectTimeout("t"), httpx.ReadTimeout("t"), httpx.ConnectError("c")):
-            assert engine._should_retry(exc, attempt=1) is True
-        assert engine._should_retry(httpx.ConnectTimeout("t"), attempt=3) is False
-        assert engine._should_retry(ValueError("x"), attempt=1) is False
-
-    def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        for code in (429, 500, 502, 503, 504):
-            assert engine._should_retry(self._status_error(code), attempt=1) is True
-
-    def test_non_retryable_status_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        assert engine._should_retry(self._status_error(400), attempt=1) is False
-
-    def test_respects_max_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mistralai.client import errors as mistral_errors
-
-        engine = _make_engine(monkeypatch, max_retries=2)
-        exc = mistral_errors.NoResponseError()
-        assert engine._should_retry(exc, attempt=3) is False

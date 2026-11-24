@@ -4,11 +4,9 @@ import json
 import mimetypes
 try:
     from google import genai
-    from google.genai import errors as genai_errors
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     genai = None
-    genai_errors = None
     _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
@@ -75,7 +73,6 @@ class GeminiEngine(LLMEngine):
     2) ``invoke({"messages": messages, "output_structure": ...})`` runs the
        shared ``LLMResult`` lifecycle:
        - normalize chat messages;
-       - snapshot current attachments;
        - build the Gemini provider payload, threading a cleaned
          ``output_structure`` (when given) through to ``response_mime_type``/
          ``response_json_schema`` on ``GenerateContentConfig``;
@@ -83,7 +80,7 @@ class GeminiEngine(LLMEngine):
        - extract assistant text, token usage, and configured model data;
        - return ``LLMResult``.
 
-    3) ``detach(path)`` calls ``_on_detach`` for best-effort file deletion via
+    3) ``detach(path)`` does best-effort file deletion via
        ``client.files.delete``.
 
     Result extraction
@@ -128,9 +125,6 @@ class GeminiEngine(LLMEngine):
             thinking_config: dict[str, Any] | None = None,
             *,
             timeout_seconds: float = 600.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -158,7 +152,7 @@ class GeminiEngine(LLMEngine):
             ``{"thinking_budget": 2000}`` or ``{"thinking_level": "high"}``).
             Expanded into ``genai.types.ThinkingConfig(**thinking_config)`` at call
             time. ``None`` omits the field.
-        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        timeout_seconds:
             Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
             Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
@@ -174,10 +168,8 @@ class GeminiEngine(LLMEngine):
             name=sanitized_name,
             description=description or "Gemini LLM Engine",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
 
         # Step 2 — SDK presence check.
         if genai is None:
@@ -212,6 +204,53 @@ class GeminiEngine(LLMEngine):
         self._thinking_config = thinking_config
 
     # ------------------------------------------------------------------ #
+    # Attachments
+    # ------------------------------------------------------------------ #
+    @property
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Read-only copy of attached local path -> provider metadata."""
+        return dict(self._attachments)
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("GeminiEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return self._attachments[path]
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return meta
+
+    def detach(self, path: str) -> bool:
+        """
+        Detach ``path``; ``True`` when something was removed. The uploaded file
+        is deleted best-effort (a failed delete is ignored).
+        """
+        meta = self._attachments.pop(path, None)
+        if meta is None:
+            return False
+        name = meta.get("resource_name")
+        if name:
+            try:
+                self._client.files.delete(name=name)
+            except Exception:
+                pass
+        return True
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
+
+    # ------------------------------------------------------------------ #
     # Attachment validation & preparation
     # ------------------------------------------------------------------ #
 
@@ -237,7 +276,7 @@ class GeminiEngine(LLMEngine):
         """
         Prepare a local path for Gemini: upload once and store the File object.
 
-        The base engine has already validated the path and extension and applied
+        ``attach`` has already validated the path and extension and applied
         MIME-based checks via `_validate_attachment_path`. This method assumes
         the path is supported and focuses on:
 
@@ -253,8 +292,7 @@ class GeminiEngine(LLMEngine):
                 "resource_name": <str | None>,
             }
 
-        The metadata shape is opaque to the base engine and only interpreted
-        by this class.
+        The metadata shape is only interpreted by this class.
         """
         try:
             mime, _ = mimetypes.guess_type(path)
@@ -280,20 +318,6 @@ class GeminiEngine(LLMEngine):
             raise LLMEngineError(
                 f"GeminiEngine._prepare_attachment failed for {path!r}"
             ) from exc
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Delete Gemini file resource if present.
-
-        This is best-effort; errors are ignored.
-        """
-        name = meta.get("resource_name")
-        if not name:
-            return
-        try:
-            self._client.files.delete(name=name)
-        except Exception:
-            return
 
     # ------------------------------------------------------------------ #
     # Template hooks for invocation
@@ -364,12 +388,11 @@ class GeminiEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for ``generate_content`` from normalized messages, the
-        current attachments snapshot, and (optionally) the caller's raw
+        Build the payload for ``generate_content`` from normalized messages, a
+        snapshot of the engine's attachments, and (optionally) the caller's raw
         structured-output template, unmodified.
 
         System messages are extracted into ``system_instruction`` for
@@ -378,7 +401,7 @@ class GeminiEngine(LLMEngine):
         is the caller's raw schema, forwarded unmodified; stashed as-is.
         """
         system_instruction = self._collect_system(messages)
-        contents = self._build_content_list(messages, attachments)
+        contents = self._build_content_list(messages, dict(self._attachments))
         return {
             "system_instruction": system_instruction,
             "contents": contents,
@@ -441,19 +464,6 @@ class GeminiEngine(LLMEngine):
             contents=payload["contents"],
             config=cfg,
         )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on ``genai_errors.ServerError`` (5xx) unconditionally, and on
-        ``ClientError`` (4xx) only when its ``.code`` is 429 (rate limit).
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, genai_errors.ServerError):
-            return True
-        if isinstance(exc, genai_errors.ClientError):
-            return exc.code == 429
-        return False
 
     def _extract_result(
         self, response: Any, requested_structured: bool

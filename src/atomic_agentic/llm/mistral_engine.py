@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import importlib
 import json
 import mimetypes
 try:
     from mistralai.client import Mistral
-    from mistralai.client import errors as mistral_errors
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     Mistral = None
-    mistral_errors = None
     _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
@@ -39,23 +36,6 @@ from ..utils.llm import validate_attachment_path
 __all__ = ["MistralEngine"]
 
 
-def _transport_error_types() -> tuple[type[BaseException], ...]:
-    """``TransportError`` classes of whichever HTTP libraries are installed.
-
-    mistralai 2.x raises ``httpx`` errors and 3.x raises ``httpx2`` errors for
-    timeouts and connection failures; neither is wrapped by the SDK.
-    """
-    found: list[type[BaseException]] = []
-    for module_name in ("httpx", "httpx2"):
-        try:
-            found.append(importlib.import_module(module_name).TransportError)
-        except (ImportError, AttributeError):
-            continue
-    return tuple(found)
-
-
-_TRANSPORT_ERRORS = _transport_error_types()
-
 # ── MISTRAL ─────────────────────────────
 class MistralEngine(LLMEngine):
     """
@@ -69,15 +49,15 @@ class MistralEngine(LLMEngine):
        - Text/code → read + inline → `{ "kind": "text", "inlined_text": ... }`
     2) `invoke({'messages': ...})` (from the base `LLMEngine`) will:
        - normalize chat messages (role/content strings),
-       - snapshot current attachments,
-       - call `_build_provider_payload` to:
+       - call `_build_provider_payload` (which snapshots the engine's
+         attachments) to:
          * convert messages into Mistral's chat schema
          * ensure the last user message has a `content` parts array
          * append inline text and signed URL parts to that last user turn
-       - call `_call_with_retries` → `_call_provider`
+       - call `_call_provider`
        - call `_extract_result` to normalize the response.
-    3) `detach(path)` triggers best-effort deletion of uploaded files via
-       `_on_detach`, which calls `client.files.delete(file_id=...)`.
+    3) `detach(path)` does best-effort deletion of uploaded files via
+       `client.files.delete(file_id=...)`.
 
     Result extraction
     ------------------
@@ -122,12 +102,8 @@ class MistralEngine(LLMEngine):
             client: Mistral | None = None,
             temperature: float | None = 0.1,
             strict: bool = True,
-            inline_cutoff_chars: int = 200_000,
             *,
             timeout_seconds: float = 600.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -158,15 +134,12 @@ class MistralEngine(LLMEngine):
             goes unenforced too), so
             disabling it trades a wider keyword allow-list for materially
             weaker guarantees generally, not just looser syntax.
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
-        timeout_seconds, max_retries,
-        retry_backoff_base, retry_backoff_max:
+        timeout_seconds:
             Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
             Additional keyword arguments forwarded to ``Mistral(...)`` during
             client construction. Common uses: ``api_key``, ``server_url``,
-            ``timeout_ms``. A default ``timeout_ms`` is seeded from
+            ``timeout_ms``, ``retry_config``. A default ``timeout_ms`` is seeded from
             ``timeout_seconds`` unless supplied explicitly. Not forwarded when
             ``client`` is injected.
         """
@@ -180,10 +153,8 @@ class MistralEngine(LLMEngine):
             name=sanitized_name,
             description=description or "Mistral LLM Engine",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
 
         # 2. SDK presence check.
         if Mistral is None:
@@ -203,16 +174,10 @@ class MistralEngine(LLMEngine):
         self.model = model
         self.temperature = temperature
         self.strict = strict
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
-
     @property
     def strict(self) -> bool:
         """Whether structured-output requests use strict schema conformance."""
@@ -225,6 +190,53 @@ class MistralEngine(LLMEngine):
                 f"MistralEngine.strict must be a bool, got {type(value).__name__}."
             )
         self._strict = value
+
+    # ------------------------------------------------------------------ #
+    # Attachments
+    # ------------------------------------------------------------------ #
+    @property
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Read-only copy of attached local path -> provider metadata."""
+        return dict(self._attachments)
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("MistralEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return self._attachments[path]
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return meta
+
+    def detach(self, path: str) -> bool:
+        """
+        Detach ``path``; ``True`` when something was removed. The uploaded file
+        is deleted best-effort (a failed delete is ignored).
+        """
+        meta = self._attachments.pop(path, None)
+        if meta is None:
+            return False
+        file_id = meta.get("file_id")
+        if file_id:
+            try:
+                self._client.files.delete(file_id=file_id)
+            except Exception:
+                pass
+        return True
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
 
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
@@ -264,8 +276,7 @@ class MistralEngine(LLMEngine):
                 "signed_url": <str>,
             }
 
-        - Text/code → read & inline, respecting `inline_cutoff_chars` as a
-          per-file safety cap (the global cap is enforced in `_build_provider_payload`):
+        - Text/code → read & inline whole:
 
             {
                 "kind": "text",
@@ -295,8 +306,6 @@ class MistralEngine(LLMEngine):
 
             # text/code → inline
             text = self._read_text_file(path)
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
             return {
                 "kind": "text",
                 "mime": mime,
@@ -311,22 +320,6 @@ class MistralEngine(LLMEngine):
                 f"MistralEngine._prepare_attachment failed for {path!r}"
             ) from exc
 
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Delete Mistral file resource if present (best-effort).
-
-        `meta` is the metadata previously returned by `_prepare_attachment`.
-        Errors are swallowed; the base engine logs detach errors at debug level.
-        """
-        file_id = meta.get("file_id")
-        if not file_id:
-            return
-        try:
-            self._client.files.delete(file_id=file_id)
-        except Exception:
-            # Best-effort cleanup only.
-            return
-
     # ------------------------------------------------------------------ #
     # Template hooks for invocation
     # ------------------------------------------------------------------ #
@@ -334,7 +327,6 @@ class MistralEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -343,7 +335,6 @@ class MistralEngine(LLMEngine):
 
         - `messages` are already validated and have lowercase `role` and
           string `content`.
-        - `attachments` is a snapshot of `self._attachments` at invoke time.
         - `output_structure`, when given, is the caller's raw schema,
           forwarded unmodified and wired into `response_format={"type":
           "json_schema", "json_schema": {"name": "output_structure",
@@ -353,6 +344,8 @@ class MistralEngine(LLMEngine):
         the **last user message** so they are clearly associated with the most
         recent user query.
         """
+        attachments = dict(self._attachments)
+
         # Start from normalized messages.
         chat_messages: List[Dict[str, Any]] = [
             {"role": m["role"], "content": m["content"]} for m in messages
@@ -362,28 +355,12 @@ class MistralEngine(LLMEngine):
         user_idx = self._ensure_user_parts(chat_messages)
         parts = chat_messages[user_idx]["content"]
 
-        # Inline text/code with a global cutoff across all attachments.
-        total_inlined = 0
-        cutoff_marker = "\n[Inline cutoff reached; additional text files omitted]\n"
+        # Inline text/code attachments whole.
         for path, meta in attachments.items():
-            kind = meta.get("kind")
             inlined_text = meta.get("inlined_text")
-            if kind == "text" and inlined_text:
-                budget = self._inline_cutoff_chars - total_inlined
-                if budget <= 0:
-                    if total_inlined == self._inline_cutoff_chars:
-                        parts.append({"type": "text", "text": cutoff_marker})
-                        total_inlined += len(cutoff_marker)
-                    continue
-
-                text = inlined_text
-                if len(text) > budget:
-                    text = text[:budget] + "\n…[truncated]\n"
-
+            if meta.get("kind") == "text" and inlined_text:
                 header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                parts.append({"type": "text", "text": header + text})
-                # We treat `inline_cutoff_chars` as a soft cap, so this is approximate.
-                total_inlined += len(text)
+                parts.append({"type": "text", "text": header + inlined_text})
 
         # Attach signed URLs for PDFs & images from persistent attachments.
         for _, meta in attachments.items():
@@ -410,7 +387,7 @@ class MistralEngine(LLMEngine):
         """
         Single synchronous Mistral chat completion call.
 
-        Retries and error-wrapping are handled by the shared ``LLMEngine`` template.
+        Error-wrapping is handled by the shared ``LLMEngine`` template.
         Temperature is omitted when ``None`` so the SDK applies its own default.
         ``response_format`` is forwarded when present (structured-output requests).
         """
@@ -442,24 +419,6 @@ class MistralEngine(LLMEngine):
         if "response_format" in payload:
             kwargs["response_format"] = payload["response_format"]
         return await self._client.chat.complete_async(**kwargs)
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on ``NoResponseError`` (no HTTP response received at all), on raw
-        HTTP transport failures (connect/read timeouts, network errors), and
-        on retryable HTTP status codes (429, 500, 502, 503, 504) from
-        ``SDKError.raw_response``.
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, mistral_errors.NoResponseError):
-            return True
-        if _TRANSPORT_ERRORS and isinstance(exc, _TRANSPORT_ERRORS):
-            return True
-        if isinstance(exc, mistral_errors.SDKError):
-            status = getattr(getattr(exc, "raw_response", None), "status_code", None)
-            return status in {429, 500, 502, 503, 504}
-        return False
 
     def _extract_result(
         self, response: Any, requested_structured: bool
@@ -621,8 +580,7 @@ class MistralEngine(LLMEngine):
         """
         Obtain a signed URL for an uploaded file.
 
-        If this call fails, the attachment fails; no additional retries are
-        performed here (chat-level retries are handled by the base engine).
+        If this call fails, the attachment fails.
         """
         try:
             signed = self._client.files.get_signed_url(file_id=file_id)
@@ -647,6 +605,5 @@ class MistralEngine(LLMEngine):
             "model": self.model,
             "temperature": self.temperature,
             "strict": self.strict,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

@@ -4,13 +4,11 @@ import asyncio
 import json
 import mimetypes
 try:
-    from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError
+    from openai import AsyncOpenAI, OpenAI
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     AsyncOpenAI = None
     OpenAI = None
-    APIConnectionError = None
-    APIStatusError = None
     _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
@@ -57,21 +55,21 @@ class OpenAIEngine(LLMEngine):
       directly; ``_call_provider_async`` offloads to a thread via
       ``asyncio.to_thread``.
 
-    ``_upload_file`` and ``_on_detach`` also use ``isinstance`` to route
+    ``_upload_file`` and ``detach`` also use ``isinstance`` to route
     file-API calls, wrapping async file operations in ``run_coro_sync``
     when needed.
 
     File policy
     -----------
-    Attachments are persistent engine state:
+    Attachments are persistent engine state, managed by this engine's own
+    ``attach``/``detach``/``clear_attachments``:
 
     - PDFs    → uploaded once via Files API; attached as
       ``{"type": "input_file", "file_id": ...}``
     - Images  → uploaded once via Files API; attached as
       ``{"type": "input_image", "file_id": ...}``
     - Text/Code → read and inlined as
-      ``{"type": "input_text", "text": ...}``
-      with a configurable character cutoff.
+      ``{"type": "input_text", "text": ...}`` (whole file).
 
     Unsupported file classes such as audio, video, archives, executables,
     databases, model weights, and obviously binary files are rejected at
@@ -115,10 +113,9 @@ class OpenAIEngine(LLMEngine):
     ``temperature``, ``max_output_tokens``, ``reasoning``, ``truncation``, and
     ``strict`` are call-time Responses API knobs, re-read fresh on every call —
     each is a ``@property`` with a validating setter, freely settable after
-    construction. ``inline_cutoff_chars`` and (base) ``timeout_seconds`` stay
-    read-only instead: both are baked into already-constructed state
-    (attachment metadata / the SDK client's own timeout option respectively)
-    at the moment they're used, so mutating them later wouldn't propagate.
+    construction. (base) ``timeout_seconds`` stays read-only instead: it is
+    baked into the SDK client's own timeout option when the client is built,
+    so mutating it later wouldn't propagate.
     """
 
     def __init__(
@@ -132,12 +129,8 @@ class OpenAIEngine(LLMEngine):
             reasoning: dict[str, str] | None = None,
             truncation: str | None = None,
             strict: bool = True,
-            inline_cutoff_chars: int = 200_000,
             *,
             timeout_seconds: float = 600.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -173,17 +166,14 @@ class OpenAIEngine(LLMEngine):
             strict schema-conformance request mode; it has no effect on what
             AA sends, since AA no longer prunes or filters
             ``output_structure`` at all (structured-generation Pass 8).
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
         timeout_seconds:
             Per-call timeout inserted into the client's ``timeout`` option via
             ``setdefault`` (user-supplied ``timeout`` in ``client_kwargs`` wins).
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/backoff configuration.
         **client_kwargs:
             Additional keyword arguments forwarded verbatim to ``OpenAI(...)``
             during client construction. Common uses: ``api_key``, ``base_url``,
-            ``organization``. Not forwarded when ``client`` is injected directly.
+            ``organization``, and the SDK's own ``max_retries``. Not forwarded
+            when ``client`` is injected directly.
         """
         # Step 1 — Name sanitization and base init.
         sanitized_name = (
@@ -195,10 +185,8 @@ class OpenAIEngine(LLMEngine):
             name=sanitized_name,
             description=description or "OpenAI LLM Engine",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
 
         # Step 2 — SDK presence check.
         if OpenAI is None:
@@ -225,16 +213,10 @@ class OpenAIEngine(LLMEngine):
         self.reasoning = reasoning
         self.truncation = truncation
         self.strict = strict
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
-
     @property
     def temperature(self) -> float | None:
         """Responses API sampling temperature; ``None`` omits the parameter."""
@@ -301,6 +283,56 @@ class OpenAIEngine(LLMEngine):
         self._strict = value
 
     # ------------------------------------------------------------------ #
+    # Attachments
+    # ------------------------------------------------------------------ #
+    @property
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Read-only copy of attached local path -> provider metadata."""
+        return dict(self._attachments)
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("OpenAIEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return self._attachments[path]
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return meta
+
+    def detach(self, path: str) -> bool:
+        """
+        Detach ``path``; ``True`` when something was removed. An uploaded file
+        is deleted best-effort (a failed delete is ignored).
+        """
+        meta = self._attachments.pop(path, None)
+        if meta is None:
+            return False
+        file_id = meta.get("file_id")
+        if file_id:
+            try:
+                if isinstance(self._client, AsyncOpenAI):
+                    run_coro_sync(self._client.files.delete(file_id))
+                else:
+                    self._client.files.delete(file_id)
+            except Exception:
+                pass
+        return True
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
+
+    # ------------------------------------------------------------------ #
     # Overrides / template hooks
     # ------------------------------------------------------------------ #
 
@@ -325,14 +357,14 @@ class OpenAIEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the payload for the OpenAI Responses API from normalized messages,
-        the current attachments snapshot, and (optionally) the caller's raw
+        a snapshot of the engine's attachments, and (optionally) the caller's raw
         structured-output template, unmodified.
         """
+        attachments = dict(self._attachments)
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
 
@@ -445,19 +477,6 @@ class OpenAIEngine(LLMEngine):
             return await self._client.responses.create(**self._build_call_kwargs(payload))
         return await asyncio.to_thread(self._call_provider, payload)
 
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on OpenAI connection/timeout errors and on retryable HTTP
-        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, APIConnectionError):
-            return True
-        if isinstance(exc, APIStatusError):
-            return exc.status_code in {429, 500, 502, 503, 504}
-        return False
-
     def _extract_result(
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
@@ -547,7 +566,7 @@ class OpenAIEngine(LLMEngine):
         Prepare a local path for reuse with this engine.
 
         - PDFs/images → upload once to Files API; metadata contains `file_id`.
-        - Text/code → inline as text (UTF-8, with a length cutoff).
+        - Text/code → inline whole as text (UTF-8).
         """
         try:
             kind = self._classify_path(path)
@@ -568,8 +587,6 @@ class OpenAIEngine(LLMEngine):
 
             # Text/code → inline as text
             text = self._read_text_file(path)
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
 
             return {
                 "kind": "text",
@@ -585,23 +602,6 @@ class OpenAIEngine(LLMEngine):
             raise LLMEngineError(
                 f"OpenAIEngine._prepare_attachment failed for {path!r}"
             ) from exc
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Attempt to delete any remote file created via the Files API.
-
-        This is best-effort; errors are ignored.
-        """
-        file_id = meta.get("file_id")
-        if not file_id:
-            return
-        try:
-            if isinstance(self._client, AsyncOpenAI):
-                run_coro_sync(self._client.files.delete(file_id))
-            else:
-                self._client.files.delete(file_id)
-        except Exception:
-            return
 
     # ------------------------------------------------------------------ #
     # OpenAI-specific helpers (not part of the template surface)
@@ -705,7 +705,7 @@ class OpenAIEngine(LLMEngine):
 
         - PDFs   → upload + `input_file` reference
         - Images → upload + `input_image` reference
-        - Other  → inline as text (UTF-8, truncated by `inline_cutoff_chars`).
+        - Other  → inline as text (UTF-8).
         """
         mime, _ = mimetypes.guess_type(path)
         mime = mime or ""
@@ -725,8 +725,6 @@ class OpenAIEngine(LLMEngine):
 
         # Inline as text
         text = self._read_text_file(path)
-        if len(text) > self._inline_cutoff_chars:
-            text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
 
         header = f"\n[Inlined file: {os.path.basename(path)}]\n"
         user_parts.append({"type": "input_text", "text": header + text})
@@ -739,7 +737,7 @@ class OpenAIEngine(LLMEngine):
         """
         Diagnostic snapshot for OpenAIEngine, without secrets.
 
-        Includes model, Responses API config, and inline cutoff in addition to
+        Includes model and Responses API config in addition to
         base engine info. Does not expose ``client_kwargs`` contents (which may
         include API keys).
         """
@@ -751,6 +749,5 @@ class OpenAIEngine(LLMEngine):
             "reasoning": self.reasoning,
             "truncation": self.truncation,
             "strict": self.strict,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

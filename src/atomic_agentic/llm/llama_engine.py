@@ -66,8 +66,7 @@ class LlamaCppEngine(LLMEngine):
        - extract assistant text, token usage, and configured model data;
        - return ``LLMResult``.
 
-    3) Attachments are not supported. Any attempt to call ``attach(path)`` fails
-       with ``LLMEngineError``.
+    3) Attachments are not supported; this engine has no ``attach`` API.
 
     Token usage
     -----------
@@ -157,9 +156,6 @@ class LlamaCppEngine(LLMEngine):
             local_files_only: bool = False,
             # ── Base engine config ────────────────────────────────────────────────
             timeout_seconds: float = 30.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             # ── Remaining Llama constructor params forwarded verbatim ─────────────
             **llama_kwargs: Any,
     ) -> None:
@@ -196,8 +192,7 @@ class LlamaCppEngine(LLMEngine):
             Optional local directory where the model file is materialized.
         local_files_only:
             If True, resolve only from local cache; do not download.
-        timeout_seconds, max_retries,
-        retry_backoff_base, retry_backoff_max:
+        timeout_seconds:
             Shared ``LLMEngine`` configuration.
         **llama_kwargs:
             Additional keyword arguments forwarded verbatim to ``Llama(...)``.
@@ -212,9 +207,6 @@ class LlamaCppEngine(LLMEngine):
             name=sanitized_name,
             description=description or "Llama.cpp LLM Engine",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
 
         # 2. SDK presence check
@@ -310,7 +302,6 @@ class LlamaCppEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -318,7 +309,6 @@ class LlamaCppEngine(LLMEngine):
         structured-output template) to llama.cpp's chat completion schema.
 
         - `messages` are already validated (role/content strings).
-        - `attachments` are ignored; this engine does not support attachments.
         - `output_structure`, when given, is the caller's raw schema,
           forwarded unmodified, and is wired into
           `response_format={"type": "json_object", "schema":
@@ -338,7 +328,7 @@ class LlamaCppEngine(LLMEngine):
         """
         Perform a single llama.cpp chat completion call.
 
-        Retries and error-wrapping are handled by `LLMEngine._call_with_retries`.
+        Error-wrapping is handled by the shared ``LLMEngine`` template.
         """
         chat_kwargs: Dict[str, Any] = {}
         if self.temperature is not None:
@@ -364,15 +354,6 @@ class LlamaCppEngine(LLMEngine):
             messages=payload["messages"],
             **chat_kwargs,
         )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Local llama.cpp inference has no network layer, so there is no
-        status-code or connection-error signal to discriminate transient
-        from permanent failures. Deliberate policy: retry blindly, bounded
-        only by the shared attempt budget.
-        """
-        return attempt <= self._max_retries
 
     def _extract_result(
         self, response: Any, requested_structured: bool

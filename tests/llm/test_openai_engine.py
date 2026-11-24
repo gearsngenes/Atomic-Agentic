@@ -5,7 +5,6 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 
 openai = pytest.importorskip("openai")
@@ -73,12 +72,19 @@ def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> OpenAIEngine
     return OpenAIEngine(model="gpt-4o-mini", **kwargs)
 
 
-class TestOpenAIImmutability:
-    def test_inline_cutoff_chars_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=500)
-        assert engine.inline_cutoff_chars == 500
-        with pytest.raises(AttributeError):
-            engine.inline_cutoff_chars = 999  # type: ignore[misc]
+class TestOpenAIRemovedSurface:
+    def test_cutoff_and_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
+                     "_max_retries", "_on_detach"):
+            assert not hasattr(engine, name)
+
+    def test_max_retries_goes_to_the_sdk_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        FakeOpenAIClient.instances.clear()
+        _make_engine(monkeypatch, max_retries=0)
+
+        assert FakeOpenAIClient.instances[-1].kwargs["max_retries"] == 0
 
 
 class TestOpenAIValidatingProperties:
@@ -313,7 +319,6 @@ class TestOpenAIEngine:
             model="gpt-4o-mini",
             api_key="secret",
             temperature=0.33,
-            inline_cutoff_chars=123,
         )
 
         data = engine.to_dict()
@@ -324,7 +329,8 @@ class TestOpenAIEngine:
         assert data["max_output_tokens"] is None
         assert data["reasoning"] is None
         assert data["truncation"] is None
-        assert data["inline_cutoff_chars"] == 123
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+            assert removed not in data
         assert "secret" not in str(data)
 
     def test_call_provider_async_with_async_client(
@@ -510,47 +516,6 @@ class TestOpenAIExtractTokenUsage:
             engine._extract_token_usage(response)
 
 
-class TestOpenAIShouldRetry:
-    def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
-        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
-        return OpenAIEngine(model="gpt-4o-mini", max_retries=2)
-
-    def _status_error(self, status_code: int) -> openai.APIStatusError:
-        request = httpx.Request("POST", "https://example.com")
-        response = httpx.Response(status_code=status_code, request=request)
-        return openai.APIStatusError("error", response=response, body=None)
-
-    def test_connection_error_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        request = httpx.Request("POST", "https://example.com")
-        exc = openai.APIConnectionError(request=request)
-
-        assert engine._should_retry(exc, attempt=1) is True
-
-    def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        for code in (429, 500, 502, 503, 504):
-            assert engine._should_retry(self._status_error(code), attempt=1) is True
-
-    def test_non_retryable_status_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        assert engine._should_retry(self._status_error(400), attempt=1) is False
-
-    def test_generic_exception_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        assert engine._should_retry(ValueError("bad"), attempt=1) is False
-
-    def test_attempt_exceeding_max_retries_not_retried(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = self._engine(monkeypatch)
-        request = httpx.Request("POST", "https://example.com")
-        exc = openai.APIConnectionError(request=request)
-
-        assert engine._should_retry(exc, attempt=3) is False
-
-
 class TestOpenAIAttachments:
     def test_validate_attachment_path_rejects_illegal_ext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
@@ -593,18 +558,16 @@ class TestOpenAIAttachments:
         assert meta["inlined"] is True
         assert "Hello world!" in meta["inlined_text"]
 
-    def test_prepare_attachment_truncates_long_text(
+    def test_prepare_attachment_inlines_long_text_whole(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=10)
+        engine = _make_engine(monkeypatch)
         path = tmp_path / "long.txt"
-        path.write_text("A" * 50)
+        path.write_text("A" * 300_000)
 
         meta = engine._prepare_attachment(str(path))
 
-        assert meta["kind"] == "text"
-        assert "truncated" in meta["inlined_text"]
-        assert len(meta["inlined_text"]) < 100
+        assert meta["inlined_text"] == "A" * 300_000
 
     def test_prepare_attachment_pdf_uploads(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
@@ -634,30 +597,102 @@ class TestOpenAIAttachments:
         assert meta["uploaded"] is True
         assert meta["file_id"] == "file_123"
 
-    def test_on_detach_calls_delete_with_file_id(
+    def test_attach_rejects_blank_and_non_string_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach("")
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach(123)  # type: ignore[arg-type]
+
+    def test_attach_rejects_missing_and_illegal_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        illegal = tmp_path / "payload.zip"
+        illegal.write_bytes(b"data")
+
+        with pytest.raises(LLMEngineError, match="does not exist"):
+            engine.attach(str(tmp_path / "missing.txt"))
+        with pytest.raises(LLMEngineError, match="not permitted"):
+            engine.attach(str(illegal))
+        assert engine.attachments == {}
+
+    def test_attach_stores_metadata_and_caches_the_same_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+
+        first = engine.attach(str(path))
+        second = engine.attach(str(path))
+
+        assert first is second
+        assert engine.attachments == {str(path): first}
+
+    def test_attachments_property_returns_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+        engine.attach(str(path))
+
+        engine.attachments.clear()  # type: ignore[attr-defined]
+
+        assert str(path) in engine.attachments
+
+    def test_detach_returns_false_for_unknown_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        assert engine.detach("never_attached.txt") is False
+
+    def test_detach_deletes_uploaded_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeOpenAIClient.instances.clear()
         engine = _make_engine(monkeypatch)
         fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["doc.pdf"] = {"file_id": "file_abc"}
 
-        engine._on_detach({"file_id": "file_abc"})
+        assert engine.detach("doc.pdf") is True
 
         assert fake.deleted_files == ["file_abc"]
+        assert engine.attachments == {}
 
-    def test_on_detach_noop_when_no_file_id(
+    def test_detach_without_file_id_deletes_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeOpenAIClient.instances.clear()
         engine = _make_engine(monkeypatch)
         fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["notes.txt"] = {"kind": "text"}
 
-        engine._on_detach({})
-        engine._on_detach({"kind": "text"})
+        assert engine.detach("notes.txt") is True
 
         assert fake.deleted_files == []
 
-    def test_on_detach_with_async_client_uses_run_coro_sync(
+    def test_detach_swallows_a_failing_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        engine = _make_engine(monkeypatch)
+
+        def _boom(file_id: str) -> None:
+            raise RuntimeError("delete failed")
+
+        engine._client.files.delete = _boom  # type: ignore[attr-defined]
+        engine._attachments["doc.pdf"] = {"file_id": "file_abc"}
+
+        assert engine.detach("doc.pdf") is True
+        assert engine.attachments == {}
+
+    def test_detach_with_async_client_uses_run_coro_sync(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeAsyncOpenAIClient.instances.clear()
@@ -666,9 +701,24 @@ class TestOpenAIAttachments:
 
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
-        engine._on_detach({"file_id": "file_xyz"})
+        engine._attachments["doc.pdf"] = {"file_id": "file_xyz"}
+        engine.detach("doc.pdf")
 
         assert "file_xyz" in injected.deleted_files
+
+    def test_clear_attachments_detaches_everything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        engine = _make_engine(monkeypatch)
+        fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["a.pdf"] = {"file_id": "file_a"}
+        engine._attachments["b.txt"] = {"kind": "text"}
+
+        engine.clear_attachments()
+
+        assert engine.attachments == {}
+        assert fake.deleted_files == ["file_a"]
 
     def test_build_provider_payload_with_inlined_attachment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -679,7 +729,8 @@ class TestOpenAIAttachments:
             "notes.txt": {"kind": "text", "inlined": True, "inlined_text": "important note"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
         user_block = next(b for b in payload["blocks"] if b["role"] == "user")
         texts = [p["text"] for p in user_block["content"] if p.get("type") == "input_text"]
 
@@ -694,7 +745,8 @@ class TestOpenAIAttachments:
             "doc.pdf": {"kind": "pdf", "uploaded": True, "file_id": "file_pdf"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
         user_block = next(b for b in payload["blocks"] if b["role"] == "user")
         file_parts = [p for p in user_block["content"] if p.get("type") == "input_file"]
 
@@ -709,7 +761,8 @@ class TestOpenAIAttachments:
             "photo.png": {"kind": "image", "uploaded": True, "file_id": "file_img"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
         user_block = next(b for b in payload["blocks"] if b["role"] == "user")
         img_parts = [p for p in user_block["content"] if p.get("type") == "input_image"]
 

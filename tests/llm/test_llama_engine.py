@@ -108,7 +108,7 @@ class TestLlamaCppEngine:
     def test_llama_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
         messages = [{"role": "user", "content": "Hello"}]
-        payload = engine._build_provider_payload(messages, {})
+        payload = engine._build_provider_payload(messages)
         response = engine._call_provider(payload)
         fake = FakeLlama.instances[-1]
 
@@ -128,7 +128,7 @@ class TestLlamaCppEngine:
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
         messages = [{"role": "user", "content": "Hello"}]
 
-        payload = engine._build_provider_payload(messages, {}, schema)
+        payload = engine._build_provider_payload(messages, schema)
         assert payload == {
             "messages": messages,
             "response_format": {"type": "json_object", "schema": schema},
@@ -147,7 +147,7 @@ class TestLlamaCppEngine:
         engine = _make_engine(monkeypatch)
         messages = [{"role": "user", "content": "Hello"}]
 
-        payload = engine._build_provider_payload(messages, {})
+        payload = engine._build_provider_payload(messages)
 
         assert "response_format" not in payload
 
@@ -167,10 +167,14 @@ class TestLlamaCppEngine:
 
         assert engine._extract_result(response, requested_structured=True) == "not json"
 
-    def test_llama_attachments_are_not_supported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_llama_has_no_attachment_or_retry_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="does not support attachments"):
-            engine._prepare_attachment("payload.txt")
+
+        for name in ("attach", "detach", "clear_attachments", "attachments",
+                     "_prepare_attachment", "_should_retry", "_max_retries"):
+            assert not hasattr(engine, name)
 
     def test_llama_to_dict_includes_non_secret_config(
         self,
@@ -196,6 +200,8 @@ class TestLlamaCppEngine:
         assert data["llama_kwargs"] == {"n_gpu_layers": 32}
         assert data["temperature"] == 0.7
         assert data["top_k"] == 40
+        for removed in ("max_retries", "retry_backoff_base", "attachments"):
+            assert removed not in data
         assert "n_threads" not in data
         assert "n_gpu_layers" not in data
 
@@ -335,14 +341,3 @@ class TestLlamaCppTokenUsage:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="unexpected usage shape"):
             engine._extract_token_usage({"choices": [], "usage": {"wrong_key": 1}})
-
-
-class TestLlamaCppShouldRetry:
-    def test_retries_blindly_within_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        assert engine._should_retry(ValueError("anything"), attempt=1) is True
-        assert engine._should_retry(RuntimeError("anything"), attempt=2) is True
-
-    def test_stops_once_budget_exhausted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, max_retries=2)
-        assert engine._should_retry(ValueError("anything"), attempt=3) is False

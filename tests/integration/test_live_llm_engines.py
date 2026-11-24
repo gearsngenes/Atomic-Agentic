@@ -107,7 +107,6 @@ def _openai_engine() -> LLMEngine:
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
             temperature=0,
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -125,7 +124,6 @@ def _gemini_engine() -> LLMEngine:
             http_options={"api_version": "v1beta"},
             temperature=0,
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -142,7 +140,6 @@ def _mistral_engine() -> LLMEngine:
             model=os.getenv("AA_TEST_MISTRAL_MODEL", "mistral-small-latest"),
             temperature=0,
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -158,7 +155,6 @@ def _anthropic_engine() -> LLMEngine:
         return AnthropicEngine(
             model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -176,7 +172,6 @@ def _litellm_engine() -> LLMEngine:
             provider="anthropic",
             temperature=0,
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -197,7 +192,6 @@ def _llamacpp_engine() -> LLMEngine:
             repo_id=LLAMACPP_MODEL_REPO,
             filename=LLAMACPP_MODEL_FILENAME,
             timeout_seconds=120,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -252,8 +246,8 @@ def test_live_llm_engine_to_dict_exposes_non_secret_runtime_snapshot(
 
     assert data["type"] == type(engine).__name__
     assert data["timeout_seconds"] == expected_timeout
-    assert data["max_retries"] == 0
-    assert "attachments" in data
+    assert "max_retries" not in data
+    assert "attachments" not in data
     assert "api_key" not in data
 
 

@@ -1,54 +1,21 @@
 from __future__ import annotations
 
-import base64
 import json
-import os
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import litellm
-    from litellm.exceptions import (
-        RateLimitError,
-        Timeout,
-        APIConnectionError,
-        ServiceUnavailableError,
-        InternalServerError,
-        BadGatewayError,
-    )
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     litellm = None  # type: ignore[assignment]
-    RateLimitError = None
-    Timeout = None
-    APIConnectionError = None
-    ServiceUnavailableError = None
-    InternalServerError = None
-    BadGatewayError = None
     _SDK_IMPORT_ERROR = _exc
 
 from .base import LLMEngine
-from ..constants.llm import (
-    ILLEGAL_ATTACHMENT_EXTS,
-    ENGINE_ILLEGAL_MIME_PREFIXES,
-    LITELLM_IMAGE_EXTS,
-    LITELLM_DOCUMENT_EXTS,
-    LITELLM_ALLOWED_EXTS,
-)
 from ..exceptions import LLMEngineError
 from ..models.results.llm import LiteLLMTokenUsage, RemoteLLMModelData
 from ..utils.core import format_missing_dependency
-from ..utils.llm import validate_attachment_path
 
 __all__ = ["LiteLLMEngine"]
-
-_MIME_MAP: dict[str, str] = {
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png":  "image/png",
-    ".gif":  "image/gif",
-    ".webp": "image/webp",
-    ".pdf":  "application/pdf",
-}
 
 
 class LiteLLMEngine(LLMEngine):
@@ -81,33 +48,6 @@ class LiteLLMEngine(LLMEngine):
     codebase's fail-loud discipline (natural exceptions surface rather than
     being silently absorbed). Set ``True`` for deliberate cross-provider use
     with one shared knob configuration.
-
-    Retry ownership
-    ----------------
-    litellm's own ``max_retries`` kwarg is never forwarded — ``LLMEngine``'s
-    base ``_call_with_retries``/``_call_with_retries_async`` loop is the sole
-    retry authority.
-
-    File policy
-    ------------
-    Inline-only attachments via litellm's generic content-block shapes:
-
-    - Images (PNG, JPG, JPEG, GIF, WEBP) → base64 ``image_url`` blocks.
-    - PDFs → base64 ``file`` blocks. **Raises when ``self.provider ==
-      "mistral"``** — litellm's Mistral transformation requires an
-      already-uploaded ``file_id`` and strips inline ``file_data``, and
-      ``litellm.create_file()``'s own provider allowlist excludes ``mistral``
-      entirely. This check is based on the ``provider`` constructor value —
-      a proxy-routed Mistral model reached via an alias
-      (``provider="litellm_proxy"``) is not detected by this guard; the
-      underlying litellm proxy call fails on its own instead.
-    - Text / code → plain ``text`` blocks (no base64; not gated by provider —
-      the Mistral gap is specific to inline binary/PDF ``file`` blocks).
-
-    Attachment blocks are appended to the last user-turn ``content`` in
-    ``_build_provider_payload``. ``_on_detach`` is a no-op. Provider
-    translation of these generic blocks into each provider's native request
-    shape is litellm's own responsibility, not this engine's.
 
     Structured-output schema policy
     --------------------------------
@@ -203,15 +143,11 @@ class LiteLLMEngine(LLMEngine):
         reasoning_effort: str | None = None,
         thinking: dict[str, Any] | None = None,
         drop_params: bool = False,
-        inline_cutoff_chars: int = 200_000,
         api_key: str | None = None,
         base_url: str | None = None,
         api_version: str | None = None,
         *,
         timeout_seconds: float = 600.0,
-        max_retries: int = 2,
-        retry_backoff_base: float = 0.5,
-        retry_backoff_max: float = 8.0,
         **litellm_kwargs: Any,
     ) -> None:
         """
@@ -233,19 +169,15 @@ class LiteLLMEngine(LLMEngine):
             Optional generation knobs; omitted from the payload when ``None``.
         drop_params:
             Forwarded as ``drop_params=`` on every call. See class docstring.
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
         api_key, base_url, api_version:
             Per-call request-level fields (no client object exists to hold
             these); omitted when ``None``.
         timeout_seconds:
             Per-call timeout, forwarded as ``timeout=`` on every call.
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/backoff configuration. litellm's own
-            ``max_retries`` kwarg is never forwarded — see class docstring.
         **litellm_kwargs:
             Escape hatch forwarded verbatim to ``completion``/``acompletion``,
-            applied last so it can override any explicit field above.
+            applied last so it can override any explicit field above. litellm's
+            own retry settings (``num_retries``, ``max_retries``) go here.
         """
         # 1. Name sanitization + super init
         sanitized = (name or f"{provider}_{model}").replace(":", "_").replace(
@@ -254,9 +186,6 @@ class LiteLLMEngine(LLMEngine):
             name=sanitized,
             description=description or "LiteLLM provider-agnostic language model engine.",
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
         )
 
         # 2. SDK presence check
@@ -281,16 +210,7 @@ class LiteLLMEngine(LLMEngine):
         self.api_key = api_key
         self.base_url = base_url
         self.api_version = api_version
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
         self._litellm_kwargs = dict(litellm_kwargs)
-
-    # ------------------------------------------------------------------ #
-    # Properties
-    # ------------------------------------------------------------------ #
-    @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
 
     # ------------------------------------------------------------------ #
     # Provider call
@@ -304,23 +224,6 @@ class LiteLLMEngine(LLMEngine):
         """Native async ``litellm.acompletion`` call."""
         return await litellm.acompletion(**payload)
 
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on litellm's own named transient-error classes, referenced
-        directly (not via the fact that they happen to subclass openai's
-        exceptions today — that's an implementation detail, not a contract).
-        """
-        if attempt > self._max_retries:
-            return False
-        return isinstance(exc, (
-            RateLimitError,
-            Timeout,
-            APIConnectionError,
-            ServiceUnavailableError,
-            InternalServerError,
-            BadGatewayError,
-        ))
-
     # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
@@ -328,48 +231,28 @@ class LiteLLMEngine(LLMEngine):
     def _build_provider_payload(
         self,
         messages: List[Dict[str, Any]],
-        attachments: Dict[str, Any],
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the ``completion``/``acompletion`` payload from normalized
-        messages, the current attachments snapshot, and (optionally) a
-        structured-output schema.
+        messages and (optionally) a structured-output schema.
 
-        Lifecycle: (1) convert messages to litellm/OpenAI-shaped list, string
-        content passed through unchanged where no attachments apply; (2)
-        append attachment blocks to the last user turn's content (converting
-        its content to a list first); (3) assemble the final payload dict
-        with the composed ``model=`` string and all conditional fields;
-        (4) when ``output_structure`` is given, check
+        Lifecycle: (1) convert messages to a litellm/OpenAI-shaped list,
+        string content passed through unchanged; (2) assemble the final
+        payload dict with the composed ``model=`` string and all conditional
+        fields; (3) when ``output_structure`` is given, check
         ``litellm.supports_response_schema(...)`` inline (raises
         ``LLMEngineError`` if unsupported -- see class docstring's
         "Structured-output schema policy") and set ``response_format`` from
-        the caller's schema, forwarded unmodified.
+        the caller's schema, forwarded unmodified; (4) apply the
+        ``litellm_kwargs`` escape hatch last.
         """
-        # 1. Convert messages — content stays a plain string unless it is the
-        #    last user turn and attachments exist below.
+        # 1. Convert messages — content stays a plain string.
         litellm_msgs: list[dict[str, Any]] = [
             {"role": m["role"], "content": m["content"]} for m in messages
         ]
 
-        # 2. Append attachment blocks to the last user turn
-        blocks = list(attachments.values())
-        if blocks:
-            idx = next(
-                (i for i in range(len(litellm_msgs) - 1, -1, -1)
-                 if litellm_msgs[i]["role"] == "user"),
-                None,
-            )
-            if idx is not None:
-                content = litellm_msgs[idx]["content"]
-                if not isinstance(content, list):
-                    content = [{"type": "text", "text": content}]
-                litellm_msgs[idx]["content"] = content + blocks
-            else:
-                litellm_msgs.append({"role": "user", "content": blocks})
-
-        # 3. Assemble payload — model/messages/drop_params/timeout always
+        # 2. Assemble payload — model/messages/drop_params/timeout always
         #    present; api_key/base_url/api_version and generation knobs
         #    conditional on non-None.
         payload: dict[str, Any] = {
@@ -418,7 +301,7 @@ class LiteLLMEngine(LLMEngine):
                 },
             }
 
-        # 4. Escape hatch — applied last; a key colliding with an explicit
+        # 3. Escape hatch — applied last; a key colliding with an explicit
         #    field above overrides it (caller error, not guarded against).
         payload.update(self._litellm_kwargs)
         return payload
@@ -524,74 +407,6 @@ class LiteLLMEngine(LLMEngine):
         return RemoteLLMModelData(provider=self.provider, model_name=self.model)
 
     # ------------------------------------------------------------------ #
-    # Attachment pipeline (inline only)
-    # ------------------------------------------------------------------ #
-
-    def _validate_attachment_path(self, path: str) -> None:
-        """Validate ``path`` against the LiteLLM allow-list and shared blacklists; raises ``LLMEngineError`` on rejection."""
-        try:
-            validate_attachment_path(
-                path,
-                illegal_exts=ILLEGAL_ATTACHMENT_EXTS,
-                allowed_exts=LITELLM_ALLOWED_EXTS,
-                illegal_mime_prefixes=ENGINE_ILLEGAL_MIME_PREFIXES,
-            )
-        except ValueError as exc:
-            raise LLMEngineError(str(exc)) from exc
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        """
-        Build an inline litellm-generic content block for ``path``.
-
-        Images → base64 ``image_url`` block; PDFs → base64 ``file`` block
-        (raises ``LLMEngineError`` when ``self.provider == "mistral"`` — a
-        documented gap, not a workaround); text/code → plain UTF-8 text
-        block, truncated at ``inline_cutoff_chars``.
-        """
-        try:
-            ext = os.path.splitext(path)[1].lower()
-
-            if ext in LITELLM_IMAGE_EXTS:
-                with open(path, "rb") as fh:
-                    data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{_MIME_MAP[ext]};base64,{data}"},
-                }
-
-            if ext in LITELLM_DOCUMENT_EXTS:
-                if self.provider == "mistral":
-                    raise LLMEngineError(
-                        "LiteLLMEngine: inline PDF/document attachments are not "
-                        "supported for provider='mistral' — litellm's Mistral "
-                        "transformation requires an already-uploaded file_id and "
-                        "strips inline file_data; litellm.create_file() does not "
-                        "support the mistral provider either."
-                    )
-                with open(path, "rb") as fh:
-                    data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "file",
-                    "file": {"file_data": f"data:{_MIME_MAP[ext]};base64,{data}"},
-                }
-
-            # Text / code — plain text block, not gated by provider
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
-            return {"type": "text", "text": text}
-        except LLMEngineError:
-            raise
-        except Exception as exc:
-            raise LLMEngineError(
-                f"LiteLLMEngine._prepare_attachment failed for {path!r}"
-            ) from exc
-
-    def _on_detach(self, meta: Any) -> None:
-        """No-op — inline attachments leave no server-side state to clean up."""
-
-    # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
 
@@ -611,6 +426,5 @@ class LiteLLMEngine(LLMEngine):
             "drop_params": self.drop_params,
             "base_url": self.base_url,
             "api_version": self.api_version,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return d

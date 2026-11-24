@@ -3,10 +3,6 @@ from __future__ import annotations
 # ~~~Standard Library Imports~~~
 import asyncio
 from abc import ABC, abstractmethod
-import logging
-import os
-import random
-import time
 from typing import (
     Any,
     ClassVar,
@@ -26,13 +22,8 @@ from ..models.results import (
     LLMResult,
     TokenUsage,
 )
-from ..constants.llm import (
-    ILLEGAL_ATTACHMENT_EXTS
-)
 
 __all__ = ["LLMEngine"]
-
-logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # LLMEngine primitive
@@ -43,7 +34,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
     Engines are stateless with respect to conversation history: the Agent owns
     message history. An engine instance represents a particular provider +
-    model configuration plus a persistent set of attachments.
+    model configuration.
 
     Public contract
     ---------------
@@ -116,10 +107,9 @@ class LLMEngine(AtomicInvokable, ABC):
     ``LLMResult``; ``_invoke_impl`` does:
 
     1. Validate and normalize ``messages``.
-    2. Snapshot current attachments.
-    3. Build the provider-specific payload.
-    4. Call the provider with retries/timeouts.
-    5. Extract assistant text, token usage, and configured model data.
+    2. Build the provider-specific payload.
+    3. Call the provider.
+    4. Extract assistant text, token usage, and configured model data.
 
     and returns ``{"result", "token_usage", "model_data"}``.
 
@@ -131,19 +121,12 @@ class LLMEngine(AtomicInvokable, ABC):
     - ``_extract_result``
     - ``_extract_token_usage``
     - ``_get_model_data``
-    - ``_prepare_attachment``
-    - ``_on_detach``
 
-    Attachments are managed separately via ``attach`` / ``detach`` /
-    ``clear_attachments`` and are snapshotted for each call.
+    Retry is each provider SDK's own client setting, and attachments are an
+    API of the individual engines that support them; neither lives here.
     """
 
     result_cls: ClassVar[type[LLMResult]] = LLMResult
-
-    # Attachment policy — coarse safety/robustness guard applied before
-    # provider-specific checks. Sourced from constants.engines.
-    illegal_attachment_exts: set[str] = ILLEGAL_ATTACHMENT_EXTS
-    allowed_attachment_exts: Optional[set[str]] = None
 
     def __init__(
         self,
@@ -151,9 +134,6 @@ class LLMEngine(AtomicInvokable, ABC):
         name: Optional[str] = None,
         description: str = "",
         timeout_seconds: float = 30.0,
-        max_retries: int = 2,
-        retry_backoff_base: float = 0.5,
-        retry_backoff_max: float = 8.0,
     ) -> None:
         """
         Parameters
@@ -163,13 +143,6 @@ class LLMEngine(AtomicInvokable, ABC):
         timeout_seconds:
             Suggested per-call timeout; subclasses should honor this where
             their provider SDKs allow it.
-        max_retries:
-            Maximum number of *retries* after the initial call (so total
-            attempts is `max_retries + 1`).
-        retry_backoff_base:
-            Base seconds for exponential backoff (approx base * 2^(attempt-1)).
-        retry_backoff_max:
-            Upper bound in seconds for backoff delay.
         """
         # Pass the provided name (or the class name) directly to AtomicInvokable.
         AtomicInvokable.__init__(
@@ -204,26 +177,10 @@ class LLMEngine(AtomicInvokable, ABC):
         )
 
         self._timeout_seconds = float(timeout_seconds)
-        self._max_retries = int(max_retries)
-        self._retry_backoff_base = float(retry_backoff_base)
-        self._retry_backoff_max = float(retry_backoff_max)
-        # Persistent mapping: local path -> provider-specific metadata
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
-        """
-        Read-only view of currently attached paths.
-
-        Keys are local paths; values are provider-specific metadata dicts as
-        returned by `_prepare_attachment`.
-        """
-        # Return a shallow copy to discourage mutation of internal state.
-        return dict(self._attachments)
-
     @property
     def timeout_seconds(self) -> float:
         """Suggested per-call timeout; subclasses honor this where their
@@ -242,62 +199,6 @@ class LLMEngine(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def attach(self, path: str) -> Mapping[str, Any]:
-        """
-        Attach a local file path to this engine.
-
-        The base implementation:
-        - validates the path and extension using `_validate_attachment_path`;
-        - delegates to `_prepare_attachment` to build provider-specific metadata;
-        - stores and returns that metadata.
-
-        The *shape* of the metadata mapping is entirely determined by the subclass.
-        """
-        if not isinstance(path, str) or not path:
-            raise LLMEngineError("LLMEngine.attach: path must be a non-empty string")
-        if path in self._attachments:
-            return self._attachments[path]
-
-        self._validate_attachment_path(path)
-        meta = self._prepare_attachment(path)
-        if not isinstance(meta, Mapping):
-            raise LLMEngineError(
-                f"{type(self).__name__}._prepare_attachment must return a mapping; "
-                f"got {type(meta)!r}"
-            )
-
-        self._attachments[path] = meta
-        logger.debug("LLMEngine %s attached %s", self.name, path)
-        return meta
-
-    def detach(self, path: str) -> bool:
-        """
-        Detach a previously attached path.
-
-        Calls `_on_detach` with the stored metadata for provider-specific cleanup.
-        Returns True if an attachment was removed, False if the path was not
-        attached.
-        """
-        meta = self._attachments.pop(path, None)
-        if meta is None:
-            return False
-        try:
-            self._on_detach(meta)
-        except Exception as exc:  # pragma: no cover - best-effort cleanup
-            logger.debug(
-                "LLMEngine %s._on_detach raised %r for %s; ignoring",
-                self.name,
-                exc,
-                path,
-            )
-        logger.debug("LLMEngine %s detached %s", self.name, path)
-        return True
-
-    def clear_attachments(self) -> None:
-        """Detach all currently attached paths."""
-        for path in list(self._attachments.keys()):
-            self.detach(path)
-
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """
         1. messages = inputs.get("messages"); not a list -> LLMEngineError.
@@ -355,11 +256,11 @@ class LLMEngine(AtomicInvokable, ABC):
         output_structure: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         """
-        Normalize messages, snapshot current attachments, build the provider
-        payload, and return the raw provider response.
+        Normalize messages, build the provider payload, and return the raw
+        provider response.
 
-        ``_build_provider_payload`` is called unconditionally as a 3-arg call
-        — every concrete engine implements the 3-arg signature with
+        ``_build_provider_payload`` is called unconditionally as a 2-arg call
+        — every concrete engine implements that signature with
         ``output_structure`` defaulting to ``None``, so plain-text calls are
         unaffected by always passing it through.
 
@@ -368,20 +269,18 @@ class LLMEngine(AtomicInvokable, ABC):
         emit deprecation warnings.
         """
         normalized = self._normalize_messages(messages)
-        attachments = dict(self._attachments)
-        payload = self._build_provider_payload(normalized, attachments, output_structure)
-        return self._call_with_retries(payload)
+        payload = self._build_provider_payload(normalized, output_structure)
+        return self._call_provider(payload)
 
     async def _call_model_async(
         self,
         messages: List[Dict[str, Any]],
         output_structure: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        """Async analog of ``_call_model``; calls ``_call_with_retries_async``."""
+        """Async analog of ``_call_model``; awaits ``_call_provider_async``."""
         normalized = self._normalize_messages(messages)
-        attachments = dict(self._attachments)
-        payload = self._build_provider_payload(normalized, attachments, output_structure)
-        return await self._call_with_retries_async(payload)
+        payload = self._build_provider_payload(normalized, output_structure)
+        return await self._call_provider_async(payload)
 
     def extract(
         self, response: Any, requested_structured: bool
@@ -452,128 +351,27 @@ class LLMEngine(AtomicInvokable, ABC):
             normalized.append({"role": role.lower(), "content": content})
         return normalized
 
-    def _validate_attachment_path(self, path: str) -> None:
-        """
-        Generic path/extension validation used by `attach`.
-
-        Subclasses are expected to further restrict supported types by setting
-        `allowed_attachment_exts` and/or overriding this method.
-        """
-        if not os.path.isfile(path):
-            raise LLMEngineError(
-                f"LLMEngine.attach: path does not exist or is not a file: {path!r}"
-            )
-
-        _, ext = os.path.splitext(path)
-        ext = ext.lower()
-
-        if ext and ext in self.illegal_attachment_exts:
-            raise LLMEngineError(
-                f"LLMEngine.attach: extension {ext!r} is not allowed for safety/robustness"
-            )
-
-        allowed_exts = self.allowed_attachment_exts
-        if allowed_exts is not None and ext not in allowed_exts:
-            raise LLMEngineError(
-                f"LLMEngine.attach: extension {ext!r} is not supported by {self.name}"
-            )
-
-    def _call_with_retries(self, payload: Any) -> Any:
-        """
-        Call `_call_provider` with a basic retry/backoff loop.
-
-        Subclasses can customize retry behavior by overriding `_should_retry`
-        or by setting `max_retries`/backoff parameters in the constructor.
-        """
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                return self._call_provider(payload)
-            except LLMEngineError:
-                # Already normalized; do not re-wrap or retry.
-                raise
-            except Exception as exc:
-                if not self._should_retry(exc, attempt):
-                    raise
-                sleep = min(
-                    self._retry_backoff_base * (2 ** (attempt - 1)),
-                    self._retry_backoff_max,
-                )
-                # Add a little jitter to avoid thundering herds.
-                sleep *= random.uniform(0.8, 1.2)
-                logger.debug(
-                    "LLMEngine %s attempt %d failed with %r; retrying in %.2fs",
-                    self.name,
-                    attempt,
-                    exc,
-                    sleep,
-                )
-                time.sleep(sleep)
-
-    async def _call_with_retries_async(self, payload: Any) -> Any:
-        """
-        Async analog of ``_call_with_retries``; uses ``await asyncio.sleep``
-        so the event loop is not blocked during backoff waits.
-        """
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                return await self._call_provider_async(payload)
-            except LLMEngineError:
-                raise
-            except Exception as exc:
-                if not self._should_retry(exc, attempt):
-                    raise
-                sleep = min(
-                    self._retry_backoff_base * (2 ** (attempt - 1)),
-                    self._retry_backoff_max,
-                )
-                sleep *= random.uniform(0.8, 1.2)
-                logger.debug(
-                    "LLMEngine %s attempt %d failed with %r; retrying in %.2fs",
-                    self.name,
-                    attempt,
-                    exc,
-                    sleep,
-                )
-                await asyncio.sleep(sleep)
-
     # --------------------------------------------------------------------- #
     # Abstract Helpers
     # --------------------------------------------------------------------- #
     @abstractmethod
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Decide whether a failed `_call_provider` should be retried.
-
-        Every engine must recognize its own provider SDK's real transient-error
-        shape (connection/timeout errors, retryable HTTP status codes) — there
-        is no cross-provider default, since no two SDKs in this family share
-        one exception hierarchy. Implementations should still respect
-        `attempt <= self._max_retries` as the outer bound.
-        """
-        raise NotImplementedError
-    @abstractmethod
     def _build_provider_payload(
         self,
         messages: List[Dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
-        Convert normalized messages, attachments, and (optionally) a caller-
-        supplied structured-output template into the provider-specific
-        request payload.
+        Convert normalized messages and (optionally) a caller-supplied
+        structured-output template into the provider-specific request
+        payload.
 
         ``output_structure`` is ``None`` for plain-text calls; the caller's
         raw JSON-Schema-shaped mapping, completely unmodified, when the
         caller requested structured output (structured-generation Pass 8:
         this base class no longer prunes or validates it — see the class
         docstring's "Structured-output request contract"). Called
-        unconditionally as a 3-arg call by ``_call_model``/``_call_model_async``
-        — every concrete engine implements this 3-arg signature.
+        unconditionally as a 2-arg call by ``_call_model``/``_call_model_async``
+        — every concrete engine implements this signature.
         """
         raise NotImplementedError
 
@@ -644,23 +442,6 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         raise NotImplementedError
 
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        """
-        Prepare a local path for reuse with this engine.
-
-        The base implementation rejects all attachments. Remote engine subclasses
-        override this to perform provider-specific upload or inlining.
-        """
-        raise LLMEngineError(
-            f"{type(self).__name__} does not support attachments; "
-            "use plain text in messages instead."
-        )
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """Hook called when an attachment is detached. No-op by default."""
-        return None
-
-
     # --------------------------------------------------------------------- #
     # Serialization
     # --------------------------------------------------------------------- #
@@ -675,9 +456,5 @@ class LLMEngine(AtomicInvokable, ABC):
         d.update({
             "type": type(self).__name__,
             "timeout_seconds": self._timeout_seconds,
-            "max_retries": self._max_retries,
-            "retry_backoff_base": self._retry_backoff_base,
-            "retry_backoff_max": self._retry_backoff_max,
-            "attachments": self._attachments,
         })
         return d

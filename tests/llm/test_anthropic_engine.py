@@ -5,7 +5,6 @@ import pathlib
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 
 anthropic = pytest.importorskip("anthropic")
@@ -237,7 +236,7 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8", max_output_tokens=512)
         msgs = [{"role": "user", "content": "hello"}]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         assert payload["model"] == "claude-opus-4-8"
         assert payload["max_tokens"] == 512
@@ -253,7 +252,7 @@ class TestAnthropicEngine:
             {"role": "user", "content": "Hi"},
         ]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         assert payload["system"] == "You are helpful."
         roles = [m["role"] for m in payload["messages"]]
@@ -270,7 +269,7 @@ class TestAnthropicEngine:
             {"role": "user", "content": "Hi"},
         ]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         assert payload["system"] == "Part A.\n\nPart B."
 
@@ -281,7 +280,7 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8")
         msgs = [{"role": "user", "content": "hello"}]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         assert "system" not in payload
 
@@ -292,7 +291,7 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8")
         msgs = [{"role": "user", "content": "hi"}]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         for key in ("temperature", "top_p", "top_k", "extra_body", "stop_sequences", "thinking"):
             assert key not in payload
@@ -309,7 +308,7 @@ class TestAnthropicEngine:
         )
         msgs = [{"role": "user", "content": "hi"}]
 
-        payload = engine._build_provider_payload(msgs, {})
+        payload = engine._build_provider_payload(msgs)
 
         assert payload["extra_body"] == {"temperature": 0.7, "top_p": 0.9, "top_k": 20}
         assert "temperature" not in payload
@@ -391,7 +390,7 @@ class TestAnthropicEngine:
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
         payload = engine._build_provider_payload(
-            [{"role": "user", "content": "hi"}], {}, schema
+            [{"role": "user", "content": "hi"}], schema
         )
 
         assert payload["output_config"] == {
@@ -404,7 +403,7 @@ class TestAnthropicEngine:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
 
-        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}], {})
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
 
         assert "output_config" not in payload
 
@@ -550,7 +549,8 @@ class TestAnthropicEngine:
         assert d["extra_body"] == {"temperature": 0.3}
         assert d["stop_sequences"] == ["END"]
         assert d["block_separator"] == "---"
-        assert d["inline_cutoff_chars"] == 200_000
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+            assert removed not in d
         assert "client" not in d
 
     # -- Attachment pipeline ---------------------------------------------------
@@ -611,7 +611,8 @@ class TestAnthropicEngine:
         }
         msgs = [{"role": "user", "content": "Describe this."}]
 
-        payload = engine._build_provider_payload(msgs, {"img.png": fake_block})
+        engine._attachments["img.png"] = fake_block
+        payload = engine._build_provider_payload(msgs)
 
         content = payload["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": "Describe this."}
@@ -629,7 +630,8 @@ class TestAnthropicEngine:
             {"role": "user", "content": "Second question."},
         ]
 
-        payload = engine._build_provider_payload(msgs, {"notes.txt": fake_block})
+        engine._attachments["notes.txt"] = fake_block
+        payload = engine._build_provider_payload(msgs)
 
         first_user = payload["messages"][0]
         last_user = payload["messages"][2]
@@ -647,17 +649,82 @@ class TestAnthropicEngine:
         fake_block = {"type": "document", "source": {"type": "text", "data": "notes"}}
         msgs = [{"role": "system", "content": "You are helpful."}]
 
-        payload = engine._build_provider_payload(msgs, {"notes.txt": fake_block})
+        engine._attachments["notes.txt"] = fake_block
+        payload = engine._build_provider_payload(msgs)
 
         assert payload["messages"][-1]["role"] == "user"
         assert payload["messages"][-1]["content"] == [fake_block]
 
-    def test_on_detach_is_noop(
+    def test_attach_rejects_blank_and_non_string_paths(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
-        engine._on_detach({"type": "image", "source": {}})  # must not raise
+
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach("")
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach(123)  # type: ignore[arg-type]
+
+    def test_attach_stores_block_and_caches_the_same_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        txt = tmp_path / "notes.txt"
+        txt.write_text("hello", encoding="utf-8")
+
+        first = engine.attach(str(txt))
+        second = engine.attach(str(txt))
+
+        assert first is second
+        assert engine.attachments == {str(txt): first}
+
+    def test_attachments_property_returns_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        txt = tmp_path / "notes.txt"
+        txt.write_text("hello", encoding="utf-8")
+        engine.attach(str(txt))
+
+        engine.attachments.clear()  # type: ignore[attr-defined]
+
+        assert str(txt) in engine.attachments
+
+    def test_detach_and_clear_attachments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        first = tmp_path / "a.txt"
+        second = tmp_path / "b.txt"
+        first.write_text("a", encoding="utf-8")
+        second.write_text("b", encoding="utf-8")
+        engine.attach(str(first))
+        engine.attach(str(second))
+
+        assert engine.detach(str(first)) is True
+        assert engine.detach(str(first)) is False
+        assert list(engine.attachments) == [str(second)]
+
+        engine.clear_attachments()
+
+        assert engine.attachments == {}
+
+    def test_payload_reads_the_engine_attachments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        txt = tmp_path / "notes.txt"
+        txt.write_text("hello", encoding="utf-8")
+        block = engine.attach(str(txt))
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "Q?"}])
+
+        assert payload["messages"][0]["content"][-1] is block
 
     def test_validate_attachment_rejects_illegal_ext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -695,59 +762,35 @@ class TestAnthropicEngine:
         with pytest.raises(LLMEngineError, match="_prepare_attachment failed"):
             engine._prepare_attachment(str(bad_path))
 
-    def test_prepare_attachment_truncates_long_text(
+    def test_prepare_attachment_inlines_long_text_whole(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", inline_cutoff_chars=10)
+        engine = AnthropicEngine(model="claude-opus-4-8")
         txt = tmp_path / "long.txt"
-        txt.write_text("a" * 50, encoding="utf-8")
+        txt.write_text("a" * 300_000, encoding="utf-8")
 
         block = engine._prepare_attachment(str(txt))
 
-        assert block["source"]["data"].startswith("a" * 10)
-        assert "truncated" in block["source"]["data"]
+        assert block["source"]["data"] == "a" * 300_000
 
-    # -- _should_retry -----------------------------------------------------
+    # -- removed retry and cutoff surface ---------------------------------
 
-    def _status_error(self, status_code: int) -> anthropic.APIStatusError:
-        request = httpx.Request("POST", "https://example.com")
-        response = httpx.Response(status_code=status_code, request=request)
-        return anthropic.APIStatusError("error", response=response, body=None)
-
-    def test_should_retry_connection_error(
+    def test_retry_and_cutoff_surface_is_gone(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", max_retries=2)
-        request = httpx.Request("POST", "https://example.com")
-        exc = anthropic.APIConnectionError(request=request)
+        engine = AnthropicEngine(model="claude-opus-4-8")
 
-        assert engine._should_retry(exc, attempt=1) is True
+        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
+                     "_max_retries", "_on_detach"):
+            assert not hasattr(engine, name)
 
-    def test_should_retry_retryable_status_codes(
+    def test_max_retries_goes_to_the_sdk_client(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        FakeAnthropicClient.instances.clear()
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", max_retries=2)
+        AnthropicEngine(model="claude-opus-4-8", max_retries=0)
 
-        for code in (429, 500, 502, 503, 504):
-            assert engine._should_retry(self._status_error(code), attempt=1) is True
-
-    def test_should_retry_non_retryable_status_code(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", max_retries=2)
-
-        assert engine._should_retry(self._status_error(400), attempt=1) is False
-
-    def test_should_retry_respects_max_retries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", max_retries=2)
-        request = httpx.Request("POST", "https://example.com")
-        exc = anthropic.APIConnectionError(request=request)
-
-        assert engine._should_retry(exc, attempt=3) is False
+        assert FakeAnthropicClient.instances[-1].kwargs["max_retries"] == 0

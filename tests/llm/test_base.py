@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import importlib
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
-
-base_module = importlib.import_module("atomic_agentic.llm.base")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import LLMEngine
@@ -41,9 +38,6 @@ class TestLLMEngineConstruction:
             name="fake_engine",
             description="Fake test engine.",
             timeout_seconds=12.5,
-            max_retries=3,
-            retry_backoff_base=0.25,
-            retry_backoff_max=2.0,
         )
 
         data = engine.to_dict()
@@ -61,10 +55,8 @@ class TestLLMEngineConstruction:
             "output for this call. None (default) requests plain text."
         )
         assert data["timeout_seconds"] == 12.5
-        assert data["max_retries"] == 3
-        assert data["retry_backoff_base"] == 0.25
-        assert data["retry_backoff_max"] == 2.0
-        assert data["attachments"] == {}
+        for removed in ("max_retries", "retry_backoff_base", "retry_backoff_max", "attachments"):
+            assert removed not in data
 
     def test_invalid_atomic_invokable_name_still_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -87,7 +79,6 @@ class TestLLMEngineMessagesAndInvoke:
         assert engine.payloads == [
             {
                 "messages": [{"role": "user", "content": "Hello"}],
-                "attachments": {},
                 "output_structure": None,
             }
         ]
@@ -169,162 +160,70 @@ class TestLLMEngineMessagesAndInvoke:
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
 
-class TestLLMEngineRetries:
-    def test_timeout_error_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
-        monkeypatch.setattr(base_module.random, "uniform", lambda _low, _high: 1.0)
+class TestLLMEngineNoRetry:
+    """The base owns no retry loop: a provider failure is raised on the first call."""
 
-        engine = FakeLLMEngine(
-            max_retries=1,
-            responses=[
-                TimeoutError("temporary"),
-                " recovered ",
-            ],
-        )
-
-        result = engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
-
-        assert result.result == "recovered"
-        assert engine.call_count == 2
-
-    def test_connection_error_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
-        monkeypatch.setattr(base_module.random, "uniform", lambda _low, _high: 1.0)
-
-        engine = FakeLLMEngine(
-            max_retries=1,
-            responses=[
-                ConnectionError("temporary"),
-                " recovered ",
-            ],
-        )
-
-        result = engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
-
-        assert result.result == "recovered"
-        assert engine.call_count == 2
-
-    def test_llm_engine_error_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
-
-        engine = FakeLLMEngine(
-            max_retries=3,
-            responses=[LLMEngineError("normalized")],
-        )
-
-        with pytest.raises(LLMEngineError, match="normalized"):
-            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
-
-        assert engine.call_count == 1
-
-    def test_non_retryable_error_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
-
-        engine = FakeLLMEngine(
-            max_retries=3,
-            responses=[ValueError("bad request")],
-        )
+    @pytest.mark.parametrize("error", [TimeoutError("temporary"), ConnectionError("temporary")])
+    def test_transient_error_is_not_retried(self, error: Exception) -> None:
+        engine = FakeLLMEngine(responses=[error, " recovered "])
 
         with pytest.raises(LLMEngineError, match="invoke failed"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
         assert engine.call_count == 1
 
+    @pytest.mark.parametrize("error", [TimeoutError("temporary"), ConnectionError("temporary")])
+    def test_transient_error_is_not_retried_async(self, error: Exception) -> None:
+        engine = FakeLLMEngine(responses=[error, " recovered "])
 
-class TestLLMEngineAttachments:
-    def test_attach_rejects_blank_and_non_string_paths(self) -> None:
+        with pytest.raises(LLMEngineError, match="async_invoke failed"):
+            run_coro_sync(engine.async_invoke({"messages": [{"role": "user", "content": "Hello"}]}))
+
+        assert engine.call_count == 1
+
+    def test_llm_engine_error_passes_through_unwrapped(self) -> None:
+        engine = FakeLLMEngine(responses=[LLMEngineError("normalized")])
+
+        with pytest.raises(LLMEngineError, match="^normalized$"):
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
+
+        assert engine.call_count == 1
+
+    def test_retry_machinery_is_gone(self) -> None:
+        for name in ("_call_with_retries", "_call_with_retries_async", "_should_retry"):
+            assert not hasattr(LLMEngine, name)
+        engine = FakeLLMEngine()
+        for name in ("_max_retries", "_retry_backoff_base", "_retry_backoff_max"):
+            assert not hasattr(engine, name)
+
+    def test_retry_constructor_arguments_are_gone(self) -> None:
+        with pytest.raises(TypeError):
+            FakeLLMEngine(max_retries=1)
+
+
+class TestLLMEngineHasNoAttachmentApi:
+    def test_base_has_no_attachment_surface(self) -> None:
         engine = FakeLLMEngine()
 
-        with pytest.raises(LLMEngineError, match="path"):
-            engine.attach("")
-
-        with pytest.raises(LLMEngineError, match="path"):
-            engine.attach(123)  # type: ignore[arg-type]
-
-    def test_attach_rejects_nonexistent_path(self) -> None:
-        engine = FakeLLMEngine()
-
-        with pytest.raises(LLMEngineError, match="does not exist"):
-            engine.attach("missing_file.txt")
-
-    def test_attach_rejects_illegal_extension(self, tmp_path: Any) -> None:
-        path = tmp_path / "payload.zip"
-        path.write_text("bad")
-
-        engine = FakeLLMEngine()
-
-        with pytest.raises(LLMEngineError, match="not allowed"):
-            engine.attach(str(path))
-
-    def test_attach_rejects_extension_not_in_allow_list(self, tmp_path: Any) -> None:
-        path = tmp_path / "payload.md"
-        path.write_text("hello")
-
-        engine = FakeLLMEngine()
-        engine.allowed_attachment_exts = {".txt"}
-
-        with pytest.raises(LLMEngineError, match="not supported"):
-            engine.attach(str(path))
-
-    def test_attach_stores_prepare_metadata_and_caches_same_path(self, tmp_path: Any) -> None:
-        path = tmp_path / "payload.txt"
-        path.write_text("hello")
-
-        engine = FakeLLMEngine(prepare_result={"kind": "text"})
-
-        first = engine.attach(str(path))
-        second = engine.attach(str(path))
-
-        assert first == {"kind": "text"}
-        assert second == {"kind": "text"}
-        assert engine.prepare_calls == [str(path)]
-        assert engine.attachments == {str(path): {"kind": "text"}}
-
-    def test_attach_requires_prepare_attachment_to_return_mapping(self, tmp_path: Any) -> None:
-        path = tmp_path / "payload.txt"
-        path.write_text("hello")
-
-        engine = FakeLLMEngine(prepare_result=["bad"])
-
-        with pytest.raises(LLMEngineError, match="must return a mapping"):
-            engine.attach(str(path))
-
-    def test_attachments_property_returns_top_level_copy(self, tmp_path: Any) -> None:
-        path = tmp_path / "payload.txt"
-        path.write_text("hello")
-
-        engine = FakeLLMEngine(prepare_result={"kind": "text"})
-        engine.attach(str(path))
-
-        snapshot = engine.attachments
-        snapshot["other.txt"] = {"kind": "other"}
-
-        assert "other.txt" not in engine.attachments
-
-    def test_detach_and_clear_attachments(self, tmp_path: Any) -> None:
-        first = tmp_path / "first.txt"
-        second = tmp_path / "second.txt"
-        first.write_text("one")
-        second.write_text("two")
-
-        engine = FakeLLMEngine()
-        engine.attach(str(first))
-        engine.attach(str(second))
-
-        assert engine.detach(str(first)) is True
-        assert engine.detach(str(first)) is False
-        assert len(engine.detach_calls) == 1
-
-        engine.clear_attachments()
-
-        assert engine.attachments == {}
-        assert len(engine.detach_calls) == 2
+        for name in (
+            "attach",
+            "detach",
+            "clear_attachments",
+            "attachments",
+            "_attachments",
+            "_prepare_attachment",
+            "_on_detach",
+            "_validate_attachment_path",
+            "illegal_attachment_exts",
+            "allowed_attachment_exts",
+        ):
+            assert not hasattr(engine, name)
 
 
-class TestLLMEngineAbstractShouldRetry:
-    def test_missing_should_retry_override_raises_type_error(self) -> None:
+class TestLLMEngineAbstractHooks:
+    def test_missing_abstract_hook_raises_type_error(self) -> None:
         class IncompleteEngine(LLMEngine):
-            def _build_provider_payload(self, messages, attachments, output_structure=None):
+            def _build_provider_payload(self, messages, output_structure=None):
                 return {}
 
             def _call_provider(self, payload):
@@ -337,9 +236,6 @@ class TestLLMEngineAbstractShouldRetry:
                 return TokenUsage(
                     input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
                 )
-
-            def _get_model_data(self):
-                return LLMModelData(provider="incomplete")
 
         with pytest.raises(TypeError):
             IncompleteEngine()

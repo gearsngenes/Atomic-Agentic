@@ -53,7 +53,6 @@ def _openai_engine() -> OpenAIEngine:
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
             temperature=0,
             timeout_seconds=60,
-            max_retries=0,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
