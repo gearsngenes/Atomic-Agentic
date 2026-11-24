@@ -39,8 +39,7 @@ aliases = [entry["model_name"] for entry in proxy_config["model_list"]]
 
 engines = {
     alias: LiteLLMEngine(
-        model=alias,
-        provider="litellm_proxy",
+        model=f"litellm_proxy/{alias}",
         base_url=PROXY_API_BASE,
         api_key=os.getenv("LITELLM_MASTER_KEY"),
     )

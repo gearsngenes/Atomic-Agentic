@@ -62,13 +62,35 @@ def _fake_response(text: str = "hello", **usage_kwargs: Any) -> Any:
     )
 
 
-class FakeLiteLLM:
-    """Stand-in for the `litellm` module — fakes `completion`/`acompletion`
-    directly since there is no client object to fake."""
+
+class FakeRouter:
+    """Stand-in for ``litellm.Router``: records completion/acompletion calls."""
 
     def __init__(self) -> None:
         self.completion_calls: list[dict[str, Any]] = []
         self.acompletion_calls: list[dict[str, Any]] = []
+
+    def completion(self, **kwargs: Any) -> Any:
+        self.completion_calls.append(kwargs)
+        return _fake_response(text="router hello")
+
+    async def acompletion(self, **kwargs: Any) -> Any:
+        self.acompletion_calls.append(kwargs)
+        return _fake_response(text="router async hello")
+
+
+class FakeLiteLLM:
+    """Stand-in for the `litellm` module: `completion`/`acompletion`, a
+    `Router` class, `get_llm_provider` and the `suppress_debug_info` flag."""
+
+    Router = FakeRouter
+
+    def __init__(self, bad_models: tuple[str, ...] = ()) -> None:
+        self.completion_calls: list[dict[str, Any]] = []
+        self.acompletion_calls: list[dict[str, Any]] = []
+        self.suppress_debug_info = False
+        self.seen_suppress: list[bool] = []
+        self._bad_models = bad_models
 
     def completion(self, **kwargs: Any) -> Any:
         self.completion_calls.append(kwargs)
@@ -77,6 +99,16 @@ class FakeLiteLLM:
     async def acompletion(self, **kwargs: Any) -> Any:
         self.acompletion_calls.append(kwargs)
         return _fake_response(text="async hello")
+
+    def get_llm_provider(self, model: str) -> tuple[str, str, None, None]:
+        self.seen_suppress.append(self.suppress_debug_info)
+        if model in self._bad_models:
+            raise ValueError("unknown model")
+        provider = model.split("/", 1)[0] if "/" in model else "openai"
+        return (model, provider, None, None)
+
+
+MSGS = [{"role": "user", "content": "hi"}]
 
 
 class TestLiteLLMEngine:
@@ -88,199 +120,214 @@ class TestLiteLLMEngine:
         with pytest.raises(LLMEngineError, match="litellm"):
             LiteLLMEngine(model="gpt-4o-mini")
 
-    # ── Constructor — naming, defaults, param storage ──────────────────────
+    # ── Constructor ─────────────────────────────────────────────────────────
 
     def test_constructor_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini")
-        assert engine.provider == "litellm_proxy"
-        assert engine.model == "gpt-4o-mini"
-        assert engine.drop_params is False
+        engine = LiteLLMEngine(model="openai/gpt-4o-mini")
+        assert engine.name == "LiteLLMEngine"
+        assert engine.description.startswith("LiteLLM provider-agnostic language model engine.")
+        assert engine.model == "openai/gpt-4o-mini"
+        assert engine.runtime_parameters == {}
 
-    def test_constructor_name_auto_derivation(
+    def test_constructor_custom_name_is_kept(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
-        assert engine.name == "openai_gpt_4o_mini"
-
-    def test_constructor_custom_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(model="gpt-4o-mini", name="my_engine")
         assert engine.name == "my_engine"
 
-    def test_constructor_stores_generation_knobs(
+    def test_wrong_client_type_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        with pytest.raises(LLMEngineError, match="must be a litellm.Router"):
+            LiteLLMEngine(model="grp", client=object())
+
+    def test_router_with_kwargs_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        with pytest.raises(LLMEngineError, match="either 'client' or call kwargs"):
+            LiteLLMEngine(model="grp", client=FakeRouter(), api_key="k")
+
+    def test_removed_arguments_flow_into_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(
-            model="gpt-4o-mini",
-            provider="openai",
-            temperature=0.5,
-            top_p=0.9,
-            max_tokens=100,
-            max_completion_tokens=200,
-            stop=["END"],
-            seed=42,
-            reasoning_effort="medium",
-            thinking={"type": "enabled"},
-            drop_params=True,
-            api_key="test-key",
-            base_url="https://example.com",
-            api_version="2024-01-01",
+            model="gpt-4o-mini", provider="openai", timeout_seconds=5.0, temperature=0.5,
         )
-        assert engine.temperature == 0.5
-        assert engine.top_p == 0.9
-        assert engine.max_tokens == 100
-        assert engine.max_completion_tokens == 200
-        assert engine.stop == ["END"]
-        assert engine.seed == 42
-        assert engine.reasoning_effort == "medium"
-        assert engine.thinking == {"type": "enabled"}
-        assert engine.drop_params is True
-        assert engine.api_key == "test-key"
-        assert engine.base_url == "https://example.com"
-        assert engine.api_version == "2024-01-01"
+        assert engine._kwargs == {
+            "provider": "openai", "timeout_seconds": 5.0, "temperature": 0.5,
+        }
 
-    # ── _call_provider / _call_provider_async ──────────────────────────────
+    # ── Call routing ────────────────────────────────────────────────────────
 
-    def test_call_provider_calls_litellm_completion(
+    def test_no_client_calls_litellm_completion(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = FakeLiteLLM()
         monkeypatch.setattr(engine_module, "litellm", fake)
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        payload = {"model": "gpt-4o-mini", "messages": []}
 
-        response = engine._call_provider({"model": "openai/gpt-4o-mini", "messages": []})
+        response = engine._call_provider(payload)
 
-        assert fake.completion_calls
+        assert fake.completion_calls == [payload]
         assert response.choices[0].message.content == "hello"
 
-    def test_call_provider_async_calls_litellm_acompletion(
+    def test_no_client_calls_litellm_acompletion(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = FakeLiteLLM()
         monkeypatch.setattr(engine_module, "litellm", fake)
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        payload = {"model": "gpt-4o-mini", "messages": []}
 
-        response = run_coro_sync(
-            engine._call_provider_async({"model": "openai/gpt-4o-mini", "messages": []})
-        )
+        response = run_coro_sync(engine._call_provider_async(payload))
 
-        assert fake.acompletion_calls
+        assert fake.acompletion_calls == [payload]
         assert response.choices[0].message.content == "async hello"
+
+    def test_router_client_calls_router_completion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        router = FakeRouter()
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="group", client=router)
+        payload = {"model": "group", "messages": []}
+
+        response = engine._call_provider(payload)
+
+        assert router.completion_calls == [payload]
+        assert fake.completion_calls == []
+        assert response.choices[0].message.content == "router hello"
+
+    def test_router_client_calls_router_acompletion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        router = FakeRouter()
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="group", client=router)
+        payload = {"model": "group", "messages": []}
+
+        response = run_coro_sync(engine._call_provider_async(payload))
+
+        assert router.acompletion_calls == [payload]
+        assert fake.acompletion_calls == []
+        assert response.choices[0].message.content == "router async hello"
 
     # ── _build_provider_payload ─────────────────────────────────────────────
 
-    def test_build_payload_composes_model_string(
+    def test_build_payload_uses_model_as_given_and_reflects_mutation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="claude-haiku-4-5-20251001", provider="anthropic")
-        msgs = [{"role": "user", "content": "hi"}]
+        engine = LiteLLMEngine(model="anthropic/claude-haiku-4-5-20251001")
 
-        payload = engine._build_provider_payload(msgs)
+        assert engine._build_provider_payload(MSGS)["model"] == "anthropic/claude-haiku-4-5-20251001"
+        engine.model = "azure/gpt-4o"
+        assert engine._build_provider_payload(MSGS)["model"] == "azure/gpt-4o"
 
-        assert payload["model"] == "anthropic/claude-haiku-4-5-20251001"
-
-    def test_build_payload_model_string_reflects_mutation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
-        engine.provider = "azure"
-        engine.model = "gpt-4o"
-        msgs = [{"role": "user", "content": "hi"}]
-
-        payload = engine._build_provider_payload(msgs)
-
-        assert payload["model"] == "azure/gpt-4o"
-
-    def test_build_payload_string_content_passes_through(
+    def test_build_payload_exact_default_shape(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(model="gpt-4o-mini")
-        msgs = [{"role": "user", "content": "hello"}]
 
-        payload = engine._build_provider_payload(msgs)
+        payload = engine._build_provider_payload(MSGS)
 
-        assert payload["messages"][0]["content"] == "hello"
+        assert payload == {"model": "gpt-4o-mini", "messages": MSGS}
+        assert "timeout" not in payload
 
-    def test_build_payload_always_includes_drop_params_and_timeout(
+    def test_build_payload_messages_are_role_content_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", drop_params=True, timeout_seconds=45.0)
-        msgs = [{"role": "user", "content": "hi"}]
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        msgs = [{"role": "user", "content": "hello", "extra": 1}]
 
-        payload = engine._build_provider_payload(msgs)
+        assert engine._build_provider_payload(msgs)["messages"] == [
+            {"role": "user", "content": "hello"}
+        ]
 
-        assert payload["drop_params"] is True
-        assert payload["timeout"] == 45.0
-
-    def test_build_payload_optional_knobs_omitted_when_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini")  # all None defaults
-        msgs = [{"role": "user", "content": "hi"}]
-
-        payload = engine._build_provider_payload(msgs)
-
-        for key in (
-            "temperature", "top_p", "max_tokens", "max_completion_tokens",
-            "stop", "seed", "reasoning_effort", "thinking",
-            "api_key", "base_url", "api_version",
-        ):
-            assert key not in payload
-
-    def test_build_payload_optional_knobs_included_when_set(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_build_payload_layering(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(
-            model="gpt-4o-mini",
-            temperature=0.7,
-            top_p=0.9,
-            max_tokens=100,
-            max_completion_tokens=200,
-            stop="STOP",
-            seed=7,
-            reasoning_effort="low",
-            thinking={"type": "enabled"},
-            api_key="k",
-            base_url="https://x",
-            api_version="v1",
+            model="gpt-4o-mini", api_key="k", timeout=60, temperature=0.1, num_retries=2,
         )
-        msgs = [{"role": "user", "content": "hi"}]
+        engine.update_runtime_parameters(temperature=0.9, drop_params=True, max_tokens=50)
 
-        payload = engine._build_provider_payload(msgs)
+        payload = engine._build_provider_payload(MSGS)
 
-        assert payload["temperature"] == 0.7
-        assert payload["top_p"] == 0.9
-        assert payload["max_tokens"] == 100
-        assert payload["max_completion_tokens"] == 200
-        assert payload["stop"] == "STOP"
-        assert payload["seed"] == 7
-        assert payload["reasoning_effort"] == "low"
-        assert payload["thinking"] == {"type": "enabled"}
         assert payload["api_key"] == "k"
-        assert payload["base_url"] == "https://x"
-        assert payload["api_version"] == "v1"
+        assert payload["timeout"] == 60
+        assert payload["num_retries"] == 2
+        assert payload["temperature"] == 0.9          # runtime over kwargs
+        assert payload["drop_params"] is True
+        assert payload["max_tokens"] == 50
 
-    def test_build_payload_litellm_kwargs_forwarded(
+    def test_engine_owned_fields_beat_kwargs_and_runtime(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", organization="org-123")
-        msgs = [{"role": "user", "content": "hi"}]
+        engine = LiteLLMEngine(model="gpt-4o-mini", model_list=1)
+        engine._kwargs.update(model="kw", messages="kw", response_format="kw")
+        engine._runtime_parameters.update(model="rt", messages="rt", response_format="rt")
+        schema = {"type": "object"}
 
-        payload = engine._build_provider_payload(msgs)
+        plain = engine._build_provider_payload(MSGS)
+        structured = engine._build_provider_payload(MSGS, schema)
 
-        assert payload["organization"] == "org-123"
+        assert plain["model"] == "gpt-4o-mini"
+        assert plain["messages"] == MSGS
+        assert structured["model"] == "gpt-4o-mini"
+        assert structured["messages"] == MSGS
+        assert structured["response_format"]["json_schema"]["schema"] is schema
 
-    # ── _extract_text ────────────────────────────────────────────────────────
+    def test_structured_call_sets_strict_envelope_without_capability_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fake has no supports_response_schema at all: no gate may call it.
+        fake = FakeLiteLLM()
+        assert not hasattr(fake, "supports_response_schema")
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="some/unsupported-model")
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        payload = engine._build_provider_payload(MSGS, schema)
+
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"schema": schema, "name": "output_structure", "strict": True},
+        }
+        assert payload["response_format"]["json_schema"]["schema"] is schema
+
+    def test_plain_call_omits_response_format(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        assert "response_format" not in engine._build_provider_payload(MSGS)
+
+    # ── update_runtime_parameters ───────────────────────────────────────────
+
+    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    def test_reserved_runtime_keys_raise(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        with pytest.raises(LLMEngineError, match="managed by the engine"):
+            engine.update_runtime_parameters(**{key: 1})
+
+    def test_unknown_runtime_keys_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        engine.update_runtime_parameters(some_provider_knob=3)
+        assert engine.runtime_parameters == {"some_provider_knob": 3}
+
+
+    # ── extraction ───────────────────────────────────────────────────────────
 
     def test_extract_text_returns_message_content(
         self, monkeypatch: pytest.MonkeyPatch
@@ -301,49 +348,8 @@ class TestLiteLLMEngine:
         )
         assert engine._extract_result(response, requested_structured=False) == ""
 
-    # ── structured-output payload/extraction ────────────────────────────────
 
-    def test_build_provider_payload_raises_when_structured_output_unsupported(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = FakeLiteLLM()
-        fake.supports_response_schema = lambda **kwargs: False
-        monkeypatch.setattr(engine_module, "litellm", fake)
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
-
-        with pytest.raises(LLMEngineError, match="structured output"):
-            engine._build_provider_payload(
-                [{"role": "user", "content": "hi"}], {"type": "object"}
-            )
-
-    def test_build_provider_payload_sets_response_format_when_supported(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = FakeLiteLLM()
-        fake.supports_response_schema = lambda **kwargs: True
-        monkeypatch.setattr(engine_module, "litellm", fake)
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
-        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
-
-        payload = engine._build_provider_payload(
-            [{"role": "user", "content": "hi"}], schema
-        )
-
-        assert payload["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {"schema": schema, "name": "output_structure", "strict": True},
-        }
-
-    def test_build_provider_payload_omits_response_format_when_not_structured(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = FakeLiteLLM()
-        monkeypatch.setattr(engine_module, "litellm", fake)
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
-
-        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
-
-        assert "response_format" not in payload
+    # ── structured-output extraction ─────────────────────────────────────────
 
     def test_extract_result_requested_parses_json(
         self, monkeypatch: pytest.MonkeyPatch
@@ -362,6 +368,7 @@ class TestLiteLLMEngine:
         response = _fake_response(text="not json")
 
         assert engine._extract_result(response, requested_structured=True) == "not json"
+
 
     # ── _extract_token_usage ─────────────────────────────────────────────────
 
@@ -437,40 +444,58 @@ class TestLiteLLMEngine:
         # response_tokens is plain subtraction: generated_tokens (20) - reasoning (15)
         assert usage.response_tokens == 5
 
+
     # ── _get_model_data ──────────────────────────────────────────────────────
 
-    def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_get_model_data_provider_from_litellm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+        engine = LiteLLMEngine(model="anthropic/claude-x")
         md = engine._get_model_data()
         assert isinstance(md, RemoteLLMModelData)
-        assert md.provider == "openai"
-        assert md.model_name == "gpt-4o-mini"
+        assert md.provider == "anthropic"
+        assert md.model_name == "anthropic/claude-x"
+
+    def test_get_model_data_unknown_when_litellm_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM(bad_models=("grp",)))
+        engine = LiteLLMEngine(model="grp")
+        md = engine._get_model_data()
+        assert md.provider == "unknown"
+        assert md.model_name == "grp"
+
+    def test_get_model_data_restores_suppress_debug_info(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM(bad_models=("grp",))
+        monkeypatch.setattr(engine_module, "litellm", fake)
+
+        LiteLLMEngine(model="ok/model")._get_model_data()
+        assert fake.suppress_debug_info is False
+        LiteLLMEngine(model="grp")._get_model_data()
+        assert fake.suppress_debug_info is False
+        assert fake.seen_suppress == [True, True]
+
+        fake.suppress_debug_info = True
+        LiteLLMEngine(model="grp")._get_model_data()
+        assert fake.suppress_debug_info is True
 
     # ── to_dict ──────────────────────────────────────────────────────────────
 
     def test_to_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(
-            model="gpt-4o-mini", provider="openai", temperature=0.3, api_key="secret",
-        )
+        engine = LiteLLMEngine(model="openai/gpt-4o-mini", api_key="secret", timeout=60)
+        engine.update_runtime_parameters(temperature=0.3)
         d = engine.to_dict()
         assert d["type"] == "LiteLLMEngine"
-        assert d["provider"] == "openai"
-        assert d["model"] == "gpt-4o-mini"
-        assert d["temperature"] == 0.3
-        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+        assert d["runtime_parameters"] == {"temperature": 0.3}
+        assert d["model"] == "openai/gpt-4o-mini"
+        for removed in ("api_key", "kwargs", "provider", "timeout_seconds", "timeout",
+                        "inline_cutoff_chars", "max_retries", "attachments"):
             assert removed not in d
-        assert "api_key" not in d
-
-    def test_timeout_default_is_600_until_pass_9(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini")
-        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
-        assert payload["timeout"] == 600.0
-        assert not hasattr(engine, "timeout_seconds")
+        assert "secret" not in str(d)
 
     # ── Removed surface ───────────────────────────────────────────────────────
 
@@ -483,15 +508,17 @@ class TestLiteLLMEngine:
         for name in ("attach", "detach", "clear_attachments", "attachments",
                      "_prepare_attachment", "_on_detach", "_validate_attachment_path",
                      "inline_cutoff_chars", "_inline_cutoff_chars",
-                     "_should_retry", "_max_retries"):
+                     "_should_retry", "_max_retries",
+                     "provider", "temperature", "drop_params", "api_key",
+                     "_timeout_seconds", "_litellm_kwargs"):
             assert not hasattr(engine, name)
 
-    def test_max_retries_is_forwarded_to_litellm_through_kwargs(
+    def test_num_retries_is_forwarded_to_litellm_through_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini", max_retries=0)
+        engine = LiteLLMEngine(model="gpt-4o-mini", num_retries=0)
 
-        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+        payload = engine._build_provider_payload(MSGS)
 
-        assert payload["max_retries"] == 0
+        assert payload["num_retries"] == 0

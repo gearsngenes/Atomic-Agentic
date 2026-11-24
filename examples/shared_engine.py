@@ -46,6 +46,7 @@ script)::
     from shared_engine import llm_engine
 """
 import os
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -60,46 +61,28 @@ from atomic_agentic.llm import (
 
 load_dotenv()
 
-PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
-    "o": (OpenAIEngine, {"api_key": os.getenv("OPENAI_API_KEY"), "model": os.getenv("OPENAI_MODEL", "gpt-4o")}),
-    "g": (GeminiEngine, {"api_key": os.getenv("GOOGLE_API_KEY"), "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-          "http_options": {"api_version": "v1beta"}}),
-    "m": (MistralEngine, {"api_key": os.getenv("MISTRAL_API_KEY"), "model": os.getenv("MISTRAL_MODEL", "mistral-medium-latest")}),
-    "a": (AnthropicEngine, {"api_key": os.getenv("ANTHROPIC_API_KEY"), "model": os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")}),
-    "p": (
-        LlamaCppEngine,
-        {
-            "model_path": os.getenv("PHI_4_PATH"),
-            "repo_id": "unsloth/phi-4-GGUF",
-            "filename": "phi-4-Q4_K_M.gguf",
-            "n_ctx": 16384,
-            "verbose": False,
-            "n_threads": 4,
-        },
-    ),
-    "3": (
-        LlamaCppEngine,
-        {
-            "model_path": os.getenv("GEMMA_3_PATH"),
-            "repo_id": "ggml-org/gemma-3-4b-it-GGUF",
-            "filename": "gemma-3-4b-it-Q4_K_M.gguf",
-            "n_ctx": 32768,
-            "verbose": False,
-            "n_threads": 4,
-        },
-    ),
-    "4": (
-        LlamaCppEngine,
-        {
-            "model_path": os.getenv("GRANITE_4_1_PATH"),
-            "repo_id": "ibm-granite/granite-4.1-8b-GGUF",
-            "filename": "granite-4.1-8b-Q4_K_M.gguf",
-            "n_ctx": 32768,
-            "verbose": False,
-            "n_threads": 4,
-        },
-    ),
-    "t": (LiteLLMEngine, {"model": os.getenv("OPENAI_MODEL", "gpt-4o")}),
+def _llama(path_env: str, repo_id: str, filename: str, n_ctx: int) -> Callable[[], Any]:
+    """Local GGUF from ``path_env`` when set, else downloaded from the Hub."""
+    def build() -> Any:
+        path = os.getenv(path_env)
+        if path:
+            return LlamaCppEngine(model=path, n_ctx=n_ctx, verbose=False, n_threads=4)
+        return LlamaCppEngine.from_pretrained(
+            repo_id, filename, n_ctx=n_ctx, verbose=False, n_threads=4
+        )
+    return build
+
+
+PROVIDER_MODELS: dict[str, Callable[[], Any]] = {
+    "o": lambda: OpenAIEngine(model=os.getenv("OPENAI_MODEL", "gpt-4o"), api_key=os.getenv("OPENAI_API_KEY")),
+    "g": lambda: GeminiEngine(model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), api_key=os.getenv("GOOGLE_API_KEY"),
+                              http_options={"api_version": "v1beta"}),
+    "m": lambda: MistralEngine(model=os.getenv("MISTRAL_MODEL", "mistral-medium-latest"), api_key=os.getenv("MISTRAL_API_KEY")),
+    "a": lambda: AnthropicEngine(model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"), api_key=os.getenv("ANTHROPIC_API_KEY")),
+    "p": _llama("PHI_4_PATH", "unsloth/phi-4-GGUF", "phi-4-Q4_K_M.gguf", 16384),
+    "3": _llama("GEMMA_3_PATH", "ggml-org/gemma-3-4b-it-GGUF", "gemma-3-4b-it-Q4_K_M.gguf", 32768),
+    "4": _llama("GRANITE_4_1_PATH", "ibm-granite/granite-4.1-8b-GGUF", "granite-4.1-8b-Q4_K_M.gguf", 32768),
+    "t": lambda: LiteLLMEngine(model="litellm_proxy/" + os.getenv("OPENAI_MODEL", "gpt-4o")),
 }
 
 
@@ -113,5 +96,4 @@ def _pick_provider() -> str:
     ).strip().lower()
 
 
-_engine_cls, _engine_kwargs = PROVIDER_MODELS[_pick_provider()]
-llm_engine = _engine_cls(**_engine_kwargs)
+llm_engine = PROVIDER_MODELS[_pick_provider()]()

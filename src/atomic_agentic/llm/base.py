@@ -81,10 +81,9 @@ class LLMEngine(AtomicInvokable, ABC):
     provider's own native error, wrapped in ``LLMEngineError`` by
     the engine's invoke hooks — the same failure shape already used for
     any other illegal per-provider configuration (e.g. an unsupported
-    ``temperature`` value). Engines that need to gate on capability rather
-    than content (e.g. ``LiteLLMEngine`` raising when a model/provider
-    combination has no structured-output path at all) do so from within
-    their own ``_build_provider_payload`` override, not a separate hook.
+    ``temperature`` value). No engine gates on capability: a model/provider
+    combination with no structured-output path fails natively and is wrapped
+    in ``LLMEngineError`` like any other provider error.
 
     Note: ``_normalize_messages`` still requires every message's ``content``
     to be a plain ``str`` — a structured ``LLMResult.result`` (``list``/
@@ -138,7 +137,9 @@ class LLMEngine(AtomicInvokable, ABC):
     mutation never changes an in-flight call. Keys the engine owns on the call
     (model, the message field, the structured-output field) are listed in
     ``_RESERVED_RUNTIME_KEYS`` and rejected; anything else unknown is rejected
-    by the provider at call time and surfaces as ``LLMEngineError``.
+    by the provider at call time and surfaces as ``LLMEngineError``, except on
+    ``LlamaCppEngine``, which validates keys against
+    ``create_chat_completion`` in ``_validate_runtime_keys``.
     """
 
     result_cls: ClassVar[type[LLMResult]] = LLMResult

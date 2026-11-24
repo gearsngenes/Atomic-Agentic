@@ -73,7 +73,7 @@ cases = {
     "gemini": lambda: GeminiEngine(model="m"),
     "mistral": lambda: MistralEngine(model="m"),
     "litellm": lambda: LiteLLMEngine(model="m"),
-    "llama": lambda: LlamaCppEngine(model_path="x.gguf"),
+    "llama": lambda: LlamaCppEngine(model="x.gguf"),
 }
 out = {}
 for extra, build in cases.items():

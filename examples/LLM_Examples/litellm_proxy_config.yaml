@@ -9,7 +9,7 @@
 # via `dotenv run -- litellm --config ...`).
 #
 # Aliases below name the *role*, not the provider, to demonstrate that
-# LiteLLMEngine(provider="litellm_proxy", model=<alias>) decouples what the
+# LiteLLMEngine(model="litellm_proxy/<alias>") decouples what the
 # caller asks for from which provider/model actually answers it.
 
 model_list:

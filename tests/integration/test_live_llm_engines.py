@@ -169,12 +169,12 @@ def _litellm_engine() -> LLMEngine:
         pytest.skip("ANTHROPIC_API_KEY is not set.")
 
     try:
-        return LiteLLMEngine(
-            model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            provider="anthropic",
-            temperature=0,
-            timeout_seconds=60,
+        engine = LiteLLMEngine(
+            model="anthropic/" + os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+            timeout=60,
         )
+        engine.update_runtime_parameters(temperature=0)
+        return engine
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
@@ -190,11 +190,7 @@ def _llamacpp_engine() -> LLMEngine:
         pytest.skip(f"{LLAMACPP_MODEL_REPO}/{LLAMACPP_MODEL_FILENAME} is not cached locally.")
 
     try:
-        return LlamaCppEngine(
-            repo_id=LLAMACPP_MODEL_REPO,
-            filename=LLAMACPP_MODEL_FILENAME,
-            timeout_seconds=120,
-        )
+        return LlamaCppEngine(model=cached)
     except RuntimeError as exc:
         pytest.skip(str(exc))
 

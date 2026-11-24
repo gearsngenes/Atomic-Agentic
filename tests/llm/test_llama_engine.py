@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
 
@@ -13,14 +13,53 @@ from atomic_agentic.llm import LlamaCppEngine
 
 class FakeLlama:
     instances: list["FakeLlama"] = []
+    pretrained_calls: list[dict[str, Any]] = []
+    pretrained_error: Exception | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+        self.model_path = kwargs["model_path"]
         self.chat_completion_calls: list[dict[str, Any]] = []
         FakeLlama.instances.append(self)
 
-    def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
-        self.chat_completion_calls.append(kwargs)
+    @classmethod
+    def from_pretrained(
+        cls,
+        repo_id: str,
+        filename: str,
+        additional_files: list[str] | None = None,
+        local_dir: str | None = None,
+        local_dir_use_symlinks: Any = "auto",
+        cache_dir: str | None = None,
+        **kwargs: Any,
+    ) -> "FakeLlama":
+        cls.pretrained_calls.append(
+            {
+                "repo_id": repo_id,
+                "filename": filename,
+                "additional_files": additional_files,
+                "local_dir": local_dir,
+                "cache_dir": cache_dir,
+                "kwargs": kwargs,
+            }
+        )
+        if cls.pretrained_error is not None:
+            raise cls.pretrained_error
+        return cls(model_path=f"/cache/{repo_id}/{filename}", **kwargs)
+
+    def create_chat_completion(
+        self,
+        messages: Any,
+        response_format: Any = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        seed: int | None = None,
+        stop: Any = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        self.chat_completion_calls.append(
+            {"messages": messages, "response_format": response_format}
+        )
         return {
             "choices": [{"message": {"content": " llama text "}}],
             "usage": {
@@ -31,81 +70,205 @@ class FakeLlama:
         }
 
 
-def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> LlamaCppEngine:
+@pytest.fixture(autouse=True)
+def _reset_fake() -> None:
     FakeLlama.instances.clear()
+    FakeLlama.pretrained_calls.clear()
+    FakeLlama.pretrained_error = None
+
+
+def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> LlamaCppEngine:
     monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-    return LlamaCppEngine(model_path="model.gguf", **kwargs)
+    return LlamaCppEngine(model="model.gguf", **kwargs)
 
 
-class TestLlamaCppEngine:
+class TestConstructor:
     def test_missing_llama_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llama_module, "Llama", None)
         with pytest.raises(LLMEngineError, match="llama-cpp-python"):
-            LlamaCppEngine(model_path="model.gguf")
+            LlamaCppEngine(model="model.gguf")
 
-    def test_requires_model_path_or_repo_and_filename(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_neither_source_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-        with pytest.raises(LLMEngineError, match="requires either"):
+        with pytest.raises(LLMEngineError, match="exactly one of 'model' or 'llm'"):
             LlamaCppEngine()
 
-    def test_missing_hf_hub_download_raises_when_repo_given(
+    def test_both_sources_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
+        preloaded = FakeLlama(model_path="a.gguf")
+        with pytest.raises(LLMEngineError, match="exactly one of 'model' or 'llm'"):
+            LlamaCppEngine(model="model.gguf", llm=preloaded)
+
+    def test_llm_with_client_kwargs_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
+        preloaded = FakeLlama(model_path="a.gguf")
+        with pytest.raises(LLMEngineError, match="either 'llm' or client kwargs"):
+            LlamaCppEngine(llm=preloaded, n_gpu_layers=1)
+
+    def test_model_loads_with_defaults_and_caller_kwargs_win(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-        monkeypatch.setattr(llama_module, "hf_hub_download", None)
 
-        with pytest.raises(LLMEngineError, match=r"huggingface-hub.*atomic-agentic\[llama\]"):
-            LlamaCppEngine(repo_id="org/repo", filename="model.gguf")
+        LlamaCppEngine(model="model.gguf")
+        defaults = FakeLlama.instances[-1].kwargs
+        assert defaults == {"model_path": "model.gguf", "n_ctx": 2048, "verbose": False}
 
-    def test_constructor_uses_local_model_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        FakeLlama.instances.clear()
+        LlamaCppEngine(model="model.gguf", n_ctx=4096, verbose=True, n_threads=4)
+        override = FakeLlama.instances[-1].kwargs
+        assert override["n_ctx"] == 4096
+        assert override["verbose"] is True
+        assert override["n_threads"] == 4
+
+    def test_llm_used_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
+        preloaded = FakeLlama(model_path="pre.gguf")
+        count = len(FakeLlama.instances)
+
+        engine = LlamaCppEngine(llm=preloaded)
+
+        assert len(FakeLlama.instances) == count
+        assert engine._llm is preloaded
+        assert engine.model_path == "pre.gguf"
+        assert engine._client_kwargs == {}
+
+    def test_default_and_custom_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        assert engine.name == "LlamaCppEngine"
+        assert engine.description.startswith("Llama.cpp LLM Engine")
+
+        custom = LlamaCppEngine(model="model.gguf", name="my_llama", description="d")
+        assert custom.name == "my_llama"
+        assert custom.description.startswith("d")
+
+    def test_model_path_property_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        assert engine.model_path == "model.gguf"
+        with pytest.raises(AttributeError):
+            engine.model_path = "other"  # type: ignore[misc]
+
+    def test_removed_arguments_flow_into_client_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, timeout_seconds=5.0, n_gpu_layers=32)
+
+        assert FakeLlama.instances[-1].kwargs["timeout_seconds"] == 5.0
+        assert engine._client_kwargs == {"timeout_seconds": 5.0, "n_gpu_layers": 32}
+
+
+class TestFromPretrained:
+    def test_forwards_arguments_and_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
-        engine = LlamaCppEngine(
-            model_path="model.gguf",
-            n_ctx=4096,
-            verbose=True,
-            n_threads=4,
+        engine = LlamaCppEngine.from_pretrained(
+            "org/repo",
+            "m.gguf",
+            additional_files=["m-2.gguf"],
+            local_dir="/ld",
+            cache_dir="/cd",
+            name="n",
+            description="d",
         )
 
-        fake = FakeLlama.instances[-1]
-        assert engine.name == "llama_cpp"
-        assert fake.kwargs["model_path"] == "model.gguf"
-        assert fake.kwargs["n_ctx"] == 4096
-        assert fake.kwargs["verbose"] is True
-        assert fake.kwargs["n_threads"] == 4
+        call = FakeLlama.pretrained_calls[-1]
+        assert call["repo_id"] == "org/repo"
+        assert call["filename"] == "m.gguf"
+        assert call["additional_files"] == ["m-2.gguf"]
+        assert call["local_dir"] == "/ld"
+        assert call["cache_dir"] == "/cd"
+        assert call["kwargs"] == {"n_ctx": 2048, "verbose": False}
+        assert engine.name == "n"
+        assert engine.description.startswith("d")
+        assert engine.model_path == "/cache/org/repo/m.gguf"
+        assert engine._llm is FakeLlama.instances[-1]
 
-    def test_constructor_resolves_repo_and_filename_via_hf_hub_download(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        FakeLlama.instances.clear()
+    def test_caller_kwargs_win_and_are_recorded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
-        download_calls: list[dict[str, Any]] = []
-        resolved_path = "/cache/org/repo/model.gguf"
+        engine = LlamaCppEngine.from_pretrained(
+            "org/repo", "m.gguf", n_ctx=512, n_threads=8
+        )
 
-        def fake_hf_hub_download(**kwargs: Any) -> str:
-            download_calls.append(kwargs)
-            return resolved_path
+        assert FakeLlama.pretrained_calls[-1]["kwargs"] == {
+            "n_ctx": 512,
+            "verbose": False,
+            "n_threads": 8,
+        }
+        assert engine._client_kwargs == {"n_ctx": 512, "n_threads": 8}
+        assert engine.name == "LlamaCppEngine"
 
-        monkeypatch.setattr(llama_module, "hf_hub_download", fake_hf_hub_download)
+    def test_missing_huggingface_hub_raises_engine_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
+        FakeLlama.pretrained_error = ImportError("no hub")
 
-        engine = LlamaCppEngine(repo_id="org/repo", filename="model.gguf")
-        fake = FakeLlama.instances[-1]
+        with pytest.raises(LLMEngineError, match=r"huggingface-hub.*atomic-agentic\[llama\]"):
+            LlamaCppEngine.from_pretrained("org/repo", "m.gguf")
 
-        assert engine.repo_id == "org/repo"
-        assert engine.filename == "model.gguf"
-        assert engine.model_path == resolved_path
-        assert download_calls[-1]["repo_id"] == "org/repo"
-        assert download_calls[-1]["filename"] == "model.gguf"
-        assert "subfolder" in download_calls[-1]
-        assert fake.kwargs["model_path"] == resolved_path
+    def test_sdk_check_runs_before_download(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(llama_module, "Llama", None)
 
-    def test_llama_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(LLMEngineError, match="llama-cpp-python"):
+            LlamaCppEngine.from_pretrained("org/repo", "m.gguf")
+        assert FakeLlama.pretrained_calls == []
+
+
+class TestRuntimeParameters:
+    def test_start_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _make_engine(monkeypatch).runtime_parameters == {}
+
+    def test_valid_keys_accepted_and_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.5, max_tokens=64, seed=7, stop=["x"])
+        assert engine.runtime_parameters == {
+            "temperature": 0.5, "max_tokens": 64, "seed": 7, "stop": ["x"],
+        }
+
+        messages = [{"role": "user", "content": "hi"}]
+        payload = engine._build_provider_payload(messages)
+        assert payload == {
+            "temperature": 0.5, "max_tokens": 64, "seed": 7, "stop": ["x"],
+            "messages": messages,
+        }
+
+    def test_unknown_key_raises_naming_key_and_valid_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match=r"unknown keys \['bogus'\].*valid keys") as exc:
+            engine.update_runtime_parameters(bogus=1)
+        assert "temperature" in str(exc.value)
+        assert "messages" not in str(exc.value).split("valid keys:")[1]
+
+    @pytest.mark.parametrize("key", ["messages", "response_format"])
+    def test_reserved_keys_raise(self, monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="managed by the engine"):
+            engine.update_runtime_parameters(**{key: 1})
+
+    def test_bad_key_in_batch_applies_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError):
+            engine.update_runtime_parameters(temperature=0.1, bogus=1)
+        assert engine.runtime_parameters == {}
+
+    def test_none_removes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.5)
+        engine.update_runtime_parameters(temperature=None)
+        assert engine.runtime_parameters == {}
+
+    def test_snapshot_semantics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.5)
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+        engine.update_runtime_parameters(temperature=0.9)
+        assert payload["temperature"] == 0.5
+
+
+class TestPayloadAndCall:
+    def test_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
         messages = [{"role": "user", "content": "Hello"}]
         payload = engine._build_provider_payload(messages)
@@ -113,15 +276,10 @@ class TestLlamaCppEngine:
         fake = FakeLlama.instances[-1]
 
         assert payload == {"messages": messages}
-        assert fake.chat_completion_calls[-1] == {"messages": messages}
+        assert fake.chat_completion_calls[-1]["messages"] == messages
         assert engine._extract_result(response, requested_structured=False) == "llama text"
 
-    def test_llama_extract_result_rejects_bad_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="unexpected response shape"):
-            engine._extract_result({"bad": "shape"}, requested_structured=False)
-
-    def test_llama_payload_and_call_include_response_format_when_structured(
+    def test_structured_call_sets_response_format(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
@@ -135,39 +293,64 @@ class TestLlamaCppEngine:
         }
 
         engine._call_provider(payload)
-        fake = FakeLlama.instances[-1]
-        assert fake.chat_completion_calls[-1]["response_format"] == {
+        assert FakeLlama.instances[-1].chat_completion_calls[-1]["response_format"] == {
             "type": "json_object",
             "schema": schema,
         }
 
-    def test_llama_payload_omits_response_format_when_not_structured(
+    def test_payload_omits_response_format_when_not_structured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
-        messages = [{"role": "user", "content": "Hello"}]
-
-        payload = engine._build_provider_payload(messages)
-
+        payload = engine._build_provider_payload([{"role": "user", "content": "Hello"}])
         assert "response_format" not in payload
 
-    def test_llama_extract_result_requested_parses_json(
+    def test_engine_owned_fields_beat_smuggled_runtime_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters.update(messages="x", response_format="y")
+        messages = [{"role": "user", "content": "Hello"}]
+        schema = {"type": "object"}
+
+        plain = engine._build_provider_payload(messages)
+        structured = engine._build_provider_payload(messages, schema)
+
+        assert plain["messages"] == messages
+        assert structured["messages"] == messages
+        assert structured["response_format"] == {"type": "json_object", "schema": schema}
+
+    def test_call_provider_passes_payload_as_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        messages = [{"role": "user", "content": "hi"}]
+        engine._call_provider({"messages": messages, "temperature": 0.3})
+
+        # The fake records only messages/response_format; a TypeError would
+        # surface here if the payload were not unpacked as keyword arguments.
+        assert FakeLlama.instances[-1].chat_completion_calls[-1]["messages"] == messages
+
+    def test_extract_result_rejects_bad_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="unexpected response shape"):
+            engine._extract_result({"bad": "shape"}, requested_structured=False)
+
+    def test_extract_result_requested_parses_json(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         response = {"choices": [{"message": {"content": '{"a": 1}'}}]}
-
         assert engine._extract_result(response, requested_structured=True) == {"a": 1}
 
-    def test_llama_extract_result_requested_parse_failure_falls_back(
+    def test_extract_result_requested_parse_failure_falls_back(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         response = {"choices": [{"message": {"content": "not json"}}]}
-
         assert engine._extract_result(response, requested_structured=True) == "not json"
 
-    def test_llama_has_no_attachment_or_retry_surface(
+    def test_has_no_attachment_or_retry_surface(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
@@ -176,129 +359,26 @@ class TestLlamaCppEngine:
                      "_prepare_attachment", "_should_retry", "_max_retries"):
             assert not hasattr(engine, name)
 
-    def test_llama_to_dict_includes_non_secret_config(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-        engine = LlamaCppEngine(
-            model_path="model.gguf",
-            n_ctx=1024,
-            verbose=True,
-            n_gpu_layers=32,
-            temperature=0.7,
-            top_k=40,
-        )
+    def test_removed_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        for name in ("repo_id", "filename", "n_ctx", "verbose", "temperature",
+                     "_timeout_seconds", "_llama_kwargs"):
+            assert not hasattr(engine, name)
+
+
+class TestToDictAndModelData:
+    def test_to_dict_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, n_gpu_layers=32)
+        engine.update_runtime_parameters(temperature=0.7)
         data = engine.to_dict()
 
         assert data["type"] == "LlamaCppEngine"
+        assert data["runtime_parameters"] == {"temperature": 0.7}
         assert data["model_path"] == "model.gguf"
-        assert data["repo_id"] is None
-        assert data["filename"] is None
-        assert data["n_ctx"] == 1024
-        assert data["verbose"] is True
-        assert data["llama_kwargs"] == {"n_gpu_layers": 32}
-        assert data["temperature"] == 0.7
-        assert data["top_k"] == 40
-        for removed in ("max_retries", "retry_backoff_base", "attachments"):
+        for removed in ("llama_kwargs", "client_kwargs", "timeout_seconds", "repo_id",
+                        "n_gpu_layers", "n_ctx"):
             assert removed not in data
-        assert "n_threads" not in data
-        assert "n_gpu_layers" not in data
-
-    def test_llamacpp_source_params_are_read_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-
-        assert engine.model_path == "model.gguf"
-        assert engine.repo_id is None
-        assert engine.filename is None
-
-        for attr in ("model_path", "repo_id", "filename"):
-            with pytest.raises(AttributeError):
-                setattr(engine, attr, None)
-
-    def test_llamacpp_model_load_params_are_read_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-        engine = LlamaCppEngine(model_path="model.gguf", n_ctx=2048, verbose=True)
-
-        assert engine.n_ctx == 2048
-        assert engine.verbose is True
-
-        for attr in ("n_ctx", "verbose"):
-            with pytest.raises(AttributeError):
-                setattr(engine, attr, None)
-
-    def test_llama_kwargs_forwarded_to_llama_constructor(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        FakeLlama.instances.clear()
-        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-
-        LlamaCppEngine(model_path="model.gguf", n_gpu_layers=32, flash_attn=True)
-
-        fake = FakeLlama.instances[-1]
-        assert fake.kwargs["n_gpu_layers"] == 32
-        assert fake.kwargs["flash_attn"] is True
-
-    def test_generation_params_set_sent_to_call(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-
-        engine = LlamaCppEngine(
-            model_path="model.gguf",
-            temperature=0.5,
-            top_k=40,
-            top_p=0.9,
-            min_p=0.05,
-            max_tokens=256,
-            repeat_penalty=1.1,
-            seed=42,
-            stop=["</s>"],
-        )
-        engine._call_provider({"messages": [{"role": "user", "content": "hi"}]})
-
-        call = FakeLlama.instances[-1].chat_completion_calls[-1]
-        assert call["temperature"] == 0.5
-        assert call["top_k"] == 40
-        assert call["top_p"] == 0.9
-        assert call["min_p"] == 0.05
-        assert call["max_tokens"] == 256
-        assert call["repeat_penalty"] == 1.1
-        assert call["seed"] == 42
-        assert call["stop"] == ["</s>"]
-
-    def test_generation_params_none_omit_from_call(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        engine._call_provider({"messages": [{"role": "user", "content": "hi"}]})
-
-        call = FakeLlama.instances[-1].chat_completion_calls[-1]
-        for param in ("temperature", "top_k", "top_p", "min_p",
-                      "max_tokens", "repeat_penalty", "seed", "stop"):
-            assert param not in call, f"{param!r} should be omitted when None"
-
-    def test_hf_subfolder_forwarded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        FakeLlama.instances.clear()
-        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
-
-        download_calls: list[dict[str, Any]] = []
-
-        def fake_hf_hub_download(**kwargs: Any) -> str:
-            download_calls.append(kwargs)
-            return "/cache/model.gguf"
-
-        monkeypatch.setattr(llama_module, "hf_hub_download", fake_hf_hub_download)
-
-        LlamaCppEngine(repo_id="org/repo", filename="model.gguf", subfolder="gguf")
-
-        assert download_calls[-1]["subfolder"] == "gguf"
 
     def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
