@@ -50,8 +50,8 @@ class LlamaCppEngine(LLMEngine):
       wrapper over ``Llama.from_pretrained`` that downloads (or reuses from
       the cache) a GGUF from the Hugging Face Hub and wraps the result.
 
-    ``self.model_path`` is the concrete local path of the loaded model, read
-    from ``llm.model_path`` after construction.
+    ``engine.model`` is the concrete local path of the loaded model (read from
+    ``llm.model_path`` after construction); it is read-only.
 
     Runtime parameters and configuration
     ------------------------------------
@@ -65,76 +65,29 @@ class LlamaCppEngine(LLMEngine):
     seed is the model's sampler seed, the call-time one overrides it for a
     call. Streaming is unsupported.
 
-    Flow per call
-    -------------
-    1) Conversation turns are passed through as an OpenAI-compatible
-       ``messages`` list.
+    Attachments are not supported; this engine has no ``attach`` API.
 
-    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
-       lifecycle:
-       - normalize chat messages;
-       - build the llama.cpp provider payload;
-       - call ``llm.create_chat_completion(...)``;
-       - extract assistant text, token usage, and configured model data;
-       - return ``LLMResult``.
-
-    3) Attachments are not supported; this engine has no ``attach`` API.
-
-    Token usage
-    -----------
-    ``_extract_token_usage`` maps the OpenAI-compatible response
-    ``response["usage"]`` dictionary into ``LlamaCppTokenUsage`` using prompt,
-    completion, and total token counts.
-
-    Model data
-    ----------
-    ``_get_model_data`` returns the concrete local model path loaded by
-    llama.cpp.
+    Result extraction and usage
+    ---------------------------
+    ``_extract_result`` reads ``choices[0].message.content`` (``None`` counts
+    as ``""``) and, on a structured call, parses it with ``json.loads`` (raw
+    text on a parse failure, e.g. ``max_tokens`` truncation mid-structure).
+    ``_extract_token_usage`` maps ``response["usage"]`` into
+    ``LlamaCppTokenUsage``; with no ``usage`` key it raises unless
+    ``require_usage`` is ``False``, which yields an all-zero record.
+    ``_get_model_data`` returns the loaded model path.
 
     Structured-output schema policy
-    --------------------------------
-    Structured output is requested via ``response_format = {"type":
-    "json_object", "schema": ...}`` on ``create_chat_completion``. Unlike
-    every remote engine in this package, enforcement happens entirely
-    locally: llama-cpp-python's own bundled grammar converter
-    (``llama_cpp.llama_grammar`` -- a separate Python port, not the same
-    codebase as upstream ``ggml-org/llama.cpp``'s own converter or server)
-    compiles the schema into a GBNF grammar and passes it to the underlying
-    completion call as a distinct ``grammar`` sampling parameter. That
-    grammar masks every token the model is allowed to emit at each
-    generation step, so structural conformance is a property of the
-    installed ``llama-cpp-python`` version, not of the loaded model's own
-    training -- confirmed by direct testing across unrelated GGUF models.
-
-    Enforced keywords (verified against the installed converter's source,
-    not just its docs): ``type``, ``enum``, ``const``, ``properties``,
-    ``required``, ``additionalProperties``, ``items``, ``prefixItems``,
-    ``minItems``, ``maxItems``, ``minLength``, ``maxLength``, ``pattern``,
-    ``oneOf``, ``anyOf``, ``allOf``, ``$ref`` (and ``$defs`` via ref
-    resolution), and ``format`` restricted to ``uuid``/``date``/``time``/
-    ``date-time``. Decorative-only keywords -- accepted without error but
-    never enforced -- are ``title``, ``description``, ``examples``,
-    ``default``, and, notably, ``minimum``/``maximum``/
-    ``exclusiveMinimum``/``exclusiveMaximum``. That last group is a real,
-    live-verified limitation of the installed dependency, not a
-    documentation gap: the converter's numeric-type handling carries a
-    literal ``# TODO: support minimum, maximum, exclusiveMinimum,
-    exclusiveMaximum`` and silently ignores those keywords outright. A
-    caller who relies on a numeric bound being enforced gets no error
-    telling them it wasn't.
-
-    This engine needs no override of any kind -- every engine now forwards
-    ``output_structure`` unmodified by default (structured-generation
-    Pass 8 removed AA's own schema-pruning mechanism entirely).
-
-    The compiled grammar constrains sampling only; it is never woven into
-    the prompt or message content the model actually reads. A caller who
-    wants the model to understand what a field is *for* -- not just its
-    name and type -- must still describe that intent in the prompt or
-    system message themselves. Confirmed directly: a prompt with no mention
-    of the requested schema at all still produces structurally valid output
-    against that schema, but with semantically arbitrary field values. This
-    is a known, documented limitation for this pass, not mitigated here.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified as ``response_format =
+    {"type": "json_object", "schema": ...}``. llama-cpp-python compiles the
+    schema into a GBNF grammar that constrains sampling locally, so
+    conformance is a property of the installed ``llama-cpp-python`` version,
+    not of the model. Structural keywords (``type``, ``enum``, ``properties``,
+    ``required``, ``items``, ``pattern``, ``oneOf``/``anyOf``/``allOf``,
+    ``$ref``, ...) are enforced; ``minimum``/``maximum`` and their exclusive
+    forms are silently ignored. The grammar never reaches the prompt, so
+    describe each field's intent in the prompt or system message.
     """
 
     _RESERVED_RUNTIME_KEYS = frozenset({"messages", "response_format", "stream"})
@@ -268,8 +221,8 @@ class LlamaCppEngine(LLMEngine):
     # ------------------------------------------------------------------ #
 
     @property
-    def model_path(self) -> str:
-        """Concrete local path of the loaded model (``llm.model_path``); fixed at construction."""
+    def model(self) -> str:
+        """Concrete local path of the loaded model (``llm.model_path``); read-only."""
         return self._model_path
 
     def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
@@ -324,25 +277,9 @@ class LlamaCppEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual OR structured reply from a llama.cpp
-        chat completion response.
-
-        Expected structure (OpenAI-compatible):
-
-            response["choices"][0]["message"]["content"] -> str
-
-        When `requested_structured` is True, the joined text is parsed via
-        `json.loads`; a parse failure falls back to returning the raw text
-        rather than raising, matching the base `LLMEngine` fallback contract
-        (structured-generation Pass 3). Grammar-constrained decoding makes a
-        genuinely invalid-JSON response effectively impossible here except
-        via `max_tokens` truncation mid-structure -- the fallback exists for
-        that case, not for provider unreliability the way it does for the
-        remote engines.
-
-        Renamed from `_extract_text` (structured-generation Pass 1
-        convention); gains `requested_structured` per the Pass 3 base
-        contract.
+        Read ``response["choices"][0]["message"]["content"]`` (``None`` counts
+        as ``""``); on a structured call, return its ``json.loads`` value
+        (raw text on a parse failure). An unexpected shape raises.
         """
         try:
             choices = response["choices"]
@@ -354,7 +291,7 @@ class LlamaCppEngine(LLMEngine):
             raise LLMEngineError(
                 "LlamaCppEngine._extract_result: unexpected response shape"
             ) from exc
-        text = str(content or "").strip()
+        text = str(content or "")
         if not requested_structured:
             return text
         try:
@@ -367,12 +304,21 @@ class LlamaCppEngine(LLMEngine):
         Extract llama-cpp-python chat-completion usage into a LlamaCppTokenUsage
         record.
 
-        The default ``create_chat_completion(...)`` path returns an
-        OpenAI-compatible dictionary response whose ``usage`` mapping contains
-        prompt, completion, and total token counts.
+        The response is an OpenAI-compatible dict whose ``usage`` mapping holds
+        prompt, completion and total counts. A response with no ``usage`` key
+        raises unless ``require_usage`` is ``False``, which yields an all-zero
+        record; a present but malformed ``usage`` always raises.
         """
         try:
             usage = response["usage"]
+        except KeyError as exc:
+            if not self.require_usage:
+                return LlamaCppTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: response missing usage."
+            ) from exc
         except Exception as exc:
             raise LLMEngineError(
                 "LlamaCppEngine._extract_token_usage: response missing usage."
@@ -400,12 +346,7 @@ class LlamaCppEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> LLMModelData:
-        """
-        Return configured llama.cpp model identity data for this engine.
-
-        Model data is derived from the concrete local path loaded by
-        llama-cpp-python.
-        """
+        """Return the llama.cpp model identity (the loaded local path)."""
         return LlamaCppModelData(
             provider="llama_cpp",
             model_path=self._model_path,
@@ -417,9 +358,9 @@ class LlamaCppEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot: the base fields plus ``model_path``. No client
-        kwargs (live objects, credentials).
+        Diagnostic snapshot: the base fields plus ``model`` (the loaded path).
+        No client kwargs (live objects, credentials).
         """
         base = super().to_dict()
-        base.update({"model_path": self._model_path})
+        base.update({"model": self._model_path})
         return base

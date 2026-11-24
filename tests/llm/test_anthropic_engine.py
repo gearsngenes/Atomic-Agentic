@@ -715,8 +715,9 @@ class TestAnthropicEngine:
         img = tmp_path / "photo.png"
         img.write_bytes(b"\x89PNG\r\n")
 
-        block = engine._prepare_attachment(str(img))
+        meta, block = engine._prepare_attachment(str(img))
 
+        assert meta == {"kind": "image", "mime": "image/png", "ext": ".png"}
         assert block["type"] == "image"
         assert block["source"]["type"] == "base64"
         assert block["source"]["media_type"] == "image/png"
@@ -730,8 +731,9 @@ class TestAnthropicEngine:
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(b"%PDF-1.4")
 
-        block = engine._prepare_attachment(str(pdf))
+        meta, block = engine._prepare_attachment(str(pdf))
 
+        assert meta == {"kind": "pdf", "mime": "application/pdf", "ext": ".pdf"}
         assert block["type"] == "document"
         assert block["source"]["type"] == "base64"
         assert block["source"]["media_type"] == "application/pdf"
@@ -745,8 +747,9 @@ class TestAnthropicEngine:
         txt = tmp_path / "notes.txt"
         txt.write_text("Hello notes", encoding="utf-8")
 
-        block = engine._prepare_attachment(str(txt))
+        meta, block = engine._prepare_attachment(str(txt))
 
+        assert meta == {"kind": "text", "mime": "text/plain", "ext": ".txt"}
         assert block["type"] == "document"
         assert block["source"]["type"] == "text"
         assert block["source"]["media_type"] == "text/plain"
@@ -763,7 +766,7 @@ class TestAnthropicEngine:
         }
         msgs = [{"role": "user", "content": "Describe this."}]
 
-        engine._attachments["img.png"] = fake_block
+        engine._blocks["img.png"] = fake_block
         payload = engine._build_provider_payload(msgs)
 
         content = payload["messages"][0]["content"]
@@ -782,7 +785,7 @@ class TestAnthropicEngine:
             {"role": "user", "content": "Second question."},
         ]
 
-        engine._attachments["notes.txt"] = fake_block
+        engine._blocks["notes.txt"] = fake_block
         payload = engine._build_provider_payload(msgs)
 
         first_user = payload["messages"][0]
@@ -792,20 +795,6 @@ class TestAnthropicEngine:
             {"type": "text", "text": "Second question."},
             fake_block,
         ]
-
-    def test_attachment_appends_bare_user_turn_when_none_exists(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8")
-        fake_block = {"type": "document", "source": {"type": "text", "data": "notes"}}
-        msgs = [{"role": "system", "content": "You are helpful."}]
-
-        engine._attachments["notes.txt"] = fake_block
-        payload = engine._build_provider_payload(msgs)
-
-        assert payload["messages"][-1]["role"] == "user"
-        assert payload["messages"][-1]["content"] == [fake_block]
 
     def test_attach_rejects_blank_and_non_string_paths(
         self, monkeypatch: pytest.MonkeyPatch
@@ -818,19 +807,23 @@ class TestAnthropicEngine:
         with pytest.raises(LLMEngineError, match="non-empty string"):
             engine.attach(123)  # type: ignore[arg-type]
 
-    def test_attach_stores_block_and_caches_the_same_path(
+    def test_attach_stores_metadata_and_a_private_block(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
-        txt = tmp_path / "notes.txt"
-        txt.write_text("hello", encoding="utf-8")
+        img = tmp_path / "photo.png"
+        img.write_bytes(b"\x89PNG\r\n")
 
-        first = engine.attach(str(txt))
-        second = engine.attach(str(txt))
+        first = engine.attach(str(img))
+        second = engine.attach(str(img))
 
-        assert first is second
-        assert engine.attachments == {str(txt): first}
+        assert first == {"kind": "image", "mime": "image/png", "ext": ".png"}
+        assert second == first
+        assert engine.attachments == {str(img): first}
+        assert "source" not in first
+        assert engine._blocks[str(img)]["type"] == "image"
+        assert base64.b64encode(b"\x89PNG\r\n").decode() not in repr(engine.attachments)
 
     def test_attachments_property_returns_a_copy(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -842,8 +835,9 @@ class TestAnthropicEngine:
         engine.attach(str(txt))
 
         engine.attachments.clear()  # type: ignore[attr-defined]
+        engine.attachments[str(txt)]["kind"] = "bogus"  # type: ignore[index]
 
-        assert str(txt) in engine.attachments
+        assert engine.attachments[str(txt)]["kind"] == "text"
 
     def test_detach_and_clear_attachments(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -860,10 +854,12 @@ class TestAnthropicEngine:
         assert engine.detach(str(first)) is True
         assert engine.detach(str(first)) is False
         assert list(engine.attachments) == [str(second)]
+        assert list(engine._blocks) == [str(second)]
 
         engine.clear_attachments()
 
         assert engine.attachments == {}
+        assert engine._blocks == {}
 
     def test_payload_reads_the_engine_attachments(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -872,11 +868,14 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8")
         txt = tmp_path / "notes.txt"
         txt.write_text("hello", encoding="utf-8")
-        block = engine.attach(str(txt))
+        engine.attach(str(txt))
 
         payload = engine._build_provider_payload([{"role": "user", "content": "Q?"}])
 
-        assert payload["messages"][0]["content"][-1] is block
+        assert payload["messages"][0]["content"][-1] == {
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": "hello"},
+        }
 
     def test_validate_attachment_rejects_illegal_ext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -911,7 +910,7 @@ class TestAnthropicEngine:
         bad_path = tmp_path / "notes.txt"
         bad_path.mkdir()
 
-        with pytest.raises(LLMEngineError, match="_prepare_attachment failed"):
+        with pytest.raises(LLMEngineError, match=r"_prepare_attachment failed for .*: "):
             engine._prepare_attachment(str(bad_path))
 
     def test_prepare_attachment_inlines_long_text_whole(
@@ -922,7 +921,7 @@ class TestAnthropicEngine:
         txt = tmp_path / "long.txt"
         txt.write_text("a" * 300_000, encoding="utf-8")
 
-        block = engine._prepare_attachment(str(txt))
+        _, block = engine._prepare_attachment(str(txt))
 
         assert block["source"]["data"] == "a" * 300_000
 

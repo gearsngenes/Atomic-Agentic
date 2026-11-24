@@ -10,6 +10,7 @@ mistral_module = importlib.import_module("atomic_agentic.llm.mistral_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import MistralEngine
+from atomic_agentic.models.results import MistralTokenUsage
 from atomic_agentic.utils.core import run_coro_sync
 
 
@@ -166,7 +167,7 @@ class TestMistralEngine:
         call = fake.aio_complete_calls[-1]
         assert call["model"] == "mistral-small-latest"
         assert call["temperature"] == 0.3
-        assert engine._extract_result(result, requested_structured=False) == "mistral async text"
+        assert engine._extract_result(result, requested_structured=False) == " mistral async text "
 
     def test_removed_runtime_key_is_omitted_from_call(
         self, monkeypatch: pytest.MonkeyPatch
@@ -203,37 +204,44 @@ class TestMistralEngine:
 
         assert FakeMistralClient.instances[-1].complete_calls[-1]["temperature"] == 0.1
 
-    @pytest.mark.parametrize(
-        ("filename", "expected"),
-        [
-            ("doc.pdf", "pdf"),
-            ("image.png", "image"),
-            ("notes.txt", "text"),
-        ],
-    )
-    def test_mistral_classify_kind(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        filename: str,
-        expected: str,
+    def test_mistral_ensure_user_parts_converts_the_last_user_message(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
-        assert engine._classify_kind(filename) == expected
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "hello"},
+        ]
 
-    def test_mistral_ensure_user_parts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        index = engine._ensure_user_parts(messages)
+
+        assert index == 2
+        assert messages[2]["content"] == [{"type": "text", "text": "hello"}]
+        assert messages[0]["content"] == "first"
+
+    def test_mistral_ensure_user_parts_empty_content_becomes_empty_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         engine = _make_engine(monkeypatch)
-        messages = [{"role": "assistant", "content": "hello"}]
+        messages = [{"role": "user", "content": ""}]
 
-        index = engine._ensure_user_parts(messages)
+        assert engine._ensure_user_parts(messages) == 0
+        assert messages[0]["content"] == []
 
-        assert index == 1
-        assert messages[1] == {"role": "user", "content": []}
+    def test_mistral_helpers_moved_to_utils(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
 
-        messages = [{"role": "user", "content": "hello"}]
-        index = engine._ensure_user_parts(messages)
+        for name in ("_classify_kind", "_read_text_file"):
+            assert not hasattr(engine, name)
 
-        assert index == 0
-        assert messages[0]["content"] == [{"type": "text", "text": "hello"}]
+    def test_prepare_attachment_failure_names_the_cause(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=r"_prepare_attachment failed for .*: .*gone\.txt"):
+            engine._prepare_attachment(str(tmp_path / "gone.txt"))
 
     def test_mistral_payload_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -257,7 +265,8 @@ class TestMistralEngine:
         response = engine._call_provider(payload)
         fake = FakeMistralClient.instances[-1]
 
-        assert engine._extract_result(response, requested_structured=False) == "mistral text"
+        # the base ``extract`` strips; ``_extract_result`` no longer does
+        assert engine._extract_result(response, requested_structured=False) == " mistral text "
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
         assert fake.complete_calls[-1]["temperature"] == 0.6
 
@@ -673,6 +682,34 @@ class TestMistralTokenUsage:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="usage"):
             engine._extract_token_usage(SimpleNamespace(usage=None))
+
+    def test_usage_none_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+
+        result = engine._extract_token_usage(SimpleNamespace(usage=None))
+
+        assert isinstance(result, MistralTokenUsage)
+        assert (result.input_tokens, result.generated_tokens,
+                result.total_tokens, result.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = "no"  # type: ignore[assignment]
+
+    def test_partial_usage_still_raises_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+        usage = SimpleNamespace(prompt_tokens=None, completion_tokens=1, total_tokens=1)
+
+        with pytest.raises(LLMEngineError, match="prompt_tokens"):
+            engine._extract_token_usage(SimpleNamespace(usage=usage))
 
     def test_missing_prompt_tokens_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)

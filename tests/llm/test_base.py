@@ -101,7 +101,7 @@ class TestLLMEngineMessagesAndInvoke:
     def test_async_invoke_rejects_non_list_messages(self) -> None:
         engine = FakeLLMEngine()
 
-        with pytest.raises(LLMEngineError, match="async_invoke"):
+        with pytest.raises(LLMEngineError, match=r"^FakeLLMEngine\.invoke: .*must be a list"):
             run_coro_sync(engine.async_invoke({"messages": "hello"}))
 
     def test_invoke_rejects_missing_messages(self) -> None:
@@ -158,8 +158,54 @@ class TestLLMEngineMessagesAndInvoke:
     def test_unexpected_provider_error_is_wrapped_by_invoke(self) -> None:
         engine = FakeLLMEngine(responses=[ValueError("provider failed")])
 
-        with pytest.raises(LLMEngineError, match="invoke failed"):
+        with pytest.raises(LLMEngineError, match=r"^FakeLLMEngine\.invoke: provider failed$"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
+
+    def test_error_prefix_is_uniform_across_sync_and_async(self) -> None:
+        messages = {"messages": [{"role": "assistant", "content": "x"}]}
+
+        with pytest.raises(LLMEngineError, match=r"^FakeLLMEngine\.invoke: "):
+            FakeLLMEngine().invoke(messages)
+        with pytest.raises(LLMEngineError, match=r"^FakeLLMEngine\.invoke: "):
+            run_coro_sync(FakeLLMEngine().async_invoke(messages))
+
+    @pytest.mark.parametrize("role", ["tool", "developer", "bogus"])
+    def test_normalize_messages_rejects_unsupported_role(self, role: str) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match=f"unsupported role '{role}'"):
+            engine.invoke({"messages": [
+                {"role": "user", "content": "hi"},
+                {"role": role, "content": "x"},
+            ]})
+
+    def test_normalize_messages_lowercases_roles_and_accepts_the_three(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.invoke({"messages": [
+            {"role": "SYSTEM", "content": "s"},
+            {"role": "User", "content": "u"},
+            {"role": "ASSISTANT", "content": "a"},
+        ]})
+
+        assert [m["role"] for m in engine.calls[0]] == ["system", "user", "assistant"]
+
+    def test_normalize_messages_requires_a_user_message(self) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match="at least one user message"):
+            engine.invoke({"messages": [
+                {"role": "system", "content": "s"},
+                {"role": "assistant", "content": "a"},
+            ]})
+        assert engine.call_count == 0
+
+    def test_system_message_is_optional(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.invoke({"messages": [{"role": "user", "content": "u"}]})
+
+        assert engine.call_count == 1
 
 
 class TestLLMEngineNoRetry:
@@ -169,7 +215,7 @@ class TestLLMEngineNoRetry:
     def test_transient_error_is_not_retried(self, error: Exception) -> None:
         engine = FakeLLMEngine(responses=[error, " recovered "])
 
-        with pytest.raises(LLMEngineError, match="invoke failed"):
+        with pytest.raises(LLMEngineError, match="FakeLLMEngine.invoke: temporary"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
         assert engine.call_count == 1
@@ -178,7 +224,7 @@ class TestLLMEngineNoRetry:
     def test_transient_error_is_not_retried_async(self, error: Exception) -> None:
         engine = FakeLLMEngine(responses=[error, " recovered "])
 
-        with pytest.raises(LLMEngineError, match="async_invoke failed"):
+        with pytest.raises(LLMEngineError, match="FakeLLMEngine.invoke: temporary"):
             run_coro_sync(engine.async_invoke({"messages": [{"role": "user", "content": "Hello"}]}))
 
         assert engine.call_count == 1
@@ -427,6 +473,16 @@ class TestLLMEngineRuntimeParameters:
 
         assert engine.runtime_parameters == {"thinking": {"type": "adaptive", "x": [1]}}
 
+    def test_update_stores_a_copy_of_the_value(self) -> None:
+        engine = FakeLLMEngine()
+        value = {"type": "adaptive", "x": [1]}
+
+        engine.update_runtime_parameters(thinking=value)
+        value["x"].append(2)
+        value["type"] = "off"
+
+        assert engine.runtime_parameters == {"thinking": {"type": "adaptive", "x": [1]}}
+
     def test_to_dict_is_a_deep_copy(self) -> None:
         engine = FakeLLMEngine()
         engine.update_runtime_parameters(thinking={"type": "adaptive"})
@@ -476,6 +532,31 @@ class TestLLMEngineRuntimeParameters:
         data["runtime_parameters"]["temperature"] = 9.9
 
         assert engine.runtime_parameters == {"temperature": 0.2}
+
+
+class TestLLMEngineRequireUsage:
+    def test_defaults_to_true_and_is_dumped(self) -> None:
+        engine = FakeLLMEngine()
+
+        assert engine.require_usage is True
+        assert engine.to_dict()["require_usage"] is True
+
+    def test_settable_bool(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.require_usage = False
+
+        assert engine.require_usage is False
+        assert engine.to_dict()["require_usage"] is False
+
+    @pytest.mark.parametrize("bad", [1, "yes", None])
+    def test_bad_type_raises(self, bad: Any) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match="require_usage must be a bool"):
+            engine.require_usage = bad
+
+        assert engine.require_usage is True
 
 
 class TestLLMEngineModelData:

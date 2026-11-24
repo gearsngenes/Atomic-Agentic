@@ -147,6 +147,42 @@ orchestration. Those responsibilities belong to agents.
 
 ------------------------------------------------------------------------
 
+### Engine configuration
+
+**Messages.** `messages` is a non-empty list of `{"role", "content"}`
+mappings with string values. The role must be `system`, `user` or
+`assistant` (case-insensitive), and at least one `user` message is required;
+a system message is optional. Anything else raises `LLMEngineError`.
+
+**Runtime parameters.** Generation settings are the provider's own call
+parameters, set after construction. `None` removes a key, every key is
+validated before any is applied, and the value is copied on the way in.
+`stream` is not supported on any engine.
+
+``` python
+engine.update_runtime_parameters(temperature=0.2, max_output_tokens=512)
+engine.update_runtime_parameters(temperature=None)   # removes the key
+print(engine.runtime_parameters)                      # a deep copy
+```
+
+**Engine attributes.**
+
+- `strict` (`OpenAIEngine`, `MistralEngine`): whether structured output
+  uses strict schema conformance; default `True`.
+- `block_separator` (`AnthropicEngine`): the string inserted between
+  multiple response text blocks; default `""`.
+- `require_usage` (every engine): default `True`. A response that carries no
+  usage object raises; with `require_usage = False` the result carries
+  all-zero token usage instead.
+
+**Attachments.** `OpenAIEngine`, `AnthropicEngine`, `GeminiEngine` and
+`MistralEngine` can hold files that ride along on every call:
+`engine.attach(path)`, `engine.detach(path)`, `engine.clear_attachments()`.
+`LlamaCppEngine` and `LiteLLMEngine` have no attach API. See
+[`examples/LLM_Examples/06_engine_configuration_demo.py`](examples/LLM_Examples/06_engine_configuration_demo.py).
+
+------------------------------------------------------------------------
+
 ## Quickstart C: Basic Agents
 
 `Agent` is an autonomous unit that uses an LLM Engine to complete tasks.

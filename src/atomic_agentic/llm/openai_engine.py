@@ -33,7 +33,13 @@ from ..models.results.llm import (
     LLMModelData,
     RemoteLLMModelData
 )
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import (
+    classify_path,
+    collect_system_text,
+    inlined_file_block,
+    read_text_file,
+    validate_attachment_path,
+)
 from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["OpenAIEngine"]
@@ -83,30 +89,15 @@ class OpenAIEngine(LLMEngine):
 
     Result extraction
     -----------------
-    ``_extract_result`` reads the generated assistant reply from the Responses
-    API response. For a plain-text call (``requested_structured=False``) it
-    returns ``response.output_text`` unchanged. For a structured call, it
-    attempts ``json.loads(response.output_text)`` and falls back to
-    ``response.output_text`` on a parse failure rather than raising —
-    detection is the base-supplied ``requested_structured`` flag, not
-    response introspection (Pass 3 revision; previously inspected
-    ``response.text.format.type`` and raised uncaught on parse failure).
-    Renamed from ``_extract_text`` (structured-generation Pass 1 base
-    contract widening).
-    ``_extract_token_usage`` maps Responses API usage fields into an
-    ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
-    identity from ``self.model``.
+    ``_extract_result`` returns ``response.output_text``, parsed with
+    ``json.loads`` on a structured call (raw text on a parse failure).
+    ``_extract_token_usage`` maps Responses API usage into ``OpenAITokenUsage``.
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to the Responses API's
-    ``text.format`` field completely unmodified — this engine performs no
-    schema pruning (structured-generation Pass 8). A schema keyword OpenAI's
-    strict mode rejects (e.g. ``default``) surfaces as OpenAI's own API
-    error rather than being silently stripped. OpenAI's strict mode also
-    requires ``additionalProperties`` be set to exactly ``false`` on every
-    object schema — the caller's own responsibility, not validated or
-    corrected here.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``text.format``; OpenAI
+    rejects what it does not accept natively (strict mode, for example,
+    requires ``additionalProperties: false`` on every object).
 
     Runtime parameters and configuration
     ------------------------------------
@@ -119,7 +110,8 @@ class OpenAIEngine(LLMEngine):
     valid). ``strict`` is the one AA behavior attribute: a validated, settable
     bool that only shapes the structured-output envelope. Timeout and retry are
     the SDK client's own settings (``timeout``, ``max_retries``), passed through
-    ``client_kwargs``.
+    ``client_kwargs``. ``require_usage`` (base) controls a response with no
+    usage object.
     """
 
     _RESERVED_RUNTIME_KEYS = frozenset({"model", "input", "instructions", "stream"})
@@ -279,7 +271,7 @@ class OpenAIEngine(LLMEngine):
         2. Convert messages into ``input`` blocks and system turns into
            ``instructions``.
         3. Append the engine's attachments (a snapshot) to the last ``user``
-           block, creating one when none exists.
+           block.
         4. ``update`` the engine-owned fields (``model``, ``input``,
            ``instructions``) over the runtime snapshot, so they always win.
         5. Structured call: set ``text["format"]`` on a copy of the runtime
@@ -289,21 +281,23 @@ class OpenAIEngine(LLMEngine):
         blocks = self._build_role_blocks(messages)
         attachments = dict(self._attachments)
         if attachments:
-            user_parts: List[Dict[str, Any]] = blocks[self._ensure_user_block(blocks)]["content"]
+            last_user = next(b for b in reversed(blocks) if b["role"] == "user")
+            user_parts: List[Dict[str, Any]] = last_user["content"]
             for path, meta in attachments.items():
                 kind = str(meta.get("kind", "text"))
                 if meta.get("inlined"):
                     text = str(meta.get("inlined_text") or "")
                     if text:
-                        header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                        user_parts.append({"type": "input_text", "text": header + text})
+                        user_parts.append(
+                            {"type": "input_text", "text": inlined_file_block(path, text)}
+                        )
                 elif meta.get("uploaded") and meta.get("file_id"):
                     part_type = "input_file" if kind == "pdf" else "input_image"
                     user_parts.append({"type": part_type, "file_id": str(meta["file_id"])})
 
         payload: Dict[str, Any] = dict(self._runtime_parameters)
         payload.update(model=self.model, input=blocks)
-        instructions = self._collect_instructions(messages)
+        instructions = collect_system_text(messages)
         if instructions:
             payload.update(instructions=instructions)
         if output_structure is not None:
@@ -341,19 +335,9 @@ class OpenAIEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Responses
-        API response object.
-
-        ``requested_structured`` is the base-supplied signal (was
-        ``output_structure`` given for this call) — authoritative, since it's
-        the same condition that decided whether the payload builder set
-        ``text.format`` in the first place; no response introspection needed.
-        When not requested, returns ``response.output_text`` unchanged (empty
-        string when no text is present; does not raise). When requested,
-        attempts ``json.loads(response.output_text)``; a parse failure
-        (shouldn't happen under ``strict: True``, but possible under e.g.
-        output-token truncation) falls back to returning the raw text instead
-        of raising.
+        Return ``response.output_text``; on a structured call, its
+        ``json.loads`` value (raw text when it does not parse, e.g. after
+        output-token truncation).
         """
         if not requested_structured:
             return response.output_text
@@ -385,9 +369,15 @@ class OpenAIEngine(LLMEngine):
         ``cache_write_tokens`` both default to ``None`` (not reported).
 
         ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
+        A response with no usage object raises unless ``require_usage`` is
+        ``False``, which yields an all-zero record.
         """
         usage = response.usage
         if usage is None:
+            if not self.require_usage:
+                return OpenAITokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError("OpenAI response did not include usage.")
 
         output_details = usage.output_tokens_details
@@ -429,7 +419,7 @@ class OpenAIEngine(LLMEngine):
         - Text/code → inline whole as text (UTF-8).
         """
         try:
-            kind = self._classify_path(path)
+            kind = classify_path(path, OPENAI_IMAGE_EXTS)
             mime, _ = mimetypes.guess_type(path)
             mime = mime or ""
             ext = os.path.splitext(path)[1].lower()
@@ -446,7 +436,7 @@ class OpenAIEngine(LLMEngine):
                 }
 
             # Text/code → inline as text
-            text = self._read_text_file(path)
+            text = read_text_file(path)
 
             return {
                 "kind": "text",
@@ -460,40 +450,12 @@ class OpenAIEngine(LLMEngine):
         except Exception as exc:
             # Normalize unexpected errors to LLMEngineError so callers see a consistent type.
             raise LLMEngineError(
-                f"OpenAIEngine._prepare_attachment failed for {path!r}"
+                f"OpenAIEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------ #
     # OpenAI-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
-
-    def _classify_path(self, path: str) -> str:
-        """
-        Classify `path` into 'pdf' | 'image' | 'text'.
-
-        Base validation has already run; this is a semantic bucketization.
-        """
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        ext = os.path.splitext(path)[1].lower()
-
-        if ext == ".pdf" or mime == "application/pdf":
-            return "pdf"
-        if ext in OPENAI_IMAGE_EXTS or mime.startswith("image/"):
-            return "image"
-        return "text"
-
-    def _collect_instructions(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """
-        Concatenate all system message contents into an `instructions` string.
-        """
-        parts = [
-            m["content"]
-            for m in messages
-            if (m.get("role") or "").lower() == "system" and m.get("content")
-        ]
-        joined = "\n\n".join(parts).strip()
-        return joined or None
 
     def _build_role_blocks(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """
@@ -502,13 +464,15 @@ class OpenAIEngine(LLMEngine):
         - `assistant` turns → `output_text`
         - Other non-system turns → `input_text`
         - `system` content is carried only via `instructions`.
+        - An empty user turn is kept (attachments attach to the last user
+          block); other empty turns are skipped.
         """
         blocks: List[Dict[str, Any]] = []
         for m in messages:
-            role = (m.get("role") or "user").lower()
+            role = m["role"]
             if role == "system":
-                continue  # handled by _collect_instructions
-            text = m.get("content") or ""
+                continue  # carried via `instructions`
+            text = m["content"]
             if not text and role != "user":
                 # Keep empty user (we attach into it), skip other empty roles.
                 continue
@@ -518,27 +482,6 @@ class OpenAIEngine(LLMEngine):
                 parts.append({"type": part_type, "text": text})
             blocks.append({"role": role, "content": parts})
         return blocks
-
-    def _ensure_user_block(self, blocks: List[Dict[str, Any]]) -> int:
-        """
-        Return the index of a `user` block; create an empty one at the end if none exist.
-        """
-        for i in range(len(blocks) - 1, -1, -1):
-            if blocks[i].get("role") == "user":
-                return i
-        blocks.append({"role": "user", "content": []})
-        return len(blocks) - 1
-
-    def _read_text_file(self, path: str) -> str:
-        """
-        Read a local file as UTF-8 (with replacement). Returns a best-effort string.
-        """
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            return raw.decode("utf-8", errors="replace")
-        except Exception as exc:  # pragma: no cover - unlikely IO failures
-            return f"[Error reading file '{os.path.basename(path)}': {exc}]"
 
     def _upload_file(self, path: str) -> str:
         """

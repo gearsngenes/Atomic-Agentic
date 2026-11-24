@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import mimetypes
 import os
 from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
@@ -19,12 +20,16 @@ from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
     ANTHROPIC_IMAGE_EXTS,
-    ANTHROPIC_DOCUMENT_EXTS,
     ANTHROPIC_ALLOWED_EXTS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import AnthropicTokenUsage, RemoteLLMModelData
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import (
+    classify_path,
+    collect_system_text,
+    read_text_file,
+    validate_attachment_path,
+)
 from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["AnthropicEngine"]
@@ -57,68 +62,48 @@ class AnthropicEngine(LLMEngine):
 
     File policy
     -----------
-    Inline-only attachment support (Anthropic Files API is still in beta —
-    deferred to a future pass):
+    Inline-only attachment support (no Files API):
 
     - Images (PNG, JPG, JPEG, GIF, WEBP) → base64 ``image`` content blocks.
     - PDFs → base64 ``document`` content blocks.
     - Text / code files → UTF-8 ``document/text`` content blocks
       (no base64 required).
 
-    Attachment blocks are appended to the last user-turn ``content`` list
-    in ``_build_provider_payload``. ``attach``/``detach``/``clear_attachments``
-    are this engine's own API; detach has no provider cleanup.
+    ``attach`` stores light metadata (``kind``, ``mime``, ``ext``) in
+    ``attachments`` and keeps the content block privately; the blocks are
+    appended to the last user turn in ``_build_provider_payload``.
+    ``attach``/``detach``/``clear_attachments`` are this engine's own API;
+    detach has no provider cleanup.
 
     Invocation
     ----------
-    ``role="system"`` messages are extracted from the normalized input list
-    and forwarded as the top-level ``system=`` parameter (joined with
-    ``"\\n\\n"`` when multiple system messages are present).  The remaining
-    messages form the ``messages=`` list.  ``max_tokens`` is always sent
+    System messages are joined and forwarded as the top-level ``system=``
+    parameter; the rest form ``messages=``. ``max_tokens`` is always sent
     (required by Anthropic): ``_REQUIRED_RUNTIME_DEFAULTS`` supplies
     ``max_tokens=8192`` under the runtime parameters, so the store starts empty
-    and removing ``max_tokens`` falls back to that default.  Every other generation setting (``stop_sequences``,
-    ``thinking``, ``extra_body``, ...) is a runtime parameter under Anthropic's
-    own name, forwarded verbatim:
-    ``engine.update_runtime_parameters(thinking={"type": "adaptive"})``.
-    Which fields the API accepts depends on the API version the SDK speaks
-    (anthropic 2.x rejects ``temperature``, which can travel in ``extra_body``);
-    AA does not validate them.  Timeout and retry are the SDK client's own
-    settings (``timeout``, ``max_retries``) through ``client_kwargs``.
-    ``block_separator`` (default ``""``) controls how multiple response text
-    blocks are rejoined into the returned string — relevant when a response
-    contains more than one ``text`` block (e.g. Anthropic citations, which
-    can split a response into interleaved cited/uncited blocks). Defaults to
-    no inserted separator, matching Anthropic's own text-reconstruction
-    convention (the streaming SDK's ``text_stream`` concatenates raw text
-    deltas across content-block boundaries with nothing inserted). It is a
-    validated, settable attribute, not a runtime parameter.
+    and removing ``max_tokens`` falls back to that default. Every other
+    generation setting (``stop_sequences``, ``thinking``, ``extra_body``, ...)
+    is a runtime parameter under Anthropic's own name, forwarded verbatim:
+    ``engine.update_runtime_parameters(thinking={"type": "adaptive"})``. Which
+    fields the API accepts depends on the SDK version (anthropic 2.x rejects
+    ``temperature``, which can travel in ``extra_body``); AA does not validate
+    them. Timeout and retry are the SDK client's own settings through
+    ``client_kwargs``. ``block_separator`` (default ``""``) is the string
+    inserted between multiple response ``text`` blocks (e.g. with citations);
+    it is a validated, settable attribute, not a runtime parameter. Anthropic
+    always reports usage, so ``require_usage`` has no effect here.
 
     Result extraction
-    ------------------
-    ``_extract_result`` reuses the same ``TextBlock``-joining logic as
-    before (``block_separator``-joined; empty string on refusal or no text
-    blocks). When the base class signals ``requested_structured=True``, the
-    joined text is parsed via ``json.loads``; a parse failure (including the
-    empty-string refusal case) falls back to returning the raw text rather
-    than raising, matching the base ``LLMEngine`` fallback contract
-    (``structured-generation`` Pass 3). No Anthropic-specific detection is
-    needed — the response shape is identical whether or not structured
-    output was requested.
+    -----------------
+    ``_extract_result`` joins the ``text`` blocks with ``block_separator``
+    (empty string on refusal or no text) and, on a structured call, parses
+    them with ``json.loads`` (raw text on a parse failure).
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to
-    ``output_config.format.schema`` completely unmodified — this engine
-    performs no schema pruning (structured-generation Pass 8). Keywords
-    Anthropic's JSON-Schema mode rejects unconditionally (confirmed live,
-    2026-08-19: ``minimum``, ``maximum``, ``multipleOf``, ``maxItems``) now
-    surface as Anthropic's own API error rather than being silently
-    stripped. ``oneOf`` and an over-constrained ``minItems`` are
-    structurally risky (can collapse a field to an unconstrained ``{}``)
-    and are not validated here; ``additionalProperties`` must be set to
-    exactly ``false`` on every object schema, the caller's own
-    responsibility.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``output_config.format.schema``;
+    Anthropic rejects what it does not accept natively (``additionalProperties``
+    must be ``false`` on every object).
 
     A runtime ``output_config`` (e.g. ``effort``) is allowed: on a structured
     call the engine copies it and sets only its ``format`` key; a plain call
@@ -179,7 +164,8 @@ class AnthropicEngine(LLMEngine):
             name=name,
             description=description or "Anthropic Claude language model engine.",
         )
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
+        self._attachments: Dict[str, Dict[str, Any]] = {}
+        self._blocks: Dict[str, Dict[str, Any]] = {}
         self._client: Anthropic | AsyncAnthropic = (
             client if client is not None else Anthropic(**client_kwargs)
         )
@@ -204,29 +190,32 @@ class AnthropicEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     @property
     def attachments(self) -> Mapping[str, Mapping[str, Any]]:
-        """Read-only copy of attached local path -> provider metadata."""
-        return dict(self._attachments)
+        """Copy of attached local path -> metadata (``kind``, ``mime``, ``ext``)."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
 
     def attach(self, path: str) -> Mapping[str, Any]:
         """
-        Attach a local file for every later call; returns its metadata.
+        Attach a local file for every later call; returns its metadata copy
+        (never the content block).
 
         1. Reject a blank or non-string path.
         2. Return the stored metadata when ``path`` is already attached.
-        3. Validate the path, prepare the provider metadata, store it.
+        3. Validate the path, build the metadata and content block, store both.
         """
         if not isinstance(path, str) or not path:
             raise LLMEngineError("AnthropicEngine.attach: path must be a non-empty string")
         if path in self._attachments:
-            return self._attachments[path]
+            return dict(self._attachments[path])
 
         self._validate_attachment_path(path)
-        meta = self._prepare_attachment(path)
+        meta, block = self._prepare_attachment(path)
         self._attachments[path] = meta
-        return meta
+        self._blocks[path] = block
+        return dict(meta)
 
     def detach(self, path: str) -> bool:
         """Detach ``path``; ``True`` when something was removed (no provider cleanup)."""
+        self._blocks.pop(path, None)
         return self._attachments.pop(path, None) is not None
 
     def clear_attachments(self) -> None:
@@ -263,49 +252,33 @@ class AnthropicEngine(LLMEngine):
         Build the ``messages.create`` payload from normalized messages and a
         snapshot of the engine's attachments.
 
-        Lifecycle: (1) partition system vs. conversation; (2) convert to
-        Anthropic content-list format; (3) append attachment blocks to the
-        last user turn; (4) assemble final payload dict from the
-        required defaults, the runtime parameters and the engine-owned fields;
-        (5) if ``output_structure`` is given, set ``output_config.format`` on a
-        copy of any runtime ``output_config`` (the caller's raw schema,
-        forwarded unmodified). Blank system messages are dropped.
+        1. Join the system messages (blank ones dropped) for ``system``.
+        2. Convert the other messages to content-list format.
+        3. Append the attachment blocks to the last user turn.
+        4. Start from the required defaults, then the runtime parameters, then
+           the engine-owned fields (``model``, ``messages``, ``system``), so
+           the engine-owned fields win.
+        5. Structured call: set ``output_config.format`` on a copy of any
+           runtime ``output_config`` (the caller's raw schema, unmodified).
         """
-        # 1. Partition system vs. conversation messages
-        system_parts = [
-            m["content"].strip()
+        # 1-2. System text and conversation turns
+        system = collect_system_text(messages)
+        anthropic_msgs: list[dict[str, Any]] = [
+            {"role": m["role"], "content": [{"type": "text", "text": m["content"]}]}
             for m in messages
-            if m.get("role") == "system" and m["content"].strip()
+            if m["role"] != "system"
         ]
-        conv = [m for m in messages if m.get("role") != "system"]
-
-        # 2. Convert to Anthropic format — content always a list
-        anthropic_msgs: list[dict[str, Any]] = []
-        for m in conv:
-            content = m["content"]
-            if not isinstance(content, list):
-                content = [{"type": "text", "text": content}]
-            anthropic_msgs.append({"role": m["role"], "content": content})
 
         # 3. Append attachment blocks to the last user turn
-        blocks = list(self._attachments.values())
+        blocks = list(self._blocks.values())
         if blocks:
-            idx = next(
-                (i for i in range(len(anthropic_msgs) - 1, -1, -1)
-                 if anthropic_msgs[i]["role"] == "user"),
-                None,
-            )
-            if idx is not None:
-                anthropic_msgs[idx]["content"] = anthropic_msgs[idx]["content"] + blocks
-            else:
-                anthropic_msgs.append({"role": "user", "content": blocks})
+            last_user = next(m for m in reversed(anthropic_msgs) if m["role"] == "user")
+            last_user["content"] = last_user["content"] + blocks
 
-        # 4. Assemble the call kwargs: the runtime-parameter snapshot, with the
-        #    engine-owned fields updated over it so they always win
+        # 4. Assemble the call kwargs
         payload: dict[str, Any] = dict(self._REQUIRED_RUNTIME_DEFAULTS)
         payload.update(self._runtime_parameters)
         payload.update(model=self.model, messages=anthropic_msgs)
-        system = "\n\n".join(system_parts).strip()
         if system:
             payload.update(system=system)
 
@@ -323,15 +296,9 @@ class AnthropicEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Messages
-        API response object.
-
-        Joins all ``TextBlock`` parts with ``block_separator`` (empty string
-        on refusal or no text blocks) -- unchanged regardless of
-        ``requested_structured``. When not requested, returns that text
-        as-is. When requested, attempts ``json.loads`` on the joined text; a
-        parse failure (including the empty-string refusal case) falls back
-        to returning the raw text instead of raising.
+        Join the ``text`` blocks with ``block_separator`` (empty string on
+        refusal or no text); on a structured call, ``json.loads`` the joined
+        text (raw text on a parse failure, including the empty refusal).
         """
         text = self.block_separator.join(
             block.text for block in response.content if block.type == "text"
@@ -397,56 +364,39 @@ class AnthropicEngine(LLMEngine):
         except ValueError as exc:
             raise LLMEngineError(str(exc)) from exc
 
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
+    def _prepare_attachment(self, path: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Build an inline Anthropic content block for ``path`` (no upload).
+        Return ``(metadata, content block)`` for ``path`` (no upload).
 
-        Images → base64 ``image`` block; PDFs → base64 ``document`` block;
-        text/code → UTF-8 ``document/text`` block (whole file).
+        Images become a base64 ``image`` block, PDFs a base64 ``document``
+        block, text/code a ``document`` block with a ``text`` source (whole
+        file, UTF-8 with replacement). The metadata is ``kind``
+        (``"image"``/``"pdf"``/``"text"``), ``mime`` and ``ext``.
         """
         try:
+            kind = classify_path(path, ANTHROPIC_IMAGE_EXTS)
+            mime, _ = mimetypes.guess_type(path)
             ext = os.path.splitext(path)[1].lower()
+            meta = {"kind": kind, "mime": mime or "", "ext": ext}
 
-            if ext in ANTHROPIC_IMAGE_EXTS:
+            if kind in ("image", "pdf"):
                 with open(path, "rb") as fh:
                     data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": _MIME_MAP[ext],
-                        "data": data,
-                    },
-                }
-
-            if ext in ANTHROPIC_DOCUMENT_EXTS:
-                with open(path, "rb") as fh:
-                    data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": _MIME_MAP[ext],
-                        "data": data,
-                    },
-                }
-
-            # Text / code — document/text source (no base64 needed)
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-            return {
-                "type": "document",
-                "source": {
+                block_type = "image" if kind == "image" else "document"
+                source = {"type": "base64", "media_type": _MIME_MAP[ext], "data": data}
+            else:
+                block_type = "document"
+                source = {
                     "type": "text",
                     "media_type": "text/plain",
-                    "data": text,
-                },
-            }
+                    "data": read_text_file(path),
+                }
+            return meta, {"type": block_type, "source": source}
         except LLMEngineError:
             raise
         except Exception as exc:
             raise LLMEngineError(
-                f"AnthropicEngine._prepare_attachment failed for {path!r}"
+                f"AnthropicEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------ #

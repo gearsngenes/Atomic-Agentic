@@ -1,7 +1,52 @@
-"""Attachment validation helpers for LLM engine adapters."""
+"""Pure helpers shared by the LLM engine adapters (messages, attachments)."""
 
 import mimetypes
 import os
+from typing import Any, Iterable, Mapping
+
+
+def collect_system_text(messages: Iterable[Mapping[str, Any]]) -> str | None:
+    """
+    Join the non-blank ``system`` message contents with blank lines.
+
+    Returns the stripped result, or ``None`` when no system message has
+    non-blank content.
+    """
+    parts = [
+        m["content"].strip()
+        for m in messages
+        if m.get("role") == "system" and m["content"].strip()
+    ]
+    return "\n\n".join(parts) or None
+
+
+def classify_path(path: str, image_exts: Iterable[str]) -> str:
+    """
+    Bucket ``path`` as ``"pdf"``, ``"image"`` or ``"text"``.
+
+    A path is a PDF by extension or MIME type, an image when its extension is
+    in ``image_exts`` or its MIME type starts with ``image/``, and text
+    otherwise.
+    """
+    mime, _ = mimetypes.guess_type(path)
+    mime = mime or ""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf" or mime == "application/pdf":
+        return "pdf"
+    if ext in image_exts or mime.startswith("image/"):
+        return "image"
+    return "text"
+
+
+def read_text_file(path: str) -> str:
+    """Read ``path`` as UTF-8, replacing undecodable bytes. IO errors propagate."""
+    with open(path, "rb") as fh:
+        return fh.read().decode("utf-8", errors="replace")
+
+
+def inlined_file_block(path: str, text: str) -> str:
+    """Return ``text`` under an ``[Inlined file: <name>]`` header line."""
+    return f"\n[Inlined file: {os.path.basename(path)}]\n{text}"
 
 
 def validate_attachment_path(

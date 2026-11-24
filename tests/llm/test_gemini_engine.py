@@ -13,6 +13,7 @@ gemini_module = importlib.import_module("atomic_agentic.llm.gemini_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import GeminiEngine
+from atomic_agentic.models.results import GeminiTokenUsage
 from atomic_agentic.utils.core import run_coro_sync
 
 
@@ -212,19 +213,16 @@ class TestGeminiEngine:
         assert len(contents[2].parts) == 2  # last user turn gets the attachment
         assert contents[2].parts[1].file_data.file_uri == "gs://fake/f1"
 
-    def test_build_content_list_standalone_attachment_when_no_user_turn(
+    def test_build_content_list_attachment_needs_a_non_empty_user_turn(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
         attachments = {"file.txt": {"uploaded": True, "file_obj": file_obj, "mime": "text/plain"}}
-        messages = [{"role": "assistant", "content": "Hello"}]
+        messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": "Hello"}]
 
-        contents = engine._build_content_list(messages, attachments)
-
-        # No user turn exists — a standalone trailing user Content is appended.
-        assert contents[-1].role == "user"
-        assert contents[-1].parts[0].file_data.file_uri == "gs://fake/f1"
+        with pytest.raises(LLMEngineError, match="non-empty content"):
+            engine._build_content_list(messages, attachments)
 
     def test_call_provider_uses_sync_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -383,14 +381,49 @@ class TestGeminiEngine:
 
         assert FakeGenAIClient.instances[-1].generate_calls[-1]["config"].temperature == 0.1
 
-    def test_unknown_runtime_key_fails_in_the_sdk_config(
+    def test_unknown_runtime_key_fails_at_update(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
-        engine.update_runtime_parameters(not_a_real_field=1)
+        engine.update_runtime_parameters(temperature=0.2)
+
+        with pytest.raises(LLMEngineError, match="unknown keys") as excinfo:
+            engine.update_runtime_parameters(not_a_real_field=1, temperature=0.9, also_bad=2)
+
+        message = str(excinfo.value)
+        assert "['also_bad', 'not_a_real_field']" in message
+        assert "temperature" in message  # listed as a valid key
+        assert "system_instruction" not in message.split("valid keys:")[1]
+        assert engine.runtime_parameters == {"temperature": 0.2}
+
+    def test_known_runtime_keys_are_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        engine.update_runtime_parameters(
+            temperature=0.2, max_output_tokens=64, thinking_config={"thinking_budget": 0}
+        )
+
+        assert set(engine.runtime_parameters) == {
+            "temperature", "max_output_tokens", "thinking_config"
+        }
+
+    def test_unknown_key_smuggled_past_the_check_fails_in_the_sdk_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters["not_a_real_field"] = 1
 
         with pytest.raises(Exception, match="not_a_real_field"):
             engine._build_provider_payload([{"role": "user", "content": "Hi"}])
+
+    def test_plain_extract_result_returns_empty_string_without_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        assert engine._extract_result(SimpleNamespace(text=None), False) == ""
 
     def test_gemini_to_dict_includes_non_secret_config(
         self, monkeypatch: pytest.MonkeyPatch
@@ -415,7 +448,7 @@ class TestGeminiEngine:
             assert removed not in data
         assert "secret" not in str(data)
 
-    def test_collect_system_joins_multiple_messages(
+    def test_system_messages_are_joined_into_the_system_instruction(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
@@ -424,15 +457,19 @@ class TestGeminiEngine:
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Part two."},
         ]
-        result = engine._collect_system(messages)
-        assert result == "Part one.\n\nPart two."
 
-    def test_collect_system_returns_none_when_absent(
+        cfg = engine._build_provider_payload(messages)["config"]
+
+        assert cfg.system_instruction == "Part one.\n\nPart two."
+
+    def test_no_system_message_leaves_the_system_instruction_unset(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
-        messages = [{"role": "user", "content": "Hello"}]
-        assert engine._collect_system(messages) is None
+
+        cfg = engine._build_provider_payload([{"role": "user", "content": "Hello"}])["config"]
+
+        assert cfg.system_instruction is None
 
 
 class TestGeminiAttachments:
@@ -621,6 +658,40 @@ class TestGeminiTokenUsage:
 
         with pytest.raises(LLMEngineError, match="usage_metadata"):
             engine._extract_token_usage(response)
+
+    def test_extract_token_usage_none_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+
+        result = engine._extract_token_usage(SimpleNamespace(usage_metadata=None))
+
+        assert isinstance(result, GeminiTokenUsage)
+        assert (result.input_tokens, result.generated_tokens,
+                result.total_tokens, result.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = 0  # type: ignore[assignment]
+
+    def test_partial_usage_still_raises_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+        usage = SimpleNamespace(
+            prompt_token_count=None, total_token_count=5, candidates_token_count=None,
+            thoughts_token_count=None, tool_use_prompt_token_count=None,
+            cached_content_token_count=None,
+        )
+
+        with pytest.raises(LLMEngineError, match="prompt_token_count"):
+            engine._extract_token_usage(SimpleNamespace(usage_metadata=usage))
 
     def test_extract_token_usage_missing_prompt_token_count_raises(
         self, monkeypatch: pytest.MonkeyPatch

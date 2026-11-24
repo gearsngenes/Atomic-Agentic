@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Dict, List, Optional
 
 try:
@@ -16,6 +17,9 @@ from ..models.results.llm import LiteLLMTokenUsage, RemoteLLMModelData
 from ..utils.core import format_missing_dependency
 
 __all__ = ["LiteLLMEngine"]
+
+# Serializes the process-wide ``litellm.suppress_debug_info`` toggle around provider lookups.
+_PROVIDER_LOOKUP_LOCK = threading.Lock()
 
 
 class LiteLLMEngine(LLMEngine):
@@ -53,73 +57,14 @@ class LiteLLMEngine(LLMEngine):
     unsupported.
 
     Structured-output schema policy
-    --------------------------------
-    Structured output is requested via ``response_format = {"type":
-    "json_schema", "json_schema": {"schema": ..., "name":
-    "output_structure", "strict": True}}`` -- litellm's own OpenAI
-    Chat-Completions dialect. A plain dict passed this way is used by
-    litellm near-verbatim internally, so this engine supplies that envelope
-    itself rather than relying on litellm to build it from a bare schema.
+    -------------------------------
+    ``output_structure`` is wrapped in a strict ``json_schema``
+    ``response_format`` envelope (``strict`` is fixed ``True``) and forwarded
+    unmodified; litellm does any per-provider schema transformation and the
+    destination provider rejects what it does not accept natively. There is
+    no capability gate.
 
-    Unlike every other engine in this package, this engine does not clean
-    or prune the caller's schema at all. litellm itself performs the real
-    per-destination-provider schema cleaning/transformation, confirmed by
-    reading its installed source (not just its docs). Two examples,
-    verified directly:
-
-    - Anthropic: model-capability-gated between real native structured
-      output (the same mechanism ``AnthropicEngine`` uses directly) and a
-      tool-call-emulation fallback for older models without native
-      support. It resolves ``$defs``/``$ref``, strips a specific set of
-      numeric/length/array keywords (appending a human-readable constraint
-      note to each affected field's ``description`` rather than silently
-      dropping it), and auto-injects ``additionalProperties: false`` on
-      object schemas that omit it.
-    - Gemini/Vertex: model-capability-gated between the modern
-      JSON-Schema-native dialect (the same one ``GeminiEngine`` targets)
-      and a legacy OpenAPI-style fallback for older model generations.
-
-    Notably, litellm's own Anthropic strip-list does **not** match the
-    unsupported-keyword set AA's own dedicated ``AnthropicEngine`` found
-    live (structured-generation Pass 4: ``minimum``, ``maximum``,
-    ``multipleOf``, ``maxItems``): litellm additionally strips
-    ``minLength``/``maxLength`` -- which AA's own live testing found the
-    real Anthropic API actually supports -- and does not strip
-    ``multipleOf`` at all -- which AA's own testing found needs stripping
-    (as of Pass 8, neither engine prunes anything AA-side any more, but
-    litellm's own downstream transformation still diverges from what the
-    real Anthropic API needs). Routing an Anthropic model through this
-    engine therefore behaves measurably differently than AA's own dedicated
-    ``AnthropicEngine`` for the identical schema. This is litellm's own
-    implementation detail, not a bug in either engine, and this pass makes
-    no attempt to reconcile the two.
-
-    Because litellm already owns this work, this engine adds no
-    schema-level cleaning of its own -- there is nothing left for AA to
-    add.
-
-    ``"strict": True`` is a fixed literal in the ``response_format``
-    envelope this engine builds -- there is no per-instance toggle (unlike
-    ``OpenAIEngine``'s/``MistralEngine``'s mutable ``strict`` property).
-    Confirmed live: both OpenAI and Anthropic reject an object schema whose
-    ``additionalProperties`` is explicitly ``true`` (not merely omitted)
-    under strict mode -- OpenAI requires it be exactly ``false``; litellm's
-    own Anthropic auto-injection (see above) only fills the key in when it
-    is *absent*, and deliberately does not override an explicit caller
-    value, so an explicit ``true`` reaches Anthropic's API unmodified and
-    is rejected there too. A schema that merely *omits*
-    ``additionalProperties`` fares differently per destination (Anthropic
-    gets it auto-set to ``false``; OpenAI still requires the caller to set
-    it themselves). Gemini has no such requirement at all -- no
-    strict-mode split exists for that dialect, matching ``GeminiEngine``'s
-    own Pass 3 finding.
-
-    There is no capability check: this engine does not gate on
-    ``litellm.supports_response_schema``. A model/provider combination with no
-    structured-output path fails natively in litellm and surfaces as
-    ``LLMEngineError`` like any other provider error. ``output_structure`` is
-    forwarded completely unmodified; litellm's own per-destination-provider
-    transformation does all real cleaning downstream.
+    ``require_usage`` (base) controls a response with no ``usage``.
     """
 
     _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format", "stream"})
@@ -229,7 +174,7 @@ class LiteLLMEngine(LLMEngine):
         payload.update(self._runtime_parameters)
         payload.update(
             model=self.model,
-            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+            messages=list(messages),
         )
         if output_structure is not None:
             payload.update(
@@ -252,15 +197,8 @@ class LiteLLMEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Return the first choice's message content, or ``""`` if empty. When
-        `requested_structured` is True, the text is parsed via `json.loads`;
-        a parse failure falls back to returning the raw text rather than
-        raising, matching the base `LLMEngine` fallback contract
-        (structured-generation Pass 3).
-
-        Renamed from `_extract_text` (structured-generation Pass 1
-        convention); gains `requested_structured` per the Pass 3 base
-        contract.
+        Return the first choice's message content (``""`` if empty); on a
+        structured call, its ``json.loads`` value (raw text on a parse failure).
         """
         text = response.choices[0].message.content or ""
         if not requested_structured:
@@ -273,23 +211,17 @@ class LiteLLMEngine(LLMEngine):
     def _extract_token_usage(self, response: Any) -> LiteLLMTokenUsage:
         """
         Map ``response.usage`` (litellm's normalized ``Usage``) to
-        ``LiteLLMTokenUsage``. ``total_tokens`` is explicitly derived as
-        ``input_tokens + generated_tokens`` rather than trusted from the raw
-        ``usage.total_tokens`` field — same defensive posture as
-        ``AnthropicEngine``. ``prompt_tokens_details``/
-        ``completion_tokens_details`` are both genuinely ``Optional`` on
-        litellm's ``Usage`` object (e.g. absent on OpenAI/Mistral's generic
-        passthrough path when the raw provider JSON lacks these keys).
-
-        ``response.usage`` itself is only conditionally set by litellm's own
-        dict-to-response conversion (populated only when the raw provider
-        JSON included a non-``None`` ``"usage"`` key) — unlike
-        ``AnthropicEngine``, which reads a raw SDK object where ``usage`` is
-        a required field. Raises ``LLMEngineError`` rather than crashing with
-        a bare ``AttributeError`` if a provider response omits it.
+        ``LiteLLMTokenUsage``. ``total_tokens`` is derived as
+        ``input_tokens + generated_tokens``; the prompt and completion detail
+        objects are optional. A response with no ``usage`` raises unless
+        ``require_usage`` is ``False``, which yields an all-zero record.
         """
         u = getattr(response, "usage", None)
         if u is None:
+            if not self.require_usage:
+                return LiteLLMTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError(
                 "LiteLLMEngine._extract_token_usage: provider response did "
                 "not include usage data"
@@ -348,15 +280,18 @@ class LiteLLMEngine(LLMEngine):
         cache = self._provider_cache
         if cache is not None and cache[0] == self.model:
             return RemoteLLMModelData(provider=cache[1], model_name=self.model)
-        # litellm prints a "Provider List" banner on failure unless this is on.
-        previous = litellm.suppress_debug_info
-        litellm.suppress_debug_info = True
-        try:
-            provider = litellm.get_llm_provider(self.model)[1]
-        except Exception:
-            provider = "unknown"
-        finally:
-            litellm.suppress_debug_info = previous
+        # litellm prints a "Provider List" banner on failure unless this
+        # process-wide flag is on; the lock keeps concurrent lookups from
+        # restoring a stale value.
+        with _PROVIDER_LOOKUP_LOCK:
+            previous = litellm.suppress_debug_info
+            litellm.suppress_debug_info = True
+            try:
+                provider = litellm.get_llm_provider(self.model)[1]
+            except Exception:
+                provider = "unknown"
+            finally:
+                litellm.suppress_debug_info = previous
         self._provider_cache = (self.model, provider)
         return RemoteLLMModelData(provider=provider, model_name=self.model)
 

@@ -27,6 +27,7 @@ from ..models.results import (
 
 __all__ = ["LLMEngine"]
 
+_VALID_ROLES = frozenset({"system", "user", "assistant"})
 _SECRET_KEY_FRAGMENTS = ("key", "token", "secret", "auth", "password", "credential", "header")
 
 
@@ -35,8 +36,9 @@ def _redact_secrets(value: Any) -> Any:
 
     A key is secret when its lowercased name contains one of
     ``_SECRET_KEY_FRAGMENTS``; the plural ``tokens`` is ignored so token-count
-    settings (``max_tokens``, ``max_output_tokens``) stay visible. Recurses into nested dicts and lists in place,
-    so pass a deep copy.
+    settings (``max_tokens``, ``max_output_tokens``) stay visible. Matching is
+    by substring, so some benign keys (e.g. ``prompt_cache_key``) are redacted
+    too. Recurses into nested dicts and lists in place, so pass a deep copy.
     """
     if isinstance(value, dict):
         for k, v in value.items():
@@ -58,97 +60,67 @@ class LLMEngine(AtomicInvokable, ABC):
     Base template-method primitive for LLM provider adapters.
 
     Engines are stateless with respect to conversation history: the Agent owns
-    message history. An engine instance represents a particular provider +
-    model configuration.
-
-    Public contract
-    ---------------
-    ``LLMEngine`` is an ``AtomicInvokable``, so its canonical public invocation
-    entrypoint is dict-first:
+    message history. An engine instance represents one provider + model
+    configuration. ``LLMEngine`` is an ``AtomicInvokable``; its entrypoint is
 
         invoke({"messages": list[{"role": str, "content": str}],
                 "output_structure": dict[str, Any] | None}) -> LLMResult
 
-    ``LLMResult.result`` is the generated assistant reply: a plain string for
-    ordinary calls, or a ``str``/``int``/``float``/``bool``/``list``/``dict``/
-    ``None`` when ``output_structure`` requested provider-native structured
-    output -- whatever a conformant JSON value decodes to via ``json.loads``.
-    The declared invokable ``return_type`` is the tuple
-    ``("str", "int", "float", "bool", "list[Any]", "dict[str, Any]", "None")``
-    to reflect this.
+    ``LLMResult.result`` is the assistant reply: a ``str`` for a plain call, or
+    any ``json.loads`` value (``str``/``int``/``float``/``bool``/``list``/
+    ``dict``/``None``) when ``output_structure`` requested structured output.
 
-    Structured-output result contract
-    ----------------------------------
-    ``extract()`` computes, once, whether a call requested structured output
-    (``output_structure is not None`` at ``invoke``/``async_invoke`` time) and
-    passes that as ``requested_structured`` into ``_extract_result``. Every
-    engine's ``_extract_result`` override must honor the same contract: when
-    ``requested_structured`` is ``False``, return plain text unchanged; when
-    ``True``, best-effort coerce the provider's raw output into structured
-    data and, on a parse failure, fall back to returning the raw text rather
-    than raising uncaught. This keeps detection response-shape-agnostic — no
-    engine needs to introspect its own response object to figure out what it
-    was asked for; the caller's own request already answers that.
+    Layers of one call, in order
+    ----------------------------
+    1. Public ``invoke`` / ``async_invoke`` (inherited template): filters the
+       inputs, times the call and builds the ``LLMResult`` from the dict
+       ``_invoke_impl`` returns.
+    2. ``_invoke_impl`` / ``_async_invoke_impl``: receive the input dict and
+       return ``{"result", "token_usage", "model_data"}``. They guard
+       ``messages`` (must be a list), run layers 3 to 6, and wrap any
+       non-``LLMEngineError`` exception as ``LLMEngineError``
+       (``"<Class>.invoke: ..."``).
+    3. ``_normalize_messages``: receives the raw list and returns
+       ``[{"role", "content"}]`` with lowercased roles. The messages contract:
+       a non-empty list of mappings with string ``role`` and ``content``; the
+       role must be ``system``, ``user`` or ``assistant``; at least one
+       ``user`` message is required (system content is optional). Anything
+       else raises ``LLMEngineError``. Content must be a plain ``str``, so a
+       structured ``LLMResult.result`` cannot be fed back unmodified.
+    4. ``_build_provider_payload(messages, output_structure)``: receives the
+       normalized messages and the caller's raw schema (or ``None``) and
+       returns the exact keyword arguments of the SDK call. Build it with
+       ``dict(self._runtime_parameters)`` and ``update`` the engine-owned
+       fields over it so they always win. The schema is forwarded
+       unmodified: the base prunes and validates nothing, and a keyword the
+       provider rejects fails as that provider's own error, wrapped in
+       ``LLMEngineError``. No engine gates on capability.
+    5. ``_call_provider(payload)`` / ``_call_provider_async(payload)``:
+       receive the payload and return the raw SDK response. The async default
+       runs the sync hook in a worker thread; engines with a native async
+       client override it.
+    6. ``extract(response, requested_structured)``: calls the three hooks
+       below, checks their return types, strips a string result and returns
+       ``(result, token_usage, model_data)``. ``requested_structured`` is
+       ``output_structure is not None``, computed once by the caller.
 
-    Structured-output request contract
-    -------------------------------------
-    ``output_structure`` is forwarded to ``_build_provider_payload``
-    completely unmodified from what the caller supplied — this base class
-    performs no JSON-Schema key pruning, allow-listing, or validation of any
-    kind (removed, structured-generation Pass 8: the prior
-    ``clean_structure_template``/``structure_permitted_keys``/
-    ``structure_omitted_keys`` mechanism silently traded away
-    caller-declared schema constraints even in cases where every omitted
-    keyword would otherwise have produced an immediate, diagnosable
-    provider error — in tension with this codebase's explicit-or-raise
-    discipline). A schema keyword a given provider rejects fails as that
-    provider's own native error, wrapped in ``LLMEngineError`` by
-    the engine's invoke hooks — the same failure shape already used for
-    any other illegal per-provider configuration (e.g. an unsupported
-    ``temperature`` value). No engine gates on capability: a model/provider
-    combination with no structured-output path fails natively and is wrapped
-    in ``LLMEngineError`` like any other provider error.
+       - ``_extract_result(response, requested_structured)``: returns the
+         reply. Plain call: the text. Structured call: ``json.loads`` of the
+         text, falling back to the raw text on a parse failure.
+       - ``_extract_token_usage(response)``: returns the engine's
+         ``TokenUsage`` subclass record.
+       - ``_get_model_data()``: returns ``LLMModelData`` from configuration
+         (also exposed as the ``model_data`` property).
+    7. Result: ``LLMResult`` carrying the result, token usage and model data.
 
-    Note: ``_normalize_messages`` still requires every message's ``content``
-    to be a plain ``str`` — a structured ``LLMResult.result`` (``list``/
-    ``dict``) cannot currently be fed back into a later call's ``messages``
-    unmodified. No ``src/`` code does this today; whichever future pass
-    wires ``output_structure`` through the ``Agent`` layer will need to make
-    an explicit choice here (``str(...)``, ``json.dumps(...)``, or a richer
-    message-content shape).
-
-    The declared invokable schema exposes two input parameters:
-
-    - ``messages`` — a non-empty list of chat-message mappings containing
-      string ``role`` and ``content`` fields.
-    - ``output_structure`` — optional JSON-Schema-shaped mapping requesting
-      schema-constrained structured output for this call; ``None`` (default)
-      requests plain text and leaves every existing call path unchanged.
-
-    Engine lifecycle
-    ----------------
-    The inherited ``invoke`` template filters the inputs and builds the
-    ``LLMResult``; ``_invoke_impl`` does:
-
-    1. Validate and normalize ``messages``.
-    2. Build the provider-specific payload.
-    3. Call the provider.
-    4. Extract assistant text, token usage, and configured model data.
-
-    and returns ``{"result", "token_usage", "model_data"}``.
-
-    Provider-specific behavior should normally be implemented through the
-    protected template hooks:
-
-    - ``_build_provider_payload``
-    - ``_call_provider``
-    - ``_extract_result``
-    - ``_extract_token_usage``
-    - ``_get_model_data``
-
-    Retry and timeout are each provider SDK's own client settings, and
-    attachments are an API of the individual engines that support them; none
-    of the three lives here.
+    What an engine overrides
+    ------------------------
+    ``_build_provider_payload``, ``_call_provider`` (plus
+    ``_call_provider_async`` for a native async client), ``_extract_result``,
+    ``_extract_token_usage`` and ``_get_model_data``; optionally
+    ``_RESERVED_RUNTIME_KEYS``, ``_validate_runtime_keys`` and ``to_dict``.
+    Retry and timeout are each SDK client's own settings, and attachments are
+    an API of the individual engines that support them.
 
     Runtime parameters
     ------------------
@@ -156,23 +128,34 @@ class LLMEngine(AtomicInvokable, ABC):
     token caps, reasoning settings, ... under the provider's own names).
     ``runtime_parameters`` returns a deep copy; ``update_runtime_parameters``
     is the only mutator (merge, ``None`` removes a key, every key is validated
-    before any is applied). Each engine's ``_build_provider_payload`` takes a
-    shallow snapshot of the store once per call (live objects such as a Llama
-    grammar are never deep-copied per call) and forwards it to the provider
-    verbatim, so a later ``update_runtime_parameters`` never changes an
-    in-flight call. Keys the engine owns on the call (model, the message
-    field, ``stream``, the structured-output field) are listed in
-    ``_RESERVED_RUNTIME_KEYS`` and rejected; anything else unknown is rejected
-    by the provider at call time and surfaces as ``LLMEngineError``, except on
-    ``LlamaCppEngine``, which validates keys against
-    ``create_chat_completion`` in ``_validate_runtime_keys``.
+    before any is applied, each value is deep-copied on the way in). Payload
+    builders take a shallow snapshot of the store once per call, so a later
+    update never changes an in-flight call.
 
-    Streaming is unsupported: ``stream`` is reserved on every engine.
-    Credentials belong in the client / client kwargs, not runtime parameters;
-    ``to_dict`` redacts runtime parameters by key name (any key containing
-    key, token, secret, auth, password, credential or header becomes ``"***"``,
-    recursively; the plural ``tokens`` is ignored so ``max_tokens`` stays
-    visible), as a safety net.
+    Keys the engine owns on the call are listed in ``_RESERVED_RUNTIME_KEYS``
+    and rejected: the model, the message field (``messages``, ``input``,
+    ``contents``), the system field (``system``, ``instructions``,
+    ``system_instruction``), the response-format fields an engine sets itself
+    (``response_format``; Gemini's ``response_mime_type`` and
+    ``response_json_schema``) and ``stream`` (streaming is unsupported on
+    every engine). OpenAI's ``text`` and Anthropic's ``output_config`` are not
+    reserved: a structured call merges its format key into a copy of them.
+    Other unknown keys are rejected by the provider at call time (surfacing as
+    ``LLMEngineError``), except on ``LlamaCppEngine`` and ``GeminiEngine``,
+    which check keys against the call signature or config model when they are
+    set.
+
+    Credentials belong in the client or client kwargs, not runtime
+    parameters; ``to_dict`` redacts runtime parameters by key name as a
+    safety net (see ``_redact_secrets``).
+
+    ``require_usage``
+    -----------------
+    A validated, settable ``bool`` (default ``True``). When a provider
+    response carries no usage object at all, the engine raises
+    ``LLMEngineError``; with ``require_usage = False`` it returns an all-zero
+    token-usage record instead. A partially malformed usage object still
+    raises. ``AnthropicEngine`` always reports usage and ignores the flag.
     """
 
     result_cls: ClassVar[type[LLMResult]] = LLMResult
@@ -229,6 +212,7 @@ class LLMEngine(AtomicInvokable, ABC):
         )
 
         self._runtime_parameters: Dict[str, Any] = {}
+        self.require_usage = True
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -239,6 +223,20 @@ class LLMEngine(AtomicInvokable, ABC):
         (nested values included) changes nothing. Use
         ``update_runtime_parameters`` to change them."""
         return copy.deepcopy(self._runtime_parameters)
+
+    @property
+    def require_usage(self) -> bool:
+        """Whether a response with no usage object raises (``True``) or yields zero counts."""
+        return self._require_usage
+
+    @require_usage.setter
+    def require_usage(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise LLMEngineError(
+                f"{type(self).__name__}.require_usage must be a bool, "
+                f"got {type(value).__name__}."
+            )
+        self._require_usage = value
 
     @property
     def model_data(self) -> LLMModelData:
@@ -266,7 +264,7 @@ class LLMEngine(AtomicInvokable, ABC):
             if value is None:
                 self._runtime_parameters.pop(key, None)
             else:
-                self._runtime_parameters[key] = value
+                self._runtime_parameters[key] = copy.deepcopy(value)
 
     def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
         """Reject keys the engine owns on the provider call. Engines extend
@@ -280,100 +278,69 @@ class LLMEngine(AtomicInvokable, ABC):
 
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """
-        1. messages = inputs.get("messages"); not a list -> LLMEngineError.
-        2. output_structure = inputs.get("output_structure");
-           requested_structured = output_structure is not None.
-        3. response = self._call_model(messages, output_structure).
-        4. text, token_usage, model_data = self.extract(response, requested_structured).
-        5. Return {"result", "token_usage", "model_data"}.
+        1. ``messages`` must be a list; ``output_structure`` is optional.
+        2. Normalize the messages, build the payload, call the provider.
+        3. Extract result, token usage and model data from the response.
+        4. Return ``{"result", "token_usage", "model_data"}``.
 
-        LLMEngineError propagates; any other exception is raised as
-        LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc.
+        ``LLMEngineError`` propagates; any other exception is raised as
+        ``LLMEngineError`` chained from it.
         """
         try:
             messages = inputs.get("messages")
             if not isinstance(messages, list):
                 raise LLMEngineError(
-                    "LLMEngine.invoke: 'messages' input must be a list"
+                    f"{type(self).__name__}.invoke: 'messages' input must be a list"
                 )
             output_structure = inputs.get("output_structure")
-            requested_structured = output_structure is not None
-
-            response = self._call_model(messages, output_structure)
-            text, token_usage, model_data = self.extract(response, requested_structured)
+            normalized = self._normalize_messages(messages)
+            payload = self._build_provider_payload(normalized, output_structure)
+            response = self._call_provider(payload)
+            text, token_usage, model_data = self.extract(
+                response, output_structure is not None
+            )
             return {"result": text, "token_usage": token_usage, "model_data": model_data}
         except LLMEngineError:
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc
+            raise LLMEngineError(f"{type(self).__name__}.invoke: {exc}") from exc
 
     async def _async_invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """Async twin of ``_invoke_impl`` (awaits ``_call_model_async``)."""
+        """Async twin of ``_invoke_impl`` (awaits ``_call_provider_async``)."""
         try:
             messages = inputs.get("messages")
             if not isinstance(messages, list):
                 raise LLMEngineError(
-                    "LLMEngine.async_invoke: 'messages' input must be a list"
+                    f"{type(self).__name__}.invoke: 'messages' input must be a list"
                 )
             output_structure = inputs.get("output_structure")
-            requested_structured = output_structure is not None
-
-            response = await self._call_model_async(messages, output_structure)
-            text, token_usage, model_data = self.extract(response, requested_structured)
+            normalized = self._normalize_messages(messages)
+            payload = self._build_provider_payload(normalized, output_structure)
+            response = await self._call_provider_async(payload)
+            text, token_usage, model_data = self.extract(
+                response, output_structure is not None
+            )
             return {"result": text, "token_usage": token_usage, "model_data": model_data}
         except LLMEngineError:
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self.name}.async_invoke failed: {exc}") from exc
+            raise LLMEngineError(f"{type(self).__name__}.invoke: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def _call_model(
-        self,
-        messages: List[Dict[str, Any]],
-        output_structure: Optional[Mapping[str, Any]] = None,
-    ) -> Any:
-        """
-        Normalize messages, build the provider payload, and return the raw
-        provider response.
-
-        ``_build_provider_payload`` is called unconditionally as a 2-arg call
-        — every concrete engine implements that signature with
-        ``output_structure`` defaulting to ``None``, so plain-text calls are
-        unaffected by always passing it through.
-
-        This helper owns only the shared provider-call sequence. It does not
-        extract text, extract token usage, or construct results.
-        """
-        normalized = self._normalize_messages(messages)
-        payload = self._build_provider_payload(normalized, output_structure)
-        return self._call_provider(payload)
-
-    async def _call_model_async(
-        self,
-        messages: List[Dict[str, Any]],
-        output_structure: Optional[Mapping[str, Any]] = None,
-    ) -> Any:
-        """Async analog of ``_call_model``; awaits ``_call_provider_async``."""
-        normalized = self._normalize_messages(messages)
-        payload = self._build_provider_payload(normalized, output_structure)
-        return await self._call_provider_async(payload)
-
     def extract(
         self, response: Any, requested_structured: bool
     ) -> tuple[str | int | float | bool | list[Any] | dict[str, Any] | None, TokenUsage, LLMModelData]:
         """
-        Extract the normalized generated result (text, or structured list/dict),
-        token usage, and configured model data from one provider response.
+        Extract the result, token usage and model data from one provider
+        response.
 
-        ``requested_structured`` reflects whether the originating call passed
-        a real ``output_structure`` (computed once by ``invoke``/
-        ``async_invoke``); forwarded to ``_extract_result`` so each engine can
-        honor the structured-output result contract without re-deriving it.
-
-        This method coordinates result-path extraction only. It does not call
-        the provider, capture timestamps, or construct ``LLMResult``.
+        1. ``_extract_result(response, requested_structured)``; the value must
+           be a JSON-shaped type.
+        2. ``_extract_token_usage(response)``; must be a ``TokenUsage``.
+        3. ``_get_model_data()``; must be ``LLMModelData``.
+        4. Return the three, with a string result stripped.
         """
         result = self._extract_result(response, requested_structured)
         if not isinstance(result, (str, int, float, bool, list, dict, type(None))):
@@ -403,30 +370,39 @@ class LLMEngine(AtomicInvokable, ABC):
         self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:
         """
-        Validate and normalize a sequence of chat messages.
+        Validate ``messages`` and return ``[{"role", "content"}]`` with
+        lowercased roles.
 
-        - Ensures `messages` is a list of mappings.
-        - Ensures each entry has string `role` and `content` keys.
-        - Normalizes `role` to lowercase.
+        1. The list must not be empty.
+        2. Each entry must be a mapping with string ``role`` and ``content``.
+        3. Each role (lowercased) must be ``system``, ``user`` or ``assistant``.
+        4. At least one ``user`` message must be present.
         """
-        if not isinstance(messages, list):
-            raise LLMEngineError("LLMEngine.invoke: messages must be a list")
+        prefix = f"{type(self).__name__}.invoke"
         if not messages:
-            raise LLMEngineError("LLMEngine.invoke: messages must not be empty")
+            raise LLMEngineError(f"{prefix}: messages must not be empty")
 
         normalized: List[Dict[str, str]] = []
         for idx, msg in enumerate(messages):
             if not isinstance(msg, Mapping):
                 raise LLMEngineError(
-                    f"LLMEngine.invoke: message {idx} is not a mapping (got {type(msg)!r})"
+                    f"{prefix}: message {idx} is not a mapping (got {type(msg)!r})"
                 )
             role = msg.get("role")
             content = msg.get("content")
             if not isinstance(role, str) or not isinstance(content, str):
                 raise LLMEngineError(
-                    "LLMEngine.invoke: each message must have 'role' and 'content' as strings"
+                    f"{prefix}: each message must have 'role' and 'content' as strings"
                 )
-            normalized.append({"role": role.lower(), "content": content})
+            role = role.lower()
+            if role not in _VALID_ROLES:
+                raise LLMEngineError(
+                    f"{prefix}: message {idx} has unsupported role {role!r}; "
+                    f"expected one of {sorted(_VALID_ROLES)}"
+                )
+            normalized.append({"role": role, "content": content})
+        if not any(m["role"] == "user" for m in normalized):
+            raise LLMEngineError(f"{prefix}: messages must include at least one user message")
         return normalized
 
     # --------------------------------------------------------------------- #
@@ -439,28 +415,19 @@ class LLMEngine(AtomicInvokable, ABC):
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
-        Convert normalized messages and (optionally) a caller-supplied
-        structured-output template into the provider-specific request
-        payload: the exact keyword arguments of the SDK call, so
-        ``_call_provider`` only picks the client and calls it with
+        Receive normalized messages and the caller's raw ``output_structure``
+        (``None`` for plain text); return the exact keyword arguments of the
+        SDK call, so ``_call_provider`` only picks the client and calls it with
         ``**payload``. Build it from a snapshot of the runtime parameters and
         ``update`` the engine-owned fields (model, messages, the
         structured-output field) over it, so they always win.
-
-        ``output_structure`` is ``None`` for plain-text calls; the caller's
-        raw JSON-Schema-shaped mapping, completely unmodified, when the
-        caller requested structured output (structured-generation Pass 8:
-        this base class no longer prunes or validates it — see the class
-        docstring's "Structured-output request contract"). Called
-        unconditionally as a 2-arg call by ``_call_model``/``_call_model_async``
-        — every concrete engine implements this signature.
         """
         raise NotImplementedError
 
     @abstractmethod
     def _call_provider(self, payload: Any) -> Any:
         """
-        Perform a single call to the underlying provider using the given payload.
+        Receive the payload; perform one provider call and return the raw response.
         """
         raise NotImplementedError
 
@@ -476,48 +443,33 @@ class LLMEngine(AtomicInvokable, ABC):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual OR structured reply from a provider
-        response object.
+        Receive a provider response; return the assistant's reply.
 
-        ``requested_structured`` reflects the caller's own request
-        (``output_structure is not None``), computed once by ``invoke``/
-        ``async_invoke`` — never re-derived from the response object itself.
-        Contract:
+        ``requested_structured`` is the caller's own request
+        (``output_structure is not None``), never re-derived from the response.
 
-        - ``requested_structured=False``: return plain text unchanged, same
-          as pre-structured-generation behavior.
-        - ``requested_structured=True``: attempt to coerce the provider's raw
-          text output into any JSON-decodable value (object, array, string,
-          number, boolean, or null — not just object/array); on any parse
-          failure, fall back to returning the raw text string rather than
-          raising uncaught. A caller that requested structure and receives a
-          ``str`` back is expected to detect and handle that itself.
-
-        Renamed from ``_extract_text`` (Pass 1, ``structured-generation``);
-        gained ``requested_structured`` (Pass 3). Every engine's override
-        must match this 2-arg signature, or that engine has an unimplemented
-        abstract method and is non-instantiable until its own pass catches
-        up.
+        - ``False``: return the plain text.
+        - ``True``: ``json.loads`` the text (any JSON value); on a parse
+          failure return the raw text rather than raising. A caller that
+          requested structure and gets a ``str`` back must handle that itself.
         """
         raise NotImplementedError
 
     @abstractmethod
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
-        Extract normalized token usage from a provider response object.
-
-        Implementations must return a ``TokenUsage``-family record, not a raw
-        provider usage dictionary or SDK object.
+        Receive a provider response; return a ``TokenUsage``-family record
+        (never a raw provider usage object). When the response has no usage
+        object at all, raise ``LLMEngineError`` unless ``require_usage`` is
+        ``False``, in which case return an all-zero record.
         """
         raise NotImplementedError
 
     @abstractmethod
     def _get_model_data(self) -> LLMModelData:
         """
-        Return configured model identity data for this engine.
-
-        Model data is derived from engine configuration, not from a provider
-        response object.
+        Return model identity data derived from engine configuration, not
+        from a response.
         """
         raise NotImplementedError
 
@@ -529,14 +481,11 @@ class LLMEngine(AtomicInvokable, ABC):
         Non-secret configuration snapshot for debugging / logging.
 
         ``runtime_parameters`` is deep-copied and redacted by key name
-        (see ``_redact_secrets``).
-
-        Invocation result data such as token usage and model data belongs to
-        ``LLMResult``, not to engine metadata serialization.
+        (see ``_redact_secrets``); ``require_usage`` is included.
         """
         d = super().to_dict()
         d.update({
-            "type": type(self).__name__,
+            "require_usage": self.require_usage,
             "runtime_parameters": _redact_secrets(copy.deepcopy(self._runtime_parameters)),
         })
         return d

@@ -12,6 +12,7 @@ import os
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -30,7 +31,7 @@ from ..models.results.llm import (
     RemoteLLMModelData
 )
 from ..utils.core import format_missing_dependency
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import collect_system_text, validate_attachment_path
 
 __all__ = ["GeminiEngine"]
 
@@ -57,7 +58,9 @@ class GeminiEngine(LLMEngine):
     base engine's runtime-parameter store and forwarded verbatim, e.g.
     ``engine.update_runtime_parameters(thinking_config={"thinking_budget": 0})``
     (the SDK coerces a dict to ``ThinkingConfig``). Nothing is set by default,
-    so Gemini's own defaults apply.
+    so Gemini's own defaults apply. Keys are checked against
+    ``GenerateContentConfig`` when set (``_validate_runtime_keys``), so a typo
+    fails at ``update_runtime_parameters``.
 
     API version
     -----------
@@ -71,56 +74,28 @@ class GeminiEngine(LLMEngine):
         GeminiEngine(model="gemini-2.5-flash", api_key=key,
                      http_options={"api_version": "v1beta"})
 
-    Flow per call
-    -------------
-    1) Engine-level attachments are prepared via ``attach(path)``:
-       - ``_prepare_attachment`` uploads supported files via
-         ``client.files.upload``.
-       - Attachment metadata stores the returned File object and its resource
-         name.
-
-    2) ``invoke({"messages": messages, "output_structure": ...})`` runs the
-       shared ``LLMResult`` lifecycle:
-       - normalize chat messages;
-       - build the Gemini provider payload, threading the
-         caller's ``output_structure`` (when given) through to ``response_mime_type``/
-         ``response_json_schema`` on ``GenerateContentConfig``;
-       - call ``client.models.generate_content(...)``;
-       - extract assistant text, token usage, and configured model data;
-       - return ``LLMResult``.
-
-    3) ``detach(path)`` does best-effort file deletion via
-       ``client.files.delete``.
-
-    Result extraction
-    ------------------
-    ``_extract_result`` returns ``response.text`` unchanged for a
-    non-structured call (``requested_structured=False``). For a structured
-    call, it attempts ``json.loads(response.text)`` and falls back to
-    ``response.text`` on ``json.JSONDecodeError`` or ``TypeError`` (the
-    latter covers ``response.text is None`` — no text parts in the
-    response), rather than raising. Renamed from ``_extract_text`` (Pass 1
-    base rename, applied this pass).
-
-    Token usage
+    Attachments
     -----------
-    ``_extract_token_usage`` maps ``response.usage_metadata`` into
-    ``GeminiTokenUsage``. The base ``generated_tokens`` value is derived as
-    ``total_token_count - prompt_token_count`` so it captures all non-prompt
-    usage counted by Gemini, including candidate, thoughts, and tool-use prompt
-    tokens when present.
+    ``attach(path)`` uploads the file once through ``client.files.upload`` and
+    stores its metadata and ``File`` object; the files are appended to the
+    last user turn on every call. ``detach(path)`` deletes the upload
+    best-effort.
 
-    Model data
-    ----------
-    ``_get_model_data`` returns configured model identity from ``self.model``.
+    Result extraction and usage
+    ---------------------------
+    ``_extract_result`` returns ``response.text`` (``""`` when absent); on a
+    structured call it parses it with ``json.loads`` and falls back to the raw
+    value on ``JSONDecodeError`` or ``TypeError``. ``_extract_token_usage``
+    maps ``usage_metadata`` into ``GeminiTokenUsage``;
+    ``generated_tokens = total_token_count - prompt_token_count`` so it covers
+    every non-prompt token Gemini counts (candidates, thoughts, tool use).
+    With no ``usage_metadata`` it raises unless ``require_usage`` is ``False``.
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to
-    ``response_json_schema`` completely unmodified — this engine performs
-    no schema filtering (structured-generation Pass 8). A keyword Gemini's
-    JSON-Schema dialect doesn't support surfaces as Gemini's own API
-    behavior (accept, ignore, or reject — unconfirmed by this pass).
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``response_json_schema``
+    (together with ``response_mime_type="application/json"``); Gemini decides
+    natively whether to accept, ignore or reject a keyword.
     """
 
     _RESERVED_RUNTIME_KEYS = frozenset({
@@ -178,6 +153,21 @@ class GeminiEngine(LLMEngine):
             client if client is not None else genai.Client(**client_kwargs)
         )
         self.model = model
+
+    def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
+        """
+        1. Reserved keys are rejected (base check).
+        2. Every key must be a ``GenerateContentConfig`` field.
+        """
+        keys = list(keys)
+        super()._validate_runtime_keys(keys)
+        valid = set(genai.types.GenerateContentConfig.model_fields)
+        unknown = set(keys) - valid
+        if unknown:
+            raise LLMEngineError(
+                f"GeminiEngine.update_runtime_parameters: unknown keys {sorted(unknown)}; "
+                f"valid keys: {sorted(valid - self._RESERVED_RUNTIME_KEYS)}"
+            )
 
     # ------------------------------------------------------------------ #
     # Attachments
@@ -292,7 +282,7 @@ class GeminiEngine(LLMEngine):
             # Normalize unexpected errors into LLMEngineError so callers see a
             # consistent engine-level error type.
             raise LLMEngineError(
-                f"GeminiEngine._prepare_attachment failed for {path!r}"
+                f"GeminiEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------ #
@@ -310,9 +300,9 @@ class GeminiEngine(LLMEngine):
 
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
-        turns. Attachment parts (uploaded files via ``Part.from_uri``) are appended to the last user ``Content``'s
-        ``parts`` list. If no user turn is present, a standalone trailing
-        ``Content(role='user', parts=attachment_parts)`` is inserted.
+        turns. Attachment parts (uploaded files via ``Part.from_uri``) are
+        appended to the last user ``Content``'s ``parts`` list (empty-content
+        turns are skipped, so attachments with no non-empty user turn raise).
         """
         # 1. Build attachment_parts list.
         attachment_parts: List[Any] = []
@@ -329,11 +319,11 @@ class GeminiEngine(LLMEngine):
         # 2. Build contents list with role mapping (no attachment injection yet).
         contents: List[Any] = []
         for m in messages:
-            role = m.get("role", "").lower()
+            role = m["role"]
             if role == "system":
                 continue
             gemini_role = "model" if role == "assistant" else "user"
-            text = m.get("content") or ""
+            text = m["content"]
             if not text:
                 continue
             contents.append(genai.types.Content(
@@ -341,18 +331,14 @@ class GeminiEngine(LLMEngine):
                 parts=[genai.types.Part.from_text(text=text)],
             ))
 
-        # 3. Append attachment_parts to the last user Content (backward scan);
-        #    insert a standalone trailing Content if no user turn exists.
+        # 3. Append attachment_parts to the last user Content.
         if attachment_parts:
-            idx = next(
-                (i for i in range(len(contents) - 1, -1, -1)
-                 if contents[i].role == "user"),
-                None,
-            )
-            if idx is not None:
-                contents[idx].parts = list(contents[idx].parts) + attachment_parts
-            else:
-                contents.append(genai.types.Content(role="user", parts=attachment_parts))
+            last_user = next((c for c in reversed(contents) if c.role == "user"), None)
+            if last_user is None:
+                raise LLMEngineError(
+                    "GeminiEngine: attachments need a user message with non-empty content"
+                )
+            last_user.parts = list(last_user.parts) + attachment_parts
 
         return contents
 
@@ -378,7 +364,7 @@ class GeminiEngine(LLMEngine):
         contents = self._build_content_list(messages, dict(self._attachments))
 
         cfg: Dict[str, Any] = dict(self._runtime_parameters)
-        system_instruction = self._collect_system(messages)
+        system_instruction = collect_system_text(messages)
         if system_instruction:
             cfg.update(system_instruction=system_instruction)
         if output_structure is not None:
@@ -387,13 +373,11 @@ class GeminiEngine(LLMEngine):
                 response_json_schema=output_structure,
             )
 
-        payload: Dict[str, Any] = {}
-        payload.update(
-            model=self.model,
-            contents=contents,
-            config=genai.types.GenerateContentConfig(**cfg),
-        )
-        return payload
+        return {
+            "model": self.model,
+            "contents": contents,
+            "config": genai.types.GenerateContentConfig(**cfg),
+        }
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """Perform a single synchronous ``models.generate_content`` call."""
@@ -412,23 +396,12 @@ class GeminiEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Gen AI SDK
-        response object.
-
-        ``requested_structured`` is the base-supplied signal (was
-        ``output_structure`` given for this call) — Gemini's own response
-        object doesn't echo back the requested config, so this is the only
-        reliable detection mechanism (the SDK's own ``response.parsed`` field
-        conflates "wasn't requested" and "requested but failed to parse" into
-        the same ``None``, since it swallows ``JSONDecodeError`` internally).
-        When not requested, returns ``response.text`` unchanged. When
-        requested, attempts ``json.loads(response.text)``; a parse failure —
-        or ``response.text`` being ``None`` (no text parts in the response,
-        raises ``TypeError`` from ``json.loads``) — falls back to returning
-        ``response.text`` as-is instead of raising.
+        Return ``response.text`` (``""`` when absent); on a structured call,
+        its ``json.loads`` value, falling back to ``response.text`` on a parse
+        failure or when it is ``None`` (no text parts).
         """
         if not requested_structured:
-            return response.text
+            return response.text or ""
         try:
             return json.loads(response.text)
         except (json.JSONDecodeError, TypeError):
@@ -448,10 +421,16 @@ class GeminiEngine(LLMEngine):
         - cached_content_token_count: cached input-token subset, when present
 
         ``generated_tokens`` is derived as
-        ``total_token_count - prompt_token_count``.
+        ``total_token_count - prompt_token_count``. Missing ``usage_metadata``
+        raises unless ``require_usage`` is ``False``, which yields an all-zero
+        record.
         """
         usage = response.usage_metadata
         if usage is None:
+            if not self.require_usage:
+                return GeminiTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError("Gemini response did not include usage_metadata.")
 
         input_tokens = usage.prompt_token_count
@@ -489,12 +468,7 @@ class GeminiEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> LLMModelData:
-        """
-        Return configured Gemini model identity data for this engine.
-
-        Model data is derived from engine configuration, not from the provider
-        response object.
-        """
+        """Return configured Gemini model identity (from ``self.model``)."""
         return RemoteLLMModelData(
             provider="gemini",
             model_name=self.model,
@@ -503,18 +477,6 @@ class GeminiEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     # Gemini-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
-
-    def _collect_system(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """
-        Join system message contents into a single `system_instruction` string.
-        """
-        parts = [
-            m["content"]
-            for m in messages
-            if (m.get("role") or "").lower() == "system" and m.get("content")
-        ]
-        joined = "\n\n".join(parts).strip()
-        return joined or None
 
     def _upload_path(self, path: str) -> Any:
         """

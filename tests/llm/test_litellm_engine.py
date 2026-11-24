@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -239,16 +240,19 @@ class TestLiteLLMEngine:
         assert payload == {"model": "gpt-4o-mini", "messages": MSGS}
         assert "timeout" not in payload
 
-    def test_build_payload_messages_are_role_content_only(
+    def test_build_payload_passes_normalized_messages_through(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(model="gpt-4o-mini")
-        msgs = [{"role": "user", "content": "hello", "extra": 1}]
+        msgs = engine._normalize_messages(
+            [{"role": "USER", "content": "hello", "extra": 1}]
+        )
 
-        assert engine._build_provider_payload(msgs)["messages"] == [
-            {"role": "user", "content": "hello"}
-        ]
+        payload_messages = engine._build_provider_payload(msgs)["messages"]
+
+        assert payload_messages == [{"role": "user", "content": "hello"}]
+        assert payload_messages is not msgs
 
     def test_build_payload_layering(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
@@ -410,6 +414,28 @@ class TestLiteLLMEngine:
         with pytest.raises(LLMEngineError, match="usage"):
             engine._extract_token_usage(response)
 
+    def test_extract_token_usage_missing_usage_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        engine.require_usage = False
+
+        usage = engine._extract_token_usage(SimpleNamespace(choices=[]))
+
+        assert isinstance(usage, LiteLLMTokenUsage)
+        assert (usage.input_tokens, usage.generated_tokens,
+                usage.total_tokens, usage.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = None  # type: ignore[assignment]
+
     def test_extract_token_usage_cache_creation_tokens_deleted_attribute(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -481,6 +507,27 @@ class TestLiteLLMEngine:
         fake.suppress_debug_info = True
         LiteLLMEngine(model="grp")._get_model_data()
         assert fake.suppress_debug_info is True
+
+    def test_provider_lookup_lock_is_a_module_level_lock_held_during_the_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = engine_module._PROVIDER_LOOKUP_LOCK
+        assert type(lock) is type(threading.Lock())
+        held: list[bool] = []
+
+        class _Fake(FakeLiteLLM):
+            def get_llm_provider(self, model: str) -> Any:
+                held.append(lock.locked())
+                return super().get_llm_provider(model)
+
+        fake = _Fake()
+        monkeypatch.setattr(engine_module, "litellm", fake)
+
+        LiteLLMEngine(model="ok/model")._get_model_data()
+
+        assert held == [True]
+        assert not lock.locked()
+        assert fake.suppress_debug_info is False
 
     def test_get_model_data_caches_the_provider_lookup(
         self, monkeypatch: pytest.MonkeyPatch

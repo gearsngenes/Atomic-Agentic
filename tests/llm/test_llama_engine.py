@@ -11,6 +11,7 @@ llama_module = importlib.import_module("atomic_agentic.llm.llama_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import LlamaCppEngine
+from atomic_agentic.models.results import LlamaCppTokenUsage
 
 
 class FakeLlama:
@@ -131,7 +132,7 @@ class TestConstructor:
 
         assert len(FakeLlama.instances) == count
         assert engine._llm is preloaded
-        assert engine.model_path == "pre.gguf"
+        assert engine.model == "pre.gguf"
         assert engine._client_kwargs == {}
 
     def test_default_and_custom_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,11 +144,12 @@ class TestConstructor:
         assert custom.name == "my_llama"
         assert custom.description.startswith("d")
 
-    def test_model_path_property_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_model_property_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
-        assert engine.model_path == "model.gguf"
+        assert engine.model == "model.gguf"
+        assert not hasattr(engine, "model_path")
         with pytest.raises(AttributeError):
-            engine.model_path = "other"  # type: ignore[misc]
+            engine.model = "other"  # type: ignore[misc]
 
     def test_removed_arguments_flow_into_client_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
@@ -181,7 +183,7 @@ class TestFromPretrained:
         assert call["kwargs"] == {"n_ctx": 2048, "verbose": False}
         assert engine.name == "n"
         assert engine.description.startswith("d")
-        assert engine.model_path == "/cache/org/repo/m.gguf"
+        assert engine.model == "/cache/org/repo/m.gguf"
         assert engine._llm is FakeLlama.instances[-1]
 
     def test_caller_kwargs_win_and_are_recorded(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -279,7 +281,8 @@ class TestPayloadAndCall:
 
         assert payload == {"messages": messages}
         assert fake.chat_completion_calls[-1]["messages"] == messages
-        assert engine._extract_result(response, requested_structured=False) == "llama text"
+        # the base ``extract`` strips; ``_extract_result`` no longer does
+        assert engine._extract_result(response, requested_structured=False) == " llama text "
 
     def test_none_content_extracts_as_empty_string(
         self, monkeypatch: pytest.MonkeyPatch
@@ -385,7 +388,8 @@ class TestToDictAndModelData:
 
         assert data["type"] == "LlamaCppEngine"
         assert data["runtime_parameters"] == {"temperature": 0.7}
-        assert data["model_path"] == "model.gguf"
+        assert data["model"] == "model.gguf"
+        assert "model_path" not in data
         for removed in ("llama_kwargs", "client_kwargs", "timeout_seconds", "repo_id",
                         "n_gpu_layers", "n_ctx"):
             assert removed not in data
@@ -421,6 +425,35 @@ class TestLlamaCppTokenUsage:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="missing usage"):
             engine._extract_token_usage({"choices": []})
+
+    def test_missing_usage_key_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+
+        result = engine._extract_token_usage({"choices": []})
+
+        assert isinstance(result, LlamaCppTokenUsage)
+        assert (result.input_tokens, result.generated_tokens,
+                result.total_tokens, result.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = 1  # type: ignore[assignment]
+
+    def test_malformed_usage_still_raises_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.require_usage = False
+
+        with pytest.raises(LLMEngineError, match="mapping"):
+            engine._extract_token_usage({"choices": [], "usage": "bad"})
+        with pytest.raises(LLMEngineError, match="unexpected usage shape"):
+            engine._extract_token_usage({"choices": [], "usage": {"wrong_key": 1}})
 
     def test_non_mapping_usage_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)

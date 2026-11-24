@@ -13,6 +13,7 @@ openai_module = importlib.import_module("atomic_agentic.llm.openai_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import OpenAIEngine
+from atomic_agentic.models.results import OpenAITokenUsage
 from atomic_agentic.utils.core import run_coro_sync
 
 
@@ -224,7 +225,6 @@ class TestOpenAIEngine:
             {"role": "assistant", "content": "Hi"},
         ]
 
-        assert engine._collect_instructions(messages) == "Be concise."
         assert engine._build_role_blocks(messages) == [
             {
                 "role": "user",
@@ -236,9 +236,9 @@ class TestOpenAIEngine:
             },
         ]
 
-        blocks: list[dict[str, Any]] = []
-        assert engine._ensure_user_block(blocks) == 0
-        assert blocks == [{"role": "user", "content": []}]
+        assert not hasattr(engine, "_collect_instructions")
+        assert not hasattr(engine, "_ensure_user_block")
+        assert engine._build_provider_payload(messages)["instructions"] == "Be concise."
 
     def test_openai_call_provider_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
@@ -390,23 +390,6 @@ class TestOpenAIEngine:
         assert text["verbosity"] == "low"
         assert text["format"]["schema"] == schema
         assert engine.runtime_parameters["text"] == {"verbosity": "low"}
-
-    @pytest.mark.parametrize(
-        ("filename", "expected"),
-        [
-            ("doc.pdf", "pdf"),
-            ("image.png", "image"),
-            ("notes.txt", "text"),
-        ],
-    )
-    def test_openai_classify_path(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        filename: str,
-        expected: str,
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        assert engine._classify_path(filename) == expected
 
     def test_openai_to_dict_includes_non_secret_config(
         self,
@@ -599,6 +582,37 @@ class TestOpenAIExtractTokenUsage:
         with pytest.raises(LLMEngineError, match="did not include usage"):
             engine._extract_token_usage(response)
 
+    def test_usage_none_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        engine.require_usage = False
+
+        result = engine._extract_token_usage(SimpleNamespace(usage=None))
+
+        assert isinstance(result, OpenAITokenUsage)
+        assert (result.input_tokens, result.generated_tokens,
+                result.total_tokens, result.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = "no"  # type: ignore[assignment]
+
+    def test_partially_malformed_usage_still_raises_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        engine.require_usage = False
+        response = SimpleNamespace(usage=self._usage(
+            output_tokens=2,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=5),
+        ))
+
+        with pytest.raises(ValueError, match="response_tokens must be >= 0"):
+            engine._extract_token_usage(response)
+
     def test_negative_response_tokens_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A negative response_tokens value now fails TokenUsage's own
         # >= 0 field validation (base class), not an OpenAIEngine-level
@@ -666,6 +680,15 @@ class TestOpenAIAttachments:
         meta = engine._prepare_attachment(str(path))
 
         assert meta["inlined_text"] == "A" * 300_000
+
+    def test_prepare_attachment_failure_names_the_cause(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        missing = tmp_path / "gone.txt"
+
+        with pytest.raises(LLMEngineError, match=r"_prepare_attachment failed for .*: .*gone\.txt"):
+            engine._prepare_attachment(str(missing))
 
     def test_prepare_attachment_pdf_uploads(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any

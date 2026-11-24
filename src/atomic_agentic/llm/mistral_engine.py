@@ -31,7 +31,12 @@ from ..models.results.llm import (
     RemoteLLMModelData
 )
 from ..utils.core import format_missing_dependency
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import (
+    classify_path,
+    inlined_file_block,
+    read_text_file,
+    validate_attachment_path,
+)
 
 __all__ = ["MistralEngine"]
 
@@ -41,51 +46,32 @@ class MistralEngine(LLMEngine):
     """
     Mistral adapter using: **upload → sign → attach URL parts**.
 
-    Flow per call
-    -------------
-    1) Attachments are prepared via `attach(path)`:
-       - PDFs  → upload + sign → `{ "kind": "pdf", "signed_url": ... }`
-       - Images → upload + sign → `{ "kind": "image", "signed_url": ... }`
-       - Text/code → read + inline → `{ "kind": "text", "inlined_text": ... }`
-    2) `invoke({'messages': ...})` (from the base `LLMEngine`) will:
-       - normalize chat messages (role/content strings),
-       - call `_build_provider_payload` (which snapshots the engine's
-         attachments) to:
-         * convert messages into Mistral's chat schema
-         * ensure the last user message has a `content` parts array
-         * append inline text and signed URL parts to that last user turn
-       - call `_call_provider`
-       - call `_extract_result` to normalize the response.
-    3) `detach(path)` does best-effort deletion of uploaded files via
-       `client.files.delete(file_id=...)`.
+    Attachments
+    -----------
+    ``attach(path)`` prepares a file once:
+
+    - PDFs and images: upload and sign, stored as ``{"kind": "pdf" | "image",
+      "signed_url": ...}`` and sent as ``document_url`` / ``image_url`` parts.
+    - Text/code: read and stored as ``{"kind": "text", "inlined_text": ...}``
+      and sent as an inlined text part.
+
+    The parts are appended to the last user message (converted to a parts
+    list only when attachments exist). ``detach(path)`` deletes an uploaded
+    file best-effort.
 
     Result extraction
-    ------------------
-    `_extract_result` reuses the same content-join logic as before
-    (`response.choices[0].message.content` may be a plain string or a list
-    of chunk dicts/strings; joined and stripped either way). When the base
-    class signals `requested_structured=True`, the joined text is parsed
-    via `json.loads`; a parse failure falls back to returning the raw text
-    rather than raising, matching the base `LLMEngine` fallback contract
-    (structured-generation Pass 3).
+    -----------------
+    ``_extract_result`` joins ``choices[0].message.content`` (a string or a
+    list of chunks) and, on a structured call, parses it with ``json.loads``
+    (raw text on a parse failure).
 
     Structured-output schema policy
-    ---------------------------------
-    `output_structure`, when given, is forwarded to
-    `response_format={"type": "json_schema", "json_schema": {"name":
-    "output_structure", "schema": ..., "strict": self.strict}}` completely
-    unmodified -- this engine performs no schema pruning
-    (structured-generation Pass 8). Mistral's own rejection behavior for
-    `uniqueItems`, `contains`, `propertyNames` under `strict=True`
-    (confirmed live: 400, "Invalid structured output syntax", code 3051)
-    now surfaces directly rather than being silently stripped. `not` and a
-    `required` entry naming an undeclared property raise unconditionally
-    under `strict=True` and are never auto-corrected. Under `strict=False`
-    none of those raise, but enforcement is materially weaker overall --
-    e.g. `additionalProperties: false` itself goes unenforced too,
-    confirmed live. Notable asymmetry, still worth stating: unlike
-    OpenAI/Anthropic, Mistral has no `additionalProperties: false`
-    requirement at all.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified in ``response_format``
+    (``json_schema`` with ``strict=self.strict``); Mistral rejects what it
+    does not accept natively. ``strict=False`` accepts more keywords but
+    enforces less (for example ``additionalProperties: false`` goes
+    unenforced).
 
     Runtime parameters and configuration
     ------------------------------------
@@ -97,7 +83,8 @@ class MistralEngine(LLMEngine):
     attribute: a validating, settable bool re-read on every structured-output
     call, mirroring `OpenAIEngine.strict`. Timeout and retry are the SDK
     client's own settings (`timeout_ms`, `retry_config`) through
-    `client_kwargs`.
+    `client_kwargs`. `require_usage` (base) controls a response with no usage
+    object.
     """
 
     _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format", "stream"})
@@ -128,12 +115,7 @@ class MistralEngine(LLMEngine):
             Keyword arguments forwarded unchanged to ``Mistral(...)``. Common
             uses: ``api_key``, ``server_url``, ``timeout_ms``, ``retry_config``.
 
-        ``strict`` starts ``True``: structured-output requests use Mistral's
-        strict JSON-Schema conformance mode, which matches its documented
-        recommendation. Confirmed live that ``strict=False`` accepts a wider
-        range of schema keywords without error but drops real enforcement
-        elsewhere (e.g. ``additionalProperties: false``), trading a wider
-        keyword allow-list for materially weaker guarantees.
+        ``strict`` starts ``True`` (Mistral's strict JSON-Schema mode).
         """
         # 1. SDK presence check.
         if Mistral is None:
@@ -267,7 +249,7 @@ class MistralEngine(LLMEngine):
             }
         """
         try:
-            kind = self._classify_kind(path)
+            kind = classify_path(path, MISTRAL_IMAGE_EXTS)
             mime, _ = mimetypes.guess_type(path)
             mime = mime or ""
             ext = os.path.splitext(path)[1].lower()
@@ -293,7 +275,7 @@ class MistralEngine(LLMEngine):
                 }
 
             # text/code → inline
-            text = self._read_text_file(path)
+            text = read_text_file(path)
             return {
                 "kind": "text",
                 "mime": mime,
@@ -305,7 +287,7 @@ class MistralEngine(LLMEngine):
             raise
         except Exception as exc:
             raise LLMEngineError(
-                f"MistralEngine._prepare_attachment failed for {path!r}"
+                f"MistralEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------ #
@@ -329,10 +311,8 @@ class MistralEngine(LLMEngine):
           "schema": output_structure, "strict": self.strict}}`.
 
         When attachments exist, inline text and signed URLs are appended as
-        parts to the **last user message** (converted to a parts list, with an
-        empty user turn added if there is none) so they are clearly associated
-        with the most recent user query. Without attachments, message content
-        passes through unchanged as plain strings.
+        parts to the last user message (converted to a parts list). Without
+        attachments, message content passes through as plain strings.
         """
         attachments = dict(self._attachments)
 
@@ -351,8 +331,9 @@ class MistralEngine(LLMEngine):
             for path, meta in attachments.items():
                 inlined_text = meta.get("inlined_text")
                 if meta.get("kind") == "text" and inlined_text:
-                    header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                    parts.append({"type": "text", "text": header + inlined_text})
+                    parts.append(
+                        {"type": "text", "text": inlined_file_block(path, inlined_text)}
+                    )
 
             # Attach signed URLs for PDFs & images from persistent attachments.
             for _, meta in attachments.items():
@@ -397,26 +378,16 @@ class MistralEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Mistral
-        chat completion response.
-
-        `response.choices[0].message.content` may be a string or a list of
-        chunks (unchanged from the prior `_extract_text` body). When
-        `requested_structured` is `True`, attempts `json.loads` on the
-        joined text; a parse failure falls back to returning the raw text
-        rather than raising, matching the base `LLMEngine` fallback
-        contract (structured-generation Pass 3).
-
-        Renamed from `_extract_text` (structured-generation Pass 1
-        convention); gains `requested_structured` per the Pass 3 base
-        contract.
+        Join `response.choices[0].message.content` (a string or a list of
+        chunks); on a structured call, its `json.loads` value (raw text on a
+        parse failure).
         """
         msg = getattr(response.choices[0].message, "content", "")
         if isinstance(msg, list):
             msg = "".join(
                 c.get("text", "") if isinstance(c, dict) else str(c) for c in msg
             )
-        text = (msg or "").strip()
+        text = msg or ""
         if not requested_structured:
             return text
         try:
@@ -434,9 +405,16 @@ class MistralEngine(LLMEngine):
         - completion_tokens: generated response tokens
         - total_tokens: total prompt + completion tokens
         - prompt_tokens_details.cached_tokens: cached prompt-token subset, when present
+
+        A response with no usage object raises unless ``require_usage`` is
+        ``False``, which yields an all-zero record.
         """
         usage = response.usage
         if usage is None:
+            if not self.require_usage:
+                return MistralTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError("Mistral response did not include usage.")
 
         if usage.prompt_tokens is None:
@@ -468,12 +446,7 @@ class MistralEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> LLMModelData:
-        """
-        Return configured Mistral model identity data for this engine.
-
-        Model data is derived from engine configuration, not from the provider
-        response object.
-        """
+        """Return configured Mistral model identity (from ``self.model``)."""
         return RemoteLLMModelData(
             provider="mistral",
             model_name=self.model,
@@ -483,62 +456,15 @@ class MistralEngine(LLMEngine):
     # Mistral-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
 
-    def _classify_kind(self, path: str) -> str:
-        """
-        Classify `path` into 'pdf' | 'image' | 'text'.
-
-        Base `_validate_attachment_path` has already checked existence and coarse
-        extension policy; here we only bucket by type.
-        """
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        ext = os.path.splitext(path)[1].lower()
-
-        if ext == ".pdf" or mime == "application/pdf":
-            return "pdf"
-        if ext in MISTRAL_IMAGE_EXTS or mime.startswith("image/"):
-            return "image"
-        # Fallback: treat as text/code and attempt to inline.
-        return "text"
-
     def _ensure_user_parts(self, messages: List[Dict[str, Any]]) -> int:
         """
-        Ensure there is a user message with `content` as a parts list.
-
-        - If none exists: append an empty user turn.
-        - If it's a string: convert to `[{\"type\": \"text\", \"text\": ...}]`.
+        Convert the last user message's string content into a parts list
+        (``[]`` for empty content) and return its index.
         """
-        idx = next(
-            (
-                i
-                for i in range(len(messages) - 1, -1, -1)
-                if (messages[i].get("role") or "").lower() == "user"
-            ),
-            None,
-        )
-        if idx is None:
-            messages.append({"role": "user", "content": []})
-            idx = len(messages) - 1
-
-        content = messages[idx].get("content", "")
-        if isinstance(content, list):
-            # already parts
-            return idx
-
-        parts: List[Dict[str, Any]] = []
-        if isinstance(content, str) and content:
-            parts.append({"type": "text", "text": content})
-        messages[idx]["content"] = parts
+        idx = next(i for i in reversed(range(len(messages))) if messages[i]["role"] == "user")
+        content = messages[idx]["content"]
+        messages[idx]["content"] = [{"type": "text", "text": content}] if content else []
         return idx
-
-    def _read_text_file(self, path: str) -> str:
-        """Read a local file as UTF-8 (with replacement)."""
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            return raw.decode("utf-8", errors="replace")
-        except Exception as exc:  # pragma: no cover - defensive
-            return f"[Error reading file '{os.path.basename(path)}': {exc}]"
 
     def _upload_file(self, path: str) -> str:
         """Upload to Mistral Files; return file handle ID."""
