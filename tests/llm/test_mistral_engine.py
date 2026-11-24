@@ -61,16 +61,6 @@ def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> MistralEngin
     return MistralEngine(model="mistral-small-latest", **kwargs)
 
 
-class TestMistralRemovedSurface:
-    def test_cutoff_and_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
-                     "_max_retries", "_on_detach", "timeout_seconds", "_timeout_seconds",
-                     "temperature"):
-            assert not hasattr(engine, name)
-
-
 class TestMistralValidatingProperties:
     def test_strict_setter_rejects_non_bool(
         self, monkeypatch: pytest.MonkeyPatch
@@ -121,16 +111,6 @@ class TestMistralEngine:
             MistralEngine(
                 model="mistral-small-latest", client=FakeMistralClient(), api_key="secret"
             )
-
-    @pytest.mark.parametrize("removed", ["temperature", "strict", "timeout_seconds"])
-    def test_removed_constructor_arguments_flow_into_client_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch, removed: str
-    ) -> None:
-        engine = _make_engine(monkeypatch, **{removed: 1})
-
-        assert FakeMistralClient.instances[-1].kwargs[removed] == 1
-        assert engine.runtime_parameters == {}
-        assert engine.strict is True
 
     @pytest.mark.parametrize("key", ["model", "messages", "response_format", "stream"])
     def test_reserved_runtime_keys_raise(
@@ -229,12 +209,6 @@ class TestMistralEngine:
         assert engine._ensure_user_parts(messages) == 0
         assert messages[0]["content"] == []
 
-    def test_mistral_helpers_moved_to_utils(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("_classify_kind", "_read_text_file"):
-            assert not hasattr(engine, name)
-
     def test_prepare_attachment_failure_names_the_cause(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
@@ -265,27 +239,61 @@ class TestMistralEngine:
         response = engine._call_provider(payload)
         fake = FakeMistralClient.instances[-1]
 
-        # the base ``extract`` strips; ``_extract_result`` no longer does
+        # ``_extract_result`` does not strip; the base ``extract`` does.
         assert engine._extract_result(response, requested_structured=False) == " mistral text "
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
         assert fake.complete_calls[-1]["temperature"] == 0.6
 
-    def test_mistral_extract_text_from_chunk_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_mistral_extract_text_from_dict_chunk_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         engine = _make_engine(monkeypatch)
-        response = SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=[
-                            {"text": "hello "},
-                            {"text": "world"},
-                        ]
-                    )
-                )
-            ]
+        response = self._response_with_content(
+            [{"text": "hello "}, {"type": "reference"}, {"text": "world"}]
         )
 
         assert engine._extract_result(response, requested_structured=False) == "hello world"
+
+    def test_mistral_extract_text_from_sdk_chunk_objects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        models = pytest.importorskip("mistralai.client.models")
+        TextChunk, ImageURLChunk = models.TextChunk, models.ImageURLChunk
+        engine = _make_engine(monkeypatch)
+        response = self._response_with_content([
+            TextChunk(text="hello "),
+            ImageURLChunk(image_url="https://example.com/x.png"),
+            TextChunk(text="world"),
+        ])
+
+        assert engine._extract_result(response, requested_structured=False) == "hello world"
+        assert engine._extract_result(
+            self._response_with_content([TextChunk(text='{"a": 1}')]),
+            requested_structured=True,
+        ) == {"a": 1}
+
+    @pytest.mark.parametrize("content", [None, "", []])
+    def test_extract_result_no_text(
+        self, monkeypatch: pytest.MonkeyPatch, content: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = self._response_with_content(content)
+
+        assert engine._extract_result(response, requested_structured=False) == ""
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        assert engine._extract_result(self._response_with_content("null"), True) is None
+
+    @staticmethod
+    def _response_with_content(content: Any) -> Any:
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
 
     def test_build_payload_response_format_uses_live_strict_property_true(
         self, monkeypatch: pytest.MonkeyPatch
@@ -364,6 +372,27 @@ class TestMistralEngine:
         payload = engine._build_provider_payload([{"role": "system", "content": "be brief"}])
 
         assert payload["messages"] == [{"role": "system", "content": "be brief"}]
+
+    def test_blank_user_turn_with_attachment_carries_only_the_attachment_part(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["doc.pdf"] = {"kind": "pdf", "signed_url": "https://doc"}
+        messages = engine._normalize_messages([{"role": "user", "content": ""}])
+
+        payload = engine._build_provider_payload(messages)
+
+        assert payload["messages"] == [
+            {"role": "user", "content": [{"type": "document_url", "document_url": "https://doc"}]}
+        ]
+
+    def test_blank_user_turn_without_attachments_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=r"^MistralEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
 
     def test_engine_owned_fields_win_over_runtime_parameters(
         self, monkeypatch: pytest.MonkeyPatch
@@ -567,7 +596,8 @@ class TestMistralAttachments:
         first = engine.attach(str(path))
         second = engine.attach(str(path))
 
-        assert first is second
+        assert first == second
+        assert first is not second
         assert engine.attachments == {str(path): first}
 
     def test_attachments_property_returns_a_copy(
@@ -579,8 +609,10 @@ class TestMistralAttachments:
         engine.attach(str(path))
 
         engine.attachments.clear()  # type: ignore[attr-defined]
+        engine.attachments[str(path)]["kind"] = "changed"  # type: ignore[index]
+        engine.attach(str(path))["kind"] = "changed"  # type: ignore[index]
 
-        assert str(path) in engine.attachments
+        assert engine.attachments[str(path)]["kind"] == "text"
 
     def test_detach_with_file_id_deletes_the_file(
         self, monkeypatch: pytest.MonkeyPatch

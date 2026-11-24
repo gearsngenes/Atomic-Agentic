@@ -1,6 +1,6 @@
 # example_doc_summarizer.py
 # Requires:
-#   - OPENAI_API_KEY in your environment (or .env)
+#   - GOOGLE_API_KEY in your environment (or .env)
 import os
 from dotenv import load_dotenv
 from atomic_agentic.agents import BasicAgent
@@ -8,12 +8,12 @@ from atomic_agentic.llm import GeminiEngine
 
 load_dotenv()
 
-# --- define our agent's llm (openai, bedrock, azure, etc.) ---
+# --- define our agent's llm (OpenAI, Anthropic, Gemini or Mistral engine; the others have no attach API) ---
 # (import the engine you switch to from atomic_agentic.llm)
 # llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-flash-lite", http_options={"api_version": "v1beta"})
 # llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
-# llm = LlamaCppEngine(model=os.getenv("LLAMA_MODEL_PATH"), n_ctx=512, verbose=False)
+# llm = LlamaCppEngine(model=os.getenv("LLAMA_MODEL_PATH"), n_ctx=4096, verbose=False)
 # Note: attachments are supported only by the OpenAI, Gemini, Mistral and Anthropic
 # engines. LlamaCppEngine and LiteLLMEngine have no attach API.
 
@@ -40,7 +40,7 @@ def main():
         "Analyze and summarize the content of the file thoroughly. "
         "Call out any key features, images, description, information, etc."
     )
-    summary = agent.invoke({"prompt": prompt})  # <-- UPDATED: dict-first invoke
+    summary = agent.invoke({"prompt": prompt})
 
     # 3) Print the summary
     print("\n=== Summary ===\n")

@@ -25,10 +25,8 @@ def _fake_usage(
     cache_read: int = 0,
     thinking_tokens: int = 0,
 ) -> Any:
-    # output_tokens_details is a real anthropic.OutputTokensDetails Pydantic
-    # object, not a dict — a SimpleNamespace mirrors that attribute-access
-    # shape (unlike a plain dict, which `.get()` would silently mis-handle
-    # via getattr, and which previously masked B1's `.get()`-on-object crash).
+    # output_tokens_details is an anthropic.OutputTokensDetails Pydantic
+    # object (attribute access), so a SimpleNamespace mirrors it, not a dict.
     return SimpleNamespace(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -165,22 +163,6 @@ class TestAnthropicEngine:
 
         assert engine.model == "claude-sonnet-4-6"
         assert engine.runtime_parameters == {}
-        assert engine.block_separator == ""
-
-    @pytest.mark.parametrize(
-        "removed",
-        ["max_output_tokens", "stop_sequences", "thinking_config", "extra_body",
-         "block_separator", "timeout_seconds"],
-    )
-    def test_removed_constructor_arguments_flow_into_client_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch, removed: str
-    ) -> None:
-        FakeAnthropicClient.instances.clear()
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-
-        engine = AnthropicEngine(model="claude-opus-4-8", **{removed: 1})
-
-        assert FakeAnthropicClient.instances[-1].kwargs[removed] == 1
         assert engine.block_separator == ""
 
     def test_block_separator_is_validated(
@@ -527,27 +509,6 @@ class TestAnthropicEngine:
 
         assert payload["output_config"] == {"effort": "high"}
 
-    def test_blank_system_messages_are_dropped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8")
-
-        blank_only = engine._build_provider_payload([
-            {"role": "system", "content": "   "},
-            {"role": "system", "content": ""},
-            {"role": "user", "content": "hi"},
-        ])
-        mixed = engine._build_provider_payload([
-            {"role": "system", "content": " A "},
-            {"role": "system", "content": "\n"},
-            {"role": "system", "content": "B"},
-            {"role": "user", "content": "hi"},
-        ])
-
-        assert "system" not in blank_only
-        assert mixed["system"] == "A\n\nB"
-
     def test_build_payload_omits_output_config_when_not_structured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -579,6 +540,25 @@ class TestAnthropicEngine:
         )
 
         assert engine._extract_result(response, requested_structured=True) == "not json"
+
+    def test_extract_result_no_text_block_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(content=[SimpleNamespace(type="text", text=None)])
+
+        assert engine._extract_result(response, requested_structured=False) == ""
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(content=[SimpleNamespace(type="text", text="null")])
+
+        assert engine._extract_result(response, requested_structured=True) is None
 
     def test_extract_result_requested_empty_content_falls_back_to_empty_string(
         self, monkeypatch: pytest.MonkeyPatch
@@ -700,9 +680,6 @@ class TestAnthropicEngine:
             "stop_sequences": ["END"],
         }
         assert d["block_separator"] == "---"
-        for removed in ("inline_cutoff_chars", "max_retries", "attachments",
-                        "timeout_seconds", "max_output_tokens"):
-            assert removed not in d
         assert "client" not in d
 
     # -- Attachment pipeline ---------------------------------------------------
@@ -772,6 +749,29 @@ class TestAnthropicEngine:
         content = payload["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": "Describe this."}
         assert content[1] is fake_block
+
+    def test_blank_user_turn_with_attachment_carries_only_the_attachment_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        fake_block = {"type": "document", "source": {"type": "text", "data": "notes"}}
+        engine._attachments["notes.txt"] = {"kind": "text", "mime": "", "ext": ".txt"}
+        engine._blocks["notes.txt"] = fake_block
+        messages = engine._normalize_messages([{"role": "user", "content": ""}])
+
+        payload = engine._build_provider_payload(messages)
+
+        assert payload["messages"] == [{"role": "user", "content": [fake_block]}]
+
+    def test_blank_user_turn_without_attachments_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+
+        with pytest.raises(LLMEngineError, match=r"^AnthropicEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
 
     def test_attachment_blocks_land_in_last_user_turn_not_first(
         self, monkeypatch: pytest.MonkeyPatch
@@ -924,19 +924,6 @@ class TestAnthropicEngine:
         _, block = engine._prepare_attachment(str(txt))
 
         assert block["source"]["data"] == "a" * 300_000
-
-    # -- removed retry and cutoff surface ---------------------------------
-
-    def test_retry_and_cutoff_surface_is_gone(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8")
-
-        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
-                     "_max_retries", "_on_detach", "timeout_seconds", "_timeout_seconds",
-                     "max_output_tokens", "stop_sequences", "thinking_config", "extra_body"):
-            assert not hasattr(engine, name)
 
     def test_max_retries_goes_to_the_sdk_client(
         self, monkeypatch: pytest.MonkeyPatch

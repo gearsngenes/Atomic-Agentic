@@ -85,7 +85,7 @@ class GeminiEngine(LLMEngine):
     ---------------------------
     ``_extract_result`` returns ``response.text`` (``""`` when absent); on a
     structured call it parses it with ``json.loads`` and falls back to the raw
-    value on ``JSONDecodeError`` or ``TypeError``. ``_extract_token_usage``
+    text on ``JSONDecodeError``. ``_extract_token_usage``
     maps ``usage_metadata`` into ``GeminiTokenUsage``;
     ``generated_tokens = total_token_count - prompt_token_count`` so it covers
     every non-prompt token Gemini counts (candidates, thoughts, tool use).
@@ -174,12 +174,13 @@ class GeminiEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     @property
     def attachments(self) -> Mapping[str, Mapping[str, Any]]:
-        """Read-only copy of attached local path -> provider metadata."""
-        return dict(self._attachments)
+        """Copy of attached local path -> provider metadata (shallow per entry)."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
 
     def attach(self, path: str) -> Mapping[str, Any]:
         """
-        Attach a local file for every later call; returns its metadata.
+        Attach a local file for every later call; returns a shallow copy of
+        its metadata.
 
         1. Reject a blank or non-string path.
         2. Return the stored metadata when ``path`` is already attached.
@@ -188,12 +189,12 @@ class GeminiEngine(LLMEngine):
         if not isinstance(path, str) or not path:
             raise LLMEngineError("GeminiEngine.attach: path must be a non-empty string")
         if path in self._attachments:
-            return self._attachments[path]
+            return dict(self._attachments[path])
 
         self._validate_attachment_path(path)
         meta = self._prepare_attachment(path)
         self._attachments[path] = meta
-        return meta
+        return dict(meta)
 
     def detach(self, path: str) -> bool:
         """
@@ -219,6 +220,10 @@ class GeminiEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
     # ------------------------------------------------------------------ #
+
+    def _allows_blank_user_content(self) -> bool:
+        """A blank user turn is allowed while attachments exist (they attach to it)."""
+        return bool(self._attachments)
 
     def _validate_attachment_path(self, path: str) -> None:
         """
@@ -301,8 +306,9 @@ class GeminiEngine(LLMEngine):
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
         turns. Attachment parts (uploaded files via ``Part.from_uri``) are
-        appended to the last user ``Content``'s ``parts`` list (empty-content
-        turns are skipped, so attachments with no non-empty user turn raise).
+        appended to the last user ``Content``'s ``parts`` list. A blank user
+        turn (allowed only with attachments) has no text part, so its parts
+        are the attachment parts alone.
         """
         # 1. Build attachment_parts list.
         attachment_parts: List[Any] = []
@@ -324,20 +330,14 @@ class GeminiEngine(LLMEngine):
                 continue
             gemini_role = "model" if role == "assistant" else "user"
             text = m["content"]
-            if not text:
-                continue
             contents.append(genai.types.Content(
                 role=gemini_role,
-                parts=[genai.types.Part.from_text(text=text)],
+                parts=[genai.types.Part.from_text(text=text)] if text else [],
             ))
 
         # 3. Append attachment_parts to the last user Content.
         if attachment_parts:
-            last_user = next((c for c in reversed(contents) if c.role == "user"), None)
-            if last_user is None:
-                raise LLMEngineError(
-                    "GeminiEngine: attachments need a user message with non-empty content"
-                )
+            last_user = next(c for c in reversed(contents) if c.role == "user")
             last_user.parts = list(last_user.parts) + attachment_parts
 
         return contents
@@ -397,15 +397,15 @@ class GeminiEngine(LLMEngine):
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Return ``response.text`` (``""`` when absent); on a structured call,
-        its ``json.loads`` value, falling back to ``response.text`` on a parse
-        failure or when it is ``None`` (no text parts).
+        its ``json.loads`` value, falling back to the text on a parse failure.
         """
+        text = response.text or ""
         if not requested_structured:
-            return response.text or ""
+            return text
         try:
-            return json.loads(response.text)
-        except (json.JSONDecodeError, TypeError):
-            return response.text
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """

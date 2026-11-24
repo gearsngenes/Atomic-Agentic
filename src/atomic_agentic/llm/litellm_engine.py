@@ -229,13 +229,9 @@ class LiteLLMEngine(LLMEngine):
         inp = u.prompt_tokens
         gen = u.completion_tokens
 
-        # `PromptTokensDetailsWrapper.__init__` (litellm/types/utils.py)
-        # `del`s `cache_creation_tokens` from the instance entirely whenever
-        # it's `None` post-construction — plain attribute access raises
-        # `AttributeError` for any response with no cache-creation activity
-        # (e.g. OpenAI, or Anthropic without prompt caching). `cached_tokens`
-        # is inherited from the base `PromptTokensDetails` and is not subject
-        # to this deletion, so it stays safe as plain attribute access.
+        # litellm's `PromptTokensDetailsWrapper` deletes `cache_creation_tokens`
+        # when it is `None`, so read it with `getattr`; `cached_tokens` is
+        # always present.
         prompt_details = u.prompt_tokens_details
         cached_tokens = (
             prompt_details.cached_tokens if prompt_details is not None else None
@@ -253,13 +249,8 @@ class LiteLLMEngine(LLMEngine):
             else None
         )
 
-        # Plain subtraction rather than litellm's own
-        # completion_tokens_details.text_tokens — verified via source that
-        # text_tokens is essentially never populated on the dominant
-        # response-conversion path (raw provider usage dicts nest
-        # reasoning_tokens under completion_tokens_details rather than
-        # passing it as a top-level Usage.__init__ kwarg, which is what
-        # actually triggers litellm's own text_tokens auto-calculation).
+        # Plain subtraction: litellm's `completion_tokens_details.text_tokens`
+        # is rarely populated.
         response_tokens = gen - (reasoning_tokens or 0)
 
         return LiteLLMTokenUsage(

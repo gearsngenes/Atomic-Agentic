@@ -22,18 +22,8 @@ class TestCollectSystemText:
 
         assert collect_system_text(messages) == "One.\n\nTwo."
 
-    def test_blank_system_content_is_dropped(self) -> None:
-        messages = [
-            {"role": "system", "content": "   "},
-            {"role": "system", "content": "Only."},
-            {"role": "user", "content": "Hi"},
-        ]
-
-        assert collect_system_text(messages) == "Only."
-
     def test_none_when_no_system_text(self) -> None:
         assert collect_system_text([{"role": "user", "content": "Hi"}]) is None
-        assert collect_system_text([{"role": "system", "content": " \n"}]) is None
         assert collect_system_text([]) is None
 
 

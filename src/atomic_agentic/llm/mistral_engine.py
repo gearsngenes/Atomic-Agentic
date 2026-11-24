@@ -158,12 +158,12 @@ class MistralEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     @property
     def attachments(self) -> Mapping[str, Mapping[str, Any]]:
-        """Read-only copy of attached local path -> provider metadata."""
-        return dict(self._attachments)
+        """Copy of attached local path -> provider metadata."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
 
     def attach(self, path: str) -> Mapping[str, Any]:
         """
-        Attach a local file for every later call; returns its metadata.
+        Attach a local file for every later call; returns a copy of its metadata.
 
         1. Reject a blank or non-string path.
         2. Return the stored metadata when ``path`` is already attached.
@@ -172,12 +172,12 @@ class MistralEngine(LLMEngine):
         if not isinstance(path, str) or not path:
             raise LLMEngineError("MistralEngine.attach: path must be a non-empty string")
         if path in self._attachments:
-            return self._attachments[path]
+            return dict(self._attachments[path])
 
         self._validate_attachment_path(path)
         meta = self._prepare_attachment(path)
         self._attachments[path] = meta
-        return meta
+        return dict(meta)
 
     def detach(self, path: str) -> bool:
         """
@@ -203,6 +203,10 @@ class MistralEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
     # ------------------------------------------------------------------ #
+
+    def _allows_blank_user_content(self) -> bool:
+        """A blank user turn is allowed while attachments exist (they attach to it)."""
+        return bool(self._attachments)
 
     def _validate_attachment_path(self, path: str) -> None:
         """
@@ -379,14 +383,17 @@ class MistralEngine(LLMEngine):
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Join `response.choices[0].message.content` (a string or a list of
-        chunks); on a structured call, its `json.loads` value (raw text on a
+        chunk objects or dicts; chunks without text are skipped, missing
+        content is ``""``); on a structured call, its `json.loads` value (raw text on a
         parse failure).
         """
         msg = getattr(response.choices[0].message, "content", "")
         if isinstance(msg, list):
-            msg = "".join(
-                c.get("text", "") if isinstance(c, dict) else str(c) for c in msg
+            texts = (
+                c.get("text") if isinstance(c, dict) else getattr(c, "text", None)
+                for c in msg
             )
+            msg = "".join(t for t in texts if isinstance(t, str))
         text = msg or ""
         if not requested_structured:
             return text
@@ -425,11 +432,8 @@ class MistralEngine(LLMEngine):
             raise LLMEngineError("Mistral usage missing total_tokens.")
 
         cached_tokens = None
-        # The real mistralai.UsageInfo model never declares
-        # prompt_tokens_details as an attribute at all (verified empirically
-        # against the installed SDK) — plain attribute access raises
-        # AttributeError on every real response. getattr with a default
-        # makes this genuinely optional instead of assumed-present.
+        # mistralai's UsageInfo does not declare prompt_tokens_details, so
+        # read it with getattr.
         prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
         if prompt_tokens_details is not None:
             if isinstance(prompt_tokens_details, Mapping):

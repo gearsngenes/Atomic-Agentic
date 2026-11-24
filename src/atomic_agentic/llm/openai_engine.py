@@ -89,8 +89,9 @@ class OpenAIEngine(LLMEngine):
 
     Result extraction
     -----------------
-    ``_extract_result`` returns ``response.output_text``, parsed with
-    ``json.loads`` on a structured call (raw text on a parse failure).
+    ``_extract_result`` returns ``response.output_text`` (``""`` when missing),
+    parsed with ``json.loads`` on a structured call (raw text on a parse
+    failure).
     ``_extract_token_usage`` maps Responses API usage into ``OpenAITokenUsage``.
 
     Structured-output schema policy
@@ -192,12 +193,12 @@ class OpenAIEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     @property
     def attachments(self) -> Mapping[str, Mapping[str, Any]]:
-        """Read-only copy of attached local path -> provider metadata."""
-        return dict(self._attachments)
+        """Copy of attached local path -> provider metadata."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
 
     def attach(self, path: str) -> Mapping[str, Any]:
         """
-        Attach a local file for every later call; returns its metadata.
+        Attach a local file for every later call; returns a copy of its metadata.
 
         1. Reject a blank or non-string path.
         2. Return the stored metadata when ``path`` is already attached.
@@ -206,12 +207,12 @@ class OpenAIEngine(LLMEngine):
         if not isinstance(path, str) or not path:
             raise LLMEngineError("OpenAIEngine.attach: path must be a non-empty string")
         if path in self._attachments:
-            return self._attachments[path]
+            return dict(self._attachments[path])
 
         self._validate_attachment_path(path)
         meta = self._prepare_attachment(path)
         self._attachments[path] = meta
-        return meta
+        return dict(meta)
 
     def detach(self, path: str) -> bool:
         """
@@ -240,6 +241,10 @@ class OpenAIEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     # Overrides / template hooks
     # ------------------------------------------------------------------ #
+
+    def _allows_blank_user_content(self) -> bool:
+        """A blank user turn is allowed while attachments exist (they attach to it)."""
+        return bool(self._attachments)
 
     def _validate_attachment_path(self, path: str) -> None:
         """
@@ -335,16 +340,17 @@ class OpenAIEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Return ``response.output_text``; on a structured call, its
-        ``json.loads`` value (raw text when it does not parse, e.g. after
-        output-token truncation).
+        Return ``response.output_text`` (``""`` when missing); on a structured
+        call, its ``json.loads`` value (raw text when it does not parse, e.g.
+        after output-token truncation).
         """
+        text = response.output_text or ""
         if not requested_structured:
-            return response.output_text
+            return text
         try:
-            return json.loads(response.output_text)
+            return json.loads(text)
         except json.JSONDecodeError:
-            return response.output_text
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -464,8 +470,8 @@ class OpenAIEngine(LLMEngine):
         - `assistant` turns → `output_text`
         - Other non-system turns → `input_text`
         - `system` content is carried only via `instructions`.
-        - An empty user turn is kept (attachments attach to the last user
-          block); other empty turns are skipped.
+        - A blank user turn (allowed only with attachments) becomes a block
+          with no text part; attachments attach to the last user block.
         """
         blocks: List[Dict[str, Any]] = []
         for m in messages:
@@ -473,9 +479,6 @@ class OpenAIEngine(LLMEngine):
             if role == "system":
                 continue  # carried via `instructions`
             text = m["content"]
-            if not text and role != "user":
-                # Keep empty user (we attach into it), skip other empty roles.
-                continue
             part_type = "output_text" if role == "assistant" else "input_text"
             parts: List[Dict[str, Any]] = []
             if text:

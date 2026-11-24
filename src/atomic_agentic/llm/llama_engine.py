@@ -30,6 +30,9 @@ from ..models.results.llm import (
 
 __all__ = ["LlamaCppEngine"]
 
+# Load defaults applied under the caller's ``client_kwargs``.
+_LOAD_DEFAULTS: Dict[str, Any] = {"n_ctx": 2048, "verbose": False}
+
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
     """
@@ -144,7 +147,7 @@ class LlamaCppEngine(LLMEngine):
 
         # 5. Load the model when given a path
         if model is not None:
-            load_kwargs: Dict[str, Any] = {"n_ctx": 2048, "verbose": False}
+            load_kwargs: Dict[str, Any] = dict(_LOAD_DEFAULTS)
             load_kwargs.update(client_kwargs)
             llm = Llama(model_path=str(model), **load_kwargs)
 
@@ -192,7 +195,7 @@ class LlamaCppEngine(LLMEngine):
         cls._require_sdk()
 
         # 2. Load kwargs
-        load_kwargs: Dict[str, Any] = {"n_ctx": 2048, "verbose": False}
+        load_kwargs: Dict[str, Any] = dict(_LOAD_DEFAULTS)
         load_kwargs.update(client_kwargs)
 
         # 3. Download and load
@@ -283,10 +286,16 @@ class LlamaCppEngine(LLMEngine):
         """
         try:
             choices = response["choices"]
-            if not choices:
-                raise KeyError("choices is empty")
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_result: unexpected response shape"
+            ) from exc
+        if not choices:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_result: unexpected response shape (empty choices)"
+            )
+        try:
+            content = choices[0].get("message", {}).get("content", "")
         except Exception as exc:
             raise LLMEngineError(
                 "LlamaCppEngine._extract_result: unexpected response shape"

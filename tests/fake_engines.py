@@ -78,7 +78,7 @@ class FakeLLMEngine(LLMEngine):
     def _extract_result(self, response: Any, requested_structured: bool) -> Any:
         # Deliberately Any, not str: some tests script a non-string response
         # to exercise the base class's own "_extract_result must return str,
-        # list, or dict" validation.
+        # int, float, bool, list, dict, or None" validation.
         self.requested_structured_calls.append(requested_structured)
         return response
 

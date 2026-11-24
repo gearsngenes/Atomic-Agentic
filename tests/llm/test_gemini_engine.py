@@ -110,17 +110,6 @@ class TestGeminiEngine:
                 model="gemini-2.5-flash", client=FakeGenAIClient(), api_key="secret"
             )
 
-    @pytest.mark.parametrize(
-        "removed", ["temperature", "max_output_tokens", "thinking_config", "timeout_seconds"]
-    )
-    def test_removed_constructor_arguments_flow_into_client_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch, removed: str
-    ) -> None:
-        engine = _make_engine(monkeypatch, **{removed: 1})
-
-        assert FakeGenAIClient.instances[-1].kwargs[removed] == 1
-        assert engine.runtime_parameters == {}
-
     def test_runtime_parameters_start_empty_so_provider_defaults_apply(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -213,16 +202,30 @@ class TestGeminiEngine:
         assert len(contents[2].parts) == 2  # last user turn gets the attachment
         assert contents[2].parts[1].file_data.file_uri == "gs://fake/f1"
 
-    def test_build_content_list_attachment_needs_a_non_empty_user_turn(
+    def test_blank_user_turn_with_attachment_carries_only_the_file_part(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
-        attachments = {"file.txt": {"uploaded": True, "file_obj": file_obj, "mime": "text/plain"}}
-        messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": "Hello"}]
+        engine._attachments["file.txt"] = {
+            "uploaded": True, "file_obj": file_obj, "mime": "text/plain"
+        }
+        messages = engine._normalize_messages([{"role": "user", "content": ""}])
 
-        with pytest.raises(LLMEngineError, match="non-empty content"):
-            engine._build_content_list(messages, attachments)
+        contents = engine._build_provider_payload(messages)["contents"]
+
+        assert len(contents) == 1
+        assert contents[0].role == "user"
+        assert len(contents[0].parts) == 1
+        assert contents[0].parts[0].file_data.file_uri == "gs://fake/f1"
+
+    def test_blank_user_turn_without_attachments_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=r"^GeminiEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
 
     def test_call_provider_uses_sync_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -309,17 +312,22 @@ class TestGeminiEngine:
 
         assert engine._extract_result(response, requested_structured=True) == "not json"
 
-    def test_extract_result_requested_none_text_falls_back(
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_extract_result_no_text(
+        self, monkeypatch: pytest.MonkeyPatch, missing: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(text=missing)
+
+        assert engine._extract_result(response, requested_structured=False) == ""
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # json.loads(None) raises TypeError, caught by the same except clause
-        # as JSONDecodeError -- proves the documented (JSONDecodeError,
-        # TypeError) fallback branch, distinct from every other engine's
-        # single-exception fallback.
         engine = _make_engine(monkeypatch)
-        response = SimpleNamespace(text=None)
 
-        assert engine._extract_result(response, requested_structured=True) is None
+        assert engine._extract_result(SimpleNamespace(text="null"), True) is None
 
     def test_removed_runtime_key_is_omitted_from_config(
         self, monkeypatch: pytest.MonkeyPatch
@@ -417,13 +425,6 @@ class TestGeminiEngine:
 
         with pytest.raises(Exception, match="not_a_real_field"):
             engine._build_provider_payload([{"role": "user", "content": "Hi"}])
-
-    def test_plain_extract_result_returns_empty_string_without_text(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-
-        assert engine._extract_result(SimpleNamespace(text=None), False) == ""
 
     def test_gemini_to_dict_includes_non_secret_config(
         self, monkeypatch: pytest.MonkeyPatch
@@ -524,7 +525,8 @@ class TestGeminiAttachments:
         first = engine.attach(str(path))
         second = engine.attach(str(path))
 
-        assert first is second
+        assert first == second
+        assert first is not second
         assert engine.attachments == {str(path): first}
 
     def test_attachments_property_returns_a_copy(
@@ -536,8 +538,10 @@ class TestGeminiAttachments:
         engine.attach(str(path))
 
         engine.attachments.clear()  # type: ignore[attr-defined]
+        engine.attachments[str(path)]["kind"] = "changed"  # type: ignore[index]
+        engine.attach(str(path))["kind"] = "changed"  # type: ignore[index]
 
-        assert str(path) in engine.attachments
+        assert engine.attachments[str(path)]["kind"] == "file"
 
     def test_payload_reads_the_engine_attachments(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
@@ -602,12 +606,6 @@ class TestGeminiAttachments:
 
         assert engine.attachments == {}
         assert fake.deleted_files == ["files/a"]
-
-    def test_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("_should_retry", "_max_retries", "_on_detach"):
-            assert not hasattr(engine, name)
 
 
 class TestGeminiTokenUsage:

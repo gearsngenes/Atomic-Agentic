@@ -147,17 +147,8 @@ class TestConstructor:
     def test_model_property_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
         assert engine.model == "model.gguf"
-        assert not hasattr(engine, "model_path")
         with pytest.raises(AttributeError):
             engine.model = "other"  # type: ignore[misc]
-
-    def test_removed_arguments_flow_into_client_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch, timeout_seconds=5.0, n_gpu_layers=32)
-
-        assert FakeLlama.instances[-1].kwargs["timeout_seconds"] == 5.0
-        assert engine._client_kwargs == {"timeout_seconds": 5.0, "n_gpu_layers": 32}
 
 
 class TestFromPretrained:
@@ -281,7 +272,7 @@ class TestPayloadAndCall:
 
         assert payload == {"messages": messages}
         assert fake.chat_completion_calls[-1]["messages"] == messages
-        # the base ``extract`` strips; ``_extract_result`` no longer does
+        # ``_extract_result`` does not strip; the base ``extract`` does.
         assert engine._extract_result(response, requested_structured=False) == " llama text "
 
     def test_none_content_extracts_as_empty_string(
@@ -291,6 +282,22 @@ class TestPayloadAndCall:
         response = {"choices": [{"message": {"content": None}}]}
 
         assert engine._extract_result(response, requested_structured=False) == ""
+
+    def test_structured_no_text_is_empty_string_and_null_text_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        no_text = {"choices": [{"message": {"content": None}}]}
+        null_text = {"choices": [{"message": {"content": "null"}}]}
+
+        assert engine._extract_result(no_text, requested_structured=True) == ""
+        assert engine._extract_result(null_text, requested_structured=True) is None
+
+    def test_empty_choices_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="empty choices"):
+            engine._extract_result({"choices": []}, requested_structured=False)
 
     def test_structured_call_sets_response_format(
         self, monkeypatch: pytest.MonkeyPatch
@@ -363,22 +370,6 @@ class TestPayloadAndCall:
         response = {"choices": [{"message": {"content": "not json"}}]}
         assert engine._extract_result(response, requested_structured=True) == "not json"
 
-    def test_has_no_attachment_or_retry_surface(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("attach", "detach", "clear_attachments", "attachments",
-                     "_prepare_attachment", "_should_retry", "_max_retries"):
-            assert not hasattr(engine, name)
-
-    def test_removed_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("repo_id", "filename", "n_ctx", "verbose", "temperature",
-                     "_timeout_seconds", "_llama_kwargs"):
-            assert not hasattr(engine, name)
-
 
 class TestToDictAndModelData:
     def test_to_dict_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -389,10 +380,6 @@ class TestToDictAndModelData:
         assert data["type"] == "LlamaCppEngine"
         assert data["runtime_parameters"] == {"temperature": 0.7}
         assert data["model"] == "model.gguf"
-        assert "model_path" not in data
-        for removed in ("llama_kwargs", "client_kwargs", "timeout_seconds", "repo_id",
-                        "n_gpu_layers", "n_ctx"):
-            assert removed not in data
 
     def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)

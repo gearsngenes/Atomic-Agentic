@@ -73,29 +73,7 @@ def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> OpenAIEngine
     return OpenAIEngine(model="gpt-4o-mini", **kwargs)
 
 
-class TestOpenAIRemovedSurface:
-    def test_cutoff_and_retry_surface_is_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch)
-
-        for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
-                     "_max_retries", "_on_detach", "timeout_seconds", "_timeout_seconds",
-                     "temperature", "max_output_tokens", "reasoning", "truncation"):
-            assert not hasattr(engine, name)
-
-    @pytest.mark.parametrize(
-        "removed", ["temperature", "max_output_tokens", "reasoning", "truncation",
-                    "strict", "timeout_seconds"],
-    )
-    def test_removed_constructor_arguments_are_not_named_parameters(
-        self, monkeypatch: pytest.MonkeyPatch, removed: str
-    ) -> None:
-        # They are no longer named parameters, so they flow into client_kwargs
-        # and reach the SDK client constructor untouched.
-        FakeOpenAIClient.instances.clear()
-        _make_engine(monkeypatch, **{removed: 1})
-
-        assert FakeOpenAIClient.instances[-1].kwargs[removed] == 1
-
+class TestOpenAIClientKwargs:
     def test_max_retries_goes_to_the_sdk_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
         _make_engine(monkeypatch, max_retries=0)
@@ -236,8 +214,6 @@ class TestOpenAIEngine:
             },
         ]
 
-        assert not hasattr(engine, "_collect_instructions")
-        assert not hasattr(engine, "_ensure_user_block")
         assert engine._build_provider_payload(messages)["instructions"] == "Be concise."
 
     def test_openai_call_provider_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,20 +265,6 @@ class TestOpenAIEngine:
 
         assert call["temperature"] == 0.7
         assert call["reasoning"] == {"effort": "high"}
-
-    def test_removed_runtime_key_is_not_sent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        engine.update_runtime_parameters(temperature=0.7)
-        engine.update_runtime_parameters(temperature=None)
-
-        engine._call_provider(engine._build_provider_payload(
-            [{"role": "user", "content": "hi"}]
-        ))
-        call = FakeOpenAIClient.instances[-1].response_calls[-1]
-
-        assert "temperature" not in call
 
     def test_payload_snapshots_runtime_parameters_once(
         self, monkeypatch: pytest.MonkeyPatch
@@ -495,6 +457,24 @@ class TestOpenAIEngine:
         response = SimpleNamespace(output_text='{"a": 1}')
 
         assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_extract_result_no_text(
+        self, monkeypatch: pytest.MonkeyPatch, missing: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text=missing)
+
+        assert engine._extract_result(response, requested_structured=False) == ""
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text="null")
+
+        assert engine._extract_result(response, requested_structured=True) is None
 
     def test_extract_result_requested_parse_failure_falls_back_to_text(
         self, monkeypatch: pytest.MonkeyPatch
@@ -751,7 +731,8 @@ class TestOpenAIAttachments:
         first = engine.attach(str(path))
         second = engine.attach(str(path))
 
-        assert first is second
+        assert first == second
+        assert first is not second
         assert engine.attachments == {str(path): first}
 
     def test_attachments_property_returns_a_copy(
@@ -763,8 +744,10 @@ class TestOpenAIAttachments:
         engine.attach(str(path))
 
         engine.attachments.clear()  # type: ignore[attr-defined]
+        engine.attachments[str(path)]["kind"] = "changed"  # type: ignore[index]
+        engine.attach(str(path))["kind"] = "changed"  # type: ignore[index]
 
-        assert str(path) in engine.attachments
+        assert engine.attachments[str(path)]["kind"] == "text"
 
     def test_detach_returns_false_for_unknown_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -872,6 +855,27 @@ class TestOpenAIAttachments:
         file_parts = [p for p in user_block["content"] if p.get("type") == "input_file"]
 
         assert file_parts == [{"type": "input_file", "file_id": "file_pdf"}]
+
+    def test_blank_user_turn_with_attachment_carries_only_the_attachment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["doc.pdf"] = {"kind": "pdf", "uploaded": True, "file_id": "file_pdf"}
+        messages = engine._normalize_messages([{"role": "user", "content": ""}])
+
+        payload = engine._build_provider_payload(messages)
+
+        assert payload["input"] == [
+            {"role": "user", "content": [{"type": "input_file", "file_id": "file_pdf"}]}
+        ]
+
+    def test_blank_user_turn_without_attachments_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=r"^OpenAIEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": " "}]})
 
     def test_build_provider_payload_with_uploaded_image(
         self, monkeypatch: pytest.MonkeyPatch

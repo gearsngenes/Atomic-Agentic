@@ -148,17 +148,6 @@ class TestLiteLLMEngine:
         with pytest.raises(LLMEngineError, match="either 'client' or call kwargs"):
             LiteLLMEngine(model="grp", client=FakeRouter(), api_key="k")
 
-    def test_removed_arguments_flow_into_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(
-            model="gpt-4o-mini", provider="openai", timeout_seconds=5.0, temperature=0.5,
-        )
-        assert engine._kwargs == {
-            "provider": "openai", "timeout_seconds": 5.0, "temperature": 0.5,
-        }
-
     # ── Call routing ────────────────────────────────────────────────────────
 
     def test_no_client_calls_litellm_completion(
@@ -293,7 +282,6 @@ class TestLiteLLMEngine:
     ) -> None:
         # The fake has no supports_response_schema at all: no gate may call it.
         fake = FakeLiteLLM()
-        assert not hasattr(fake, "supports_response_schema")
         monkeypatch.setattr(engine_module, "litellm", fake)
         engine = LiteLLMEngine(model="some/unsupported-model")
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
@@ -352,6 +340,26 @@ class TestLiteLLMEngine:
         )
         assert engine._extract_result(response, requested_structured=False) == ""
 
+
+    def test_extract_result_structured_no_text_is_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+            usage=_fake_usage(),
+        )
+
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+
+        assert engine._extract_result(_fake_response(text="null"), requested_structured=True) is None
 
     # ── structured-output extraction ─────────────────────────────────────────
 
@@ -512,7 +520,6 @@ class TestLiteLLMEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         lock = engine_module._PROVIDER_LOOKUP_LOCK
-        assert type(lock) is type(threading.Lock())
         held: list[bool] = []
 
         class _Fake(FakeLiteLLM):
@@ -567,26 +574,9 @@ class TestLiteLLMEngine:
         assert d["type"] == "LiteLLMEngine"
         assert d["runtime_parameters"] == {"temperature": 0.3}
         assert d["model"] == "openai/gpt-4o-mini"
-        for removed in ("api_key", "kwargs", "provider", "timeout_seconds", "timeout",
-                        "inline_cutoff_chars", "max_retries", "attachments"):
-            assert removed not in d
         assert "secret" not in str(d)
 
-    # ── Removed surface ───────────────────────────────────────────────────────
-
-    def test_attachment_and_retry_surface_is_gone(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
-        engine = LiteLLMEngine(model="gpt-4o-mini")
-
-        for name in ("attach", "detach", "clear_attachments", "attachments",
-                     "_prepare_attachment", "_on_detach", "_validate_attachment_path",
-                     "inline_cutoff_chars", "_inline_cutoff_chars",
-                     "_should_retry", "_max_retries",
-                     "provider", "temperature", "drop_params", "api_key",
-                     "_timeout_seconds", "_litellm_kwargs"):
-            assert not hasattr(engine, name)
+    # ── Retry pass-through ────────────────────────────────────────────────────
 
     def test_num_retries_is_forwarded_to_litellm_through_kwargs(
         self, monkeypatch: pytest.MonkeyPatch

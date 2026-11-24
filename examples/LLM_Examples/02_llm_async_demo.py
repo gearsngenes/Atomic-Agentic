@@ -54,7 +54,7 @@ anthropic_engine = AnthropicEngine(
 # without blocking the event loop, but gains no I/O concurrency benefit.
 llama_engine = LlamaCppEngine(
     model=os.getenv("LLAMA_MODEL_PATH"),
-    n_ctx=512,
+    n_ctx=4096,
     verbose=False,
     n_threads=4,
 )

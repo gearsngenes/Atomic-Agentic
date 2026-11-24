@@ -227,6 +227,10 @@ class AnthropicEngine(LLMEngine):
     # Client routing
     # ------------------------------------------------------------------ #
 
+    def _allows_blank_user_content(self) -> bool:
+        """A blank user turn is allowed while attachments exist (they attach to it)."""
+        return bool(self._attachments)
+
     def _call_provider(self, payload: Any) -> Any:
         """Synchronous Messages API call; bridges via ``run_coro_sync`` when an async client is held."""
         if isinstance(self._client, AsyncAnthropic):
@@ -252,8 +256,9 @@ class AnthropicEngine(LLMEngine):
         Build the ``messages.create`` payload from normalized messages and a
         snapshot of the engine's attachments.
 
-        1. Join the system messages (blank ones dropped) for ``system``.
-        2. Convert the other messages to content-list format.
+        1. Join the system messages for ``system``.
+        2. Convert the other messages to content-list format (a blank user
+           turn, allowed only with attachments, gets no text block).
         3. Append the attachment blocks to the last user turn.
         4. Start from the required defaults, then the runtime parameters, then
            the engine-owned fields (``model``, ``messages``, ``system``), so
@@ -264,7 +269,10 @@ class AnthropicEngine(LLMEngine):
         # 1-2. System text and conversation turns
         system = collect_system_text(messages)
         anthropic_msgs: list[dict[str, Any]] = [
-            {"role": m["role"], "content": [{"type": "text", "text": m["content"]}]}
+            {
+                "role": m["role"],
+                "content": [{"type": "text", "text": m["content"]}] if m["content"] else [],
+            }
             for m in messages
             if m["role"] != "system"
         ]
@@ -301,7 +309,7 @@ class AnthropicEngine(LLMEngine):
         text (raw text on a parse failure, including the empty refusal).
         """
         text = self.block_separator.join(
-            block.text for block in response.content if block.type == "text"
+            block.text or "" for block in response.content if block.type == "text"
         )
         if not requested_structured:
             return text
@@ -324,10 +332,8 @@ class AnthropicEngine(LLMEngine):
         inp = u.input_tokens
         gen = u.output_tokens
 
-        # `output_tokens_details` is either `None` or a real
-        # `anthropic.OutputTokensDetails` Pydantic object (never a dict) —
-        # `getattr` avoids assuming dict-style `.get()` access, which crashes
-        # on the real object whenever extended thinking actually populates it.
+        # `output_tokens_details` is `None` or an `anthropic.OutputTokensDetails`
+        # Pydantic object (not a dict), so read it with `getattr`.
         details = getattr(u, "output_tokens_details", None)
         thinking_tokens = (
             getattr(details, "thinking_tokens", None) if details is not None else None

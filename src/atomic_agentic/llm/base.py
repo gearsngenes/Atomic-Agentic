@@ -69,6 +69,10 @@ class LLMEngine(AtomicInvokable, ABC):
     ``LLMResult.result`` is the assistant reply: a ``str`` for a plain call, or
     any ``json.loads`` value (``str``/``int``/``float``/``bool``/``list``/
     ``dict``/``None``) when ``output_structure`` requested structured output.
+    Missing, ``None`` or empty provider text counts as ``""`` before any
+    parsing: a plain call then returns ``""``, a structured call returns the
+    raw text ``""`` (it does not parse), and ``None`` is returned only for the
+    JSON text ``null``.
 
     Layers of one call, in order
     ----------------------------
@@ -84,9 +88,12 @@ class LLMEngine(AtomicInvokable, ABC):
        ``[{"role", "content"}]`` with lowercased roles. The messages contract:
        a non-empty list of mappings with string ``role`` and ``content``; the
        role must be ``system``, ``user`` or ``assistant``; at least one
-       ``user`` message is required (system content is optional). Anything
-       else raises ``LLMEngineError``. Content must be a plain ``str``, so a
-       structured ``LLMResult.result`` cannot be fed back unmodified.
+       ``user`` message is required; every message needs non-blank content,
+       except that a ``user`` message may be blank while the engine has
+       attachments (``_allows_blank_user_content``). A system message is
+       optional. Anything else raises ``LLMEngineError``. Content must be a
+       plain ``str``, so a structured ``LLMResult.result`` cannot be fed back
+       unmodified.
     4. ``_build_provider_payload(messages, output_structure)``: receives the
        normalized messages and the caller's raw schema (or ``None``) and
        returns the exact keyword arguments of the SDK call. Build it with
@@ -105,8 +112,9 @@ class LLMEngine(AtomicInvokable, ABC):
        ``output_structure is not None``, computed once by the caller.
 
        - ``_extract_result(response, requested_structured)``: returns the
-         reply. Plain call: the text. Structured call: ``json.loads`` of the
-         text, falling back to the raw text on a parse failure.
+         reply. Missing or ``None`` text becomes ``""`` first. Plain call: the
+         text. Structured call: ``json.loads`` of the text, falling back to the
+         raw text on a parse failure (so ``""`` stays ``""``).
        - ``_extract_token_usage(response)``: returns the engine's
          ``TokenUsage`` subclass record.
        - ``_get_model_data()``: returns ``LLMModelData`` from configuration
@@ -118,7 +126,8 @@ class LLMEngine(AtomicInvokable, ABC):
     ``_build_provider_payload``, ``_call_provider`` (plus
     ``_call_provider_async`` for a native async client), ``_extract_result``,
     ``_extract_token_usage`` and ``_get_model_data``; optionally
-    ``_RESERVED_RUNTIME_KEYS``, ``_validate_runtime_keys`` and ``to_dict``.
+    ``_RESERVED_RUNTIME_KEYS``, ``_validate_runtime_keys``,
+    ``_allows_blank_user_content`` and ``to_dict``.
     Retry and timeout are each SDK client's own settings, and attachments are
     an API of the individual engines that support them.
 
@@ -194,7 +203,11 @@ class LLMEngine(AtomicInvokable, ABC):
                               "A non-empty list of chat-message mappings. "
                               "Each mapping must have a string 'role' key "
                               "(one of 'system', 'user', 'assistant') and a "
-                              "string 'content' key (free-form text)."
+                              "string 'content' key (free-form text). "
+                              "At least one message must have role 'user'. "
+                              "Content must not be blank, except that a "
+                              "'user' message may be blank when the engine "
+                              "has attachments."
                           )),
                 ParamSpec(name="output_structure",
                           index=1,
@@ -377,6 +390,8 @@ class LLMEngine(AtomicInvokable, ABC):
         2. Each entry must be a mapping with string ``role`` and ``content``.
         3. Each role (lowercased) must be ``system``, ``user`` or ``assistant``.
         4. At least one ``user`` message must be present.
+        5. Every content must be non-blank (not empty, not whitespace-only),
+           except a ``user`` message when ``_allows_blank_user_content()``.
         """
         prefix = f"{type(self).__name__}.invoke"
         if not messages:
@@ -400,10 +415,24 @@ class LLMEngine(AtomicInvokable, ABC):
                     f"{prefix}: message {idx} has unsupported role {role!r}; "
                     f"expected one of {sorted(_VALID_ROLES)}"
                 )
+            if not content.strip() and not (
+                role == "user" and self._allows_blank_user_content()
+            ):
+                raise LLMEngineError(
+                    f"{prefix}: message {idx} ({role}) has blank content"
+                )
             normalized.append({"role": role, "content": content})
         if not any(m["role"] == "user" for m in normalized):
             raise LLMEngineError(f"{prefix}: messages must include at least one user message")
         return normalized
+
+    def _allows_blank_user_content(self) -> bool:
+        """
+        Whether a ``user`` message may have blank content. ``False`` by
+        default; engines that attach files to the user turn return
+        ``bool(self._attachments)``.
+        """
+        return False
 
     # --------------------------------------------------------------------- #
     # Abstract Helpers
@@ -448,10 +477,14 @@ class LLMEngine(AtomicInvokable, ABC):
         ``requested_structured`` is the caller's own request
         (``output_structure is not None``), never re-derived from the response.
 
-        - ``False``: return the plain text.
-        - ``True``: ``json.loads`` the text (any JSON value); on a parse
-          failure return the raw text rather than raising. A caller that
-          requested structure and gets a ``str`` back must handle that itself.
+        Missing or ``None`` provider text is treated as ``""`` before any
+        parsing.
+
+        - ``False``: return the plain text (``""`` when there is none).
+        - ``True``: ``json.loads`` the text (any JSON value, ``None`` only for
+          the text ``null``); on a parse failure, including empty text,
+          return the raw text rather than raising. A caller that requested
+          structure and gets a ``str`` back must handle that itself.
         """
         raise NotImplementedError
 

@@ -2,9 +2,8 @@
 
 One shared ``llm_engine`` for every example under ``examples/`` (PlanAct,
 ReAct, and ScriptAct alike), so switching providers doesn't mean editing
-each example file by hand. Single shared module at `examples/` root,
-mirroring `prebuilt_tools.py`'s own move here -- one source of truth
-instead of a per-folder copy that drifts.
+each example file by hand. It lives at the `examples/` root as one source
+of truth instead of a per-folder copy.
 
 Provider selection: set the ``AA_AGENT_PROVIDER`` env var to one of
 ``o``/``g``/``m``/``a``/``p``/``3``/``4``/``t`` (openai/gemini/mistral/
@@ -14,18 +13,10 @@ so this also works untouched when just running an example by hand.
 
 Per-provider model override: ``OPENAI_MODEL``/``GEMINI_MODEL``/
 ``MISTRAL_MODEL``/``ANTHROPIC_MODEL`` swap that one provider's model
-without touching this file. Unset falls back to this repo's own confirmed
-floor model for that provider -- the weakest model live-tested (via this
-repo's own multi-round ReAct/PlanAct/ScriptAct examples, not a generic
-benchmark) to reliably complete them, not simply "whatever is cheapest."
-As of this writing that floor is OpenAI gpt-4o (gpt-4o-mini and gpt-5-nano
-were both tested and rejected -- each failed the bulk of ReAct trial runs
-in ways untied to raw reasoning, e.g. repeating a side effect already
-performed, or folding a value meant to be printed into the return value
-instead); Gemini/Mistral/Anthropic's existing small-tier defaults
-(gemini-2.5-flash/mistral-medium-latest/claude-haiku-4-5) passed that same
-live check cleanly and are unchanged. The Gemini entry pins the API version to
-``v1beta``: google-genai 3.x defaults to ``v1``, which rejects system instructions
+without touching this file. Unset falls back to the defaults below: OpenAI
+gpt-4o, gemini-2.5-flash, mistral-medium-latest and claude-haiku-4-5, the
+models the multi-round ReAct/PlanAct/ScriptAct examples are run against.
+The Gemini entry pins the API version to ``v1beta``: google-genai 3.x defaults to ``v1``, which rejects system instructions
 and JSON mode for the 2.5 family (Gemini 3.x models work on either).
 
 Only an example's own core ToolAgent under test should import this -- any
@@ -90,10 +81,14 @@ def _pick_provider() -> str:
     env_choice = (os.getenv("AA_AGENT_PROVIDER") or "").strip().lower()
     if env_choice in PROVIDER_MODELS:
         return env_choice
-    return input(
-        "Pick provider: (o)penai, (g)emini, (m)istral, (a)nthropic, "
-        "gemma(3), (p)hi4, granite(4).1, (t)lite: "
-    ).strip().lower()
+    while True:
+        choice = input(
+            "Pick provider: (o)penai, (g)emini, (m)istral, (a)nthropic, "
+            "gemma(3), (p)hi4, granite(4).1, (t)lite: "
+        ).strip().lower()
+        if choice in PROVIDER_MODELS:
+            return choice
+        print(f"Unrecognized choice {choice!r}; expected one of {sorted(PROVIDER_MODELS)}.")
 
 
 llm_engine = PROVIDER_MODELS[_pick_provider()]()

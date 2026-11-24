@@ -8,9 +8,12 @@ from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 
-# Requires OPENAI_API_KEY in your environment (or .env). The same calls work on
-# every engine; attach/detach exist only on the OpenAI, Anthropic, Gemini and
-# Mistral engines.
+# Requires OPENAI_API_KEY in your environment (or .env). This demo uses
+# OpenAIEngine; runtime-parameter names are each provider's own, so another
+# engine takes its own names. `strict` exists on OpenAIEngine and MistralEngine
+# only; attach/detach exist on the OpenAI, Anthropic, Gemini and Mistral
+# engines only. `update_runtime_parameters` and `require_usage` are on every
+# engine (Anthropic always reports usage).
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise SystemExit("Set OPENAI_API_KEY to run this demo.")
@@ -28,9 +31,15 @@ try:
 except LLMEngineError as exc:
     print("rejected:", exc)
 
-# --- Messages contract: at least one user message is required ---
+# --- Messages contract ---
+# A non-empty list; roles system/user/assistant; at least one user message;
+# non-blank content, except a blank user message while attachments exist.
 try:
     engine.invoke({"messages": [{"role": "system", "content": "No user turn."}]})
+except LLMEngineError as exc:
+    print("rejected:", exc)
+try:
+    engine.invoke({"messages": [{"role": "user", "content": "  "}]})
 except LLMEngineError as exc:
     print("rejected:", exc)
 

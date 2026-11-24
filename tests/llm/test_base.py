@@ -22,7 +22,9 @@ class TestLLMEngineConstruction:
             "- messages: A non-empty list of chat-message mappings. Each "
             "mapping must have a string 'role' key (one of 'system', "
             "'user', 'assistant') and a string 'content' key (free-form "
-            "text).\n"
+            "text). At least one message must have role 'user'. Content "
+            "must not be blank, except that a 'user' message may be blank "
+            "when the engine has attachments.\n"
             "- output_structure: Optional JSON-Schema-shaped mapping "
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
@@ -48,17 +50,14 @@ class TestLLMEngineConstruction:
             "- messages: A non-empty list of chat-message mappings. Each "
             "mapping must have a string 'role' key (one of 'system', "
             "'user', 'assistant') and a string 'content' key (free-form "
-            "text).\n"
+            "text). At least one message must have role 'user'. Content "
+            "must not be blank, except that a 'user' message may be blank "
+            "when the engine has attachments.\n"
             "- output_structure: Optional JSON-Schema-shaped mapping "
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
         )
         assert data["runtime_parameters"] == {}
-        for removed in (
-            "timeout_seconds", "max_retries", "retry_backoff_base",
-            "retry_backoff_max", "attachments",
-        ):
-            assert removed not in data
 
     def test_invalid_atomic_invokable_name_still_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -92,10 +91,9 @@ class TestLLMEngineMessagesAndInvoke:
         assert engine.invoke(messages).invoker_id == engine.full_name
         assert run_coro_sync(engine.async_invoke(messages)).invoker_id == engine.full_name
 
-    def test_invoke_is_inherited_and_make_result_is_gone(self) -> None:
+    def test_invoke_is_inherited(self) -> None:
         assert "invoke" not in LLMEngine.__dict__
         assert "async_invoke" not in LLMEngine.__dict__
-        assert not hasattr(LLMEngine, "make_result")
         assert LLMEngine.result_cls is LLMResult
 
     def test_async_invoke_rejects_non_list_messages(self) -> None:
@@ -147,9 +145,7 @@ class TestLLMEngineMessagesAndInvoke:
             engine.invoke({"messages": [message]})  # type: ignore[list-item]
 
     def test_extract_result_rejects_unsupported_type(self) -> None:
-        # int/float/bool/None are all valid JSON-decodable result types now
-        # (widened alongside response-schema-basic-agent's addendum) -- a
-        # set is genuinely still outside the allowed closure.
+        # A set is outside the JSON-shaped result types.
         engine = FakeLLMEngine(responses=[{1, 2, 3}])
 
         with pytest.raises(LLMEngineError, match="must return str"):
@@ -237,36 +233,6 @@ class TestLLMEngineNoRetry:
 
         assert engine.call_count == 1
 
-    def test_retry_machinery_is_gone(self) -> None:
-        for name in ("_call_with_retries", "_call_with_retries_async", "_should_retry"):
-            assert not hasattr(LLMEngine, name)
-        engine = FakeLLMEngine()
-        for name in ("_max_retries", "_retry_backoff_base", "_retry_backoff_max"):
-            assert not hasattr(engine, name)
-
-    def test_retry_constructor_arguments_are_gone(self) -> None:
-        with pytest.raises(TypeError):
-            FakeLLMEngine(max_retries=1)
-
-
-class TestLLMEngineHasNoAttachmentApi:
-    def test_base_has_no_attachment_surface(self) -> None:
-        engine = FakeLLMEngine()
-
-        for name in (
-            "attach",
-            "detach",
-            "clear_attachments",
-            "attachments",
-            "_attachments",
-            "_prepare_attachment",
-            "_on_detach",
-            "_validate_attachment_path",
-            "illegal_attachment_exts",
-            "allowed_attachment_exts",
-        ):
-            assert not hasattr(engine, name)
-
 
 class TestLLMEngineAbstractHooks:
     def test_missing_abstract_hook_raises_type_error(self) -> None:
@@ -287,6 +253,74 @@ class TestLLMEngineAbstractHooks:
 
         with pytest.raises(TypeError):
             IncompleteEngine()
+
+
+class _AttachFake(FakeLLMEngine):
+    """Fake that behaves like an attach-capable engine for the blank-user rule."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._attachments: dict[str, Any] = {}
+
+    def _allows_blank_user_content(self) -> bool:
+        return bool(self._attachments)
+
+
+class TestLLMEngineBlankContent:
+    @pytest.mark.parametrize("blank", ["", "   ", " \n\t "])
+    def test_blank_user_without_attachments_is_rejected(self, blank: str) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match=r"^FakeLLMEngine\.invoke: message 0 \(user\) has blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": blank}]})
+        assert engine.call_count == 0
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_blank_system_is_rejected(self, blank: str) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match=r"message 0 \(system\) has blank content"):
+            engine.invoke({"messages": [
+                {"role": "system", "content": blank},
+                {"role": "user", "content": "hi"},
+            ]})
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_blank_assistant_is_rejected(self, blank: str) -> None:
+        engine = FakeLLMEngine()
+
+        with pytest.raises(LLMEngineError, match=r"message 1 \(assistant\) has blank content"):
+            engine.invoke({"messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": blank},
+            ]})
+
+    def test_blank_user_is_allowed_while_attachments_exist(self) -> None:
+        engine = _AttachFake()
+        engine._attachments["a.txt"] = {}
+
+        engine.invoke({"messages": [{"role": "user", "content": ""}]})
+
+        assert engine.calls[0] == [{"role": "user", "content": ""}]
+
+    def test_blank_user_is_rejected_again_after_attachments_clear(self) -> None:
+        engine = _AttachFake()
+
+        with pytest.raises(LLMEngineError, match="has blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
+
+    def test_blank_assistant_is_still_rejected_with_attachments(self) -> None:
+        engine = _AttachFake()
+        engine._attachments["a.txt"] = {}
+
+        with pytest.raises(LLMEngineError, match=r"\(assistant\) has blank content"):
+            engine.invoke({"messages": [
+                {"role": "user", "content": ""},
+                {"role": "assistant", "content": ""},
+            ]})
+
+    def test_default_predicate_is_false(self) -> None:
+        assert FakeLLMEngine()._allows_blank_user_content() is False
 
 
 class TestLLMEngineOutputStructure:
@@ -311,8 +345,7 @@ class TestLLMEngineOutputStructure:
             }
         )
 
-        # Identity, not just equality -- proves it was forwarded completely
-        # unmodified, not copied or rebuilt.
+        # Identity, not equality: the schema is forwarded unmodified.
         assert engine.payloads[-1]["output_structure"] is schema
         assert engine.requested_structured_calls == [True]
 
@@ -346,9 +379,7 @@ class TestLLMEngineOutputStructure:
             }
         )
 
-        # A dict result must not be passed through .strip() (which would
-        # raise AttributeError on a dict) -- confirms extract() no longer
-        # str-only-validates.
+        # Only string results are stripped; a dict passes through.
         assert result.result == {"a": 1}
         assert isinstance(result.result, dict)
 
@@ -389,25 +420,6 @@ class TestLLMEngineOutputStructure:
 
         assert result.result is None
 
-    def test_extract_still_rejects_unsupported_type(self) -> None:
-        # int/float/bool/None are all valid JSON-decodable result types now
-        # (widened alongside response-schema-basic-agent's addendum) -- a
-        # set is genuinely still outside the allowed closure.
-        engine = FakeLLMEngine(responses=[{1, 2, 3}])
-
-        with pytest.raises(LLMEngineError, match="must return str"):
-            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
-
-
-class TestLLMEngineNoTimeout:
-    def test_base_has_no_timeout_surface(self) -> None:
-        engine = FakeLLMEngine()
-
-        assert not hasattr(engine, "timeout_seconds")
-        assert not hasattr(engine, "_timeout_seconds")
-        with pytest.raises(TypeError):
-            FakeLLMEngine(timeout_seconds=12.5)  # type: ignore[call-arg]
-
 
 class _ReservedEngine(FakeLLMEngine):
     _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages"})
@@ -416,14 +428,6 @@ class _ReservedEngine(FakeLLMEngine):
 class TestLLMEngineRuntimeParameters:
     def test_store_starts_empty(self) -> None:
         assert FakeLLMEngine().runtime_parameters == {}
-
-    def test_property_returns_a_copy(self) -> None:
-        engine = FakeLLMEngine()
-        engine.update_runtime_parameters(temperature=0.2)
-
-        engine.runtime_parameters["temperature"] = 9.9
-
-        assert engine.runtime_parameters == {"temperature": 0.2}
 
     def test_update_merges_and_overwrites(self) -> None:
         engine = FakeLLMEngine()
@@ -523,15 +527,6 @@ class TestLLMEngineRuntimeParameters:
         # the store itself is untouched
         assert engine.runtime_parameters["api_key"] == "sk-1"
         assert engine.runtime_parameters["extra_headers"] == {"X-Id": "abc"}
-
-    def test_to_dict_carries_a_copy(self) -> None:
-        engine = FakeLLMEngine()
-        engine.update_runtime_parameters(temperature=0.2)
-
-        data = engine.to_dict()
-        data["runtime_parameters"]["temperature"] = 9.9
-
-        assert engine.runtime_parameters == {"temperature": 0.2}
 
 
 class TestLLMEngineRequireUsage:

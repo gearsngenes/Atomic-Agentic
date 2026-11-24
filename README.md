@@ -151,13 +151,17 @@ orchestration. Those responsibilities belong to agents.
 
 **Messages.** `messages` is a non-empty list of `{"role", "content"}`
 mappings with string values. The role must be `system`, `user` or
-`assistant` (case-insensitive), and at least one `user` message is required;
-a system message is optional. Anything else raises `LLMEngineError`.
+`assistant` (case-insensitive), at least one `user` message is required, and
+every message needs non-blank content, except that a `user` message may be
+blank while the engine has attachments. A system message is optional.
+Anything else raises `LLMEngineError`. A missing reply text is `""`; a
+structured call returns `None` only for a JSON `null`.
 
 **Runtime parameters.** Generation settings are the provider's own call
-parameters, set after construction. `None` removes a key, every key is
-validated before any is applied, and the value is copied on the way in.
-`stream` is not supported on any engine.
+parameters under that provider's own names (the snippet below uses OpenAI's),
+set after construction. `None` removes a key, every key is validated before
+any is applied, and the value is copied on the way in. `stream` is not
+supported on any engine.
 
 ``` python
 engine.update_runtime_parameters(temperature=0.2, max_output_tokens=512)
@@ -171,9 +175,10 @@ print(engine.runtime_parameters)                      # a deep copy
   uses strict schema conformance; default `True`.
 - `block_separator` (`AnthropicEngine`): the string inserted between
   multiple response text blocks; default `""`.
-- `require_usage` (every engine): default `True`. A response that carries no
-  usage object raises; with `require_usage = False` the result carries
-  all-zero token usage instead.
+- `require_usage` (every engine except `AnthropicEngine`, which always
+  reports usage): default `True`. A response that carries no usage object
+  raises; with `require_usage = False` the result carries all-zero token
+  usage instead.
 
 **Attachments.** `OpenAIEngine`, `AnthropicEngine`, `GeminiEngine` and
 `MistralEngine` can hold files that ride along on every call:

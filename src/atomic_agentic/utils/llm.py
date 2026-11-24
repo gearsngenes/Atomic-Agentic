@@ -7,16 +7,11 @@ from typing import Any, Iterable, Mapping
 
 def collect_system_text(messages: Iterable[Mapping[str, Any]]) -> str | None:
     """
-    Join the non-blank ``system`` message contents with blank lines.
+    Join the stripped ``system`` message contents with blank lines.
 
-    Returns the stripped result, or ``None`` when no system message has
-    non-blank content.
+    Returns the joined text, or ``None`` when there is no system message.
     """
-    parts = [
-        m["content"].strip()
-        for m in messages
-        if m.get("role") == "system" and m["content"].strip()
-    ]
+    parts = [m["content"].strip() for m in messages if m.get("role") == "system"]
     return "\n\n".join(parts) or None
 
 
@@ -58,9 +53,9 @@ def validate_attachment_path(
     """
     Validate a local file path for engine attachment.
 
-    Raises ``ValueError`` on any violation. Engine subclasses call this from
-    their ``_validate_attachment_path`` overrides and wrap ``ValueError`` into
-    ``LLMEngineError`` at the engine boundary.
+    Raises ``ValueError`` on any violation. Each attach-capable engine calls
+    this from its own ``_validate_attachment_path`` and wraps ``ValueError``
+    into ``LLMEngineError`` at the engine boundary.
 
     Validation order:
     1. File must exist and be a regular file.
