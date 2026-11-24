@@ -49,11 +49,12 @@ def _openai_engine() -> OpenAIEngine:
         pytest.skip("OPENAI_API_KEY is not set.")
 
     try:
-        return OpenAIEngine(
+        engine = OpenAIEngine(
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=0,
-            timeout_seconds=60,
+            timeout=60,
         )
+        engine.update_runtime_parameters(temperature=0)
+        return engine
     except RuntimeError as exc:
         pytest.skip(str(exc))
 

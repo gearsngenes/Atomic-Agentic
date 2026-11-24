@@ -37,7 +37,6 @@ class TestLLMEngineConstruction:
         engine = FakeLLMEngine(
             name="fake_engine",
             description="Fake test engine.",
-            timeout_seconds=12.5,
         )
 
         data = engine.to_dict()
@@ -54,8 +53,11 @@ class TestLLMEngineConstruction:
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
         )
-        assert data["timeout_seconds"] == 12.5
-        for removed in ("max_retries", "retry_backoff_base", "retry_backoff_max", "attachments"):
+        assert data["runtime_parameters"] == {}
+        for removed in (
+            "timeout_seconds", "max_retries", "retry_backoff_base",
+            "retry_backoff_max", "attachments",
+        ):
             assert removed not in data
 
     def test_invalid_atomic_invokable_name_still_raises(self) -> None:
@@ -351,14 +353,79 @@ class TestLLMEngineOutputStructure:
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
 
-class TestLLMEngineImmutability:
-    def test_timeout_seconds_is_read_only(self) -> None:
-        engine = FakeLLMEngine(timeout_seconds=12.5)
+class TestLLMEngineNoTimeout:
+    def test_base_has_no_timeout_surface(self) -> None:
+        engine = FakeLLMEngine()
 
-        assert engine.timeout_seconds == 12.5
+        assert not hasattr(engine, "timeout_seconds")
+        assert not hasattr(engine, "_timeout_seconds")
+        with pytest.raises(TypeError):
+            FakeLLMEngine(timeout_seconds=12.5)  # type: ignore[call-arg]
 
-        with pytest.raises(AttributeError):
-            engine.timeout_seconds = 99.0  # type: ignore[misc]
+
+class _ReservedEngine(FakeLLMEngine):
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages"})
+
+
+class TestLLMEngineRuntimeParameters:
+    def test_store_starts_empty(self) -> None:
+        assert FakeLLMEngine().runtime_parameters == {}
+
+    def test_property_returns_a_copy(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(temperature=0.2)
+
+        engine.runtime_parameters["temperature"] = 9.9
+
+        assert engine.runtime_parameters == {"temperature": 0.2}
+
+    def test_update_merges_and_overwrites(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.update_runtime_parameters(temperature=0.2, top_p=0.9)
+        engine.update_runtime_parameters(temperature=0.5)
+
+        assert engine.runtime_parameters == {"temperature": 0.5, "top_p": 0.9}
+
+    def test_none_removes_a_key_and_absent_key_is_a_noop(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(temperature=0.2, top_p=0.9)
+
+        result = engine.update_runtime_parameters(temperature=None, never_set=None)
+
+        assert result is None
+        assert engine.runtime_parameters == {"top_p": 0.9}
+
+    def test_reserved_key_raises(self) -> None:
+        engine = _ReservedEngine()
+
+        with pytest.raises(LLMEngineError, match="model"):
+            engine.update_runtime_parameters(model="other")
+
+    def test_reserved_key_in_a_mixed_call_applies_nothing(self) -> None:
+        engine = _ReservedEngine()
+        engine.update_runtime_parameters(temperature=0.2)
+
+        with pytest.raises(LLMEngineError):
+            engine.update_runtime_parameters(temperature=0.9, messages=[])
+
+        assert engine.runtime_parameters == {"temperature": 0.2}
+
+    def test_base_reserves_nothing_by_default(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.update_runtime_parameters(model="anything")
+
+        assert engine.runtime_parameters == {"model": "anything"}
+
+    def test_to_dict_carries_a_copy(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(temperature=0.2)
+
+        data = engine.to_dict()
+        data["runtime_parameters"]["temperature"] = 9.9
+
+        assert engine.runtime_parameters == {"temperature": 0.2}
 
 
 class TestLLMEngineModelData:

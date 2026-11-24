@@ -65,7 +65,8 @@ class TestMistralRemovedSurface:
         engine = _make_engine(monkeypatch)
 
         for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
-                     "_max_retries", "_on_detach"):
+                     "_max_retries", "_on_detach", "timeout_seconds", "_timeout_seconds",
+                     "temperature"):
             assert not hasattr(engine, name)
 
 
@@ -77,6 +78,16 @@ class TestMistralValidatingProperties:
         with pytest.raises(LLMEngineError, match="strict"):
             engine.strict = "not-a-bool"  # type: ignore[assignment]
 
+    def test_strict_defaults_true_and_stays_out_of_the_runtime_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        assert engine.strict is True
+
+        engine.strict = False
+
+        assert "strict" not in engine.runtime_parameters
+
 
 class TestMistralEngine:
     def test_missing_mistral_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,15 +95,50 @@ class TestMistralEngine:
         with pytest.raises(LLMEngineError, match="mistralai"):
             MistralEngine(model="mistral_test")
 
-    def test_constructor_builds_client_from_kwargs(
+    def test_constructor_builds_client_from_kwargs_unchanged(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, api_key="secret", timeout_seconds=5.0)
+        engine = _make_engine(monkeypatch, api_key="secret", timeout_ms=5000)
         fake = FakeMistralClient.instances[-1]
 
-        assert engine.name == "mistral_mistral_small_latest"
-        assert fake.kwargs["api_key"] == "secret"
-        assert fake.kwargs["timeout_ms"] == 5000
+        assert engine.name == "MistralEngine"
+        assert fake.kwargs == {"api_key": "secret", "timeout_ms": 5000}
+
+    def test_no_timeout_is_injected_into_the_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _make_engine(monkeypatch)
+
+        assert "timeout_ms" not in FakeMistralClient.instances[-1].kwargs
+
+    def test_client_with_client_kwargs_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
+
+        with pytest.raises(LLMEngineError, match="either 'client' or client kwargs"):
+            MistralEngine(
+                model="mistral-small-latest", client=FakeMistralClient(), api_key="secret"
+            )
+
+    @pytest.mark.parametrize("removed", ["temperature", "strict", "timeout_seconds"])
+    def test_removed_constructor_arguments_flow_into_client_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, removed: str
+    ) -> None:
+        engine = _make_engine(monkeypatch, **{removed: 1})
+
+        assert FakeMistralClient.instances[-1].kwargs[removed] == 1
+        assert engine.runtime_parameters == {}
+        assert engine.strict is True
+
+    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    def test_reserved_runtime_keys_raise(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=key):
+            engine.update_runtime_parameters(**{key: "x"})
 
     def test_constructor_client_injection_skips_construction(
         self, monkeypatch: pytest.MonkeyPatch
@@ -109,8 +155,9 @@ class TestMistralEngine:
     def test_call_provider_async_uses_aio_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.3)
-        payload = {"messages": [{"role": "user", "content": "hello"}]}
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.3)
+        payload = engine._build_provider_payload([{"role": "user", "content": "hello"}])
 
         result = run_coro_sync(engine._call_provider_async(payload))
 
@@ -121,15 +168,40 @@ class TestMistralEngine:
         assert call["temperature"] == 0.3
         assert engine._extract_result(result, requested_structured=False) == "mistral async text"
 
-    def test_temperature_none_omits_from_call(
+    def test_removed_runtime_key_is_omitted_from_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=None)
-        payload = {"messages": [{"role": "user", "content": "hi"}]}
-        engine._call_provider(payload)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.3)
+        engine.update_runtime_parameters(temperature=None)
+        engine._call_provider(
+            engine._build_provider_payload([{"role": "user", "content": "hi"}])
+        )
 
         fake = FakeMistralClient.instances[-1]
         assert "temperature" not in fake.complete_calls[-1]
+
+    def test_no_temperature_is_sent_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._call_provider(
+            engine._build_provider_payload([{"role": "user", "content": "hi"}])
+        )
+
+        assert "temperature" not in FakeMistralClient.instances[-1].complete_calls[-1]
+
+    def test_payload_snapshots_runtime_parameters_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.1)
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        engine.update_runtime_parameters(temperature=0.9)
+        engine._call_provider(payload)
+
+        assert FakeMistralClient.instances[-1].complete_calls[-1]["temperature"] == 0.1
 
     @pytest.mark.parametrize(
         ("filename", "expected"),
@@ -164,7 +236,8 @@ class TestMistralEngine:
         assert messages[0]["content"] == [{"type": "text", "text": "hello"}]
 
     def test_mistral_payload_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.6)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.6)
 
         engine._attachments.update({
             "notes.txt": {"kind": "text", "inlined_text": "Inline notes"},
@@ -186,6 +259,7 @@ class TestMistralEngine:
 
         assert engine._extract_result(response, requested_structured=False) == "mistral text"
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
+        assert fake.complete_calls[-1]["temperature"] == 0.6
 
     def test_mistral_extract_text_from_chunk_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -207,7 +281,7 @@ class TestMistralEngine:
     def test_build_payload_response_format_uses_live_strict_property_true(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, strict=True)
+        engine = _make_engine(monkeypatch)
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
         payload = engine._build_provider_payload(
@@ -222,7 +296,7 @@ class TestMistralEngine:
     def test_build_payload_response_format_reflects_strict_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, strict=True)
+        engine = _make_engine(monkeypatch)
         engine.strict = False
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
@@ -252,6 +326,7 @@ class TestMistralEngine:
         }
         payload = {
             "messages": [{"role": "user", "content": "hi"}],
+            "runtime_parameters": {},
             "response_format": response_format,
         }
 
@@ -284,14 +359,17 @@ class TestMistralEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.7, strict=False)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.7)
+        engine.strict = False
         data = engine.to_dict()
 
         assert data["type"] == "MistralEngine"
         assert data["model"] == "mistral-small-latest"
-        assert data["temperature"] == 0.7
+        assert data["runtime_parameters"] == {"temperature": 0.7}
         assert data["strict"] is False
-        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments",
+                        "timeout_seconds", "temperature"):
             assert removed not in data
 
     def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:

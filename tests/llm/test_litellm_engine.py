@@ -463,12 +463,14 @@ class TestLiteLLMEngine:
             assert removed not in d
         assert "api_key" not in d
 
-    def test_timeout_seconds_default_matches_other_remote_engines(
+    def test_timeout_default_is_600_until_pass_9(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(model="gpt-4o-mini")
-        assert engine.timeout_seconds == 600.0
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+        assert payload["timeout"] == 600.0
+        assert not hasattr(engine, "timeout_seconds")
 
     # ── Removed surface ───────────────────────────────────────────────────────
 

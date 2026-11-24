@@ -7,6 +7,7 @@ from typing import (
     Any,
     ClassVar,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -122,27 +123,44 @@ class LLMEngine(AtomicInvokable, ABC):
     - ``_extract_token_usage``
     - ``_get_model_data``
 
-    Retry is each provider SDK's own client setting, and attachments are an
-    API of the individual engines that support them; neither lives here.
+    Retry and timeout are each provider SDK's own client settings, and
+    attachments are an API of the individual engines that support them; none
+    of the three lives here.
+
+    Runtime parameters
+    ------------------
+    The base owns one store of provider-call parameters (``temperature``,
+    token caps, reasoning settings, ... under the provider's own names).
+    ``runtime_parameters`` returns a copy; ``update_runtime_parameters`` is the
+    only mutator (merge, ``None`` removes a key, every key is validated before
+    any is applied). Each engine's ``_build_provider_payload`` snapshots the
+    store once per call and forwards it to the provider verbatim, so a
+    mutation never changes an in-flight call. Keys the engine owns on the call
+    (model, the message field, the structured-output field) are listed in
+    ``_RESERVED_RUNTIME_KEYS`` and rejected; anything else unknown is rejected
+    by the provider at call time and surfaces as ``LLMEngineError``.
     """
 
     result_cls: ClassVar[type[LLMResult]] = LLMResult
+
+    # Keys the engine owns on the provider call; update_runtime_parameters
+    # rejects them. Subclasses override.
+    _RESERVED_RUNTIME_KEYS: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
         self,
         *,
         name: Optional[str] = None,
         description: str = "",
-        timeout_seconds: float = 30.0,
     ) -> None:
         """
         Parameters
         ----------
         name:
-            Optional human-friendly identifier for logging/introspection.
-        timeout_seconds:
-            Suggested per-call timeout; subclasses should honor this where
-            their provider SDKs allow it.
+            Optional human-friendly identifier for logging/introspection;
+            defaults to the class name.
+        description:
+            Human-readable description; defaults to ``"LLM Engine"``.
         """
         # Pass the provided name (or the class name) directly to AtomicInvokable.
         AtomicInvokable.__init__(
@@ -176,16 +194,16 @@ class LLMEngine(AtomicInvokable, ABC):
             return_type=("str", "int", "float", "bool", "list[Any]", "dict[str, Any]", "None"),
         )
 
-        self._timeout_seconds = float(timeout_seconds)
+        self._runtime_parameters: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def timeout_seconds(self) -> float:
-        """Suggested per-call timeout; subclasses honor this where their
-        provider SDK allows it to be configured."""
-        return self._timeout_seconds
+    def runtime_parameters(self) -> Dict[str, Any]:
+        """Copy of the stored provider-call parameters; mutating the copy
+        changes nothing. Use ``update_runtime_parameters`` to change them."""
+        return dict(self._runtime_parameters)
 
     @property
     def model_data(self) -> LLMModelData:
@@ -199,6 +217,32 @@ class LLMEngine(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
+    def update_runtime_parameters(self, **kwargs: Any) -> None:
+        """
+        Merge provider-call parameters into the store.
+
+        1. Validate every key (``_validate_runtime_keys``); raise before
+           anything is applied.
+        2. For each key: a ``None`` value removes it (absent keys are a
+           no-op), any other value sets it.
+        """
+        self._validate_runtime_keys(kwargs.keys())
+        for key, value in kwargs.items():
+            if value is None:
+                self._runtime_parameters.pop(key, None)
+            else:
+                self._runtime_parameters[key] = value
+
+    def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
+        """Reject keys the engine owns on the provider call. Engines extend
+        this to add their own key checks."""
+        reserved = sorted(set(keys) & self._RESERVED_RUNTIME_KEYS)
+        if reserved:
+            raise LLMEngineError(
+                f"{type(self).__name__}.update_runtime_parameters: {reserved} "
+                "are managed by the engine and cannot be set"
+            )
+
     def _invoke_impl(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """
         1. messages = inputs.get("messages"); not a list -> LLMEngineError.
@@ -379,8 +423,6 @@ class LLMEngine(AtomicInvokable, ABC):
     def _call_provider(self, payload: Any) -> Any:
         """
         Perform a single call to the underlying provider using the given payload.
-
-        This method should honor `self._timeout_seconds` where possible.
         """
         raise NotImplementedError
 
@@ -455,6 +497,6 @@ class LLMEngine(AtomicInvokable, ABC):
         d = super().to_dict()
         d.update({
             "type": type(self).__name__,
-            "timeout_seconds": self._timeout_seconds,
+            "runtime_parameters": dict(self._runtime_parameters),
         })
         return d

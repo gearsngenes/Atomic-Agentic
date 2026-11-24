@@ -76,93 +76,72 @@ class TestGeminiEngine:
         with pytest.raises(LLMEngineError, match="google-genai"):
             GeminiEngine(model="gemini_test")
 
-    def test_constructor_builds_client_from_kwargs(
+    def test_constructor_builds_client_from_kwargs_unchanged(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
         monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
-        engine = GeminiEngine(
-            model="gemini-2.5-flash",
-            timeout_seconds=7.0,
-            api_key="secret",
-        )
+        engine = GeminiEngine(model="gemini-2.5-flash", api_key="secret")
         fake = FakeGenAIClient.instances[-1]
 
-        assert engine.name == "gemini_gemini_2_5_flash"
-        assert fake.kwargs["api_key"] == "secret"
-        assert fake.kwargs["http_options"] == {"timeout": 7000}
+        assert engine.name == "GeminiEngine"
+        assert fake.kwargs == {"api_key": "secret"}
 
-    def test_http_options_dict_keeps_keys_and_fills_missing_timeout(
+    def test_http_options_pass_through_untouched(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
         monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
-        caller_options = {"api_version": "v1beta"}
+        caller_options = {"api_version": "v1beta", "timeout": 120_000}
 
-        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options=caller_options)
+        GeminiEngine(model="gemini-2.5-flash", http_options=caller_options)
 
-        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {
-            "api_version": "v1beta",
-            "timeout": 7000,
-        }
-        assert caller_options == {"api_version": "v1beta"}  # caller's dict is not mutated
+        assert FakeGenAIClient.instances[-1].kwargs["http_options"] is caller_options
 
-    def test_http_options_caller_timeout_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
-
-        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0,
-                     http_options={"api_version": "v1", "timeout": 120_000})
-
-        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {
-            "api_version": "v1",
-            "timeout": 120_000,
-        }
-
-    def test_http_options_explicit_none_timeout_is_filled(
+    def test_client_with_client_kwargs_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        FakeGenAIClient.instances.clear()
         monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
-        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options={"timeout": None})
+        with pytest.raises(LLMEngineError, match="either 'client' or client kwargs"):
+            GeminiEngine(
+                model="gemini-2.5-flash", client=FakeGenAIClient(), api_key="secret"
+            )
 
-        assert FakeGenAIClient.instances[-1].kwargs["http_options"] == {"timeout": 7000}
+    @pytest.mark.parametrize(
+        "removed", ["temperature", "max_output_tokens", "thinking_config", "timeout_seconds"]
+    )
+    def test_removed_constructor_arguments_flow_into_client_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, removed: str
+    ) -> None:
+        engine = _make_engine(monkeypatch, **{removed: 1})
 
-    def test_http_options_object_is_merged_without_mutating_the_original(
+        assert FakeGenAIClient.instances[-1].kwargs[removed] == 1
+        assert engine.runtime_parameters == {}
+
+    def test_runtime_parameters_start_empty_so_provider_defaults_apply(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
-        caller_options = _real_genai_types.HttpOptions(api_version="v1beta")
+        engine = _make_engine(monkeypatch)
 
-        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0, http_options=caller_options)
+        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
 
-        merged = FakeGenAIClient.instances[-1].kwargs["http_options"]
-        assert merged.api_version == "v1beta"
-        assert merged.timeout == 7000
-        assert caller_options.timeout is None
+        assert engine.runtime_parameters == {}
+        assert cfg.temperature is None
 
-    def test_http_options_object_with_timeout_is_kept(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "key",
+        ["model", "contents", "system_instruction",
+         "response_mime_type", "response_json_schema"],
+    )
+    def test_reserved_runtime_keys_raise(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:
-        FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
+        engine = _make_engine(monkeypatch)
 
-        GeminiEngine(model="gemini-2.5-flash", timeout_seconds=7.0,
-                     http_options=_real_genai_types.HttpOptions(api_version="v1", timeout=90_000))
-
-        merged = FakeGenAIClient.instances[-1].kwargs["http_options"]
-        assert (merged.api_version, merged.timeout) == ("v1", 90_000)
-
-    def test_real_client_receives_the_merged_options(self) -> None:
-        engine = GeminiEngine(model="gemini-2.5-flash", api_key="dummy-key", timeout_seconds=7.0,
-                              http_options={"api_version": "v1beta"})
-
-        options = engine._client._api_client._http_options
-        assert options.api_version == "v1beta"
-        assert options.timeout == 7000
+        with pytest.raises(LLMEngineError, match=key):
+            engine.update_runtime_parameters(**{key: "x"})
 
     def test_constructor_client_injection_skips_construction(
         self, monkeypatch: pytest.MonkeyPatch
@@ -252,7 +231,8 @@ class TestGeminiEngine:
     def test_call_provider_uses_sync_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.4)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.4)
         messages = [
             {"role": "system", "content": "Sys."},
             {"role": "user", "content": "Hello"},
@@ -292,7 +272,7 @@ class TestGeminiEngine:
         engine = _make_engine(monkeypatch)
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
-        cfg = engine._build_generate_config(None, schema)
+        cfg = engine._build_generate_config(None, schema, {})
 
         assert cfg.response_mime_type == "application/json"
         assert cfg.response_json_schema == schema
@@ -302,7 +282,7 @@ class TestGeminiEngine:
     ) -> None:
         engine = _make_engine(monkeypatch)
 
-        cfg = engine._build_generate_config(None)
+        cfg = engine._build_generate_config(None, None, {})
 
         assert cfg.response_mime_type is None
         assert cfg.response_json_schema is None
@@ -343,39 +323,70 @@ class TestGeminiEngine:
 
         assert engine._extract_result(response, requested_structured=True) is None
 
-    def test_temperature_none_omits_from_config(
+    def test_removed_runtime_key_is_omitted_from_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=None)
-        cfg = engine._build_generate_config(None)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.4)
+        engine.update_runtime_parameters(temperature=None)
+
+        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
+
         assert cfg.temperature is None
 
-    def test_thinking_config_passed_to_generate_config(
+    def test_thinking_config_dict_passes_through_to_generate_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = _make_engine(monkeypatch, thinking_config={"thinking_budget": 1024})
-        cfg = engine._build_generate_config(None)
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(thinking_config={"thinking_budget": 1024})
+
+        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
+
         assert cfg.thinking_config.thinking_budget == 1024
+
+    def test_payload_snapshots_runtime_parameters_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.1)
+        payload = engine._build_provider_payload([{"role": "user", "content": "Hi"}])
+
+        engine.update_runtime_parameters(temperature=0.9)
+        engine._call_provider(payload)
+
+        assert FakeGenAIClient.instances[-1].generate_calls[-1]["config"].temperature == 0.1
+
+    def test_unknown_runtime_key_fails_in_the_sdk_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(not_a_real_field=1)
+
+        with pytest.raises(Exception, match="not_a_real_field"):
+            engine._call_provider(
+                engine._build_provider_payload([{"role": "user", "content": "Hi"}])
+            )
 
     def test_gemini_to_dict_includes_non_secret_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
-        engine = GeminiEngine(
-            model="gemini-2.5-flash",
-            api_key="secret",
-            temperature=0.2,
-            max_output_tokens=512,
+        engine = GeminiEngine(model="gemini-2.5-flash", api_key="secret")
+        engine.update_runtime_parameters(
+            temperature=0.2, max_output_tokens=512,
             thinking_config={"thinking_budget": 100},
         )
         data = engine.to_dict()
 
         assert data["type"] == "GeminiEngine"
         assert data["model"] == "gemini-2.5-flash"
-        assert data["temperature"] == 0.2
-        assert data["max_output_tokens"] == 512
-        assert data["thinking_config"] == {"thinking_budget": 100}
-        for removed in ("max_retries", "retry_backoff_base", "attachments"):
+        assert data["runtime_parameters"] == {
+            "temperature": 0.2,
+            "max_output_tokens": 512,
+            "thinking_config": {"thinking_budget": 100},
+        }
+        for removed in ("max_retries", "retry_backoff_base", "attachments",
+                        "timeout_seconds", "temperature"):
             assert removed not in data
         assert "secret" not in str(data)
 

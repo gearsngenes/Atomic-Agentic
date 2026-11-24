@@ -103,11 +103,12 @@ def _openai_engine() -> LLMEngine:
         pytest.skip("OPENAI_API_KEY is not set.")
 
     try:
-        return OpenAIEngine(
+        engine = OpenAIEngine(
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=0,
-            timeout_seconds=60,
+            timeout=60,
         )
+        engine.update_runtime_parameters(temperature=0)
+        return engine
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
@@ -119,12 +120,12 @@ def _gemini_engine() -> LLMEngine:
         pytest.skip("GOOGLE_API_KEY or GEMINI_API_KEY is not set.")
 
     try:
-        return GeminiEngine(
+        engine = GeminiEngine(
             model=os.getenv("AA_TEST_GEMINI_MODEL", "gemini-2.5-flash-lite"),
-            http_options={"api_version": "v1beta"},
-            temperature=0,
-            timeout_seconds=60,
+            http_options={"api_version": "v1beta", "timeout": 60_000},
         )
+        engine.update_runtime_parameters(temperature=0)
+        return engine
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
@@ -136,11 +137,12 @@ def _mistral_engine() -> LLMEngine:
         pytest.skip("MISTRAL_API_KEY is not set.")
 
     try:
-        return MistralEngine(
+        engine = MistralEngine(
             model=os.getenv("AA_TEST_MISTRAL_MODEL", "mistral-small-latest"),
-            temperature=0,
-            timeout_seconds=60,
+            timeout_ms=60_000,
         )
+        engine.update_runtime_parameters(temperature=0)
+        return engine
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
@@ -154,7 +156,7 @@ def _anthropic_engine() -> LLMEngine:
     try:
         return AnthropicEngine(
             model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            timeout_seconds=60,
+            timeout=60,
         )
     except RuntimeError as exc:
         pytest.skip(str(exc))
@@ -240,12 +242,9 @@ def test_live_llm_engine_to_dict_exposes_non_secret_runtime_snapshot(
 
     data = engine.to_dict()
 
-    # LlamaCpp's builder uses a longer timeout (local model load/generation
-    # can exceed the 60s the five remote-engine builders share).
-    expected_timeout = 120.0 if provider == "llamacpp" else 60.0
-
     assert data["type"] == type(engine).__name__
-    assert data["timeout_seconds"] == expected_timeout
+    assert "runtime_parameters" in data
+    assert "timeout_seconds" not in data
     assert "max_retries" not in data
     assert "attachments" not in data
     assert "api_key" not in data

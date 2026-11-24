@@ -108,29 +108,28 @@ class OpenAIEngine(LLMEngine):
     object schema — the caller's own responsibility, not validated or
     corrected here.
 
-    Mutable configuration
-    ----------------------
-    ``temperature``, ``max_output_tokens``, ``reasoning``, ``truncation``, and
-    ``strict`` are call-time Responses API knobs, re-read fresh on every call —
-    each is a ``@property`` with a validating setter, freely settable after
-    construction. (base) ``timeout_seconds`` stays read-only instead: it is
-    baked into the SDK client's own timeout option when the client is built,
-    so mutating it later wouldn't propagate.
+    Runtime parameters and configuration
+    ------------------------------------
+    Generation settings (``temperature``, ``max_output_tokens``, ``reasoning``,
+    ``truncation``, ``text`` options such as ``verbosity``, ...) are Responses
+    API call parameters under OpenAI's own names, held in the base engine's
+    runtime-parameter store and forwarded verbatim:
+    ``engine.update_runtime_parameters(temperature=0.2, reasoning={"effort": "high"})``.
+    AA applies no gate between them (the provider decides which combinations are
+    valid). ``strict`` is the one AA behavior attribute: a validated, settable
+    bool that only shapes the structured-output envelope. Timeout and retry are
+    the SDK client's own settings (``timeout``, ``max_retries``), passed through
+    ``client_kwargs``.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "input", "instructions"})
 
     def __init__(
             self,
             model: str,
             name: str | None = None,
-            description: str = "OpenAI LLM Engine",
+            description: str | None = None,
             client: OpenAI | AsyncOpenAI | None = None,
-            temperature: float | None = None,
-            max_output_tokens: int | None = None,
-            reasoning: dict[str, str] | None = None,
-            truncation: str | None = None,
-            strict: bool = True,
-            *,
-            timeout_seconds: float = 600.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -139,136 +138,50 @@ class OpenAIEngine(LLMEngine):
         model:
             OpenAI model identifier (e.g. ``"gpt-4.1"``, ``"gpt-4o-mini"``).
         name:
-            Optional human-friendly engine name; defaults to ``openai_{model}``
-            with non-identifier characters replaced by underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
             Pre-built ``OpenAI`` or ``AsyncOpenAI`` client. When provided, it is
-            used directly and no client is constructed from ``client_kwargs``.
-            When ``None``, a sync ``OpenAI(**client_kwargs)`` is built. An injected
+            used directly; combining it with ``client_kwargs`` raises. When
+            ``None``, a sync ``OpenAI(**client_kwargs)`` is built. An injected
             ``AsyncOpenAI`` routes sync calls through ``run_coro_sync``; an injected
             ``OpenAI`` routes async calls through ``asyncio.to_thread``.
-        temperature:
-            Responses API sampling temperature. Pass ``None`` to omit the parameter
-            entirely (required for reasoning models).
-        max_output_tokens:
-            Optional maximum number of output tokens to generate.
-        reasoning:
-            Optional reasoning configuration dict (e.g. ``{"effort": "high"}``).
-            When set, ``temperature`` is suppressed regardless of its value.
-        truncation:
-            Optional truncation strategy string (e.g. ``"auto"``).
-        strict:
-            Whether structured-output requests (``output_structure``) use
-            OpenAI's strict schema-conformance mode. ``True`` (default) is
-            OpenAI's own recommended setting. Controls only OpenAI's own
-            strict schema-conformance request mode; it has no effect on what
-            AA sends, since AA no longer prunes or filters
-            ``output_structure`` at all (structured-generation Pass 8).
-        timeout_seconds:
-            Per-call timeout inserted into the client's ``timeout`` option via
-            ``setdefault`` (user-supplied ``timeout`` in ``client_kwargs`` wins).
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to ``OpenAI(...)``
-            during client construction. Common uses: ``api_key``, ``base_url``,
-            ``organization``, and the SDK's own ``max_retries``. Not forwarded
-            when ``client`` is injected directly.
-        """
-        # Step 1 — Name sanitization and base init.
-        sanitized_name = (
-            (name or f"openai_{model}")
-            .replace(":", "_").replace("-", "_")
-            .replace(" ", "_").replace(".", "_")
-        )
-        super().__init__(
-            name=sanitized_name,
-            description=description or "OpenAI LLM Engine",
-            timeout_seconds=timeout_seconds,
-        )
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
+            Keyword arguments forwarded unchanged to ``OpenAI(...)``. Common uses:
+            ``api_key``, ``base_url``, ``organization``, and the SDK's own
+            ``timeout`` and ``max_retries``.
 
-        # Step 2 — SDK presence check.
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client; ``strict``
+        starts ``True``. Generation parameters start empty
+        (``update_runtime_parameters``).
+        """
+        # 1. SDK presence check.
         if OpenAI is None:
             raise LLMEngineError(
                 "OpenAIEngine "
                 + format_missing_dependency("openai", "openai", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # Step 3 — Build shared client kwargs; seed timeout from the base-engine knob.
-        _ckw = dict(client_kwargs)
-        _ckw.setdefault("timeout", self._timeout_seconds)
+        # 2. Exactly one client source.
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "OpenAIEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # Step 4 — Single client: injected as-is or built sync from kwargs.
+        # 3. Base init, then engine state.
+        super().__init__(name=name, description=description or "OpenAI LLM Engine")
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
         self._client: OpenAI | AsyncOpenAI = (
-            client if client is not None else OpenAI(**_ckw)
+            client if client is not None else OpenAI(**client_kwargs)
         )
-
-        # Step 5 — Store model and Responses API config. The five knobs below
-        # go through their own property setters (validation lives in one
-        # place, shared by construction and later mutation).
         self.model = model
-        self.temperature = temperature
-        self.max_output_tokens = max_output_tokens
-        self.reasoning = reasoning
-        self.truncation = truncation
-        self.strict = strict
+        self.strict = True
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def temperature(self) -> float | None:
-        """Responses API sampling temperature; ``None`` omits the parameter."""
-        return self._temperature
-
-    @temperature.setter
-    def temperature(self, value: float | None) -> None:
-        if value is not None and not isinstance(value, (int, float)):
-            raise LLMEngineError(
-                f"OpenAIEngine.temperature must be a number or None, got {type(value).__name__}."
-            )
-        self._temperature = value
-
-    @property
-    def max_output_tokens(self) -> int | None:
-        """Maximum output tokens to generate; ``None`` omits the parameter."""
-        return self._max_output_tokens
-
-    @max_output_tokens.setter
-    def max_output_tokens(self, value: int | None) -> None:
-        if value is not None and not isinstance(value, int):
-            raise LLMEngineError(
-                f"OpenAIEngine.max_output_tokens must be an int or None, got {type(value).__name__}."
-            )
-        self._max_output_tokens = value
-
-    @property
-    def reasoning(self) -> dict[str, str] | None:
-        """Reasoning configuration dict; suppresses ``temperature`` when set."""
-        return self._reasoning
-
-    @reasoning.setter
-    def reasoning(self, value: dict[str, str] | None) -> None:
-        if value is not None and not isinstance(value, dict):
-            raise LLMEngineError(
-                f"OpenAIEngine.reasoning must be a dict or None, got {type(value).__name__}."
-            )
-        self._reasoning = value
-
-    @property
-    def truncation(self) -> str | None:
-        """Truncation strategy string; ``None`` omits the parameter."""
-        return self._truncation
-
-    @truncation.setter
-    def truncation(self, value: str | None) -> None:
-        if value is not None and not isinstance(value, str):
-            raise LLMEngineError(
-                f"OpenAIEngine.truncation must be a str or None, got {type(value).__name__}."
-            )
-        self._truncation = value
-
     @property
     def strict(self) -> bool:
         """Whether structured-output requests use strict schema conformance."""
@@ -361,14 +274,17 @@ class OpenAIEngine(LLMEngine):
     ) -> Dict[str, Any]:
         """
         Build the payload for the OpenAI Responses API from normalized messages,
-        a snapshot of the engine's attachments, and (optionally) the caller's raw
-        structured-output template, unmodified.
+        a snapshot of the engine's attachments and runtime parameters, and
+        (optionally) the caller's raw structured-output template, unmodified.
         """
         attachments = dict(self._attachments)
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
 
-        payload: Dict[str, Any] = {"blocks": blocks}
+        payload: Dict[str, Any] = {
+            "blocks": blocks,
+            "runtime_parameters": dict(self._runtime_parameters),
+        }
         if instructions:
             payload["instructions"] = instructions
         if output_structure is not None:
@@ -422,37 +338,28 @@ class OpenAIEngine(LLMEngine):
 
         Used by both sync and async call methods to avoid duplication.
 
-        Temperature gate: ``temperature`` is only forwarded when it is not
-        ``None`` AND ``reasoning`` is not set — reasoning-mode models reject
-        the ``temperature`` parameter.
+        1. Start from the payload's runtime-parameter snapshot, verbatim.
+        2. Set the engine-owned fields: ``model``, ``input``, ``instructions``.
+        3. Structured call: set ``text["format"]`` on a copy of the runtime
+           ``text`` (the schema wins; other ``text`` options such as
+           ``verbosity`` survive).
         """
-        blocks = payload["blocks"]
+        kwargs: dict[str, Any] = dict(payload["runtime_parameters"])
+        kwargs["model"] = self.model
+        kwargs["input"] = payload["blocks"]
         instructions = payload.get("instructions")
-
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "input": blocks,
-        }
         if instructions:
             kwargs["instructions"] = instructions
-        if self.temperature is not None and self.reasoning is None:
-            kwargs["temperature"] = self.temperature
-        if self.max_output_tokens is not None:
-            kwargs["max_output_tokens"] = self.max_output_tokens
-        if self.reasoning is not None:
-            kwargs["reasoning"] = self.reasoning
-        if self.truncation is not None:
-            kwargs["truncation"] = self.truncation
         output_structure = payload.get("output_structure")
         if output_structure is not None:
-            kwargs["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": "output_structure",
-                    "schema": output_structure,
-                    "strict": self.strict,
-                }
+            text = dict(kwargs.get("text") or {})
+            text["format"] = {
+                "type": "json_schema",
+                "name": "output_structure",
+                "schema": output_structure,
+                "strict": self.strict,
             }
+            kwargs["text"] = text
         return kwargs
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
@@ -737,17 +644,13 @@ class OpenAIEngine(LLMEngine):
         """
         Diagnostic snapshot for OpenAIEngine, without secrets.
 
-        Includes model and Responses API config in addition to
-        base engine info. Does not expose ``client_kwargs`` contents (which may
+        Includes model and the strict flag in addition to
+        base engine info (which carries the runtime parameters). Does not expose ``client_kwargs`` contents (which may
         include API keys).
         """
         base = super().to_dict()
         base.update({
             "model": self.model,
-            "temperature": self.temperature,
-            "max_output_tokens": self.max_output_tokens,
-            "reasoning": self.reasoning,
-            "truncation": self.truncation,
             "strict": self.strict,
         })
         return base

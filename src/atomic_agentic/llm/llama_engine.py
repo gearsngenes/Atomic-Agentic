@@ -206,8 +206,9 @@ class LlamaCppEngine(LLMEngine):
         super().__init__(
             name=sanitized_name,
             description=description or "Llama.cpp LLM Engine",
-            timeout_seconds=timeout_seconds,
         )
+        # Interim: the base no longer owns a timeout; deleted in Pass 9.
+        self._timeout_seconds = float(timeout_seconds)
 
         # 2. SDK presence check
         if Llama is None:

@@ -87,23 +87,27 @@ class MistralEngine(LLMEngine):
     OpenAI/Anthropic, Mistral has no `additionalProperties: false`
     requirement at all.
 
-    Mutable configuration
-    -----------------------
-    `strict` is a call-time knob, re-read fresh on every structured-output
-    call -- a `@property` with a validating setter, freely settable after
-    construction, mirroring `OpenAIEngine.strict`.
+    Runtime parameters and configuration
+    ------------------------------------
+    Generation settings (`temperature`, `max_tokens`, ...) are `chat.complete`
+    call parameters under Mistral's own names, held in the base engine's
+    runtime-parameter store and forwarded verbatim:
+    `engine.update_runtime_parameters(temperature=0.2)`. Nothing is set by
+    default, so Mistral's own defaults apply. `strict` is the one AA behavior
+    attribute: a validating, settable bool re-read on every structured-output
+    call, mirroring `OpenAIEngine.strict`. Timeout and retry are the SDK
+    client's own settings (`timeout_ms`, `retry_config`) through
+    `client_kwargs`.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format"})
 
     def __init__(
             self,
             model: str,
             name: str | None = None,
-            description: str = "Mistral LLM Engine",
+            description: str | None = None,
             client: Mistral | None = None,
-            temperature: float | None = 0.1,
-            strict: bool = True,
-            *,
-            timeout_seconds: float = 600.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -112,68 +116,44 @@ class MistralEngine(LLMEngine):
         model:
             Mistral model identifier (e.g. ``"mistral-small-latest"``).
         name:
-            Optional human-friendly engine name; defaults to ``mistral_{model}``
-            with non-identifier characters replaced by underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
-            Pre-built ``Mistral`` client. When provided, used directly and no
-            client is constructed from ``client_kwargs``. ``Mistral`` exposes
+            Pre-built ``Mistral`` client. When provided, used directly
+            (combining it with ``client_kwargs`` raises). ``Mistral`` exposes
             both sync (``.chat.complete``) and async (``.chat.complete_async``)
             paths on the same object — no isinstance routing is needed.
-        temperature:
-            Sampling temperature for text generation. ``None`` omits the kwarg
-            entirely, letting the SDK apply its own default sentinel.
-        strict:
-            Whether structured-output requests (`output_structure`) use
-            Mistral's strict JSON-Schema conformance mode. `True` (default)
-            matches Mistral's own documented recommendation for reliable
-            structured output -- confirmed live that `strict=False` accepts
-            a wider range of schema keywords without error, but also drops
-            real enforcement elsewhere (e.g. `additionalProperties: false`
-            goes unenforced too), so
-            disabling it trades a wider keyword allow-list for materially
-            weaker guarantees generally, not just looser syntax.
-        timeout_seconds:
-            Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
-            Additional keyword arguments forwarded to ``Mistral(...)`` during
-            client construction. Common uses: ``api_key``, ``server_url``,
-            ``timeout_ms``, ``retry_config``. A default ``timeout_ms`` is seeded from
-            ``timeout_seconds`` unless supplied explicitly. Not forwarded when
-            ``client`` is injected.
-        """
-        # 1. Name sanitization + super init.
-        sanitized_name = (
-            (name or f"mistral_{model}")
-            .replace(":", "_").replace("-", "_")
-            .replace(" ", "_").replace(".", "_")
-        )
-        super().__init__(
-            name=sanitized_name,
-            description=description or "Mistral LLM Engine",
-            timeout_seconds=timeout_seconds,
-        )
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
+            Keyword arguments forwarded unchanged to ``Mistral(...)``. Common
+            uses: ``api_key``, ``server_url``, ``timeout_ms``, ``retry_config``.
 
-        # 2. SDK presence check.
+        ``strict`` starts ``True``: structured-output requests use Mistral's
+        strict JSON-Schema conformance mode, which matches its documented
+        recommendation. Confirmed live that ``strict=False`` accepts a wider
+        range of schema keywords without error but drops real enforcement
+        elsewhere (e.g. ``additionalProperties: false``), trading a wider
+        keyword allow-list for materially weaker guarantees.
+        """
+        # 1. SDK presence check.
         if Mistral is None:
             raise LLMEngineError(
                 "MistralEngine "
                 + format_missing_dependency("mistralai", "mistral", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # 3. Build _ckw + seed timeout_ms default from the base-engine knob.
-        _ckw = dict(client_kwargs)
-        _ckw.setdefault("timeout_ms", int(self._timeout_seconds * 1000))
+        # 2. Exactly one client source.
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "MistralEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # 4. Single client: injected as-is or built from kwargs.
-        self._client: Mistral = client if client is not None else Mistral(**_ckw)
-
-        # 5. Store model and generation config.
+        # 3. Base init, then engine state.
+        super().__init__(name=name, description=description or "Mistral LLM Engine")
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
+        self._client: Mistral = client if client is not None else Mistral(**client_kwargs)
         self.model = model
-        self.temperature = temperature
-        self.strict = strict
+        self.strict = True
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -371,7 +351,10 @@ class MistralEngine(LLMEngine):
             elif kind == "image" and signed_url:
                 parts.append({"type": "image_url", "image_url": signed_url})
 
-        payload: Dict[str, Any] = {"messages": chat_messages}
+        payload: Dict[str, Any] = {
+            "messages": chat_messages,
+            "runtime_parameters": dict(self._runtime_parameters),
+        }
         if output_structure is not None:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -388,15 +371,14 @@ class MistralEngine(LLMEngine):
         Single synchronous Mistral chat completion call.
 
         Error-wrapping is handled by the shared ``LLMEngine`` template.
-        Temperature is omitted when ``None`` so the SDK applies its own default.
+        Runtime parameters from the payload snapshot are forwarded verbatim.
         ``response_format`` is forwarded when present (structured-output requests).
         """
         kwargs: Dict[str, Any] = {
+            **payload["runtime_parameters"],
             "model": self.model,
             "messages": payload["messages"],
         }
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
         if "response_format" in payload:
             kwargs["response_format"] = payload["response_format"]
         return self._client.chat.complete(**kwargs)
@@ -406,16 +388,15 @@ class MistralEngine(LLMEngine):
         Native async Mistral chat completion call via ``chat.complete_async``.
 
         ``Mistral`` (v2.6.0+) exposes both sync and async paths on the same
-        object — no thread offload or isinstance routing needed. Temperature is
-        omitted when ``None`` so the SDK applies its own default.
+        object — no thread offload or isinstance routing needed. Runtime
+        parameters from the payload snapshot are forwarded verbatim.
         ``response_format`` is forwarded when present (structured-output requests).
         """
         kwargs: Dict[str, Any] = {
+            **payload["runtime_parameters"],
             "model": self.model,
             "messages": payload["messages"],
         }
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
         if "response_format" in payload:
             kwargs["response_format"] = payload["response_format"]
         return await self._client.chat.complete_async(**kwargs)
@@ -596,14 +577,14 @@ class MistralEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for MistralEngine: provider + requested knobs.
+        Diagnostic snapshot for MistralEngine: provider + model + strict (the
+        base adds the runtime parameters).
 
         Includes non-secret configuration only.
         """
         base = super().to_dict()
         base.update({
             "model": self.model,
-            "temperature": self.temperature,
             "strict": self.strict,
         })
         return base

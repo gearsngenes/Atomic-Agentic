@@ -45,10 +45,19 @@ class GeminiEngine(LLMEngine):
     ``genai.Client`` exposes both sync (``client.models``) and async
     (``client.aio.models``) paths — no isinstance routing is needed.
 
-    ``client=None`` builds ``genai.Client(**client_kwargs)``. ``timeout_seconds``
-    becomes ``http_options.timeout`` (milliseconds, as the SDK requires) unless
-    the ``http_options`` you pass already sets a timeout, which then wins. An
-    injected client is used as-is, so set its options on the client itself.
+    ``client=None`` builds ``genai.Client(**client_kwargs)`` with the kwargs
+    unchanged; timeout is the SDK's own ``http_options.timeout`` (milliseconds).
+    An injected client is used as-is, so set its options on the client itself;
+    combining ``client`` with ``client_kwargs`` raises.
+
+    Runtime parameters
+    ------------------
+    Generation settings (``temperature``, ``max_output_tokens``,
+    ``thinking_config``, ...) are ``GenerateContentConfig`` fields held in the
+    base engine's runtime-parameter store and forwarded verbatim, e.g.
+    ``engine.update_runtime_parameters(thinking_config={"thinking_budget": 0})``
+    (the SDK coerces a dict to ``ThinkingConfig``). Nothing is set by default,
+    so Gemini's own defaults apply.
 
     API version
     -----------
@@ -114,17 +123,17 @@ class GeminiEngine(LLMEngine):
     behavior (accept, ignore, or reject — unconfirmed by this pass).
     """
 
+    _RESERVED_RUNTIME_KEYS = frozenset({
+        "model", "contents", "system_instruction",
+        "response_mime_type", "response_json_schema",
+    })
+
     def __init__(
             self,
             model: str,
             name: str | None = None,
-            description: str = "Gemini LLM Engine",
+            description: str | None = None,
             client: genai.Client | None = None,
-            temperature: float | None = 0.1,
-            max_output_tokens: int | None = None,
-            thinking_config: dict[str, Any] | None = None,
-            *,
-            timeout_seconds: float = 600.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -133,75 +142,42 @@ class GeminiEngine(LLMEngine):
         model:
             Gemini model identifier (e.g. ``"gemini-2.5-flash"``, ``"gemini-2.0-pro"``).
         name:
-            Optional human-friendly engine name; defaults to ``gemini_{model}`` with
-            non-identifier characters replaced by underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
-            Pre-built ``genai.Client``. When provided, used directly; no client is
-            constructed from ``client_kwargs``. The same client handles both sync
+            Pre-built ``genai.Client``. When provided, used directly (combining
+            it with ``client_kwargs`` raises). The same client handles both sync
             (``client.models``) and async (``client.aio.models``) paths.
-        temperature:
-            Sampling temperature passed to ``GenerateContentConfig``. ``None`` omits
-            the parameter entirely.
-        max_output_tokens:
-            Optional maximum number of output tokens. Maps to
-            ``GenerateContentConfig.max_output_tokens``.
-        thinking_config:
-            Optional thinking configuration dict (e.g.
-            ``{"thinking_budget": 2000}`` or ``{"thinking_level": "high"}``).
-            Expanded into ``genai.types.ThinkingConfig(**thinking_config)`` at call
-            time. ``None`` omits the field.
-        timeout_seconds:
-            Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
-            during client construction. Common uses: ``api_key``, ``credentials``,
-            ``project``, ``location``, ``vertexai``, ``http_options`` (a dict or
-            ``types.HttpOptions``; every key is kept, and only a missing
-            ``timeout`` is filled in from ``timeout_seconds``). Not forwarded
-            when ``client`` is injected.
-        """
-        # Step 1 — Name sanitization and base init.
-        sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
-        super().__init__(
-            name=sanitized_name,
-            description=description or "Gemini LLM Engine",
-            timeout_seconds=timeout_seconds,
-        )
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
+            Keyword arguments forwarded unchanged to ``genai.Client(...)``.
+            Common uses: ``api_key``, ``credentials``, ``project``, ``location``,
+            ``vertexai``, ``http_options`` (a dict or ``types.HttpOptions``,
+            including its ``timeout`` in milliseconds).
 
-        # Step 2 — SDK presence check.
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client.
+        """
+        # 1. SDK presence check.
         if genai is None:
             raise LLMEngineError(
                 "GeminiEngine "
                 + format_missing_dependency("google-genai", "gemini", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # Step 3 — Build client kwargs; fill http_options.timeout (milliseconds)
-        # from timeout_seconds unless the caller's http_options already sets one.
-        # Everything else the caller put in http_options (api_version, ...) is kept.
-        _ckw = dict(client_kwargs)
-        _timeout_ms = int(self._timeout_seconds * 1000)
-        _http = _ckw.get("http_options")
-        if _http is None:
-            _http = {"timeout": _timeout_ms}
-        elif isinstance(_http, Mapping):
-            _http = {**_http}
-            if _http.get("timeout") is None:
-                _http["timeout"] = _timeout_ms
-        elif _http.timeout is None:  # types.HttpOptions
-            _http = _http.model_copy(update={"timeout": _timeout_ms})
-        _ckw["http_options"] = _http
+        # 2. Exactly one client source.
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "GeminiEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # Step 4 — Single client: injected as-is or built from kwargs.
-        self._client: genai.Client = client if client is not None else genai.Client(**_ckw)
-
-        # Step 5 — Store model and generation config.
+        # 3. Base init, then engine state.
+        super().__init__(name=name, description=description or "Gemini LLM Engine")
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
+        self._client: genai.Client = (
+            client if client is not None else genai.Client(**client_kwargs)
+        )
         self.model = model
-        self.temperature = temperature
-        self._max_output_tokens = max_output_tokens
-        self._thinking_config = thinking_config
 
     # ------------------------------------------------------------------ #
     # Attachments
@@ -392,8 +368,8 @@ class GeminiEngine(LLMEngine):
     ) -> Dict[str, Any]:
         """
         Build the payload for ``generate_content`` from normalized messages, a
-        snapshot of the engine's attachments, and (optionally) the caller's raw
-        structured-output template, unmodified.
+        snapshot of the engine's attachments and runtime parameters, and
+        (optionally) the caller's raw structured-output template, unmodified.
 
         System messages are extracted into ``system_instruction`` for
         ``GenerateContentConfig``; all other turns are returned as
@@ -406,33 +382,29 @@ class GeminiEngine(LLMEngine):
             "system_instruction": system_instruction,
             "contents": contents,
             "output_structure": output_structure,
+            "runtime_parameters": dict(self._runtime_parameters),
         }
 
     def _build_generate_config(
             self,
             system_instruction: str | None,
-            output_structure: Optional[Dict[str, Any]] = None,
+            output_structure: Optional[Dict[str, Any]],
+            runtime_parameters: Dict[str, Any],
     ) -> genai.types.GenerateContentConfig:
         """
-        Build a ``GenerateContentConfig`` from stored engine params, the per-call
-        ``system_instruction``, and (optionally) the caller's raw
-        structured-output template, unmodified. Fields are omitted when their
-        stored value is ``None``.
+        Build a ``GenerateContentConfig`` from the call's runtime-parameter
+        snapshot (verbatim), the per-call ``system_instruction``, and
+        (optionally) the caller's raw structured-output template, unmodified.
 
         When ``output_structure`` is given, ``response_mime_type`` and
         ``response_json_schema`` are set together — mime type alone is only a
         soft hint, not a real constraint, so the two are never sent
-        independently.
+        independently. An unknown runtime key fails here as the SDK's own
+        validation error.
         """
-        cfg: Dict[str, Any] = {}
+        cfg: Dict[str, Any] = dict(runtime_parameters)
         if system_instruction:
             cfg["system_instruction"] = system_instruction
-        if self.temperature is not None:
-            cfg["temperature"] = self.temperature
-        if self._max_output_tokens is not None:
-            cfg["max_output_tokens"] = self._max_output_tokens
-        if self._thinking_config is not None:
-            cfg["thinking_config"] = genai.types.ThinkingConfig(**self._thinking_config)
         if output_structure is not None:
             cfg["response_mime_type"] = "application/json"
             cfg["response_json_schema"] = output_structure
@@ -441,7 +413,9 @@ class GeminiEngine(LLMEngine):
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """Perform a single synchronous ``models.generate_content`` call."""
         cfg = self._build_generate_config(
-            payload.get("system_instruction"), payload.get("output_structure")
+            payload.get("system_instruction"),
+            payload.get("output_structure"),
+            payload["runtime_parameters"],
         )
         return self._client.models.generate_content(
             model=self.model,
@@ -457,7 +431,9 @@ class GeminiEngine(LLMEngine):
         paths on the same object.
         """
         cfg = self._build_generate_config(
-            payload.get("system_instruction"), payload.get("output_structure")
+            payload.get("system_instruction"),
+            payload.get("output_structure"),
+            payload["runtime_parameters"],
         )
         return await self._client.aio.models.generate_content(
             model=self.model,
@@ -588,15 +564,13 @@ class GeminiEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for GeminiEngine: provider + model + generation config.
+        Diagnostic snapshot for GeminiEngine: provider + model (the base adds the
+        runtime parameters).
 
         Keeps output minimal to avoid leaking client or API keys.
         """
         base = super().to_dict()
         base.update({
             "model": self.model,
-            "temperature": self.temperature,
-            "max_output_tokens": self._max_output_tokens,
-            "thinking_config": self._thinking_config,
         })
         return base

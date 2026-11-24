@@ -101,13 +101,32 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(
             model="claude-opus-4-8",
             api_key="test-key",
-            timeout_seconds=30.0,
+            timeout=30.0,
         )
 
         fake = FakeAnthropicClient.instances[-1]
         assert engine._client is fake
-        assert fake.kwargs["api_key"] == "test-key"
-        assert fake.kwargs["timeout"] == 30.0
+        assert fake.kwargs == {"api_key": "test-key", "timeout": 30.0}
+
+    def test_no_timeout_is_injected_into_the_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeAnthropicClient.instances.clear()
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+
+        AnthropicEngine(model="claude-opus-4-8")
+
+        assert "timeout" not in FakeAnthropicClient.instances[-1].kwargs
+
+    def test_client_with_client_kwargs_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+
+        with pytest.raises(LLMEngineError, match="either 'client' or client kwargs"):
+            AnthropicEngine(
+                model="claude-opus-4-8", client=FakeAnthropicClient(), api_key="k"
+            )
 
     def test_constructor_client_injection_skips_build(
         self, monkeypatch: pytest.MonkeyPatch
@@ -124,12 +143,12 @@ class TestAnthropicEngine:
 
     # -- Constructor: name + params --------------------------------------------
 
-    def test_constructor_name_sanitization(
+    def test_constructor_default_name_is_the_class_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
-        assert engine.name == "anthropic_claude_opus_4_8"
+        assert engine.name == "AnthropicEngine"
 
     def test_constructor_custom_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -138,22 +157,53 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8", name="my_engine")
         assert engine.name == "my_engine"
 
-    def test_constructor_stores_request_params(
+    def test_constructor_stores_model_and_seeds_max_tokens(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(
-            model="claude-sonnet-4-6",
-            max_output_tokens=1024,
-            stop_sequences=["STOP"],
-            thinking_config={"type": "adaptive"},
-            extra_body={"temperature": 0.5, "top_k": 40},
-        )
+        engine = AnthropicEngine(model="claude-sonnet-4-6")
+
         assert engine.model == "claude-sonnet-4-6"
-        assert engine.max_output_tokens == 1024
-        assert engine.stop_sequences == ["STOP"]
-        assert engine.thinking_config == {"type": "adaptive"}
-        assert engine.extra_body == {"temperature": 0.5, "top_k": 40}
+        assert engine.runtime_parameters == {"max_tokens": 8192}
+        assert engine.block_separator == ""
+
+    @pytest.mark.parametrize(
+        "removed",
+        ["max_output_tokens", "stop_sequences", "thinking_config", "extra_body",
+         "block_separator", "timeout_seconds"],
+    )
+    def test_removed_constructor_arguments_flow_into_client_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, removed: str
+    ) -> None:
+        FakeAnthropicClient.instances.clear()
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+
+        engine = AnthropicEngine(model="claude-opus-4-8", **{removed: 1})
+
+        assert FakeAnthropicClient.instances[-1].kwargs[removed] == 1
+        assert engine.block_separator == ""
+
+    def test_block_separator_is_validated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+
+        engine.block_separator = "|"
+        assert engine.block_separator == "|"
+        with pytest.raises(LLMEngineError, match="block_separator"):
+            engine.block_separator = 5  # type: ignore[assignment]
+        assert "block_separator" not in engine.runtime_parameters
+
+    @pytest.mark.parametrize("key", ["model", "messages", "system", "output_config"])
+    def test_reserved_runtime_keys_raise(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+
+        with pytest.raises(LLMEngineError, match=key):
+            engine.update_runtime_parameters(**{key: "x"})
 
     # -- _call_provider routing ------------------------------------------------
 
@@ -233,7 +283,8 @@ class TestAnthropicEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", max_output_tokens=512)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(max_tokens=512)
         msgs = [{"role": "user", "content": "hello"}]
 
         payload = engine._build_provider_payload(msgs)
@@ -284,7 +335,7 @@ class TestAnthropicEngine:
 
         assert "system" not in payload
 
-    def test_build_payload_optional_params_omitted_when_none(
+    def test_build_payload_sends_only_max_tokens_by_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
@@ -293,17 +344,18 @@ class TestAnthropicEngine:
 
         payload = engine._build_provider_payload(msgs)
 
+        assert payload["max_tokens"] == 8192
         for key in ("temperature", "top_p", "top_k", "extra_body", "stop_sequences", "thinking"):
             assert key not in payload
 
-    def test_build_payload_optional_params_included_when_set(
+    def test_build_payload_forwards_runtime_parameters_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(
-            model="claude-opus-4-8",
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(
             stop_sequences=["END"],
-            thinking_config={"type": "adaptive"},
+            thinking={"type": "adaptive"},
             extra_body={"temperature": 0.7, "top_p": 0.9, "top_k": 20},
         )
         msgs = [{"role": "user", "content": "hi"}]
@@ -312,10 +364,30 @@ class TestAnthropicEngine:
 
         assert payload["extra_body"] == {"temperature": 0.7, "top_p": 0.9, "top_k": 20}
         assert "temperature" not in payload
-        assert "top_p" not in payload
-        assert "top_k" not in payload
         assert payload["stop_sequences"] == ["END"]
         assert payload["thinking"] == {"type": "adaptive"}
+
+    def test_removing_max_tokens_omits_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(max_tokens=None)
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert "max_tokens" not in payload
+
+    def test_payload_is_a_snapshot_of_the_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        engine.update_runtime_parameters(max_tokens=1)
+
+        assert payload["max_tokens"] == 8192
 
     # -- _extract_text ---------------------------------------------------------
 
@@ -362,7 +434,8 @@ class TestAnthropicEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8", block_separator="---")
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.block_separator = "---"
         response = SimpleNamespace(
             content=[
                 SimpleNamespace(type="text", text="Hello"),
@@ -535,21 +608,22 @@ class TestAnthropicEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(
-            model="claude-opus-4-8",
-            max_output_tokens=1024,
-            extra_body={"temperature": 0.3},
-            stop_sequences=["END"],
-            block_separator="---",
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(
+            max_tokens=1024, extra_body={"temperature": 0.3}, stop_sequences=["END"]
         )
+        engine.block_separator = "---"
         d = engine.to_dict()
         assert d["type"] == "AnthropicEngine"
         assert d["model"] == "claude-opus-4-8"
-        assert d["max_output_tokens"] == 1024
-        assert d["extra_body"] == {"temperature": 0.3}
-        assert d["stop_sequences"] == ["END"]
+        assert d["runtime_parameters"] == {
+            "max_tokens": 1024,
+            "extra_body": {"temperature": 0.3},
+            "stop_sequences": ["END"],
+        }
         assert d["block_separator"] == "---"
-        for removed in ("inline_cutoff_chars", "max_retries", "attachments"):
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments",
+                        "timeout_seconds", "max_output_tokens"):
             assert removed not in d
         assert "client" not in d
 
@@ -783,7 +857,8 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8")
 
         for name in ("inline_cutoff_chars", "_inline_cutoff_chars", "_should_retry",
-                     "_max_retries", "_on_detach"):
+                     "_max_retries", "_on_detach", "timeout_seconds", "_timeout_seconds",
+                     "max_output_tokens", "stop_sequences", "thinking_config", "extra_body"):
             assert not hasattr(engine, name)
 
     def test_max_retries_goes_to_the_sdk_client(

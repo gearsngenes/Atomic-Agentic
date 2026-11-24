@@ -75,16 +75,23 @@ class AnthropicEngine(LLMEngine):
     and forwarded as the top-level ``system=`` parameter (joined with
     ``"\\n\\n"`` when multiple system messages are present).  The remaining
     messages form the ``messages=`` list.  ``max_tokens`` is always sent
-    (required by Anthropic).  ``stop_sequences``, ``thinking`` and
-    ``extra_body`` (sampling fields such as ``temperature``) are omitted
-    when ``None``.
+    (required by Anthropic): the runtime-parameter store is seeded with
+    ``{"max_tokens": 8192}``.  Every other generation setting (``stop_sequences``,
+    ``thinking``, ``extra_body``, ...) is a runtime parameter under Anthropic's
+    own name, forwarded verbatim:
+    ``engine.update_runtime_parameters(thinking={"type": "adaptive"})``.
+    Which fields the API accepts depends on the API version the SDK speaks
+    (anthropic 2.x rejects ``temperature``, which can travel in ``extra_body``);
+    AA does not validate them.  Timeout and retry are the SDK client's own
+    settings (``timeout``, ``max_retries``) through ``client_kwargs``.
     ``block_separator`` (default ``""``) controls how multiple response text
     blocks are rejoined into the returned string — relevant when a response
     contains more than one ``text`` block (e.g. Anthropic citations, which
     can split a response into interleaved cited/uncited blocks). Defaults to
     no inserted separator, matching Anthropic's own text-reconstruction
     convention (the streaming SDK's ``text_stream`` concatenates raw text
-    deltas across content-block boundaries with nothing inserted).
+    deltas across content-block boundaries with nothing inserted). It is a
+    validated, settable attribute, not a runtime parameter.
 
     Result extraction
     ------------------
@@ -113,19 +120,14 @@ class AnthropicEngine(LLMEngine):
     responsibility.
     """
 
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "system", "output_config"})
+
     def __init__(
         self,
         model: str,
         name: str | None = None,
-        description: str = "Anthropic Claude language model engine.",
+        description: str | None = None,
         client: Anthropic | AsyncAnthropic | None = None,
-        max_output_tokens: int = 8192,
-        stop_sequences: list[str] | None = None,
-        thinking_config: dict[str, Any] | None = None,
-        extra_body: Mapping[str, Any] | None = None,
-        block_separator: str = "",
-        *,
-        timeout_seconds: float = 600.0,
         **client_kwargs: Any,
     ) -> None:
         """
@@ -134,74 +136,63 @@ class AnthropicEngine(LLMEngine):
         model:
             Anthropic model identifier (e.g. ``"claude-sonnet-4-6"``).
         name:
-            Optional human-friendly engine name; defaults to
-            ``anthropic_{model}`` with non-identifier characters replaced by
-            underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
             Pre-built ``Anthropic`` or ``AsyncAnthropic`` client. When
-            provided, used directly; when ``None``, a sync
-            ``Anthropic(**client_kwargs)`` is built.
-        max_output_tokens:
-            Always sent as ``max_tokens=`` (required by the Anthropic API).
-        stop_sequences:
-            Optional list of stop strings; omitted when ``None``.
-        thinking_config:
-            Optional extended-thinking configuration dict (e.g.
-            ``{"type": "adaptive"}``); sent as ``thinking=``, omitted when
-            ``None``.
-        extra_body:
-            Extra request fields forwarded verbatim through the SDK's
-            ``extra_body`` passthrough, e.g. ``{"temperature": 0.3}`` or
-            ``{"top_k": 5}``. Which fields the API accepts depends on the
-            API version the SDK speaks (anthropic 2.x rejects
-            ``temperature``); AA does not validate them. Omitted when ``None``.
-        block_separator:
-            Controls how multiple response text blocks are rejoined into the
-            returned string (relevant for citation-bearing responses).
-            Defaults to ``""`` (no inserted separator).
-        timeout_seconds:
-            Per-call timeout inserted into the client's ``timeout`` option.
+            provided, used directly (combining it with ``client_kwargs``
+            raises); when ``None``, a sync ``Anthropic(**client_kwargs)`` is
+            built.
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to
-            ``Anthropic(...)`` during client construction. Common uses:
-            ``api_key``, ``base_url``, and the SDK's own ``max_retries``. Not
-            forwarded when ``client`` is injected directly.
-        """
-        # 1. Name sanitization + super init
-        sanitized = (name or f"anthropic_{model}").replace(":", "_").replace(
-            "-", "_").replace(" ", "_").replace(".", "_")
-        super().__init__(
-            name=sanitized,
-            description=description or "Anthropic Claude language model engine.",
-            timeout_seconds=timeout_seconds,
-        )
-        self._attachments: Dict[str, Mapping[str, Any]] = {}
+            Keyword arguments forwarded unchanged to ``Anthropic(...)``. Common
+            uses: ``api_key``, ``base_url``, and the SDK's own ``timeout`` and
+            ``max_retries``.
 
-        # 2. SDK presence check
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client; seed
+        ``max_tokens``; ``block_separator`` starts as ``""``.
+        """
+        # 1. SDK presence check
         if Anthropic is None:
             raise LLMEngineError(
                 "AnthropicEngine "
                 + format_missing_dependency("anthropic", "anthropic", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # 3. Build client kwargs; seed timeout default
-        _ckw = dict(client_kwargs)
-        _ckw.setdefault("timeout", self._timeout_seconds)
+        # 2. Exactly one client source
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "AnthropicEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # 4. Assign or build client
-        self._client: Anthropic | AsyncAnthropic = (
-            client if client is not None else Anthropic(**_ckw)
+        # 3. Base init, then engine state
+        super().__init__(
+            name=name,
+            description=description or "Anthropic Claude language model engine.",
         )
-
-        # 5. Store request-level params
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
+        self._client: Anthropic | AsyncAnthropic = (
+            client if client is not None else Anthropic(**client_kwargs)
+        )
         self.model = model
-        self.max_output_tokens = int(max_output_tokens)
-        self.stop_sequences = stop_sequences
-        self.thinking_config = thinking_config
-        self.extra_body = dict(extra_body) if extra_body is not None else None
-        self.block_separator = block_separator
+        self.block_separator = ""
+
+        # 4. The API requires max_tokens on every call
+        self._runtime_parameters["max_tokens"] = 8192
+
+    @property
+    def block_separator(self) -> str:
+        """String inserted between response text blocks when they are joined."""
+        return self._block_separator
+
+    @block_separator.setter
+    def block_separator(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise LLMEngineError(
+                f"AnthropicEngine.block_separator must be a str, got {type(value).__name__}."
+            )
+        self._block_separator = value
 
     # ------------------------------------------------------------------ #
     # Attachments
@@ -269,9 +260,9 @@ class AnthropicEngine(LLMEngine):
 
         Lifecycle: (1) partition system vs. conversation; (2) convert to
         Anthropic content-list format; (3) append attachment blocks to the
-        last user turn; (4) assemble final payload dict with optional
-        generation params; (5) if ``output_structure`` is given, wire it into
-        ``output_config.format`` (the caller's raw schema, forwarded
+        last user turn; (4) assemble final payload dict from the
+        runtime parameters and the engine-owned fields; (5) if
+        ``output_structure`` is given, wire it into ``output_config.format`` (the caller's raw schema, forwarded
         unmodified).
         """
         # 1. Partition system vs. conversation messages
@@ -301,26 +292,16 @@ class AnthropicEngine(LLMEngine):
             else:
                 anthropic_msgs.append({"role": "user", "content": blocks})
 
-        # 4. Assemble payload
+        # 4. Assemble payload: the runtime-parameter snapshot, verbatim, plus
+        #    the engine-owned fields
         payload: dict[str, Any] = {
+            **self._runtime_parameters,
             "model": self.model,
-            "max_tokens": self.max_output_tokens,
             "messages": anthropic_msgs,
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
 
-        # Sampling params (temperature, top_p, top_k, ...) are no longer fixed
-        # engine knobs: newer Anthropic API versions (SDK 2.x) reject some of
-        # them, so they travel through the SDK's extra_body passthrough exactly
-        # as the caller supplied them.
-        if self.extra_body:
-            payload["extra_body"] = dict(self.extra_body)
-
-        if self.stop_sequences is not None:
-            payload["stop_sequences"] = self.stop_sequences
-        if self.thinking_config is not None:
-            payload["thinking"] = self.thinking_config
         if output_structure is not None:
             payload["output_config"] = {
                 "format": {"type": "json_schema", "schema": output_structure}
@@ -469,10 +450,6 @@ class AnthropicEngine(LLMEngine):
         d = super().to_dict()
         d.update({
             "model": self.model,
-            "max_output_tokens": self.max_output_tokens,
-            "stop_sequences": self.stop_sequences,
-            "thinking_config": self.thinking_config,
-            "extra_body": self.extra_body,
             "block_separator": self.block_separator,
         })
         return d

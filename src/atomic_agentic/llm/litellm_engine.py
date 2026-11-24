@@ -185,8 +185,9 @@ class LiteLLMEngine(LLMEngine):
         super().__init__(
             name=sanitized,
             description=description or "LiteLLM provider-agnostic language model engine.",
-            timeout_seconds=timeout_seconds,
         )
+        # Interim: the base no longer owns a timeout; deleted in Pass 9.
+        self._timeout_seconds = float(timeout_seconds)
 
         # 2. SDK presence check
         if litellm is None:
@@ -259,7 +260,7 @@ class LiteLLMEngine(LLMEngine):
             "model": f"{self.provider}/{self.model}",
             "messages": litellm_msgs,
             "drop_params": self.drop_params,
-            "timeout": self.timeout_seconds,
+            "timeout": self._timeout_seconds,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
