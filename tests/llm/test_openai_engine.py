@@ -211,7 +211,7 @@ class TestOpenAIEngine:
 
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
-        response = engine._call_provider({"blocks": [], "instructions": None, "runtime_parameters": {}})
+        response = engine._call_provider({"model": "gpt-4o-mini", "input": []})
 
         assert injected.response_calls
         assert engine._extract_result(response, requested_structured=False) == " openai async text "
@@ -247,13 +247,9 @@ class TestOpenAIEngine:
 
         engine = OpenAIEngine(model="gpt-4o-mini")
         engine.update_runtime_parameters(temperature=0.25)
-        response = engine._call_provider(
-            {
-                "blocks": [{"role": "user", "content": []}],
-                "instructions": "system",
-                "runtime_parameters": engine.runtime_parameters,
-            }
-        )
+        response = engine._call_provider(engine._build_provider_payload(
+            [{"role": "system", "content": "system"}, {"role": "user", "content": "hi"}]
+        ))
 
         fake = FakeOpenAIClient.instances[-1]
         assert engine._extract_result(response, requested_structured=False) == " openai text "
@@ -328,6 +324,44 @@ class TestOpenAIEngine:
 
         with pytest.raises(LLMEngineError, match=key):
             engine.update_runtime_parameters(**{key: "x"})
+
+    def test_payload_is_the_sdk_call_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.3)
+
+        payload = engine._build_provider_payload(
+            [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}]
+        )
+
+        assert payload == {
+            "temperature": 0.3,
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "instructions": "Be brief.",
+        }
+
+    def test_engine_owned_fields_win_over_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters.update(model="smuggled", input="smuggled")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["model"] == "gpt-4o-mini"
+        assert isinstance(payload["input"], list)
+
+    def test_unrecognized_attachment_metadata_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["odd.bin"] = {"kind": "text"}
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["input"][-1]["content"] == [{"type": "input_text", "text": "hi"}]
 
     def test_text_option_survives_a_plain_call(
         self, monkeypatch: pytest.MonkeyPatch
@@ -405,7 +439,7 @@ class TestOpenAIEngine:
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
 
-        response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None, "runtime_parameters": {}}))
+        response = run_coro_sync(engine._call_provider_async({"model": "gpt-4o-mini", "input": []}))
 
         assert injected.response_calls
         assert engine._extract_result(response, requested_structured=False) == " openai async text "
@@ -418,7 +452,7 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
-        response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None, "runtime_parameters": {}}))
+        response = run_coro_sync(engine._call_provider_async({"model": "gpt-4o-mini", "input": []}))
 
         assert engine._extract_result(response, requested_structured=False) == " openai text "
 
@@ -437,8 +471,7 @@ class TestOpenAIEngine:
             "additionalProperties": False,
         }
         engine._call_provider(
-            {"blocks": [], "instructions": None, "runtime_parameters": {},
-             "output_structure": schema}
+            engine._build_provider_payload([{"role": "user", "content": "hi"}], schema)
         )
 
         call = FakeOpenAIClient.instances[-1].response_calls[-1]
@@ -459,7 +492,7 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
-        engine._call_provider({"blocks": [], "instructions": None, "runtime_parameters": {}})
+        engine._call_provider({"model": "gpt-4o-mini", "input": []})
 
         call = FakeOpenAIClient.instances[-1].response_calls[-1]
         assert "text" not in call
@@ -796,7 +829,7 @@ class TestOpenAIAttachments:
 
         engine._attachments.update(attachments)
         payload = engine._build_provider_payload(messages)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         texts = [p["text"] for p in user_block["content"] if p.get("type") == "input_text"]
 
         assert any("important note" in t for t in texts)
@@ -812,7 +845,7 @@ class TestOpenAIAttachments:
 
         engine._attachments.update(attachments)
         payload = engine._build_provider_payload(messages)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         file_parts = [p for p in user_block["content"] if p.get("type") == "input_file"]
 
         assert file_parts == [{"type": "input_file", "file_id": "file_pdf"}]
@@ -828,7 +861,7 @@ class TestOpenAIAttachments:
 
         engine._attachments.update(attachments)
         payload = engine._build_provider_payload(messages)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         img_parts = [p for p in user_block["content"] if p.get("type") == "input_image"]
 
         assert img_parts == [{"type": "input_image", "file_id": "file_img"}]

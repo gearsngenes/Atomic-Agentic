@@ -273,106 +273,59 @@ class OpenAIEngine(LLMEngine):
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for the OpenAI Responses API from normalized messages,
-        a snapshot of the engine's attachments and runtime parameters, and
-        (optionally) the caller's raw structured-output template, unmodified.
+        Build the exact keyword arguments of ``responses.create``.
+
+        1. Start from a snapshot of the runtime parameters.
+        2. Convert messages into ``input`` blocks and system turns into
+           ``instructions``.
+        3. Append the engine's attachments (a snapshot) to the last ``user``
+           block, creating one when none exists.
+        4. ``update`` the engine-owned fields (``model``, ``input``,
+           ``instructions``) over the runtime snapshot, so they always win.
+        5. Structured call: set ``text["format"]`` on a copy of the runtime
+           ``text`` (the caller's raw schema, unmodified; other ``text``
+           options such as ``verbosity`` survive).
         """
-        attachments = dict(self._attachments)
-        instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
+        attachments = dict(self._attachments)
+        if attachments:
+            user_parts: List[Dict[str, Any]] = blocks[self._ensure_user_block(blocks)]["content"]
+            for path, meta in attachments.items():
+                kind = str(meta.get("kind", "text"))
+                if meta.get("inlined"):
+                    text = str(meta.get("inlined_text") or "")
+                    if text:
+                        header = f"\n[Inlined file: {os.path.basename(path)}]\n"
+                        user_parts.append({"type": "input_text", "text": header + text})
+                elif meta.get("uploaded") and meta.get("file_id"):
+                    part_type = "input_file" if kind == "pdf" else "input_image"
+                    user_parts.append({"type": part_type, "file_id": str(meta["file_id"])})
 
-        payload: Dict[str, Any] = {
-            "blocks": blocks,
-            "runtime_parameters": dict(self._runtime_parameters),
-        }
+        payload: Dict[str, Any] = dict(self._runtime_parameters)
+        payload.update(model=self.model, input=blocks)
+        instructions = self._collect_instructions(messages)
         if instructions:
-            payload["instructions"] = instructions
+            payload.update(instructions=instructions)
         if output_structure is not None:
-            # output_structure is the caller's raw schema, forwarded
-            # unmodified; stash as-is.
-            payload["output_structure"] = output_structure
-
-        # No attachments: avoid creating an artificial empty user turn.
-        if not attachments:
-            return payload
-
-        # Find or create a `user` block to hold attachments.
-        user_idx = self._ensure_user_block(blocks)
-        user_parts: List[Dict[str, Any]] = blocks[user_idx]["content"]
-
-        for path, meta in attachments.items():
-            kind = str(meta.get("kind", "text"))
-
-            # Inlined text (text/code attachments prepared by _prepare_attachment).
-            if meta.get("inlined"):
-                text = str(meta.get("inlined_text") or "")
-                if not text:
-                    continue
-                header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                user_parts.append(
-                    {"type": "input_text", "text": header + text}
-                )
-                continue
-
-            # Uploaded files/images with a file_id
-            if meta.get("uploaded") and meta.get("file_id"):
-                file_id = str(meta["file_id"])
-                if kind == "pdf":
-                    user_parts.append({"type": "input_file", "file_id": file_id})
-                else:
-                    user_parts.append({"type": "input_image", "file_id": file_id})
-                continue
-
-            # Fallback: try to handle the local path directly (older metadata, etc.)
-            try:
-                self._attach_local_path(user_parts, path)
-            except Exception:
-                # Best-effort; silently skip failing attachments.
-                continue
-
-        return payload
-
-    def _build_call_kwargs(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        Build the shared Responses API kwargs from a pre-built payload dict.
-
-        Used by both sync and async call methods to avoid duplication.
-
-        1. Start from the payload's runtime-parameter snapshot, verbatim.
-        2. Set the engine-owned fields: ``model``, ``input``, ``instructions``.
-        3. Structured call: set ``text["format"]`` on a copy of the runtime
-           ``text`` (the schema wins; other ``text`` options such as
-           ``verbosity`` survive).
-        """
-        kwargs: dict[str, Any] = dict(payload["runtime_parameters"])
-        kwargs["model"] = self.model
-        kwargs["input"] = payload["blocks"]
-        instructions = payload.get("instructions")
-        if instructions:
-            kwargs["instructions"] = instructions
-        output_structure = payload.get("output_structure")
-        if output_structure is not None:
-            text = dict(kwargs.get("text") or {})
+            text = dict(payload.get("text") or {})
             text["format"] = {
                 "type": "json_schema",
                 "name": "output_structure",
                 "schema": output_structure,
                 "strict": self.strict,
             }
-            kwargs["text"] = text
-        return kwargs
+            payload.update(text=text)
+        return payload
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """
-        Perform a single Responses API call using the pre-built payload.
+        Perform a single Responses API call with the payload as its kwargs.
 
         Routes via ``run_coro_sync`` when the injected client is ``AsyncOpenAI``.
         """
         if isinstance(self._client, AsyncOpenAI):
-            return run_coro_sync(
-                self._client.responses.create(**self._build_call_kwargs(payload))
-            )
-        return self._client.responses.create(**self._build_call_kwargs(payload))
+            return run_coro_sync(self._client.responses.create(**payload))
+        return self._client.responses.create(**payload)
 
     async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
         """
@@ -381,7 +334,7 @@ class OpenAIEngine(LLMEngine):
         Falls back to ``asyncio.to_thread`` when only a sync client is available.
         """
         if isinstance(self._client, AsyncOpenAI):
-            return await self._client.responses.create(**self._build_call_kwargs(payload))
+            return await self._client.responses.create(**payload)
         return await asyncio.to_thread(self._call_provider, payload)
 
     def _extract_result(
@@ -393,7 +346,7 @@ class OpenAIEngine(LLMEngine):
 
         ``requested_structured`` is the base-supplied signal (was
         ``output_structure`` given for this call) — authoritative, since it's
-        the same condition that decided whether ``_build_call_kwargs`` set
+        the same condition that decided whether the payload builder set
         ``text.format`` in the first place; no response introspection needed.
         When not requested, returns ``response.output_text`` unchanged (empty
         string when no text is present; does not raise). When requested,
@@ -601,40 +554,6 @@ class OpenAIEngine(LLMEngine):
             else:
                 f = self._client.files.create(file=fp, purpose="assistants")
         return str(f.id)
-
-    def _attach_local_path(
-            self,
-            user_parts: List[Dict[str, Any]],
-            path: str,
-    ) -> None:
-        """
-        Fallback helper for attaching a path directly when metadata is incomplete.
-
-        - PDFs   → upload + `input_file` reference
-        - Images → upload + `input_image` reference
-        - Other  → inline as text (UTF-8).
-        """
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        lower = path.lower()
-        is_pdf = mime == "application/pdf" or lower.endswith(".pdf")
-        is_image = mime.startswith("image/") or lower.endswith(OPENAI_IMAGE_EXTS)
-
-        if is_pdf:
-            file_id = self._upload_file(path)
-            user_parts.append({"type": "input_file", "file_id": file_id})
-            return
-
-        if is_image:
-            file_id = self._upload_file(path)
-            user_parts.append({"type": "input_image", "file_id": file_id})
-            return
-
-        # Inline as text
-        text = self._read_text_file(path)
-
-        header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-        user_parts.append({"type": "input_text", "text": header + text})
 
     # ------------------------------------------------------------------ #
     # Introspection

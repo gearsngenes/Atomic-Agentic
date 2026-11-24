@@ -367,6 +367,18 @@ class TestAnthropicEngine:
         assert payload["stop_sequences"] == ["END"]
         assert payload["thinking"] == {"type": "adaptive"}
 
+    def test_engine_owned_fields_win_over_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine._runtime_parameters.update(model="smuggled", messages="smuggled")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["model"] == "claude-opus-4-8"
+        assert isinstance(payload["messages"], list)
+
     def test_removing_max_tokens_omits_it(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

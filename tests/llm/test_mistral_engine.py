@@ -320,20 +320,43 @@ class TestMistralEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {"name": "output_structure", "schema": {}, "strict": True},
-        }
-        payload = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "runtime_parameters": {},
-            "response_format": response_format,
-        }
+        schema = {"type": "object"}
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], schema
+        )
 
         engine._call_provider(payload)
 
         fake = FakeMistralClient.instances[-1]
-        assert fake.complete_calls[-1]["response_format"] == response_format
+        assert fake.complete_calls[-1]["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "output_structure", "schema": schema, "strict": True},
+        }
+
+    def test_payload_is_the_sdk_call_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.3)
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload == {
+            "temperature": 0.3,
+            "model": "mistral-small-latest",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+
+    def test_engine_owned_fields_win_over_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters.update(model="smuggled", messages="smuggled")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["model"] == "mistral-small-latest"
+        assert isinstance(payload["messages"], list)
 
     def test_extract_result_requested_parses_json(
         self, monkeypatch: pytest.MonkeyPatch

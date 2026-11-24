@@ -125,7 +125,7 @@ class TestGeminiEngine:
     ) -> None:
         engine = _make_engine(monkeypatch)
 
-        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
+        cfg = engine._build_provider_payload([{"role": "user", "content": "Hi"}])["config"]
 
         assert engine.runtime_parameters == {}
         assert cfg.temperature is None
@@ -239,7 +239,7 @@ class TestGeminiEngine:
         ]
         payload = engine._build_provider_payload(messages)
 
-        assert payload["system_instruction"] == "Sys."
+        assert payload["config"].system_instruction == "Sys."
         assert len(payload["contents"]) == 1
         assert payload["contents"][0].role == "user"
 
@@ -272,7 +272,9 @@ class TestGeminiEngine:
         engine = _make_engine(monkeypatch)
         schema = {"type": "object", "properties": {"a": {"type": "string"}}}
 
-        cfg = engine._build_generate_config(None, schema, {})
+        cfg = engine._build_provider_payload(
+            [{"role": "user", "content": "Hi"}], schema
+        )["config"]
 
         assert cfg.response_mime_type == "application/json"
         assert cfg.response_json_schema == schema
@@ -282,7 +284,7 @@ class TestGeminiEngine:
     ) -> None:
         engine = _make_engine(monkeypatch)
 
-        cfg = engine._build_generate_config(None, None, {})
+        cfg = engine._build_provider_payload([{"role": "user", "content": "Hi"}])["config"]
 
         assert cfg.response_mime_type is None
         assert cfg.response_json_schema is None
@@ -330,7 +332,7 @@ class TestGeminiEngine:
         engine.update_runtime_parameters(temperature=0.4)
         engine.update_runtime_parameters(temperature=None)
 
-        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
+        cfg = engine._build_provider_payload([{"role": "user", "content": "Hi"}])["config"]
 
         assert cfg.temperature is None
 
@@ -340,9 +342,36 @@ class TestGeminiEngine:
         engine = _make_engine(monkeypatch)
         engine.update_runtime_parameters(thinking_config={"thinking_budget": 1024})
 
-        cfg = engine._build_generate_config(None, None, engine.runtime_parameters)
+        cfg = engine._build_provider_payload([{"role": "user", "content": "Hi"}])["config"]
 
         assert cfg.thinking_config.thinking_budget == 1024
+
+    def test_payload_is_the_sdk_call_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "Hi"}])
+
+        assert set(payload) == {"model", "contents", "config"}
+        assert payload["model"] == "gemini-2.5-flash"
+
+    def test_engine_owned_config_fields_win_over_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters.update(
+            system_instruction="smuggled", response_mime_type="text/plain"
+        )
+        schema = {"type": "object"}
+
+        cfg = engine._build_provider_payload(
+            [{"role": "system", "content": "Real."}, {"role": "user", "content": "Hi"}],
+            schema,
+        )["config"]
+
+        assert cfg.system_instruction == "Real."
+        assert cfg.response_mime_type == "application/json"
 
     def test_payload_snapshots_runtime_parameters_once(
         self, monkeypatch: pytest.MonkeyPatch
@@ -363,9 +392,7 @@ class TestGeminiEngine:
         engine.update_runtime_parameters(not_a_real_field=1)
 
         with pytest.raises(Exception, match="not_a_real_field"):
-            engine._call_provider(
-                engine._build_provider_payload([{"role": "user", "content": "Hi"}])
-            )
+            engine._build_provider_payload([{"role": "user", "content": "Hi"}])
 
     def test_gemini_to_dict_includes_non_secret_config(
         self, monkeypatch: pytest.MonkeyPatch

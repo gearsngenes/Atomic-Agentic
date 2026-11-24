@@ -351,55 +351,35 @@ class MistralEngine(LLMEngine):
             elif kind == "image" and signed_url:
                 parts.append({"type": "image_url", "image_url": signed_url})
 
-        payload: Dict[str, Any] = {
-            "messages": chat_messages,
-            "runtime_parameters": dict(self._runtime_parameters),
-        }
+        payload: Dict[str, Any] = dict(self._runtime_parameters)
+        payload.update(model=self.model, messages=chat_messages)
         if output_structure is not None:
-            payload["response_format"] = {
+            payload.update(response_format={
                 "type": "json_schema",
                 "json_schema": {
                     "name": "output_structure",
                     "schema": output_structure,
                     "strict": self.strict,
                 },
-            }
+            })
         return payload
 
     def _call_provider(self, payload: Any) -> Any:
         """
-        Single synchronous Mistral chat completion call.
-
-        Error-wrapping is handled by the shared ``LLMEngine`` template.
-        Runtime parameters from the payload snapshot are forwarded verbatim.
-        ``response_format`` is forwarded when present (structured-output requests).
+        Single synchronous Mistral chat completion call; the payload is the
+        call's kwargs. Error-wrapping is handled by the shared ``LLMEngine``
+        template.
         """
-        kwargs: Dict[str, Any] = {
-            **payload["runtime_parameters"],
-            "model": self.model,
-            "messages": payload["messages"],
-        }
-        if "response_format" in payload:
-            kwargs["response_format"] = payload["response_format"]
-        return self._client.chat.complete(**kwargs)
+        return self._client.chat.complete(**payload)
 
     async def _call_provider_async(self, payload: Any) -> Any:
         """
         Native async Mistral chat completion call via ``chat.complete_async``.
 
         ``Mistral`` (v2.6.0+) exposes both sync and async paths on the same
-        object — no thread offload or isinstance routing needed. Runtime
-        parameters from the payload snapshot are forwarded verbatim.
-        ``response_format`` is forwarded when present (structured-output requests).
+        object — no thread offload or isinstance routing needed.
         """
-        kwargs: Dict[str, Any] = {
-            **payload["runtime_parameters"],
-            "model": self.model,
-            "messages": payload["messages"],
-        }
-        if "response_format" in payload:
-            kwargs["response_format"] = payload["response_format"]
-        return await self._client.chat.complete_async(**kwargs)
+        return await self._client.chat.complete_async(**payload)
 
     def _extract_result(
         self, response: Any, requested_structured: bool

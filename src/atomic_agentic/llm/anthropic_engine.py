@@ -292,20 +292,17 @@ class AnthropicEngine(LLMEngine):
             else:
                 anthropic_msgs.append({"role": "user", "content": blocks})
 
-        # 4. Assemble payload: the runtime-parameter snapshot, verbatim, plus
-        #    the engine-owned fields
-        payload: dict[str, Any] = {
-            **self._runtime_parameters,
-            "model": self.model,
-            "messages": anthropic_msgs,
-        }
+        # 4. Assemble the call kwargs: the runtime-parameter snapshot, with the
+        #    engine-owned fields updated over it so they always win
+        payload: dict[str, Any] = dict(self._runtime_parameters)
+        payload.update(model=self.model, messages=anthropic_msgs)
         if system_parts:
-            payload["system"] = "\n\n".join(system_parts)
+            payload.update(system="\n\n".join(system_parts))
 
         if output_structure is not None:
-            payload["output_config"] = {
+            payload.update(output_config={
                 "format": {"type": "json_schema", "schema": output_structure}
-            }
+            })
         return payload
 
     # ------------------------------------------------------------------ #

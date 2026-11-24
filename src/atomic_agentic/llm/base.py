@@ -407,7 +407,11 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         Convert normalized messages and (optionally) a caller-supplied
         structured-output template into the provider-specific request
-        payload.
+        payload: the exact keyword arguments of the SDK call, so
+        ``_call_provider`` only picks the client and calls it with
+        ``**payload``. Build it from a snapshot of the runtime parameters and
+        ``update`` the engine-owned fields (model, messages, the
+        structured-output field) over it, so they always win.
 
         ``output_structure`` is ``None`` for plain-text calls; the caller's
         raw JSON-Schema-shaped mapping, completely unmodified, when the

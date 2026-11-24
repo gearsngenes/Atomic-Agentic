@@ -367,61 +367,42 @@ class GeminiEngine(LLMEngine):
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for ``generate_content`` from normalized messages, a
-        snapshot of the engine's attachments and runtime parameters, and
-        (optionally) the caller's raw structured-output template, unmodified.
+        Build the exact keyword arguments of ``generate_content``.
 
-        System messages are extracted into ``system_instruction`` for
-        ``GenerateContentConfig``; all other turns are returned as
-        ``list[Content]`` via ``_build_content_list``. ``output_structure``
-        is the caller's raw schema, forwarded unmodified; stashed as-is.
+        1. ``contents``: non-system turns as ``Content`` objects, with a
+           snapshot of the engine's attachments appended to the last user turn.
+        2. ``config``: a ``GenerateContentConfig`` from a snapshot of the
+           runtime parameters, with the engine-owned fields (``system_instruction``
+           and, for a structured call, ``response_mime_type`` plus
+           ``response_json_schema``) updated over it so they always win. Mime
+           type alone is only a soft hint, so the two are always sent together;
+           the schema is the caller's raw one, unmodified. An unknown runtime key
+           fails here as the SDK's own validation error.
+        3. Return ``{"model", "contents", "config"}``.
         """
-        system_instruction = self._collect_system(messages)
         contents = self._build_content_list(messages, dict(self._attachments))
-        return {
-            "system_instruction": system_instruction,
-            "contents": contents,
-            "output_structure": output_structure,
-            "runtime_parameters": dict(self._runtime_parameters),
-        }
 
-    def _build_generate_config(
-            self,
-            system_instruction: str | None,
-            output_structure: Optional[Dict[str, Any]],
-            runtime_parameters: Dict[str, Any],
-    ) -> genai.types.GenerateContentConfig:
-        """
-        Build a ``GenerateContentConfig`` from the call's runtime-parameter
-        snapshot (verbatim), the per-call ``system_instruction``, and
-        (optionally) the caller's raw structured-output template, unmodified.
-
-        When ``output_structure`` is given, ``response_mime_type`` and
-        ``response_json_schema`` are set together — mime type alone is only a
-        soft hint, not a real constraint, so the two are never sent
-        independently. An unknown runtime key fails here as the SDK's own
-        validation error.
-        """
-        cfg: Dict[str, Any] = dict(runtime_parameters)
+        cfg: Dict[str, Any] = dict(self._runtime_parameters)
+        system_instruction = self._collect_system(messages)
         if system_instruction:
-            cfg["system_instruction"] = system_instruction
+            cfg.update(system_instruction=system_instruction)
         if output_structure is not None:
-            cfg["response_mime_type"] = "application/json"
-            cfg["response_json_schema"] = output_structure
-        return genai.types.GenerateContentConfig(**cfg)
+            cfg.update(
+                response_mime_type="application/json",
+                response_json_schema=output_structure,
+            )
+
+        payload: Dict[str, Any] = {}
+        payload.update(
+            model=self.model,
+            contents=contents,
+            config=genai.types.GenerateContentConfig(**cfg),
+        )
+        return payload
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """Perform a single synchronous ``models.generate_content`` call."""
-        cfg = self._build_generate_config(
-            payload.get("system_instruction"),
-            payload.get("output_structure"),
-            payload["runtime_parameters"],
-        )
-        return self._client.models.generate_content(
-            model=self.model,
-            contents=payload["contents"],
-            config=cfg,
-        )
+        return self._client.models.generate_content(**payload)
 
     async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
         """
@@ -430,16 +411,7 @@ class GeminiEngine(LLMEngine):
         No thread offload needed — ``genai.Client`` exposes both sync and async
         paths on the same object.
         """
-        cfg = self._build_generate_config(
-            payload.get("system_instruction"),
-            payload.get("output_structure"),
-            payload["runtime_parameters"],
-        )
-        return await self._client.aio.models.generate_content(
-            model=self.model,
-            contents=payload["contents"],
-            config=cfg,
-        )
+        return await self._client.aio.models.generate_content(**payload)
 
     def _extract_result(
         self, response: Any, requested_structured: bool
