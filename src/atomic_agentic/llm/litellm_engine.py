@@ -122,7 +122,7 @@ class LiteLLMEngine(LLMEngine):
     transformation does all real cleaning downstream.
     """
 
-    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format"})
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format", "stream"})
 
     def __init__(
         self,
@@ -148,7 +148,11 @@ class LiteLLMEngine(LLMEngine):
         **kwargs:
             Per-call litellm settings merged into every call: ``api_key``,
             ``base_url``, ``api_version``, ``timeout``, ``num_retries``, ...
-            Kept private and never dumped (credentials).
+            Kept private and never dumped (credentials). ``stream`` is
+            rejected (streaming is unsupported). Credentials belong here (or
+            on a Router), not in runtime parameters, which ``to_dict``
+            redacts by key name (key, token, secret, auth, password,
+            credential, header) as a safety net.
 
         1. SDK presence check.
         2. ``client`` must be ``None`` or a ``litellm.Router``.
@@ -174,6 +178,10 @@ class LiteLLMEngine(LLMEngine):
                 "LiteLLMEngine: pass either 'client' or call kwargs, not both."
             )
 
+        # Streaming is unsupported
+        if "stream" in kwargs:
+            raise LLMEngineError("LiteLLMEngine: 'stream' is not supported (streaming is unsupported).")
+
         # 4. Base init and state
         super().__init__(
             name=name,
@@ -181,6 +189,7 @@ class LiteLLMEngine(LLMEngine):
         )
         self._client = client
         self._kwargs = dict(kwargs)
+        self._provider_cache: tuple[str, str] | None = None
         self.model = model
 
     # ------------------------------------------------------------------ #
@@ -332,7 +341,13 @@ class LiteLLMEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> RemoteLLMModelData:
-        """Provider derived from ``model`` by litellm (``"unknown"`` when unresolvable)."""
+        """Provider derived from ``model`` by litellm (``"unknown"`` when unresolvable).
+
+        The lookup is cached per ``model`` value; a changed ``model`` recomputes.
+        """
+        cache = self._provider_cache
+        if cache is not None and cache[0] == self.model:
+            return RemoteLLMModelData(provider=cache[1], model_name=self.model)
         # litellm prints a "Provider List" banner on failure unless this is on.
         previous = litellm.suppress_debug_info
         litellm.suppress_debug_info = True
@@ -342,6 +357,7 @@ class LiteLLMEngine(LLMEngine):
             provider = "unknown"
         finally:
             litellm.suppress_debug_info = previous
+        self._provider_cache = (self.model, provider)
         return RemoteLLMModelData(provider=provider, model_name=self.model)
 
     # ------------------------------------------------------------------ #

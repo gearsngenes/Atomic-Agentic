@@ -311,7 +311,7 @@ class TestLiteLLMEngine:
 
     # ── update_runtime_parameters ───────────────────────────────────────────
 
-    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    @pytest.mark.parametrize("key", ["model", "messages", "response_format", "stream"])
     def test_reserved_runtime_keys_raise(
         self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:
@@ -481,6 +481,34 @@ class TestLiteLLMEngine:
         fake.suppress_debug_info = True
         LiteLLMEngine(model="grp")._get_model_data()
         assert fake.suppress_debug_info is True
+
+    def test_get_model_data_caches_the_provider_lookup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="anthropic/claude-x")
+
+        first = engine._get_model_data()
+        second = engine._get_model_data()
+
+        assert first.provider == second.provider == "anthropic"
+        assert fake.seen_suppress == [True]  # one lookup only
+        assert fake.suppress_debug_info is False
+
+        engine.model = "mistral/small"
+        third = engine._get_model_data()
+
+        assert third.provider == "mistral"
+        assert third.model_name == "mistral/small"
+        assert fake.seen_suppress == [True, True]
+
+    def test_constructor_rejects_stream_kwarg(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        with pytest.raises(LLMEngineError, match="stream"):
+            LiteLLMEngine(model="gpt-4o-mini", stream=True)
 
     # ── to_dict ──────────────────────────────────────────────────────────────
 

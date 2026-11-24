@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.composites import Pipeline
+from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.models.results import AtomicResult
 
@@ -70,7 +71,10 @@ def _openai_engine() -> OpenAIEngine:
         )
         engine.update_runtime_parameters(temperature=0)
         return engine
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 

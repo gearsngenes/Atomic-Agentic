@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import inspect
+import types
 from typing import Any
 
 import pytest
@@ -241,7 +243,7 @@ class TestRuntimeParameters:
         assert "temperature" in str(exc.value)
         assert "messages" not in str(exc.value).split("valid keys:")[1]
 
-    @pytest.mark.parametrize("key", ["messages", "response_format"])
+    @pytest.mark.parametrize("key", ["messages", "response_format", "stream"])
     def test_reserved_keys_raise(self, monkeypatch: pytest.MonkeyPatch, key: str) -> None:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="managed by the engine"):
@@ -278,6 +280,14 @@ class TestPayloadAndCall:
         assert payload == {"messages": messages}
         assert fake.chat_completion_calls[-1]["messages"] == messages
         assert engine._extract_result(response, requested_structured=False) == "llama text"
+
+    def test_none_content_extracts_as_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = {"choices": [{"message": {"content": None}}]}
+
+        assert engine._extract_result(response, requested_structured=False) == ""
 
     def test_structured_call_sets_response_format(
         self, monkeypatch: pytest.MonkeyPatch
@@ -421,3 +431,47 @@ class TestLlamaCppTokenUsage:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="unexpected usage shape"):
             engine._extract_token_usage({"choices": [], "usage": {"wrong_key": 1}})
+
+
+class TestRealSignatureContract:
+    """Valid-key logic against the real ``llama_cpp.Llama.create_chat_completion``."""
+
+    @staticmethod
+    def _engine_over_real_signature(monkeypatch: pytest.MonkeyPatch) -> LlamaCppEngine:
+        llama_cpp = pytest.importorskip("llama_cpp")
+
+        class _Stub:
+            model_path = "stub.gguf"
+
+        stub = _Stub()
+        stub.create_chat_completion = types.MethodType(  # type: ignore[attr-defined]
+            llama_cpp.Llama.create_chat_completion, stub
+        )
+        assert "self" not in inspect.signature(stub.create_chat_completion).parameters
+        return LlamaCppEngine(llm=stub)  # type: ignore[arg-type]
+
+    def test_real_signature_accepts_common_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine_over_real_signature(monkeypatch)
+
+        engine.update_runtime_parameters(temperature=0.2, max_tokens=32, grammar=object())
+
+        assert set(engine.runtime_parameters) == {"temperature", "max_tokens", "grammar"}
+
+    def test_real_signature_rejects_bogus_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine_over_real_signature(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="unknown keys"):
+            engine.update_runtime_parameters(not_a_real_param=1)
+
+    @pytest.mark.parametrize("key", ["messages", "response_format", "stream"])
+    def test_real_signature_reserved_keys_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        engine = self._engine_over_real_signature(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="managed by the engine"):
+            engine.update_runtime_parameters(**{key: 1})

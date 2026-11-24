@@ -122,7 +122,7 @@ class OpenAIEngine(LLMEngine):
     ``client_kwargs``.
     """
 
-    _RESERVED_RUNTIME_KEYS = frozenset({"model", "input", "instructions"})
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "input", "instructions", "stream"})
 
     def __init__(
             self,

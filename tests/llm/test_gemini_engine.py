@@ -133,7 +133,7 @@ class TestGeminiEngine:
     @pytest.mark.parametrize(
         "key",
         ["model", "contents", "system_instruction",
-         "response_mime_type", "response_json_schema"],
+         "response_mime_type", "response_json_schema", "stream"],
     )
     def test_reserved_runtime_keys_raise(
         self, monkeypatch: pytest.MonkeyPatch, key: str
@@ -180,7 +180,6 @@ class TestGeminiEngine:
         file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
         attachments = {
             "file.txt": {"uploaded": True, "file_obj": file_obj, "mime": "text/plain"},
-            "note.txt": {"inlined": True, "inlined_text": "Inline!"},
         }
         messages = [
             {"role": "user", "content": "Hello"},
@@ -190,10 +189,9 @@ class TestGeminiEngine:
 
         assert len(contents) == 2
         first_parts = contents[0].parts
-        assert len(first_parts) == 3
+        assert len(first_parts) == 2
         assert first_parts[0].text == "Hello"
         assert first_parts[1].file_data.file_uri == "gs://fake/f1"
-        assert first_parts[2].text == "Inline!"
         assert contents[1].role == "model"
 
     def test_build_content_list_attachments_land_in_last_user_turn_not_first(

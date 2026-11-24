@@ -131,7 +131,7 @@ class TestMistralEngine:
         assert engine.runtime_parameters == {}
         assert engine.strict is True
 
-    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    @pytest.mark.parametrize("key", ["model", "messages", "response_format", "stream"])
     def test_reserved_runtime_keys_raise(
         self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:
@@ -344,8 +344,17 @@ class TestMistralEngine:
         assert payload == {
             "temperature": 0.3,
             "model": "mistral-small-latest",
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "messages": [{"role": "user", "content": "hi"}],
         }
+
+    def test_payload_without_attachments_adds_no_user_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        payload = engine._build_provider_payload([{"role": "system", "content": "be brief"}])
+
+        assert payload["messages"] == [{"role": "system", "content": "be brief"}]
 
     def test_engine_owned_fields_win_over_runtime_parameters(
         self, monkeypatch: pytest.MonkeyPatch
@@ -435,6 +444,48 @@ class TestMistralAttachments:
         assert meta["uploaded"] is True
         assert meta["file_id"] == "mistral_file"
         assert "signed.example/mistral_file" in meta["signed_url"]
+
+    def test_prepare_attachment_sign_failure_deletes_the_upload(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        fake = FakeMistralClient.instances[-1]
+
+        def boom(**kwargs: Any) -> Any:
+            raise RuntimeError("sign failed")
+
+        fake.files.get_signed_url = boom
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"%PDF data")
+
+        with pytest.raises(LLMEngineError) as exc:
+            engine._prepare_attachment(str(path))
+
+        assert "sign failed" in str(exc.value) or "sign failed" in str(exc.value.__cause__)
+        assert fake.deleted_files == ["mistral_file"]
+
+    def test_prepare_attachment_sign_failure_ignores_delete_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        fake = FakeMistralClient.instances[-1]
+
+        def sign_boom(**kwargs: Any) -> Any:
+            raise RuntimeError("sign failed")
+
+        def delete_boom(**kwargs: Any) -> Any:
+            raise RuntimeError("delete failed")
+
+        fake.files.get_signed_url = sign_boom
+        fake.files.delete = delete_boom
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"%PDF data")
+
+        with pytest.raises(LLMEngineError) as exc:
+            engine._prepare_attachment(str(path))
+
+        assert "delete failed" not in str(exc.value)
+        assert "sign failed" in str(exc.value) or "sign failed" in str(exc.value.__cause__)
 
     def test_prepare_attachment_image_uploads_and_signs(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any

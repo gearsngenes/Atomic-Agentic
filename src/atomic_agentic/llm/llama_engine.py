@@ -137,7 +137,7 @@ class LlamaCppEngine(LLMEngine):
     is a known, documented limitation for this pass, not mitigated here.
     """
 
-    _RESERVED_RUNTIME_KEYS = frozenset({"messages", "response_format"})
+    _RESERVED_RUNTIME_KEYS = frozenset({"messages", "response_format", "stream"})
 
     def __init__(
             self,
@@ -354,7 +354,7 @@ class LlamaCppEngine(LLMEngine):
             raise LLMEngineError(
                 "LlamaCppEngine._extract_result: unexpected response shape"
             ) from exc
-        text = str(content).strip()
+        text = str(content or "").strip()
         if not requested_structured:
             return text
         try:

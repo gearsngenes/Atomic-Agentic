@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ~~~Standard Library Imports~~~
 import asyncio
+import copy
 from abc import ABC, abstractmethod
 from typing import (
     Any,
@@ -25,6 +26,29 @@ from ..models.results import (
 )
 
 __all__ = ["LLMEngine"]
+
+_SECRET_KEY_FRAGMENTS = ("key", "token", "secret", "auth", "password", "credential", "header")
+
+
+def _redact_secrets(value: Any) -> Any:
+    """Return ``value`` with every secret-named dict entry replaced by ``"***"``.
+
+    A key is secret when its lowercased name contains one of
+    ``_SECRET_KEY_FRAGMENTS``; the plural ``tokens`` is ignored so token-count
+    settings (``max_tokens``, ``max_output_tokens``) stay visible. Recurses into nested dicts and lists in place,
+    so pass a deep copy.
+    """
+    if isinstance(value, dict):
+        for k, v in value.items():
+            name = k.lower().replace("tokens", "") if isinstance(k, str) else ""
+            if any(s in name for s in _SECRET_KEY_FRAGMENTS):
+                value[k] = "***"
+            else:
+                _redact_secrets(v)
+    elif isinstance(value, list):
+        for item in value:
+            _redact_secrets(item)
+    return value
 
 # ───────────────────────────────────────────────────────────────────────────────
 # LLMEngine primitive
@@ -130,16 +154,25 @@ class LLMEngine(AtomicInvokable, ABC):
     ------------------
     The base owns one store of provider-call parameters (``temperature``,
     token caps, reasoning settings, ... under the provider's own names).
-    ``runtime_parameters`` returns a copy; ``update_runtime_parameters`` is the
-    only mutator (merge, ``None`` removes a key, every key is validated before
-    any is applied). Each engine's ``_build_provider_payload`` snapshots the
-    store once per call and forwards it to the provider verbatim, so a
-    mutation never changes an in-flight call. Keys the engine owns on the call
-    (model, the message field, the structured-output field) are listed in
+    ``runtime_parameters`` returns a deep copy; ``update_runtime_parameters``
+    is the only mutator (merge, ``None`` removes a key, every key is validated
+    before any is applied). Each engine's ``_build_provider_payload`` takes a
+    shallow snapshot of the store once per call (live objects such as a Llama
+    grammar are never deep-copied per call) and forwards it to the provider
+    verbatim, so a later ``update_runtime_parameters`` never changes an
+    in-flight call. Keys the engine owns on the call (model, the message
+    field, ``stream``, the structured-output field) are listed in
     ``_RESERVED_RUNTIME_KEYS`` and rejected; anything else unknown is rejected
     by the provider at call time and surfaces as ``LLMEngineError``, except on
     ``LlamaCppEngine``, which validates keys against
     ``create_chat_completion`` in ``_validate_runtime_keys``.
+
+    Streaming is unsupported: ``stream`` is reserved on every engine.
+    Credentials belong in the client / client kwargs, not runtime parameters;
+    ``to_dict`` redacts runtime parameters by key name (any key containing
+    key, token, secret, auth, password, credential or header becomes ``"***"``,
+    recursively; the plural ``tokens`` is ignored so ``max_tokens`` stays
+    visible), as a safety net.
     """
 
     result_cls: ClassVar[type[LLMResult]] = LLMResult
@@ -202,9 +235,10 @@ class LLMEngine(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     @property
     def runtime_parameters(self) -> Dict[str, Any]:
-        """Copy of the stored provider-call parameters; mutating the copy
-        changes nothing. Use ``update_runtime_parameters`` to change them."""
-        return dict(self._runtime_parameters)
+        """Deep copy of the stored provider-call parameters; mutating the copy
+        (nested values included) changes nothing. Use
+        ``update_runtime_parameters`` to change them."""
+        return copy.deepcopy(self._runtime_parameters)
 
     @property
     def model_data(self) -> LLMModelData:
@@ -310,8 +344,7 @@ class LLMEngine(AtomicInvokable, ABC):
         unaffected by always passing it through.
 
         This helper owns only the shared provider-call sequence. It does not
-        extract text, extract token usage, construct results, capture timing, or
-        emit deprecation warnings.
+        extract text, extract token usage, or construct results.
         """
         normalized = self._normalize_messages(messages)
         payload = self._build_provider_payload(normalized, output_structure)
@@ -434,8 +467,7 @@ class LLMEngine(AtomicInvokable, ABC):
     async def _call_provider_async(self, payload: Any) -> Any:
         """
         Async provider call. Default wraps the sync ``_call_provider`` in a
-        worker thread. Remote engine subclasses override with a native async
-        client in Passes 2–4.
+        worker thread; engines with a native async client override it.
         """
         return await asyncio.to_thread(self._call_provider, payload)
 
@@ -494,7 +526,10 @@ class LLMEngine(AtomicInvokable, ABC):
     # --------------------------------------------------------------------- #
     def to_dict(self) -> Dict[str, Any]:
         """
-        Shallow, non-secret configuration snapshot for debugging / logging.
+        Non-secret configuration snapshot for debugging / logging.
+
+        ``runtime_parameters`` is deep-copied and redacted by key name
+        (see ``_redact_secrets``).
 
         Invocation result data such as token usage and model data belongs to
         ``LLMResult``, not to engine metadata serialization.
@@ -502,6 +537,6 @@ class LLMEngine(AtomicInvokable, ABC):
         d = super().to_dict()
         d.update({
             "type": type(self).__name__,
-            "runtime_parameters": dict(self._runtime_parameters),
+            "runtime_parameters": _redact_secrets(copy.deepcopy(self._runtime_parameters)),
         })
         return d

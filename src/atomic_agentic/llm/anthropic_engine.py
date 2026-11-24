@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import os
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
 try:
     from anthropic import Anthropic, AsyncAnthropic
@@ -75,8 +75,9 @@ class AnthropicEngine(LLMEngine):
     and forwarded as the top-level ``system=`` parameter (joined with
     ``"\\n\\n"`` when multiple system messages are present).  The remaining
     messages form the ``messages=`` list.  ``max_tokens`` is always sent
-    (required by Anthropic): the runtime-parameter store is seeded with
-    ``{"max_tokens": 8192}``.  Every other generation setting (``stop_sequences``,
+    (required by Anthropic): ``_REQUIRED_RUNTIME_DEFAULTS`` supplies
+    ``max_tokens=8192`` under the runtime parameters, so the store starts empty
+    and removing ``max_tokens`` falls back to that default.  Every other generation setting (``stop_sequences``,
     ``thinking``, ``extra_body``, ...) is a runtime parameter under Anthropic's
     own name, forwarded verbatim:
     ``engine.update_runtime_parameters(thinking={"type": "adaptive"})``.
@@ -118,9 +119,16 @@ class AnthropicEngine(LLMEngine):
     and are not validated here; ``additionalProperties`` must be set to
     exactly ``false`` on every object schema, the caller's own
     responsibility.
+
+    A runtime ``output_config`` (e.g. ``effort``) is allowed: on a structured
+    call the engine copies it and sets only its ``format`` key; a plain call
+    passes it through untouched.
     """
 
-    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "system", "output_config"})
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "system", "stream"})
+
+    # Fields the API requires on every call; runtime parameters override them.
+    _REQUIRED_RUNTIME_DEFAULTS: ClassVar[Mapping[str, Any]] = {"max_tokens": 8192}
 
     def __init__(
         self,
@@ -150,8 +158,8 @@ class AnthropicEngine(LLMEngine):
             ``max_retries``.
 
         Lifecycle: SDK presence check; reject ``client`` combined with
-        ``client_kwargs``; base init; build or adopt the client; seed
-        ``max_tokens``; ``block_separator`` starts as ``""``.
+        ``client_kwargs``; base init; build or adopt the client;
+        ``block_separator`` starts as ``""``.
         """
         # 1. SDK presence check
         if Anthropic is None:
@@ -177,9 +185,6 @@ class AnthropicEngine(LLMEngine):
         )
         self.model = model
         self.block_separator = ""
-
-        # 4. The API requires max_tokens on every call
-        self._runtime_parameters["max_tokens"] = 8192
 
     @property
     def block_separator(self) -> str:
@@ -261,13 +266,16 @@ class AnthropicEngine(LLMEngine):
         Lifecycle: (1) partition system vs. conversation; (2) convert to
         Anthropic content-list format; (3) append attachment blocks to the
         last user turn; (4) assemble final payload dict from the
-        runtime parameters and the engine-owned fields; (5) if
-        ``output_structure`` is given, wire it into ``output_config.format`` (the caller's raw schema, forwarded
-        unmodified).
+        required defaults, the runtime parameters and the engine-owned fields;
+        (5) if ``output_structure`` is given, set ``output_config.format`` on a
+        copy of any runtime ``output_config`` (the caller's raw schema,
+        forwarded unmodified). Blank system messages are dropped.
         """
         # 1. Partition system vs. conversation messages
         system_parts = [
-            m["content"] for m in messages if m.get("role") == "system"
+            m["content"].strip()
+            for m in messages
+            if m.get("role") == "system" and m["content"].strip()
         ]
         conv = [m for m in messages if m.get("role") != "system"]
 
@@ -294,15 +302,17 @@ class AnthropicEngine(LLMEngine):
 
         # 4. Assemble the call kwargs: the runtime-parameter snapshot, with the
         #    engine-owned fields updated over it so they always win
-        payload: dict[str, Any] = dict(self._runtime_parameters)
+        payload: dict[str, Any] = dict(self._REQUIRED_RUNTIME_DEFAULTS)
+        payload.update(self._runtime_parameters)
         payload.update(model=self.model, messages=anthropic_msgs)
-        if system_parts:
-            payload.update(system="\n\n".join(system_parts))
+        system = "\n\n".join(system_parts).strip()
+        if system:
+            payload.update(system=system)
 
         if output_structure is not None:
-            payload.update(output_config={
-                "format": {"type": "json_schema", "schema": output_structure}
-            })
+            output_config = dict(payload.get("output_config") or {})
+            output_config["format"] = {"type": "json_schema", "schema": output_structure}
+            payload.update(output_config=output_config)
         return payload
 
     # ------------------------------------------------------------------ #

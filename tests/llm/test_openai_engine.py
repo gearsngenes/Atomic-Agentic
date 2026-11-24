@@ -316,7 +316,7 @@ class TestOpenAIEngine:
 
         assert FakeOpenAIClient.instances[-1].response_calls[-1]["temperature"] == 0.1
 
-    @pytest.mark.parametrize("key", ["model", "input", "instructions"])
+    @pytest.mark.parametrize("key", ["model", "input", "instructions", "stream"])
     def test_reserved_runtime_keys_raise(
         self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:

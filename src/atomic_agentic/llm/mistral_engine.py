@@ -100,7 +100,7 @@ class MistralEngine(LLMEngine):
     `client_kwargs`.
     """
 
-    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format"})
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "response_format", "stream"})
 
     def __init__(
             self,
@@ -274,7 +274,15 @@ class MistralEngine(LLMEngine):
 
             if kind in ("pdf", "image"):
                 file_id = self._upload_file(path)
-                signed_url = self._sign_file(file_id)
+                try:
+                    signed_url = self._sign_file(file_id)
+                except Exception:
+                    # Don't leave an orphaned upload behind.
+                    try:
+                        self._client.files.delete(file_id=file_id)
+                    except Exception:
+                        pass
+                    raise
                 return {
                     "kind": kind,
                     "mime": mime,
@@ -320,9 +328,11 @@ class MistralEngine(LLMEngine):
           "json_schema", "json_schema": {"name": "output_structure",
           "schema": output_structure, "strict": self.strict}}`.
 
-        Inline text from attachments and signed URLs are appended as parts to
-        the **last user message** so they are clearly associated with the most
-        recent user query.
+        When attachments exist, inline text and signed URLs are appended as
+        parts to the **last user message** (converted to a parts list, with an
+        empty user turn added if there is none) so they are clearly associated
+        with the most recent user query. Without attachments, message content
+        passes through unchanged as plain strings.
         """
         attachments = dict(self._attachments)
 
@@ -331,25 +341,27 @@ class MistralEngine(LLMEngine):
             {"role": m["role"], "content": m["content"]} for m in messages
         ]
 
-        # Ensure the last user message is a parts array we can extend.
-        user_idx = self._ensure_user_parts(chat_messages)
-        parts = chat_messages[user_idx]["content"]
+        # Attachments need the last user message as a parts array; without
+        # them the message content passes through unchanged.
+        if attachments:
+            user_idx = self._ensure_user_parts(chat_messages)
+            parts = chat_messages[user_idx]["content"]
 
-        # Inline text/code attachments whole.
-        for path, meta in attachments.items():
-            inlined_text = meta.get("inlined_text")
-            if meta.get("kind") == "text" and inlined_text:
-                header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                parts.append({"type": "text", "text": header + inlined_text})
+            # Inline text/code attachments whole.
+            for path, meta in attachments.items():
+                inlined_text = meta.get("inlined_text")
+                if meta.get("kind") == "text" and inlined_text:
+                    header = f"\n[Inlined file: {os.path.basename(path)}]\n"
+                    parts.append({"type": "text", "text": header + inlined_text})
 
-        # Attach signed URLs for PDFs & images from persistent attachments.
-        for _, meta in attachments.items():
-            kind = meta.get("kind")
-            signed_url = meta.get("signed_url")
-            if kind == "pdf" and signed_url:
-                parts.append({"type": "document_url", "document_url": signed_url})
-            elif kind == "image" and signed_url:
-                parts.append({"type": "image_url", "image_url": signed_url})
+            # Attach signed URLs for PDFs & images from persistent attachments.
+            for _, meta in attachments.items():
+                kind = meta.get("kind")
+                signed_url = meta.get("signed_url")
+                if kind == "pdf" and signed_url:
+                    parts.append({"type": "document_url", "document_url": signed_url})
+                elif kind == "image" and signed_url:
+                    parts.append({"type": "image_url", "image_url": signed_url})
 
         payload: Dict[str, Any] = dict(self._runtime_parameters)
         payload.update(model=self.model, messages=chat_messages)

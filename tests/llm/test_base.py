@@ -418,6 +418,56 @@ class TestLLMEngineRuntimeParameters:
 
         assert engine.runtime_parameters == {"model": "anything"}
 
+    def test_property_returns_a_deep_copy(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(thinking={"type": "adaptive", "x": [1]})
+
+        engine.runtime_parameters["thinking"]["x"].append(2)
+        engine.runtime_parameters["thinking"]["type"] = "off"
+
+        assert engine.runtime_parameters == {"thinking": {"type": "adaptive", "x": [1]}}
+
+    def test_to_dict_is_a_deep_copy(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(thinking={"type": "adaptive"})
+
+        data = engine.to_dict()
+        data["runtime_parameters"]["thinking"]["type"] = "off"
+
+        assert engine.runtime_parameters == {"thinking": {"type": "adaptive"}}
+
+    def test_to_dict_redacts_secret_named_keys(self) -> None:
+        engine = FakeLLMEngine()
+        engine.update_runtime_parameters(
+            temperature=0.2,
+            max_tokens=64,
+            api_key="sk-1",
+            Access_Token="t",
+            client_secret="s",
+            authorization="Bearer x",
+            password="p",
+            credentials="c",
+            base_url="http://localhost:1234",
+            extra_headers={"X-Id": "abc"},
+            extra_body={"nested": {"api_key": "k2", "plain": 1}, "items": [{"token": "t2", "n": 1}]},
+        )
+
+        rp = engine.to_dict()["runtime_parameters"]
+
+        assert rp["temperature"] == 0.2
+        assert rp["max_tokens"] == 64
+        assert rp["base_url"] == "http://localhost:1234"
+        for key in ("api_key", "Access_Token", "client_secret", "authorization",
+                    "password", "credentials", "extra_headers"):
+            assert rp[key] == "***"
+        assert rp["extra_body"] == {
+            "nested": {"api_key": "***", "plain": 1},
+            "items": [{"token": "***", "n": 1}],
+        }
+        # the store itself is untouched
+        assert engine.runtime_parameters["api_key"] == "sk-1"
+        assert engine.runtime_parameters["extra_headers"] == {"X-Id": "abc"}
+
     def test_to_dict_carries_a_copy(self) -> None:
         engine = FakeLLMEngine()
         engine.update_runtime_parameters(temperature=0.2)

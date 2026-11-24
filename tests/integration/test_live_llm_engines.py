@@ -109,7 +109,10 @@ def _openai_engine() -> LLMEngine:
         )
         engine.update_runtime_parameters(temperature=0)
         return engine
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 
@@ -126,7 +129,10 @@ def _gemini_engine() -> LLMEngine:
         )
         engine.update_runtime_parameters(temperature=0)
         return engine
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 
@@ -143,7 +149,10 @@ def _mistral_engine() -> LLMEngine:
         )
         engine.update_runtime_parameters(temperature=0)
         return engine
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 
@@ -158,7 +167,10 @@ def _anthropic_engine() -> LLMEngine:
             model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
             timeout=60,
         )
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 
@@ -175,7 +187,10 @@ def _litellm_engine() -> LLMEngine:
         )
         engine.update_runtime_parameters(temperature=0)
         return engine
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 
@@ -191,7 +206,10 @@ def _llamacpp_engine() -> LLMEngine:
 
     try:
         return LlamaCppEngine(model=cached)
-    except RuntimeError as exc:
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 

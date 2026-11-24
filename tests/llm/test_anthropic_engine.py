@@ -157,14 +157,14 @@ class TestAnthropicEngine:
         engine = AnthropicEngine(model="claude-opus-4-8", name="my_engine")
         assert engine.name == "my_engine"
 
-    def test_constructor_stores_model_and_seeds_max_tokens(
+    def test_constructor_stores_model_and_starts_with_empty_store(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-sonnet-4-6")
 
         assert engine.model == "claude-sonnet-4-6"
-        assert engine.runtime_parameters == {"max_tokens": 8192}
+        assert engine.runtime_parameters == {}
         assert engine.block_separator == ""
 
     @pytest.mark.parametrize(
@@ -195,7 +195,7 @@ class TestAnthropicEngine:
             engine.block_separator = 5  # type: ignore[assignment]
         assert "block_separator" not in engine.runtime_parameters
 
-    @pytest.mark.parametrize("key", ["model", "messages", "system", "output_config"])
+    @pytest.mark.parametrize("key", ["model", "messages", "system", "stream"])
     def test_reserved_runtime_keys_raise(
         self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:
@@ -379,16 +379,29 @@ class TestAnthropicEngine:
         assert payload["model"] == "claude-opus-4-8"
         assert isinstance(payload["messages"], list)
 
-    def test_removing_max_tokens_omits_it(
+    def test_default_max_tokens_is_sent_with_an_empty_store(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["max_tokens"] == 8192
+        assert engine.runtime_parameters == {}
+
+    def test_removing_max_tokens_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(max_tokens=1)
         engine.update_runtime_parameters(max_tokens=None)
 
         payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
 
-        assert "max_tokens" not in payload
+        assert payload["max_tokens"] == 8192
+        assert engine.runtime_parameters == {}
 
     def test_payload_is_a_snapshot_of_the_runtime_parameters(
         self, monkeypatch: pytest.MonkeyPatch
@@ -481,6 +494,59 @@ class TestAnthropicEngine:
         assert payload["output_config"] == {
             "format": {"type": "json_schema", "schema": schema}
         }
+
+    def test_structured_call_merges_runtime_output_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(output_config={"effort": "high", "format": "stale"})
+        schema = {"type": "object"}
+
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], schema
+        )
+
+        assert payload["output_config"] == {
+            "effort": "high",
+            "format": {"type": "json_schema", "schema": schema},
+        }
+        # the stored value is not mutated by the structured call
+        assert engine.runtime_parameters["output_config"] == {
+            "effort": "high", "format": "stale",
+        }
+
+    def test_plain_call_passes_runtime_output_config_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        engine.update_runtime_parameters(output_config={"effort": "high"})
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["output_config"] == {"effort": "high"}
+
+    def test_blank_system_messages_are_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+
+        blank_only = engine._build_provider_payload([
+            {"role": "system", "content": "   "},
+            {"role": "system", "content": ""},
+            {"role": "user", "content": "hi"},
+        ])
+        mixed = engine._build_provider_payload([
+            {"role": "system", "content": " A "},
+            {"role": "system", "content": "\n"},
+            {"role": "system", "content": "B"},
+            {"role": "user", "content": "hi"},
+        ])
+
+        assert "system" not in blank_only
+        assert mixed["system"] == "A\n\nB"
 
     def test_build_payload_omits_output_config_when_not_structured(
         self, monkeypatch: pytest.MonkeyPatch

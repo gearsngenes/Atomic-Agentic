@@ -82,8 +82,8 @@ class GeminiEngine(LLMEngine):
     2) ``invoke({"messages": messages, "output_structure": ...})`` runs the
        shared ``LLMResult`` lifecycle:
        - normalize chat messages;
-       - build the Gemini provider payload, threading a cleaned
-         ``output_structure`` (when given) through to ``response_mime_type``/
+       - build the Gemini provider payload, threading the
+         caller's ``output_structure`` (when given) through to ``response_mime_type``/
          ``response_json_schema`` on ``GenerateContentConfig``;
        - call ``client.models.generate_content(...)``;
        - extract assistant text, token usage, and configured model data;
@@ -125,7 +125,7 @@ class GeminiEngine(LLMEngine):
 
     _RESERVED_RUNTIME_KEYS = frozenset({
         "model", "contents", "system_instruction",
-        "response_mime_type", "response_json_schema",
+        "response_mime_type", "response_json_schema", "stream",
     })
 
     def __init__(
@@ -310,8 +310,7 @@ class GeminiEngine(LLMEngine):
 
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
-        turns. Attachment parts (uploaded files via ``Part.from_uri``; inlined text
-        via ``Part.from_text``) are appended to the last user ``Content``'s
+        turns. Attachment parts (uploaded files via ``Part.from_uri``) are appended to the last user ``Content``'s
         ``parts`` list. If no user turn is present, a standalone trailing
         ``Content(role='user', parts=attachment_parts)`` is inserted.
         """
@@ -325,10 +324,6 @@ class GeminiEngine(LLMEngine):
                         file_uri=file_obj.uri,
                         mime_type=meta.get("mime") or file_obj.mime_type,
                     )
-                )
-            elif meta.get("inlined") and meta.get("inlined_text"):
-                attachment_parts.append(
-                    genai.types.Part.from_text(text=str(meta["inlined_text"]))
                 )
 
         # 2. Build contents list with role mapping (no attachment injection yet).
