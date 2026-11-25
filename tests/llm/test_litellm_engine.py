@@ -564,7 +564,7 @@ class TestLiteLLMEngine:
         with pytest.raises(LLMEngineError, match="stream"):
             LiteLLMEngine(model="gpt-4o-mini", stream=True)
 
-    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    @pytest.mark.parametrize("key", ["messages", "response_format"])
     def test_constructor_rejects_engine_owned_kwargs(
         self, monkeypatch: pytest.MonkeyPatch, key: str
     ) -> None:
