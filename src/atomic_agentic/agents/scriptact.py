@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import keyword
 from collections.abc import Iterable
 from typing import Any, Callable, ClassVar, Mapping, Optional
 
@@ -20,7 +19,6 @@ from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
-    ALLOWED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -30,15 +28,17 @@ from ..exceptions import (
     BlackboardParseError,
     ToolAgentError,
     ToolInvocationError,
-    ToolRegistrationError,
 )
 from ..utils.agents import check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
+    check_script_tool_name,
+    dispatch_inputs,
     parse_generation,
     render_completed_as_python,
     render_failed_as_python,
     rewrite_builtin_calls,
+    script_context_clashes,
     validate_references,
 )
 
@@ -230,26 +230,7 @@ class ScriptActAgent(ToolAgent):
         could never call it.
         """
         super()._validate_tool_name(name)
-
-        if name in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS):
-            raise ToolRegistrationError(
-                f"tool name {name!r} is reserved for the parser's own "
-                "sentinel tool names and cannot be used as a registered "
-                "tool name."
-            )
-        if name in ALLOWED_PY_BUILTINS:
-            raise ToolRegistrationError(
-                f"tool name {name!r} collides with a real Python builtin "
-                "of the same name -- a tool with this name would be "
-                "permanently unreachable (the builtin always resolves "
-                "first). Build the tool with a different name via to_tool."
-            )
-        if keyword.iskeyword(name):
-            raise ToolRegistrationError(
-                f"tool name {name!r} is a Python keyword; a script could "
-                "never call it. Build the tool with a different name via "
-                "to_tool."
-            )
+        check_script_tool_name(name)
 
     def _seed_task(self, task: ScriptActAgentTask) -> None:
         """
@@ -261,11 +242,7 @@ class ScriptActAgent(ToolAgent):
         Runs inside ``create_task``, before any model call.
         """
         super()._seed_task(task)
-        clashes = {
-            n: ("a Python keyword" if keyword.iskeyword(n) else "a registered tool id")
-            for n in sorted(task.context)
-            if keyword.iskeyword(n) or n in self._toolbox
-        }
+        clashes = script_context_clashes(task.context, self._toolbox)
         if clashes:
             detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
             raise AgentInvocationError(
@@ -595,18 +572,7 @@ class ScriptActAgent(ToolAgent):
                 # would let a real call's own argument name (e.g. `name`,
                 # `obj`, `method_name`) collide with the dispatcher's own
                 # same-named parameter during binding (see agents/tools.py).
-                if slot.tool == PY_BUILTIN_ALIAS:
-                    resolved.append(
-                        tool._args_kwargs_to_dict(positional[0], tuple(positional[1:]), keyword)
-                    )
-                elif slot.tool == ATTR_CALL_ALIAS:
-                    resolved.append(
-                        tool._args_kwargs_to_dict(
-                            positional[0], positional[1], tuple(positional[2:]), keyword
-                        )
-                    )
-                else:
-                    resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
+                resolved.append(dispatch_inputs(slot, tool, positional, keyword))
             except Exception as e:
                 slot.exception = ToolAgentError(
                     f"{label}: argument(s) do not match {slot.tool!r}'s "

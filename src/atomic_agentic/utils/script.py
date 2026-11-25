@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+import keyword
+from collections.abc import Collection, Iterable
+from dataclasses import replace
 from typing import Any, Optional
 
 from ..constants.agents import (
@@ -17,7 +20,8 @@ from ..constants.agents import (
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
 )
-from ..exceptions import BlackboardParseError
+from ..exceptions import BlackboardParseError, ToolRegistrationError
+from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.agents.blackboard_models import ToolStatement
 from .agents import (
     evaluate_expr,
@@ -30,6 +34,10 @@ from .agents import (
 __all__ = [
     "parse_statement_to_slots",
     "parse_generation",
+    "parse_one_statement",
+    "dispatch_inputs",
+    "check_script_tool_name",
+    "script_context_clashes",
     "rewrite_builtin_calls",
     "validate_references",
     "render_completed_as_python",
@@ -441,6 +449,107 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[ToolS
     return [*hoisted, final_slot]
 
 
+def _compile_gate(nodes: list[ast.stmt]) -> None:
+    """Compile ``nodes`` inside a function body, raising ``BlackboardParseError``
+    on what the statement-level checks cannot catch (a duplicate keyword
+    argument, assignment to ``__debug__``)."""
+    shell = ast.parse("def _script():\n    pass")
+    shell.body[0].body = nodes
+    try:
+        compile(shell, "<generation>", "exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(f"line {e.lineno}: {e.msg}") from e
+
+
+def parse_one_statement(raw_text: str) -> ToolStatement:
+    """
+    Parse one generation into exactly one ``ToolStatement``, for an agent that
+    runs one statement per round. Raises ``BlackboardParseError`` for every
+    rejection.
+
+    1. ``strip_code_fence`` (one fenced block with prose around it is fine),
+       ``ast.parse``; the body must hold exactly one statement.
+    2. ``parse_statement_to_slots`` (shape checks, hoisting), then the
+       compile gate.
+    3. More than one slot means a call was nested inside the statement: the
+       generation is rejected, naming each nested call as written.
+    """
+    text = strip_code_fence(raw_text)
+    try:
+        tree = ast.parse(text, mode="exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(str(e)) from e
+    if len(tree.body) != 1:
+        raise BlackboardParseError(
+            f"expected exactly one statement; got {len(tree.body)}."
+        )
+    slots = parse_statement_to_slots(ast.unparse(tree.body[0]))
+    _compile_gate(tree.body)
+    if len(slots) > 1:
+        nested = ", ".join(replace(slot, identifier=None).to_code() for slot in slots[:-1])
+        raise BlackboardParseError(
+            "a statement may contain at most one call, and it must be the whole "
+            f"right-hand side or the whole statement; found nested call(s): {nested}. "
+            "Make each nested call its own statement and assign its result, "
+            "then use that name."
+        )
+    return slots[0]
+
+
+def dispatch_inputs(
+    slot: ToolStatement,
+    tool: AtomicInvokable,
+    positional: list[Any],
+    keyword: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind a resolved ``(positional, keyword)`` pair into the input dict of
+    the tool that runs ``slot``. A builtin or attribute-call slot packs the
+    real call's own arguments as one tuple and one dict, so a real argument
+    named like the dispatcher's own parameter cannot collide."""
+    if slot.tool == PY_BUILTIN_ALIAS:
+        return tool._args_kwargs_to_dict(positional[0], tuple(positional[1:]), keyword)
+    if slot.tool == ATTR_CALL_ALIAS:
+        return tool._args_kwargs_to_dict(
+            positional[0], positional[1], tuple(positional[2:]), keyword
+        )
+    return tool._args_kwargs_to_dict(*positional, **keyword)
+
+
+def check_script_tool_name(name: str) -> None:
+    """Raise ``ToolRegistrationError`` for a tool name script source cannot
+    reach: a parser sentinel, an allowed Python builtin, or a Python keyword."""
+    if name in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS):
+        raise ToolRegistrationError(
+            f"tool name {name!r} is reserved for the parser's own "
+            "sentinel tool names and cannot be used as a registered "
+            "tool name."
+        )
+    if name in ALLOWED_PY_BUILTINS:
+        raise ToolRegistrationError(
+            f"tool name {name!r} collides with a real Python builtin "
+            "of the same name -- a tool with this name would be "
+            "permanently unreachable (the builtin always resolves "
+            "first). Build the tool with a different name via to_tool."
+        )
+    if keyword.iskeyword(name):
+        raise ToolRegistrationError(
+            f"tool name {name!r} is a Python keyword; a script could "
+            "never call it. Build the tool with a different name via "
+            "to_tool."
+        )
+
+
+def script_context_clashes(names: Iterable[str], tool_ids: Collection[str]) -> dict[str, str]:
+    """Context-variable names a script could not use unambiguously, mapped to
+    the reason: a Python keyword, or a registered tool id (a name in call
+    position would resolve to the tool)."""
+    return {
+        n: ("a Python keyword" if keyword.iskeyword(n) else "a registered tool id")
+        for n in sorted(names)
+        if keyword.iskeyword(n) or n in tool_ids
+    }
+
+
 def parse_generation(raw_text: str) -> list[ToolStatement]:
     """
     Parse one whole generation (a fresh plan, or a repair-triggered
@@ -520,12 +629,10 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
             break
 
     if not errors:
-        shell = ast.parse("def _script():\n    pass")
-        shell.body[0].body = consumed
         try:
-            compile(shell, "<generation>", "exec")
-        except SyntaxError as e:
-            errors.append(f"line {e.lineno}: {e.msg}")
+            _compile_gate(consumed)
+        except BlackboardParseError as e:
+            errors.append(str(e))
 
     if errors:
         raise BlackboardParseError("\n".join(errors))
