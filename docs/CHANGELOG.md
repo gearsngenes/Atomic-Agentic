@@ -5,6 +5,92 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a38] - 2026-11-24
+
+Remote-proxy and engines release (Stages 9 and 10). `MCPClientHub`, `A2AClientHub`, `MCPProxyTool` and `A2AProxyTool` share one construction surface (`location`, `transport_mode`, keyword-only options, and a hub `name` that prefixes the tool names), and each hub owns a fixed catalog and an explicit close lifecycle. Every LLM engine takes `(model, name, description, client, **client_kwargs)`, generation settings move to `runtime_parameters` set through `update_runtime_parameters`, the engine retry machinery and `timeout_seconds` are gone, attachments belong to the four engines that support them, and `to_llm` builds an engine from a pre-built SDK client. The release is breaking for every hub, proxy tool and engine constructor; each breaking change is marked `breaking:` below.
+
+### Added
+
+- `MCPClientHub.stdio`, `.sse` and `.http` and `A2AClientHub.jsonrpc`, `.rest` and `.grpc` secondary constructors, and `async_create` on both hubs. A2A card resolution is HTTP(S) for all three transports, so `location` is the card base URL for `.grpc` as well.
+- `name` on both hubs, an identifier fragment that prefixes every proxy tool built from the hub (`<hub name>_<remote name>`); an unnamed hub keeps raw remote names. `A2AProxyTool(hub)` with no name is generic mode, named `<hub name>_send_parts` or `send_parts`.
+- `client_kwargs` on both hubs (the transport SDK's options on MCP, httpx options on A2A) and `session_kwargs` on `MCPClientHub`.
+- Hub catalog accessors: `get_tool(name)` on `MCPClientHub`, `list_skills()` and `get_skill(name)` on `A2AClientHub`; `refresh()` is valid with no arguments on both. Both hubs gain `async_close()` and `is_connected`, and `A2AClientHub` supports `with` and closes at interpreter exit.
+- `to_llm(client, model=None, name=None, description=None)` in `atomic_agentic.adapters` builds the engine that matches an `OpenAI`, `AsyncOpenAI`, `Anthropic`, `AsyncAnthropic`, `google.genai.Client`, `Mistral`, `litellm.Router` or `llama_cpp.Llama` client. A `Llama` client takes no `model`; every other client requires one; an unsupported object raises `TypeError` listing the supported clients and any SDK that could not be imported.
+- `runtime_parameters` (a deep-copy read-only property) and `update_runtime_parameters(**kwargs)` on every engine. A `None` value removes a key, all keys are validated before any is applied, and keys the engine owns (model, messages, the structured-output field, `stream`) raise. `LlamaCppEngine` and `GeminiEngine` validate keys against the provider's own signature.
+- `require_usage` on every engine (default `True`): a response with no usage object raises, or with `require_usage = False` returns all-zero token usage.
+- `strict` (`OpenAIEngine`, `MistralEngine`) and `block_separator` (`AnthropicEngine`) as validated settable attributes.
+- `LlamaCppEngine(model=None, name=None, description=None, llm=None, **client_kwargs)` with a preloaded `llm=` and `LlamaCppEngine.from_pretrained(repo_id, filename, ...)`; `LiteLLMEngine(client=Router)` routes calls through a `litellm.Router`.
+- `@to_tool`, `@to_tool()` and `@to_tool(name=..., description=...)` decorator forms.
+- `examples/LLM_Examples/06_engine_configuration_demo.py` and an "Engine configuration" README section.
+
+### Changed
+
+- breaking: `MCPClientHub` and `A2AClientHub` construct as `(location, transport_mode, *, name=None, persistent=False, headers=None, ...)`; every option after `transport_mode` is keyword-only, and `args` raises for a non-stdio transport and `headers` for stdio. `location` replaces the stdio command, the MCP URL and the A2A `base_url`. `persistent` now defaults to `False` on `A2AClientHub` (it was required).
+- breaking: `A2AClientHub`'s `timeout` is renamed `timeout_seconds`, and `get_atomic_skills` is renamed `list_skills`. `call_atomic_skill` and its async twins take `remote_name` where they took `skill_id`; the protocol routing key on the wire is still `skill_id`.
+- breaking: `MCPProxyTool(hub, name)` and `A2AProxyTool(hub, name=None)` replace `remote_name`, `skill_id` and `description` as constructor arguments. `description` is derived and stays settable. A proxy's tool name is `<hub name>_<name>` for a named hub, so tools from a named hub are renamed.
+- breaking: `to_tool(hub, name)` takes the remote tool or skill name in `name`, and its `remote_name=` keyword is removed.
+- breaking: `MCPToolResult` and `A2AProxyToolResult` report `location` in place of `endpoint`, `command` and `base_url`; `A2AProxyToolResult` reports `remote_name` in place of `skill_id`, and no longer carries `persistent`.
+- breaking: an `MCPClientHub` fetches its tool catalog once at construction (a persistent hub on its live session, a non-persistent hub in a throwaway connection), so an unreachable server fails construction; `list_tools()` returns a local deep copy and `to_tools` builds MCP proxies from it with no network call. The catalog changes only through `refresh(...)`, which rolls back completely on failure.
+- breaking: `mcp` is pinned to `>=2,<3`.
+- breaking: engine constructors are `XEngine(model, name=None, description=None, client=None, **client_kwargs)`. `client` is a pre-built SDK client, `client_kwargs` go unchanged to the SDK client constructor, and giving both raises. Timeouts and retries are the SDK's own client settings. The named generation parameters (`temperature`, `max_output_tokens`, `max_tokens`, `thinking_config`, `reasoning`, `truncation`, `stop_sequences`, `extra_body`) become runtime-parameter keys under the provider's own names, and AA no longer translates them.
+- breaking: the `LLMEngine` base takes only `name` and `description`; each engine declares its own `model`. `LlamaCppEngine.model_path` is renamed `model`, and `to_dict` emits `model`.
+- breaking: the Gemini and Mistral default `temperature=0.1` is dropped (the provider default applies), and OpenAI no longer suppresses `temperature` when `reasoning` is set.
+- breaking: `LLMEngine` validates messages: a non-empty list of mappings with string `role` (`system`, `user` or `assistant`) and `content`, at least one `user` message, and non-blank content on every message, except that a `user` message may be blank while the engine holds attachments. The "create a user turn" fallbacks are gone. A violation raises `LLMEngineError`. The agent paths that can still send a blank system, history or retry message (`BasicAgent`, `ScratchpadAgent`, `ScriptActAgent`, turn rendering in `Agent`) raise it until Stage 11 fixes them.
+- breaking: missing or empty provider text is `""` on every engine; a structured call returns the parsed value (`None` only for the JSON text `null`) and the raw text on a parse failure.
+- breaking: `LiteLLMEngine` calls `litellm.completion`, or `router.completion` with a `Router`, and the `supports_response_schema` capability gate is deleted: the schema goes through unmodified and fails natively on a provider without support.
+- Engine error messages share the prefix `<Class>.invoke: ...`. A text attachment that cannot be read raises instead of inlining an error string.
+- `validate_name_filter` stores stripped names.
+
+### Fixed
+
+- `MCPClientHub` with `read_timeout_seconds` set crashed; the value now reaches the SDK as float seconds.
+- A paginated MCP server no longer loses tools silently: the listing follows every page.
+- `A2AClientHub` closes the client it opened when a connect or refresh fails, rolls back its background loop on a failed connect, and serializes `refresh` and `close`; `close()` always stops the loop and clears state, and a second call does nothing.
+- Copying or pickling a `ParamSpec` no longer breaks `is NO_VAL` checks, because `NO_VAL` now copies to itself.
+
+### Removed
+
+- breaking: hub `endpoint`, `command` and `base_url` views, `MCPClientHub.async_list_tools` and the `MCPClientHub.headers` setter are removed; use `location`, `list_tools()` and `refresh(headers=...)`.
+- breaking: `Tool.of`, `MCPProxyTool.of` and `A2AProxyTool.of` are removed with no alias; use `@to_tool`. `to_tool(None)` still raises `ToolDefinitionError`, and `to_tool("name")` raises `ToolDefinitionError` with a keyword-only hint (it was a `TypeError`).
+- breaking: the engine retry machinery is removed: `max_retries`, `retry_backoff_base`, `retry_backoff_max`, `_should_retry` and the retry wrappers, with their `to_dict` keys. Retry is the SDK's own client setting.
+- breaking: `timeout_seconds` is removed from every engine constructor and from the `LLMEngine` base; use the SDK client's own `timeout`, `http_options` or `timeout_ms`.
+- breaking: the base `LLMEngine` attach API (`attach`, `detach`, `clear_attachments`, `_prepare_attachment`, the `attachments` key in `to_dict`) is removed. `OpenAIEngine`, `AnthropicEngine`, `GeminiEngine` and `MistralEngine` keep their own `attach` and `detach`; `LlamaCppEngine` has none, and `LiteLLMEngine` no longer supports attachments (use a native engine for file input).
+- breaking: `inline_cutoff_chars` is removed everywhere; text attachments inline whole.
+- breaking: the `LiteLLMEngine` `provider` argument is removed; the provider in model data is derived from the model string.
+- `examples/LLM_Examples/04_litellm_attach_demo.py` is removed.
+
+## [2.0.0a37] - 2026-11-22
+
+Remote-and-layout release (Stages 9 part 1 and 8). The unmaintained `python-a2a` surface is removed, so `a2a-sdk` (`A2AtomicExecutor`, `A2AClientHub`, `A2AProxyTool`) is the only A2A path, and the package is reorganized around a new `atomic_agentic.adapters` package that holds the conversion functions, now named `to_tool`, `to_tools`, `to_invokable` and `to_invokables`. `atomic_agentic.utils` exposes only the parameter API, and `Tool.of` adds a decorator form of the `Tool` constructor. This release carries several breaking changes; each is marked `breaking:` below.
+
+### Added
+
+- `atomic_agentic.adapters` package with `to_tool`, `to_tools`, `to_invokable` and `to_invokables`. `to_tool` turns one component (callable, invokable, `MCPClientHub` or `A2AClientHub`) into a `Tool`; `to_tools` converts a batch and expands a hub into one proxy tool per remote tool or skill.
+- `to_invokable` takes optional `name` and `description`: a callable infers them, an `AtomicInvokable` passes through unchanged, and a `str` (which becomes a `PromptTemplate`) still needs both. `to_invokables` converts a batch for a toolbox, expanding hubs and rejecting strings with the item's index.
+- `Tool.of`, the decorator form of the constructor: `@Tool.of` or `@Tool.of(name=..., description=...)`, keyword-only arguments, name and description inferred as in `Tool(...)`. It is not supported on `MCPProxyTool` or `A2AProxyTool`.
+- An `AtomicInvokable` passed to `Tool(...)` takes its own name and description by default.
+- `A2AProxyTool` skill mode shows the remote extra description.
+
+### Changed
+
+- breaking: `toolify`, `batch_toolify` and `to_invokable` move from `atomic_agentic.tools` (module `tools.toolification`) to `atomic_agentic.adapters`, with no alias.
+- breaking: `toolify` is renamed `to_tool`, `batch_toolify` is renamed `to_tools`, and the batch invokable converter is `to_invokables`; the `ToolDefinitionError` messages that began `toolify:` now begin `to_tool:`.
+- breaking: `extract_io` moves from `atomic_agentic.invokables` to `atomic_agentic.utils` and takes only callables; it no longer unwraps an `AtomicInvokable` (use its `.parameters` and `.return_type`).
+- breaking: `parameter_overlap` and `parameter_collisions` move to `atomic_agentic.utils` and take `Sequence[Sequence[ParamSpec]]`.
+- breaking: `to_paramspec_list` is renamed `to_parameter_list`, with no alias.
+- breaking: `atomic_agentic.utils` re-exports only the parameter API (seven names). The async-loop helpers, `normalize_headers`, the name-filter helpers and `dataclass_record_to_dict` import from `atomic_agentic.utils.core`. `atomic_agentic.invokables` no longer exports `extract_io`, `parameter_overlap` or `parameter_collisions`.
+- breaking: a callable with no usable name passed to `Tool(...)` (or to `Tool.of` or `to_tool`) raises `ToolDefinitionError`; it used to be named `unnamed_callable`. A callable with no docstring gets the description `"No description available."` everywhere.
+- `ToolAgent.register_tool` and `register_tools` convert through the shared converter; the `tools` hint on the `ToolAgent` family is `MCPClientHub | A2AClientHub`.
+- The three A2A host-server examples now use `A2AtomicExecutor`, and `06_to_tool_example.py` replaces `07_toolify_example.py` without its `python-a2a` sections.
+
+### Removed
+
+- breaking: `PyA2AtomicHost`, `PyA2AtomicClient`, `PyA2AtomicTool`, `PyA2AtomicToolResult`, `PyA2AtomicError` and `PyA2AtomicConnectionError` are removed, with `atomic_agentic.constants.python_a2a` and the `python-a2a` and `extras` install extras. Use `A2AtomicExecutor`, `A2AClientHub` and `A2AProxyTool`.
+- breaking: servers deployed as `PyA2AtomicHost` cannot be reached by `A2AClientHub`; re-host them with `A2AtomicExecutor`.
+- breaking: not carried over from the removed surface: runtime `register`/`remove` on a host (the executor registry is fixed at construction), a one-call `run_server`, a free-form `capabilities` mapping, the remote class name `invokable_type`, the `headers` setter (use `refresh(headers=...)`), and the proxy-tool `agent_card`, `headers` and `remote_metadata` properties (use `tool.client_hub`). An `A2AProxyError` for a failed remote task names the task state only.
+- breaking: `to_tool`, `to_tools` and `ToolAgent.register_tools` no longer accept a `PyA2AtomicClient`.
+- The `python-a2a` CI flavor, `examples/Tool_Examples/05_PyA2AtomicTool.py` and `atomic_agentic/invokables/core_api.py` are removed.
+
 ## [2.0.0a36] - 2026-11-21
 
 Composites release (Stage 7). The five workflow classes become three in the new `atomic_agentic.composites` package: a mutable `Graph`, and `Pipeline` and `Router`, which are frozen and built over a private `Graph`. All three use the shared binding grammar from `utils/binding.py`. The `core` package was renamed `invokables` earlier in this release. The release is breaking for anyone who imports `atomic_agentic.workflows`, `atomic_agentic.core`, or any of the removed classes and exceptions below.

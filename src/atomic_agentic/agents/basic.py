@@ -10,7 +10,7 @@ from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import AgentTask
-from ..tools import to_invokable
+from ..adapters import to_invokable
 from .base import Agent
 
 

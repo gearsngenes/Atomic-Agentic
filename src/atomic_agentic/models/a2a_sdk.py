@@ -21,7 +21,7 @@ class A2AtomicSkillMetadata:
     """One registered Atomic skill's full remote metadata.
 
     Published inside ``A2AtomicExecutor``'s ``PARAM_SCHEMA_EXT_URI`` card
-    extension and reconstructed by ``A2AClientHub.get_atomic_skills()``.
+    extension and reconstructed by ``A2AClientHub.list_skills()``.
 
     Deliberately ``AtomicInvokable``-unaware -- mirrors ``ParamSpec``'s own
     purity in this same module. Building an instance *from* an

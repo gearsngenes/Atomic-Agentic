@@ -104,7 +104,7 @@ messages = [
 llm = GeminiEngine(api_key=os.getenv("GOOGLE_API_KEY"), model="gemini-2.5-flash-lite", http_options={"api_version": "v1beta"})
 # llm = MistralEngine(api_key=os.getenv("MISTRAL_API_KEY"), model="mistral-small-latest")
 # llm = AnthropicEngine(api_key=os.getenv("ANTHROPIC_API_KEY"), model="claude-sonnet-4-6")
-# llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id="unsloth/phi-4-GGUF", filename="phi-4-Q4_K_M.gguf", n_ctx=512, verbose=False, n_threads=4)
+# llm = LlamaCppEngine(model=os.getenv("LLAMA_MODEL_PATH"), n_ctx=4096, verbose=False, n_threads=4)
 
 # --- Invoke the engine with output_structure for schema-constrained output ---
 result = llm.invoke({"messages": messages, "output_structure": CHARACTER_SCHEMA})

@@ -167,6 +167,71 @@ class TestToAgentCard:
             executor.to_agent_card("", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC)
 
 
+class DescribedInvokable(AtomicInvokable):
+    """Described parameter plus a non-empty extra description."""
+
+    def _invoke_impl(self, inputs): return {"result": inputs}
+    async def _async_invoke_impl(self, inputs): return {"result": inputs}
+
+    def _extra_description(self) -> str:
+        return "Output schema: [value]"
+
+
+def make_described_invokable(name: str = "described") -> DescribedInvokable:
+    return DescribedInvokable(
+        name=name,
+        description="Described invokable.",
+        parameters=[
+            ParamSpec(
+                name="value",
+                index=0,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="Any",
+                description="The value to echo back.",
+            )
+        ],
+        return_type="dict[str, Any]",
+    )
+
+
+class TestMetadataPropagation:
+    def test_skill_metadata_carries_raw_description_not_rendered(self) -> None:
+        invokable = make_described_invokable()
+        executor = A2AtomicExecutor([invokable])
+
+        description = executor._skill_metadata["described"].description
+
+        assert description == invokable._description
+        assert description != invokable.description
+        assert "- value:" not in description
+
+    def test_extension_carries_extra_description(self) -> None:
+        executor = A2AtomicExecutor([make_described_invokable()])
+        card = executor.to_agent_card(
+            "http://127.0.0.1:9", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC
+        )
+
+        raw = MessageToDict(list(card.capabilities.extensions)[0].params)
+
+        assert raw["described"]["extra_description"] == "Output schema: [value]"
+
+    def test_extra_description_empty_by_default(self) -> None:
+        executor = A2AtomicExecutor([make_add_invokable("add")])
+
+        assert executor._skill_metadata["add"].extra_description == ""
+
+
+class TestToDict:
+    def test_executor_to_dict(self) -> None:
+        executor = A2AtomicExecutor([make_add_invokable("add"), make_failing_invokable("boom")])
+
+        assert executor.to_dict() == {
+            "type": "A2AtomicExecutor",
+            "invokable_names": ["add", "boom"],
+            "invokable_count": 2,
+        }
+
+
 # --------------------------------------------------------------------------- #
 # cancel() -- unit-level, no live server needed
 # --------------------------------------------------------------------------- #
@@ -284,14 +349,14 @@ async def _start_uvicorn(uvicorn_server: "uvicorn.Server") -> None:
 
 class TestEndToEndDispatch:
     def test_successful_call_round_trips_result(self, fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             assert hub.call_atomic_skill("add", {"a": 2, "b": 3}) == 5
         finally:
             hub.close()
 
     def test_unknown_skill_raises(self, fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(A2AProxyError):
                 hub.call_atomic_skill("does_not_exist", {})
@@ -299,7 +364,7 @@ class TestEndToEndDispatch:
             hub.close()
 
     def test_invokable_exception_raises(self, fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
             with pytest.raises(A2AProxyError):
                 hub.call_atomic_skill("boom", {})
@@ -307,9 +372,9 @@ class TestEndToEndDispatch:
             hub.close()
 
     def test_hub_detects_published_atomic_skills(self, fixture_server: FixtureServer) -> None:
-        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC)
         try:
-            skills = hub.get_atomic_skills()
+            skills = hub.list_skills()
             assert set(skills) == {"add", "boom"}
             assert skills["add"].description == "Adds two numbers."
             assert len(skills["add"].params) == 2
@@ -318,24 +383,24 @@ class TestEndToEndDispatch:
 
 
 class TestHubNameFiltering:
-    """include_names/exclude_names filter get_atomic_skills()'s output only
+    """include_names/exclude_names filter list_skills()'s output only
     -- construction-time, discovery-only, per A2AClientHub's own docstring."""
 
     def test_include_names_narrows_to_matching_skill(self, fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(
-            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+            fixture_server.http_url, TRANSPORT_JSON_RPC, include_names=["add"]
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
     def test_exclude_names_removes_matching_skill(self, fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(
-            fixture_server.http_url, TRANSPORT_JSON_RPC, False, exclude_names=["boom"]
+            fixture_server.http_url, TRANSPORT_JSON_RPC, exclude_names=["boom"]
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
@@ -345,33 +410,32 @@ class TestHubNameFiltering:
         hub = A2AClientHub(
             fixture_server.http_url,
             TRANSPORT_JSON_RPC,
-            False,
             include_names=["add", "does_not_exist"],
         )
         try:
-            assert set(hub.get_atomic_skills()) == {"add"}
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
     def test_call_atomic_skill_ignores_the_filter(self, fixture_server: FixtureServer) -> None:
-        # Discovery-only: a name excluded from get_atomic_skills() must
+        # Discovery-only: a name excluded from list_skills() must
         # still be directly callable.
         hub = A2AClientHub(
-            fixture_server.http_url, TRANSPORT_JSON_RPC, False, exclude_names=["add"]
+            fixture_server.http_url, TRANSPORT_JSON_RPC, exclude_names=["add"]
         )
         try:
-            assert "add" not in hub.get_atomic_skills()
+            assert "add" not in hub.list_skills()
             assert hub.call_atomic_skill("add", {"a": 2, "b": 3}) == 5
         finally:
             hub.close()
 
     def test_refresh_reapplies_the_stored_filter(self, fixture_server: FixtureServer) -> None:
         hub = A2AClientHub(
-            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+            fixture_server.http_url, TRANSPORT_JSON_RPC, include_names=["add"]
         )
         try:
-            hub.refresh(timeout=123.0)
-            assert set(hub.get_atomic_skills()) == {"add"}
+            hub.refresh(timeout_seconds=123.0)
+            assert set(hub.list_skills()) == {"add"}
         finally:
             hub.close()
 
@@ -379,7 +443,7 @@ class TestHubNameFiltering:
         self, fixture_server: FixtureServer
     ) -> None:
         with pytest.raises(ValueError):
-            A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=[])
+            A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, include_names=[])
 
     def test_include_exclude_overlap_raises_at_construction(
         self, fixture_server: FixtureServer
@@ -388,7 +452,6 @@ class TestHubNameFiltering:
             A2AClientHub(
                 fixture_server.http_url,
                 TRANSPORT_JSON_RPC,
-                False,
                 include_names=["add"],
                 exclude_names=["add"],
             )
@@ -397,7 +460,7 @@ class TestHubNameFiltering:
         self, fixture_server: FixtureServer
     ) -> None:
         hub = A2AClientHub(
-            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+            fixture_server.http_url, TRANSPORT_JSON_RPC, include_names=["add"]
         )
         try:
             data = hub.to_dict()

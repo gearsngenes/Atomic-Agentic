@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ..constants.agents import TASK_RESULT_PREFIX
-from ..constants.core import HeaderValue, T
+from ..constants.core import IDENTIFIER_PATTERN, HeaderValue, T
 
 __all__ = [
     "apply_name_filter",
@@ -17,6 +17,8 @@ __all__ = [
     "format_missing_dependency",
     "is_reserved_name",
     "normalize_headers",
+    "normalize_optional_identifier",
+    "normalize_timeout_seconds",
     "run_coro_async",
     "run_coro_sync",
     "start_background_loop",
@@ -75,6 +77,27 @@ def is_reserved_name(name: str) -> bool:
     return name.startswith(TASK_RESULT_PREFIX)
 
 
+def normalize_optional_identifier(name: str | None) -> str | None:
+    """None passes through; otherwise name must be a str matching IDENTIFIER_PATTERN."""
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise TypeError("name must be a string when provided.")
+    if not IDENTIFIER_PATTERN.fullmatch(name):
+        raise ValueError(
+            "name must be a valid identifier (letters, digits, underscores) "
+            "when provided."
+        )
+    return name
+
+
+def normalize_timeout_seconds(value: Any, param_name: str) -> float:
+    """Return ``value`` as a float; it must be a real number (not a bool) above zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ValueError(f"{param_name} must be a positive number.")
+    return float(value)
+
+
 async def _await_value(awaitable: Awaitable[T]) -> T:
     """Await an arbitrary awaitable through a coroutine wrapper."""
     return await awaitable
@@ -90,7 +113,7 @@ def run_coro_sync(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoop | Non
       ``asyncio.run_coroutine_threadsafe`` and block the calling thread
       until it completes. Intended for a loop started by
       ``start_background_loop`` and kept alive across multiple calls (e.g.
-      A2AClientHub's persistent mode) -- some asyncio-native resources
+      the persistent mode of MCPClientHub and A2AClientHub) -- some asyncio-native resources
       (a grpc.aio.Channel in particular) break when reused across
       independently-created event loops, so anything meant to outlive one
       call must always dispatch onto the *same* loop.
@@ -152,7 +175,8 @@ async def run_coro_async(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoo
 
     ``loop`` is required, not optional: this exists specifically to target a
     *different* loop than the one the caller is currently running on (e.g.
-    A2AClientHub persistent mode's dedicated background loop). A caller with
+    the persistent mode of MCPClientHub or A2AClientHub, whose dedicated
+    background loop). A caller with
     no other loop to target should just await the awaitable directly --
     there is nothing to bridge cross-thread in that case.
 
@@ -275,7 +299,7 @@ def validate_name_filter(
 ) -> tuple[frozenset[str] | None, frozenset[str] | None]:
     """
     Validate and normalize a construction-time include/exclude name filter
-    pair, shared by MCPClientHub, A2AClientHub, and PyA2AtomicClient.
+    pair, shared by MCPClientHub and A2AClientHub.
 
     ``None`` disables that side of the filter. A non-``None`` list must be
     non-empty and contain only non-empty (after stripping) strings -- an
@@ -318,7 +342,7 @@ def _validate_name_list(
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"{param_name} entries must be non-empty strings.")
 
-    return frozenset(value)
+    return frozenset(item.strip() for item in value)
 
 
 def apply_name_filter(
@@ -352,7 +376,8 @@ def start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread
     run_coro_sync/run_coro_async's ``loop`` param by the time this returns.
     Daemon so a caller that never calls stop_background_loop doesn't hang
     process exit -- it only leaks the thread/loop/whatever was dispatched
-    onto it for the rest of the process's life. Needed by anything holding
+    onto it for the rest of the process's life. Used by MCPClientHub and
+    A2AClientHub in persistent mode; needed by anything holding
     an asyncio-native resource that must stay bound to the same loop for
     its whole lifetime -- confirmed necessary because grpc.aio.Channel
     breaks when reused across independently-created event loops (a channel

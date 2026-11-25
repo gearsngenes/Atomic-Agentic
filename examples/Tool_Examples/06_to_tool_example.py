@@ -1,6 +1,3 @@
-# NOTE: PyA2AtomicClient/PyA2AtomicHost use the deprecated python-a2a stack (removed in
-# the final 2.0.0 release). Install it with `pip install atomic-agentic[python-a2a]`;
-# prefer the a2a-sdk examples (A2AClientHub / A2AtomicExecutor) for new work.
 from __future__ import annotations
 
 import json
@@ -8,14 +5,15 @@ from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a import A2AClientHub, PyA2AtomicClient
+from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
-from atomic_agentic.tools import Tool, batch_toolify, toolify
+from atomic_agentic.adapters import to_tools, to_tool
+from atomic_agentic.tools import Tool
 
 load_dotenv()
 
@@ -58,12 +56,8 @@ agent = BasicAgent(
 )
 
 
-MCP_ENDPOINT = "http://127.0.0.1:8000/mcp"
+MCP_URL = "http://127.0.0.1:8000/mcp"
 MCP_HEADERS: Mapping[str, str] | None = None
-
-A2A_MATH_URL = "http://localhost:7000"
-A2A_MATH_REMOTE_NAME = "MathPlannerAgent"
-A2A_HEADERS: Mapping[str, str] | None = None
 
 # a2a-sdk-backed targets -- see a2a_sdk_atomic_host_server.py (invokable,
 # publishes Atomic skills) and a2a_sdk_foreign_host_server.py (plain a2a-sdk
@@ -123,16 +117,16 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any] | None = None) -> None
 
 
 def main() -> None:
-    print("\n[1] Agent -> Tool via toolify(agent) — delegates by reference")
-    agent_tool = toolify(agent)
+    print("\n[1] Agent -> Tool via to_tool(agent) — delegates by reference")
+    agent_tool = to_tool(agent)
     show_plan(agent_tool)
     invoke_with_inputs(
         agent_tool,
         {"topic": "unit testing", "style": "concise", "audience": "beginners"},
     )
 
-    print("\n[2] Callable -> Tool via toolify(add_scale, ...)")
-    callable_tool = toolify(
+    print("\n[2] Callable -> Tool via to_tool(add_scale, ...)")
+    callable_tool = to_tool(
         add_scale,
         name="add_scale",
         description="Compute (a + b) * scale.",
@@ -141,7 +135,7 @@ def main() -> None:
     invoke_with_inputs(callable_tool, {"a": 2, "b": 3, "scale": 10})
 
     print("\n[3] Tool -> new Tool instance wrapping the same function, with overrides applied")
-    updated_tool = toolify(
+    updated_tool = to_tool(
         pre_wrapped_tool,
         description="Truncate text to a character limit with ellipsis.",
     )
@@ -154,13 +148,12 @@ def main() -> None:
         },
     )
 
-    print("\n[4] MCPClientHub + remote_name -> MCPProxyTool")
-    print("[MCP] Connecting to:", MCP_ENDPOINT)
+    print("\n[4] MCPClientHub + name -> MCPProxyTool")
+    print("[MCP] Connecting to:", MCP_URL)
     try:
         mcp_hub = MCPClientHub(
-            transport_mode="streamable_http",
-            persistent=False,
-            endpoint=MCP_ENDPOINT,
+            MCP_URL,
+            "streamable_http",
             headers=MCP_HEADERS,
         )
 
@@ -178,9 +171,9 @@ def main() -> None:
 
         if remote_names:
             remote_name = remote_names[0]
-            mcp_tool = toolify(
+            mcp_tool = to_tool(
                 mcp_hub,
-                remote_name=remote_name,
+                name=remote_name,
             )
             show_plan(mcp_tool)
             invoke_with_inputs(mcp_tool, example_inputs_by_remote_name.get(remote_name))
@@ -188,71 +181,30 @@ def main() -> None:
     except Exception as exc:
         print("[MCP] Skipping MCP demo due to error:", exc)
 
-    print("\n[5] PyA2AtomicClient + remote_name -> PyA2AtomicTool via toolify(client, ...)")
-    print("[A2A] Connecting to:", A2A_MATH_URL)
-    try:
-        a2a_client = PyA2AtomicClient(
-            url=A2A_MATH_URL,
-            headers=A2A_HEADERS,
-        )
-        discovered = a2a_client.list_invokables()
-        print(f"[A2A] Discovered {len(discovered)} invokables: {list(discovered.keys())}")
-
-        a2a_tool = toolify(
-            a2a_client,
-            remote_name=A2A_MATH_REMOTE_NAME,
-        )
-        show_plan(a2a_tool)
-        invoke_with_inputs(
-            a2a_tool,
-            {
-                "prompt": "Give the sum of 20 and negative six all divided by seven.",
-            },
-        )
-
-    except Exception as exc:
-        print("[A2A] Skipping A2A demo due to error:", exc)
-
-    print("\n[6] batch_toolify([PyA2AtomicClient]) -> one proxy per remote invokable")
-    try:
-        a2a_client = PyA2AtomicClient(
-            url=A2A_MATH_URL,
-            headers=A2A_HEADERS,
-        )
-        a2a_tools = batch_toolify(
-            [a2a_client],
-        )
-        print(f"[A2A] batch_toolify produced {len(a2a_tools)} tool(s):")
-        for t in a2a_tools:
-            print(f"  - {t.full_name}")
-
-    except Exception as exc:
-        print("[A2A] Skipping batch A2A demo due to error:", exc)
-
-    print("\n[7] A2AClientHub + remote_name -> A2AProxyTool (skill mode) via toolify(hub, remote_name=...)")
+    print("\n[5] A2AClientHub + name -> A2AProxyTool (skill mode) via to_tool(hub, name=...)")
     print("[A2A-sdk] Connecting to:", A2A_SDK_ATOMIC_URL)
     try:
         atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
-        skills = atomic_hub.get_atomic_skills()
+        skills = atomic_hub.list_skills()
         print(f"[A2A-sdk] Discovered {len(skills)} Atomic skill(s): {sorted(skills.keys())}")
 
         if skills:
-            skill_id = "add" if "add" in skills else next(iter(skills))
-            skill_tool = toolify(atomic_hub, remote_name=skill_id)
+            skill_name = "add" if "add" in skills else next(iter(skills))
+            skill_tool = to_tool(atomic_hub, name=skill_name)
             show_plan(skill_tool)
             invoke_with_inputs(skill_tool, {"a": 12, "b": 5})
 
     except Exception as exc:
         print("[A2A-sdk] Skipping skill-mode demo due to error:", exc)
 
-    print("\n[8] A2AClientHub, remote_name omitted -> A2AProxyTool (generic mode) via toolify(hub)")
+    print("\n[6] A2AClientHub, name omitted -> A2AProxyTool (generic mode) via to_tool(hub)")
     print("[A2A-sdk] Connecting to:", A2A_SDK_FOREIGN_URL)
     try:
         foreign_hub = A2AClientHub(A2A_SDK_FOREIGN_URL, TRANSPORT_JSON_RPC, persistent=False)
         print(f"[A2A-sdk] {foreign_hub.agent_card.name!r} publishes "
-              f"{len(foreign_hub.get_atomic_skills())} Atomic skill(s) -- not invokable, generic mode only")
+              f"{len(foreign_hub.list_skills())} Atomic skill(s) -- not invokable, generic mode only")
 
-        generic_tool = toolify(foreign_hub)
+        generic_tool = to_tool(foreign_hub)
         show_plan(generic_tool)
         invoke_with_inputs(
             generic_tool,
@@ -266,18 +218,36 @@ def main() -> None:
     except Exception as exc:
         print("[A2A-sdk] Skipping generic-mode demo due to error:", exc)
 
-    print("\n[9] batch_toolify([A2AClientHub]) -> one proxy per Atomic skill + one trailing generic proxy")
+    print("\n[7] to_tools([A2AClientHub]) -> one proxy per Atomic skill + one trailing generic proxy")
     try:
         atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
-        a2a_sdk_tools = batch_toolify(
+        a2a_sdk_tools = to_tools(
             [atomic_hub],
         )
-        print(f"[A2A-sdk] batch_toolify produced {len(a2a_sdk_tools)} tool(s):")
+        print(f"[A2A-sdk] to_tools produced {len(a2a_sdk_tools)} tool(s):")
         for t in a2a_sdk_tools:
-            print(f"  - {t.full_name} (skill_id={t.skill_id!r})")
+            print(f"  - {t.full_name} (remote_name={t.remote_name!r})")
 
     except Exception as exc:
         print("[A2A-sdk] Skipping batch A2A-sdk demo due to error:", exc)
+
+    print("\n[8] @to_tool -> decorator form of to_tool; the name is bound to a Tool")
+
+    @to_tool
+    def shout(text: str) -> str:
+        """Upper-case the text."""
+        return text.upper()
+
+    @to_tool(name="join_words", description="Join words with a separator.")
+    def join(words: list[str], sep: str = " ") -> str:
+        return sep.join(words)
+
+    # Note: a method loses `self` binding (Tool is not a descriptor); decorate
+    # module-level functions, or bind the method first.
+    for t in (shout, join):
+        print(f"  - {t.name}: {t.description}")
+    print("  shout ->", shout.invoke({"text": "hello"}).result)
+    print("  join_words ->", join.invoke({"words": ["a", "b"], "sep": "-"}).result)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 PlanActAgent planning against a local MCP server.
 
-Expected local MCP endpoint:
+Expected local MCP server location (URL):
   http://localhost:8000/mcp
 
 Updated to use PlanActAgent (formerly PlannerAgent).
@@ -24,7 +24,7 @@ planner = PlanActAgent(
 
 # Register all tools from MCP server (bulk discover via a hub entry in the list).
 planner.register_tools(
-    [MCPClientHub("streamable_http", persistent=False, endpoint="http://localhost:8000/mcp")]
+    [MCPClientHub("http://localhost:8000/mcp", "streamable_http")]
 )
 
 result = planner.invoke(

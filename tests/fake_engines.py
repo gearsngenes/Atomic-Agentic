@@ -29,16 +29,12 @@ class FakeLLMEngine(LLMEngine):
         responses: list[Any] | None = None,
         *,
         response_fn: Callable[[list[dict[str, str]]], Any] | None = None,
-        prepare_result: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.responses = list(responses) if responses is not None else [" hello "]
         self.response_fn = response_fn
-        self.prepare_result = prepare_result
         self.payloads: list[Any] = []
-        self.prepare_calls: list[str] = []
-        self.detach_calls: list[Mapping[str, Any]] = []
         self.calls: list[list[dict[str, str]]] = []
         self.call_count = 0
         self.requested_structured_calls: list[bool] = []
@@ -46,14 +42,12 @@ class FakeLLMEngine(LLMEngine):
     def _build_provider_payload(
         self,
         messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
         output_structure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         copied = [dict(m) for m in messages]
         self.calls.append(copied)
         payload = {
             "messages": copied,
-            "attachments": dict(attachments),
             "output_structure": output_structure,
         }
         self.payloads.append(payload)
@@ -84,7 +78,7 @@ class FakeLLMEngine(LLMEngine):
     def _extract_result(self, response: Any, requested_structured: bool) -> Any:
         # Deliberately Any, not str: some tests script a non-string response
         # to exercise the base class's own "_extract_result must return str,
-        # list, or dict" validation.
+        # int, float, bool, list, dict, or None" validation.
         self.requested_structured_calls.append(requested_structured)
         return response
 
@@ -95,20 +89,6 @@ class FakeLLMEngine(LLMEngine):
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="fake")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        self.prepare_calls.append(path)
-        if self.prepare_result is not None:
-            return self.prepare_result
-        return {"path": path, "prepared": True}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        self.detach_calls.append(meta)
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        if attempt > self._max_retries:
-            return False
-        return isinstance(exc, (TimeoutError, ConnectionError))
 
 
 def echo_latest_user(prefix: str = "ECHO") -> Callable[[list[dict[str, str]]], str]:

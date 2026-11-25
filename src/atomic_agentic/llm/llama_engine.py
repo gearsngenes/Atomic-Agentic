@@ -1,13 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
+import threading
 
-try:
-    from huggingface_hub import hf_hub_download
-    _HF_IMPORT_ERROR: ImportError | None = None
-except ImportError as _exc:
-    hf_hub_download = None
-    _HF_IMPORT_ERROR = _exc
 try:
     from llama_cpp import Llama
     _LLAMA_IMPORT_ERROR: ImportError | None = None
@@ -17,6 +13,7 @@ except ImportError as _exc:
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -34,6 +31,9 @@ from ..models.results.llm import (
 
 __all__ = ["LlamaCppEngine"]
 
+# Load defaults applied under the caller's ``client_kwargs``.
+_LOAD_DEFAULTS: Dict[str, Any] = {"n_ctx": 2048, "verbose": False}
+
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
     """
@@ -44,264 +44,209 @@ class LlamaCppEngine(LLMEngine):
 
     Model source
     ------------
-    A model may be loaded from either:
+    Exactly one of three sources:
 
-    - ``model_path``: a direct path to an existing local GGUF/GGML file.
-    - ``repo_id`` + ``filename``: a Hugging Face Hub file reference resolved
-      through ``hf_hub_download(...)`` into a concrete local file path.
+    - ``model``: a path to a local GGUF/GGML file, loaded through
+      ``Llama(model_path=...)`` with ``client_kwargs`` forwarded to ``Llama``.
+    - ``llm``: a preloaded ``Llama`` instance, used as is (combining it with
+      ``client_kwargs`` raises).
+    - ``LlamaCppEngine.from_pretrained(repo_id, filename, ...)``: a shallow
+      wrapper over ``Llama.from_pretrained`` that downloads (or reuses from
+      the cache) a GGUF from the Hugging Face Hub and wraps the result.
 
-    In both cases, ``self.model_path`` stores the concrete local path loaded by
-    ``Llama(model_path=...)``.
+    ``engine.model`` is the concrete local path of the loaded model (read from
+    ``llm.model_path`` after construction); it is read-only.
 
-    Flow per call
-    -------------
-    1) Conversation turns are passed through as an OpenAI-compatible
-       ``messages`` list.
+    Runtime parameters and configuration
+    ------------------------------------
+    Runtime-parameter keys are ``create_chat_completion`` parameters under
+    llama.cpp's own names, validated against its signature when set
+    (``_validate_runtime_keys``). Nothing is set by default, so Llama's own
+    defaults apply. Load-time settings (``n_ctx``, ``n_gpu_layers``,
+    ``chat_format``, ...) go through ``client_kwargs``; call-time ones
+    (``temperature``, ``max_tokens``, ...) go through
+    ``update_runtime_parameters``. ``seed`` is one of each: the load-time
+    seed is the model's sampler seed, the call-time one overrides it for a
+    call. Streaming is unsupported.
 
-    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
-       lifecycle:
-       - normalize chat messages;
-       - build the llama.cpp provider payload;
-       - call ``llm.create_chat_completion(...)``;
-       - extract assistant text, token usage, and configured model data;
-       - return ``LLMResult``.
+    Attachments are not supported; this engine has no ``attach`` API.
 
-    3) Attachments are not supported. Any attempt to call ``attach(path)`` fails
-       with ``LLMEngineError``.
-
-    Token usage
-    -----------
-    ``_extract_token_usage`` maps the OpenAI-compatible response
-    ``response["usage"]`` dictionary into ``LlamaCppTokenUsage`` using prompt,
-    completion, and total token counts.
-
-    Model data
-    ----------
-    ``_get_model_data`` returns the concrete local model path loaded by
-    llama.cpp.
+    Result extraction and usage
+    ---------------------------
+    ``_extract_result`` reads ``choices[0].message.content`` (``None`` counts
+    as ``""``) and, on a structured call, parses it with ``json.loads`` (raw
+    text on a parse failure, e.g. ``max_tokens`` truncation mid-structure).
+    ``_extract_token_usage`` maps ``response["usage"]`` into
+    ``LlamaCppTokenUsage``; with no ``usage`` key it raises unless
+    ``require_usage`` is ``False``, which yields an all-zero record.
+    ``_get_model_data`` returns the loaded model path.
 
     Structured-output schema policy
-    --------------------------------
-    Structured output is requested via ``response_format = {"type":
-    "json_object", "schema": ...}`` on ``create_chat_completion``. Unlike
-    every remote engine in this package, enforcement happens entirely
-    locally: llama-cpp-python's own bundled grammar converter
-    (``llama_cpp.llama_grammar`` -- a separate Python port, not the same
-    codebase as upstream ``ggml-org/llama.cpp``'s own converter or server)
-    compiles the schema into a GBNF grammar and passes it to the underlying
-    completion call as a distinct ``grammar`` sampling parameter. That
-    grammar masks every token the model is allowed to emit at each
-    generation step, so structural conformance is a property of the
-    installed ``llama-cpp-python`` version, not of the loaded model's own
-    training -- confirmed by direct testing across unrelated GGUF models.
-
-    Enforced keywords (verified against the installed converter's source,
-    not just its docs): ``type``, ``enum``, ``const``, ``properties``,
-    ``required``, ``additionalProperties``, ``items``, ``prefixItems``,
-    ``minItems``, ``maxItems``, ``minLength``, ``maxLength``, ``pattern``,
-    ``oneOf``, ``anyOf``, ``allOf``, ``$ref`` (and ``$defs`` via ref
-    resolution), and ``format`` restricted to ``uuid``/``date``/``time``/
-    ``date-time``. Decorative-only keywords -- accepted without error but
-    never enforced -- are ``title``, ``description``, ``examples``,
-    ``default``, and, notably, ``minimum``/``maximum``/
-    ``exclusiveMinimum``/``exclusiveMaximum``. That last group is a real,
-    live-verified limitation of the installed dependency, not a
-    documentation gap: the converter's numeric-type handling carries a
-    literal ``# TODO: support minimum, maximum, exclusiveMinimum,
-    exclusiveMaximum`` and silently ignores those keywords outright. A
-    caller who relies on a numeric bound being enforced gets no error
-    telling them it wasn't.
-
-    This engine needs no override of any kind -- every engine now forwards
-    ``output_structure`` unmodified by default (structured-generation
-    Pass 8 removed AA's own schema-pruning mechanism entirely).
-
-    The compiled grammar constrains sampling only; it is never woven into
-    the prompt or message content the model actually reads. A caller who
-    wants the model to understand what a field is *for* -- not just its
-    name and type -- must still describe that intent in the prompt or
-    system message themselves. Confirmed directly: a prompt with no mention
-    of the requested schema at all still produces structurally valid output
-    against that schema, but with semantically arbitrary field values. This
-    is a known, documented limitation for this pass, not mitigated here.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified as ``response_format =
+    {"type": "json_object", "schema": ...}``. llama-cpp-python compiles the
+    schema into a GBNF grammar that constrains sampling locally, so
+    conformance is a property of the installed ``llama-cpp-python`` version,
+    not of the model. Structural keywords (``type``, ``enum``, ``properties``,
+    ``required``, ``items``, ``pattern``, ``oneOf``/``anyOf``/``allOf``,
+    ``$ref``, ...) are enforced; ``minimum``/``maximum`` and their exclusive
+    forms are silently ignored. The grammar never reaches the prompt, so
+    describe each field's intent in the prompt or system message.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({"messages", "response_format", "stream"})
 
     def __init__(
             self,
-            # ── AtomicInvokable identity ──────────────────────────────────────────
+            model: str | None = None,
             name: str | None = None,
-            description: str = "Llama.cpp LLM Engine",
-            # ── Model source ──────────────────────────────────────────────────────
-            model_path: str | None = None,
-            repo_id: str | None = None,
-            filename: str | None = None,
-            # ── Llama constructor config (explicit surface) ───────────────────────
-            n_ctx: int = 2048,
-            verbose: bool = False,
-            # ── Generation defaults — applied at every create_chat_completion call ─
-            temperature: float | None = None,
-            top_k: int | None = None,
-            top_p: float | None = None,
-            min_p: float | None = None,
-            max_tokens: int | None = None,
-            repeat_penalty: float | None = None,
-            seed: int | None = None,
-            stop: str | list[str] | None = None,
-            *,
-            # ── HF download options — only used when loading via Hub ─────────────
-            subfolder: str | None = None,
-            revision: str | None = None,
-            hf_token: str | bool | None = None,
-            cache_dir: str | None = None,
-            local_dir: str | None = None,
-            local_files_only: bool = False,
-            # ── Base engine config ────────────────────────────────────────────────
-            timeout_seconds: float = 30.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
-            # ── Remaining Llama constructor params forwarded verbatim ─────────────
-            **llama_kwargs: Any,
+            description: str | None = None,
+            llm: Llama | None = None,
+            **client_kwargs: Any,
     ) -> None:
         """
-        Parameters
-        ----------
+        model:
+            Path to a local GGUF/GGML file, loaded through
+            ``Llama(model_path=...)``.
+        llm:
+            A preloaded ``Llama``, used as is. Exactly one of ``model`` and
+            ``llm`` is required.
         name:
-            Optional human-friendly engine name; defaults to ``"llama_cpp"``.
+            Defaults to the class name; stored as given.
         description:
-            Shared ``AtomicInvokable`` identity field.
-        model_path:
-            Direct path to a local GGUF/GGML model file.
-        repo_id:
-            Hugging Face repo ID used with ``filename`` when ``model_path`` is
-            omitted.
-        filename:
-            Model filename within ``repo_id`` when resolving from Hugging Face.
-        n_ctx:
-            Context window size; overrides Llama's default of 512.
-        verbose:
-            Verbose logging flag; overrides Llama's default of True.
-        temperature, top_k, top_p, min_p, max_tokens, repeat_penalty, seed, stop:
-            Generation defaults applied at every ``create_chat_completion`` call.
-            ``None`` omits the parameter from the call.
-        subfolder:
-            Optional subfolder within the HF repo (for repos with nested files).
-        revision:
-            Optional HF branch, tag, or commit hash.
-        hf_token:
-            Optional HF auth token; ``True`` uses the locally configured token.
-        cache_dir:
-            Optional HF cache root directory.
-        local_dir:
-            Optional local directory where the model file is materialized.
-        local_files_only:
-            If True, resolve only from local cache; do not download.
-        timeout_seconds, max_retries,
-        retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` configuration.
-        **llama_kwargs:
-            Additional keyword arguments forwarded verbatim to ``Llama(...)``.
-            Covers the full llama-cpp-python constructor surface: ``n_gpu_layers``,
-            ``n_threads``, ``flash_attn``, ``chat_format``, ``use_mmap``, etc.
-        """
-        # 1. Name sanitization + super init
-        sanitized_name = (
-                name or "llama_cpp"
-        ).replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
-        super().__init__(
-            name=sanitized_name,
-            description=description or "Llama.cpp LLM Engine",
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
-        )
+            Defaults to ``"Llama.cpp LLM Engine"``.
+        **client_kwargs:
+            Keyword arguments forwarded unchanged to ``Llama(...)``
+            (``n_gpu_layers``, ``n_threads``, ``flash_attn``, ``chat_format``,
+            ...). ``n_ctx=2048`` and ``verbose=False`` are applied under them.
+            Combining ``llm`` with ``client_kwargs`` raises.
 
-        # 2. SDK presence check
+        1. SDK presence check.
+        2. Exactly one of ``model`` / ``llm``.
+        3. ``llm`` together with ``client_kwargs`` raises.
+        4. Base init.
+        5. ``model`` given: load ``Llama`` with the defaults under the caller's kwargs.
+        6. Store the ``Llama``, its model path and the client kwargs.
+        """
+        # 1. SDK presence check
+        self._require_sdk()
+
+        # 2. Source check
+        if (model is None) == (llm is None):
+            raise LLMEngineError(
+                "LlamaCppEngine requires exactly one of 'model' or 'llm'."
+            )
+
+        # 3. A preloaded Llama takes no load kwargs
+        if llm is not None and client_kwargs:
+            raise LLMEngineError(
+                "LlamaCppEngine: pass either 'llm' or client kwargs, not both."
+            )
+
+        # 4. Base init
+        super().__init__(name=name, description=description or "Llama.cpp LLM Engine")
+
+        # 5. Load the model when given a path
+        if model is not None:
+            load_kwargs: Dict[str, Any] = dict(_LOAD_DEFAULTS)
+            load_kwargs.update(client_kwargs)
+            llm = Llama(model_path=str(model), **load_kwargs)
+
+        # 6. Store state
+        self._llm = llm
+        self._model_path = str(llm.model_path)
+        # ``Llama`` is not thread-safe and holds one context; serialize calls.
+        self._call_lock = threading.Lock()
+
+    @staticmethod
+    def _require_sdk() -> None:
+        """Raise ``LLMEngineError`` when llama-cpp-python is not installed."""
         if Llama is None:
             raise LLMEngineError(
                 "LlamaCppEngine "
                 + format_missing_dependency("llama-cpp-python", "llama", _LLAMA_IMPORT_ERROR)
             ) from _LLAMA_IMPORT_ERROR
 
-        # 3. Resolve model path
-        if model_path:
-            resolved_model_path = model_path
-        elif repo_id and filename:
-            if hf_hub_download is None:
-                raise LLMEngineError(
-                    "LlamaCppEngine, when `repo_id` and `filename` are used, "
-                    + format_missing_dependency("huggingface-hub", "llama", _HF_IMPORT_ERROR)
-                ) from _HF_IMPORT_ERROR
-            resolved_model_path = hf_hub_download(
+    @classmethod
+    def from_pretrained(
+            cls,
+            repo_id: str,
+            filename: str,
+            *,
+            additional_files: list[str] | None = None,
+            local_dir: str | None = None,
+            cache_dir: str | None = None,
+            name: str | None = None,
+            description: str | None = None,
+            **client_kwargs: Any,
+    ) -> LlamaCppEngine:
+        """
+        Download (or reuse from cache) a GGUF from the Hugging Face Hub and
+        wrap it. A shallow wrapper over ``Llama.from_pretrained``: ``filename``
+        is a glob, sharded GGUF files come through ``additional_files``.
+        ``revision``, ``subfolder``, ``hf_token`` and ``local_files_only`` are
+        not exposed (use ``HF_TOKEN`` and a pre-downloaded ``model`` path).
+
+        1. SDK presence check (before any download).
+        2. Load defaults (``n_ctx=2048``, ``verbose=False``) under the caller's kwargs.
+        3. ``Llama.from_pretrained``; a missing ``huggingface-hub`` becomes ``LLMEngineError``.
+        4. Wrap the result through ``llm=``.
+        5. Record the client kwargs and return.
+        """
+        # 1. SDK presence check
+        cls._require_sdk()
+
+        # 2. Load kwargs
+        load_kwargs: Dict[str, Any] = dict(_LOAD_DEFAULTS)
+        load_kwargs.update(client_kwargs)
+
+        # 3. Download and load
+        try:
+            llm = Llama.from_pretrained(
                 repo_id=repo_id,
                 filename=filename,
-                subfolder=subfolder,
-                revision=revision,
-                cache_dir=cache_dir,
+                additional_files=additional_files,
                 local_dir=local_dir,
-                local_files_only=bool(local_files_only),
-                token=hf_token,
+                cache_dir=cache_dir,
+                **load_kwargs,
             )
-        else:
+        except ImportError as exc:
             raise LLMEngineError(
-                "LlamaCppEngine requires either `model_path` or both "
-                "`repo_id` and `filename`."
-            )
+                "LlamaCppEngine.from_pretrained "
+                + format_missing_dependency("huggingface-hub", "llama", exc)
+            ) from exc
 
-        # 4. Build Llama instance
-        self._llm = Llama(
-            model_path=str(resolved_model_path),
-            n_ctx=int(n_ctx),
-            verbose=bool(verbose),
-            **llama_kwargs,
-        )
-
-        # 5. Store config
-        self._model_path = str(resolved_model_path)
-        self._repo_id = repo_id
-        self._filename = filename
-        self._has_hf_token = hf_token is not None
-        self._n_ctx = int(n_ctx)
-        self._verbose = bool(verbose)
-        self._llama_kwargs = dict(llama_kwargs)
-        self.temperature = float(temperature) if temperature is not None else None
-        self.top_k = int(top_k) if top_k is not None else None
-        self.top_p = float(top_p) if top_p is not None else None
-        self.min_p = float(min_p) if min_p is not None else None
-        self.max_tokens = int(max_tokens) if max_tokens is not None else None
-        self.repeat_penalty = float(repeat_penalty) if repeat_penalty is not None else None
-        self.seed = int(seed) if seed is not None else None
-        self.stop = stop
+        # 4-5. Wrap and record
+        engine = cls(name=name, description=description, llm=llm)
+        return engine
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
 
     @property
-    def model_path(self) -> str:
-        """Concrete local path of the loaded model; fixed at construction."""
+    def model(self) -> str:
+        """Concrete local path of the loaded model (``llm.model_path``); read-only."""
         return self._model_path
 
-    @property
-    def repo_id(self) -> Optional[str]:
-        """Hugging Face repo ID used to download the model; fixed at construction."""
-        return self._repo_id
-
-    @property
-    def filename(self) -> Optional[str]:
-        """Model filename within the repo; fixed at construction."""
-        return self._filename
-
-    @property
-    def n_ctx(self) -> int:
-        """Context window size passed to Llama at construction."""
-        return self._n_ctx
-
-    @property
-    def verbose(self) -> bool:
-        """Verbose flag passed to Llama at construction."""
-        return self._verbose
+    def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
+        """
+        1. Reserved keys are rejected (base check).
+        2. Every key must be a named parameter of ``create_chat_completion``.
+        """
+        keys = list(keys)
+        super()._validate_runtime_keys(keys)
+        valid = {
+            p.name
+            for p in inspect.signature(self._llm.create_chat_completion).parameters.values()
+            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        }
+        unknown = set(keys) - valid
+        if unknown:
+            raise LLMEngineError(
+                f"LlamaCppEngine.update_runtime_parameters: unknown keys {sorted(unknown)}; "
+                f"valid keys: {sorted(valid - self._RESERVED_RUNTIME_KEYS)}"
+            )
 
     # ------------------------------------------------------------------ #
     # LLMEngine template hooks
@@ -310,105 +255,58 @@ class LlamaCppEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Map normalized messages (+ optionally the caller's raw
-        structured-output template) to llama.cpp's chat completion schema.
+        The exact ``create_chat_completion`` kwargs.
 
-        - `messages` are already validated (role/content strings).
-        - `attachments` are ignored; this engine does not support attachments.
-        - `output_structure`, when given, is the caller's raw schema,
-          forwarded unmodified, and is wired into
-          `response_format={"type": "json_object", "schema":
-          output_structure}`.
+        1. Snapshot the runtime parameters.
+        2. Engine-owned ``messages``.
+        3. Structured call: ``response_format={"type": "json_object", "schema": output_structure}``
+           (the schema is forwarded unmodified).
         """
-        # llama-cpp-python exposes an OpenAI-compatible chat API, so we
-        # simply pass the messages through unchanged.
-        payload: Dict[str, Any] = {"messages": messages}
+        payload: Dict[str, Any] = dict(self._runtime_parameters)
+        payload.update(messages=messages)
         if output_structure is not None:
-            payload["response_format"] = {
-                "type": "json_object",
-                "schema": output_structure,
-            }
+            payload.update(
+                response_format={"type": "json_object", "schema": output_structure}
+            )
         return payload
 
     def _call_provider(self, payload: Any) -> Any:
-        """
-        Perform a single llama.cpp chat completion call.
+        """One ``create_chat_completion`` call; error wrapping is the template's.
 
-        Retries and error-wrapping are handled by `LLMEngine._call_with_retries`.
+        Calls on one engine are serialized (``Llama`` is not thread-safe),
+        for the sync path and the worker-thread async path alike.
         """
-        chat_kwargs: Dict[str, Any] = {}
-        if self.temperature is not None:
-            chat_kwargs["temperature"] = self.temperature
-        if self.top_k is not None:
-            chat_kwargs["top_k"] = self.top_k
-        if self.top_p is not None:
-            chat_kwargs["top_p"] = self.top_p
-        if self.min_p is not None:
-            chat_kwargs["min_p"] = self.min_p
-        if self.max_tokens is not None:
-            chat_kwargs["max_tokens"] = self.max_tokens
-        if self.repeat_penalty is not None:
-            chat_kwargs["repeat_penalty"] = self.repeat_penalty
-        if self.seed is not None:
-            chat_kwargs["seed"] = self.seed
-        if self.stop is not None:
-            chat_kwargs["stop"] = self.stop
-        if "response_format" in payload:
-            chat_kwargs["response_format"] = payload["response_format"]
-
-        return self._llm.create_chat_completion(
-            messages=payload["messages"],
-            **chat_kwargs,
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Local llama.cpp inference has no network layer, so there is no
-        status-code or connection-error signal to discriminate transient
-        from permanent failures. Deliberate policy: retry blindly, bounded
-        only by the shared attempt budget.
-        """
-        return attempt <= self._max_retries
+        with self._call_lock:
+            return self._llm.create_chat_completion(**payload)
 
     def _extract_result(
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual OR structured reply from a llama.cpp
-        chat completion response.
-
-        Expected structure (OpenAI-compatible):
-
-            response["choices"][0]["message"]["content"] -> str
-
-        When `requested_structured` is True, the joined text is parsed via
-        `json.loads`; a parse failure falls back to returning the raw text
-        rather than raising, matching the base `LLMEngine` fallback contract
-        (structured-generation Pass 3). Grammar-constrained decoding makes a
-        genuinely invalid-JSON response effectively impossible here except
-        via `max_tokens` truncation mid-structure -- the fallback exists for
-        that case, not for provider unreliability the way it does for the
-        remote engines.
-
-        Renamed from `_extract_text` (structured-generation Pass 1
-        convention); gains `requested_structured` per the Pass 3 base
-        contract.
+        Read ``response["choices"][0]["message"]["content"]`` (``None`` counts
+        as ``""``); on a structured call, return its ``json.loads`` value
+        (raw text on a parse failure). An unexpected shape raises.
         """
         try:
             choices = response["choices"]
-            if not choices:
-                raise KeyError("choices is empty")
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
         except Exception as exc:
             raise LLMEngineError(
                 "LlamaCppEngine._extract_result: unexpected response shape"
             ) from exc
-        text = str(content).strip()
+        if not choices:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_result: unexpected response shape (empty choices)"
+            )
+        try:
+            content = choices[0].get("message", {}).get("content", "")
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_result: unexpected response shape"
+            ) from exc
+        text = str(content or "")
         if not requested_structured:
             return text
         try:
@@ -421,12 +319,21 @@ class LlamaCppEngine(LLMEngine):
         Extract llama-cpp-python chat-completion usage into a LlamaCppTokenUsage
         record.
 
-        The default ``create_chat_completion(...)`` path returns an
-        OpenAI-compatible dictionary response whose ``usage`` mapping contains
-        prompt, completion, and total token counts.
+        The response is an OpenAI-compatible dict whose ``usage`` mapping holds
+        prompt, completion and total counts. A response with no ``usage`` key
+        raises unless ``require_usage`` is ``False``, which yields an all-zero
+        record; a present but malformed ``usage`` always raises.
         """
         try:
             usage = response["usage"]
+        except KeyError as exc:
+            if not self.require_usage:
+                return LlamaCppTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: response missing usage."
+            ) from exc
         except Exception as exc:
             raise LLMEngineError(
                 "LlamaCppEngine._extract_token_usage: response missing usage."
@@ -454,12 +361,7 @@ class LlamaCppEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> LLMModelData:
-        """
-        Return configured llama.cpp model identity data for this engine.
-
-        Model data is derived from the concrete local path loaded by
-        llama-cpp-python.
-        """
+        """Return the llama.cpp model identity (the loaded local path)."""
         return LlamaCppModelData(
             provider="llama_cpp",
             model_path=self._model_path,
@@ -471,27 +373,9 @@ class LlamaCppEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for LlamaCppEngine.
-
-        Includes non-secret model source, model-load config, and generation
-        defaults. The Hugging Face token value is never serialized.
+        Diagnostic snapshot: the base fields plus ``model`` (the loaded path).
+        No client kwargs (live objects, credentials).
         """
         base = super().to_dict()
-        base.update({
-            "model_path": self._model_path,
-            "repo_id": self._repo_id,
-            "filename": self._filename,
-            "has_hf_token": self._has_hf_token,
-            "n_ctx": self._n_ctx,
-            "verbose": self._verbose,
-            "llama_kwargs": dict(self._llama_kwargs),
-            "temperature": self.temperature,
-            "top_k": self.top_k,
-            "top_p": self.top_p,
-            "min_p": self.min_p,
-            "max_tokens": self.max_tokens,
-            "repeat_penalty": self.repeat_penalty,
-            "seed": self.seed,
-            "stop": self.stop,
-        })
+        base.update({"model": self._model_path})
         return base

@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.composites import Graph, Pipeline
+from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import OpenAIEngine
 
 
@@ -49,13 +50,16 @@ def _openai_engine() -> OpenAIEngine:
         pytest.skip("OPENAI_API_KEY is not set.")
 
     try:
-        return OpenAIEngine(
+        engine = OpenAIEngine(
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=0,
-            timeout_seconds=60,
-            max_retries=0,
+            timeout=60,
         )
-    except RuntimeError as exc:
+        engine.update_runtime_parameters(temperature=0)
+        return engine
+    except LLMEngineError as exc:
+        # Skip only for a missing SDK; any other failure is misconfiguration.
+        if "pip install" not in str(exc):
+            raise
         pytest.skip(str(exc))
 
 

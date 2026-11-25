@@ -7,7 +7,6 @@ from typing import Any, Callable, ClassVar, Mapping, Optional
 
 from ..mcp.mcp_client_hub import MCPClientHub
 from ..a2a.a2a_client_hub import A2AClientHub
-from ..a2a.py_a2atomic_client import PyA2AtomicClient
 
 from .toolagent import ToolAgent
 from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
@@ -107,7 +106,7 @@ class ScriptActAgent(ToolAgent):
         description: str,
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub]] = None,
         pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
         post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),
@@ -243,13 +242,13 @@ class ScriptActAgent(ToolAgent):
                 f"tool name {name!r} collides with a real Python builtin "
                 "of the same name -- a tool with this name would be "
                 "permanently unreachable (the builtin always resolves "
-                "first). Build the tool with a different name via toolify."
+                "first). Build the tool with a different name via to_tool."
             )
         if keyword.iskeyword(name):
             raise ToolRegistrationError(
                 f"tool name {name!r} is a Python keyword; a script could "
                 "never call it. Build the tool with a different name via "
-                "toolify."
+                "to_tool."
             )
 
     def _seed_task(self, task: ScriptActAgentTask) -> None:
@@ -272,7 +271,7 @@ class ScriptActAgent(ToolAgent):
             raise AgentInvocationError(
                 f"{type(self).__name__}.{self.name}: context variable name(s) "
                 f"unusable in a script: {detail}. Rename or forget the "
-                "variable, or rename the tool with toolify."
+                "variable, or rename the tool with to_tool."
             )
 
     # ------------------------------------------------------------------ #

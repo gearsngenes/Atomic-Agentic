@@ -28,31 +28,28 @@ HEADERS     = None  # e.g., {"Authorization": "Bearer ..."} if your server needs
 # One planned MCPClientHub configuration per transport -- edit these directly
 # to try out read_timeout_seconds/client_kwargs/session_kwargs. Only
 # CLIENT_CONFIGS[TRANSPORT_MODE] is actually used to build `client` below.
-# persistent=False below matches this example's original one-shot-per-call
-# behavior. Set it to True (and use `with MCPClientHub(...) as client:` or
+# persistent defaults to False (one-shot per call). Add persistent=True to a
+# config (and use `with MCPClientHub(...) as client:` or
 # call client.close() when done) to hold one connection open across every
 # tool call this script makes instead of reopening per call.
 CLIENT_CONFIGS: dict[str, dict[str, Any]] = {
     "stdio": dict(
+        location=sys.executable,
         transport_mode="stdio",
-        persistent=False,
-        command=sys.executable,
         args=[str(Path(__file__).parent / "sample_mcp_server.py")],
         client_kwargs={"cwd": str(Path(__file__).parent)},
         read_timeout_seconds=30.0,
     ),
     "sse": dict(
+        location="http://127.0.0.1:8000/sse",
         transport_mode="sse",
-        persistent=False,
-        endpoint="http://127.0.0.1:8000/sse",
         headers=HEADERS,
         client_kwargs={"timeout": 5, "sse_read_timeout": 300},
         read_timeout_seconds=30.0,
     ),
     "streamable_http": dict(
+        location="http://127.0.0.1:8000/mcp",
         transport_mode="streamable_http",
-        persistent=False,
-        endpoint="http://127.0.0.1:8000/mcp",
         headers=HEADERS,
         client_kwargs={"terminate_on_close": True},
         read_timeout_seconds=30.0,
@@ -66,8 +63,6 @@ EXAMPLE_INPUTS: dict[str, dict[str, Any]] = {
     "factorial":  {"n": 5},
     "derivative": {"func": "x**2 + 2*x + 1", "x": 3.0},
 }
-
-client = MCPClientHub(**CLIENT_CONFIGS[TRANSPORT_MODE])
 
 def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
@@ -90,16 +85,20 @@ def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
         print("invoke error:", e)
 
 def main() -> None:
-    print(f"Connecting via {TRANSPORT_MODE}:", client.endpoint or client.command)
-    tool_names = client.list_tools()
-    print("Discovered tools:", tool_names.keys())
+    with MCPClientHub(**CLIENT_CONFIGS[TRANSPORT_MODE]) as client:
+        print(f"Connected via {TRANSPORT_MODE}:", client.location)
+        tool_names = list(client.list_tools())
+        print("Discovered tools:", tool_names)
 
-    for name in tool_names:
-        proxy = MCPProxyTool(client, name)
-        _show_plan(proxy)
+        for name in tool_names:
+            proxy = MCPProxyTool(client, name)
+            _show_plan(proxy)
 
-        inputs = EXAMPLE_INPUTS.get(name)
-        _invoke(proxy, inputs)
+            inputs = EXAMPLE_INPUTS.get(name)
+            if inputs is None:
+                print(f"(no example inputs for {name!r}; skipping invocation)")
+                continue
+            _invoke(proxy, inputs)
 
 if __name__ == "__main__":
     main()

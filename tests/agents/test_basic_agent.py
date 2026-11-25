@@ -188,7 +188,7 @@ class TestBasicAgentInstructionRendering:
 
         agent = make_basic_agent(instructions=instructions_fn)
 
-        # A toolified callable surfaces as the Tool's own ToolInvocationError.
+        # A callable converted by to_tool surfaces as the Tool's own ToolInvocationError.
         with pytest.raises(ToolInvocationError, match="instructions blew up"):
             agent.invoke({"prompt": "hi"})
 

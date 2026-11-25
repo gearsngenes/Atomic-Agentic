@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import MCPToolError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import MCPToolResult
 from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
@@ -61,7 +61,9 @@ class FakeMCPClientHub(MCPClientHub):
         async_result: Any | None = None,
         async_error: Exception | None = None,
         error: Exception | None = None,
+        hub_name: str | None = None,
     ) -> None:
+        self._hub_name = hub_name
         self._tools = {"search": search_metadata()} if tools is None else tools
         self.result = (
             result
@@ -77,31 +79,18 @@ class FakeMCPClientHub(MCPClientHub):
         self.error = error
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.async_calls: list[tuple[str, dict[str, Any]]] = []
-        self._headers: Mapping[str, str] | None = None
 
     @property
     def transport_mode(self) -> str:
         return "stdio"
 
     @property
-    def endpoint(self) -> str | None:
-        return None
-
-    @property
-    def command(self) -> str | None:
+    def location(self) -> str:
         return "python"
 
     @property
-    def args(self) -> tuple[str, ...] | None:
-        return ("fake_server.py",)
-
-    @property
-    def headers(self) -> Mapping[str, str] | None:
-        return self._headers
-
-    @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
-        self._headers = value
+    def name(self) -> str | None:
+        return self._hub_name
 
     def list_tools(self) -> dict[str, dict[str, Any]]:
         return dict(self._tools)
@@ -121,9 +110,7 @@ class FakeMCPClientHub(MCPClientHub):
     def to_dict(self) -> dict[str, Any]:
         return {
             "transport_mode": self.transport_mode,
-            "command": self.command,
-            "args": list(self.args or ()),
-            "has_headers": self.headers is not None,
+            "location": self.location,
         }
 
 
@@ -131,15 +118,8 @@ def make_tool(
     *,
     hub: FakeMCPClientHub | None = None,
     remote_name: str = "search",
-    name: str | None = None,
-    description: str = "",
 ) -> MCPProxyTool:
-    return MCPProxyTool(
-        hub or FakeMCPClientHub(),
-        remote_name,
-        name=name,
-        description=description,
-    )
+    return MCPProxyTool(hub or FakeMCPClientHub(), remote_name)
 
 
 class TestMCPProxyToolConstruction:
@@ -152,24 +132,13 @@ class TestMCPProxyToolConstruction:
         assert tool.name == "search"
         assert tool.description == "Remote search tool."
         assert tool.full_name == "MCPProxyTool.search"
-        assert tool.transport_mode == "stdio"
-        assert tool.command == "python"
-        assert tool.args == ("fake_server.py",)
 
-    def test_remote_name_is_stripped(self) -> None:
-        tool = make_tool(remote_name="  search  ")
+    def test_description_is_replaceable_through_setter(self) -> None:
+        tool = make_tool()
 
-        assert tool.remote_name == "search"
+        tool.description = "Local description."
 
-    def test_explicit_identity_overrides_defaults(self) -> None:
-        tool = make_tool(
-            name="local_search",
-            description="Local description.",
-        )
-
-        assert tool.name == "local_search"
         assert tool.description == "Local description."
-        assert tool.full_name == "MCPProxyTool.local_search"
 
     def test_description_falls_back_to_stub_when_remote_description_missing(self) -> None:
         hub = FakeMCPClientHub(
@@ -182,28 +151,22 @@ class TestMCPProxyToolConstruction:
 
         assert tool.description == "MCP proxy tool 'search'"
 
-    def test_missing_remote_name_raises(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
+    def test_blank_remote_name_raises_hub_not_found(self) -> None:
+        with pytest.raises(MCPToolError, match="not found"):
             make_tool(remote_name="   ")
 
-    def test_non_hub_client_hub_raises(self) -> None:
-        with pytest.raises(TypeError, match="client_hub"):
-            MCPProxyTool(object(), "search")  # type: ignore[arg-type]
-
-    def test_positional_order_is_hub_remote_name_name_description(self) -> None:
+    def test_constructor_takes_only_hub_and_name(self) -> None:
         hub = FakeMCPClientHub()
 
-        tool = MCPProxyTool(hub, "search", "local_search", "Local description.")
-
-        assert tool.client_hub is hub
-        assert tool.remote_name == "search"
-        assert tool.name == "local_search"
-        assert tool.description == "Local description."
+        with pytest.raises(TypeError):
+            MCPProxyTool(hub, "search", "local_search")  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            MCPProxyTool(hub, "search", description="x")  # type: ignore[call-arg]
 
     def test_missing_remote_tool_raises(self) -> None:
         hub = FakeMCPClientHub(tools={})
 
-        with pytest.raises(ToolDefinitionError, match="not found"):
+        with pytest.raises(MCPToolError, match="not found"):
             make_tool(hub=hub)
 
 
@@ -474,13 +437,12 @@ class TestMCPProxyToolMakeResult:
 
         assert result.remote_name == "search"
 
-    def test_result_carries_command_for_stdio_transport(self) -> None:
+    def test_result_carries_location(self) -> None:
         tool = make_tool()
 
         result = tool.invoke({"query": "hello"})
 
-        assert result.command == "python"
-        assert result.endpoint is None
+        assert result.location == "python"
 
     def test_to_dict_includes_transport_fields(self) -> None:
         tool = make_tool()
@@ -489,8 +451,9 @@ class TestMCPProxyToolMakeResult:
 
         assert data["transport_mode"] == "stdio"
         assert data["remote_name"] == "search"
-        assert data["command"] == "python"
-        assert data["endpoint"] is None
+        assert data["location"] == "python"
+        assert "endpoint" not in data
+        assert "command" not in data
 
     def test_async_invoke_also_returns_mcp_tool_result(self) -> None:
         hub = FakeMCPClientHub(
@@ -514,11 +477,10 @@ class TestMCPProxyToolResultHook:
 
         payload = tool.execute((), {"query": "hello"})
 
-        assert set(payload) == {"transport_mode", "remote_name", "endpoint", "command", "result"}
-        assert payload["transport_mode"] == tool.transport_mode
+        assert set(payload) == {"transport_mode", "remote_name", "location", "result"}
+        assert payload["transport_mode"] == "stdio"
         assert payload["remote_name"] == tool.remote_name
-        assert payload["endpoint"] == tool.endpoint
-        assert payload["command"] == tool.command
+        assert payload["location"] == "python"
 
     def test_async_execute_returns_payload_with_transport_fields(self) -> None:
         hub = FakeMCPClientHub(
@@ -529,10 +491,9 @@ class TestMCPProxyToolResultHook:
         payload = asyncio.run(tool.async_execute((), {"query": "hello"}))
 
         assert payload == {
-            "transport_mode": tool.transport_mode,
+            "transport_mode": "stdio",
             "remote_name": tool.remote_name,
-            "endpoint": tool.endpoint,
-            "command": tool.command,
+            "location": "python",
             "result": "x",
         }
 
@@ -542,10 +503,9 @@ class TestMCPProxyToolResultHook:
         result = tool.invoke({"query": "hello"})
 
         assert type(result) is MCPToolResult
-        assert result.transport_mode == tool.transport_mode
+        assert result.transport_mode == "stdio"
         assert result.remote_name == tool.remote_name
-        assert result.endpoint == tool.endpoint
-        assert result.command == tool.command
+        assert result.location == "python"
 
     def test_async_invoke_populates_transport_fields(self) -> None:
         hub = FakeMCPClientHub(
@@ -556,7 +516,7 @@ class TestMCPProxyToolResultHook:
         result = asyncio.run(tool.async_invoke({"query": "hello"}))
 
         assert type(result) is MCPToolResult
-        assert result.transport_mode == tool.transport_mode
+        assert result.transport_mode == "stdio"
         assert result.remote_name == tool.remote_name
 
     def test_no_make_result_and_no_hook_overrides(self) -> None:
@@ -567,20 +527,61 @@ class TestMCPProxyToolResultHook:
         assert "_async_invoke_impl" not in MCPProxyTool.__dict__
 
 
-class TestMCPProxyToolHeaders:
-    def test_headers_getter_reads_from_client_hub(self) -> None:
-        hub = FakeMCPClientHub()
-        hub._headers = {"X-Token": "abc"}
+class TestNaming:
+    def test_named_hub_prefixes_tool_name(self) -> None:
+        tool = make_tool(hub=FakeMCPClientHub(hub_name="files"))
+
+        assert tool.name == "files_search"
+        assert tool.remote_name == "search"
+
+    def test_unnamed_hub_uses_raw_name(self) -> None:
+        tool = make_tool(hub=FakeMCPClientHub(hub_name=None))
+
+        assert tool.name == "search"
+
+    def test_call_path_uses_raw_remote_name(self) -> None:
+        hub = FakeMCPClientHub(hub_name="files")
         tool = make_tool(hub=hub)
 
-        assert tool.headers == hub.headers
+        tool.invoke({"query": "hello"})
 
-    def test_headers_has_no_setter(self) -> None:
-        hub = FakeMCPClientHub()
+        assert hub.calls[0][0] == "search"
+
+    def test_unknown_name_raises(self) -> None:
+        with pytest.raises(MCPToolError, match="missing"):
+            make_tool(remote_name="missing")
+
+    def test_blank_name_raises(self) -> None:
+        with pytest.raises(MCPToolError):
+            make_tool(remote_name="  ")
+
+    def test_description_remote_fallback_and_setter(self) -> None:
+        assert make_tool().description == "Remote search tool."
+
+        hub = FakeMCPClientHub(
+            hub_name="files", tools={"search": search_metadata(description="")}
+        )
         tool = make_tool(hub=hub)
+        assert tool.description == "MCP proxy tool 'files_search'"
 
-        with pytest.raises(AttributeError):
-            tool.headers = {"Authorization": "Bearer token"}  # type: ignore[misc]
+        tool.description = "Replaced."
+        assert tool.description == "Replaced."
+
+    def test_result_validates_payload_fields(self) -> None:
+        result = make_tool().invoke({"query": "hello"})
+
+        assert isinstance(result, MCPToolResult)
+        assert (result.transport_mode, result.remote_name, result.location) == (
+            "stdio",
+            "search",
+            "python",
+        )
+
+    def test_passthrough_properties_are_gone(self) -> None:
+        tool = make_tool()
+
+        for attr in ("endpoint", "command", "args", "headers", "transport_mode"):
+            assert not hasattr(tool, attr)
 
 
 class TestMCPProxyToolHeadersAndSerialization:
@@ -594,3 +595,29 @@ class TestMCPProxyToolHeadersAndSerialization:
         assert data["remote_name"] == "search"
         assert data["raw_metadata"] == {"title": "Search"}
         assert data["client_hub"]["transport_mode"] == "stdio"
+
+
+class TestPackage:
+    def test_package_builds_the_payload(self) -> None:
+        tool = make_tool()
+
+        payload = tool._package({"structuredContent": {"result": "ok"}, "isError": False})
+
+        assert payload == {
+            "transport_mode": "stdio",
+            "remote_name": "search",
+            "location": "python",
+            "result": "ok",
+        }
+
+    def test_package_rejects_a_non_mapping_envelope(self) -> None:
+        with pytest.raises(ToolInvocationError, match="non-mapping result envelope"):
+            make_tool()._package(["not", "a", "mapping"])
+
+    def test_package_raises_on_is_error_and_treats_missing_flag_as_success(self) -> None:
+        tool = make_tool()
+
+        with pytest.raises(ToolInvocationError, match="isError=True"):
+            tool._package({"structuredContent": {"result": "x"}, "isError": True})
+
+        assert tool._package({"structuredContent": {"result": "x"}})["result"] == "x"

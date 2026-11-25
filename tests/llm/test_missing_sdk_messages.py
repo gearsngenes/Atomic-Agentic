@@ -22,7 +22,7 @@ ENGINES = [
     ("gemini_engine", lambda: GeminiEngine(model="m"), "genai", "_SDK_IMPORT_ERROR", "google-genai", "gemini"),
     ("mistral_engine", lambda: MistralEngine(model="m"), "Mistral", "_SDK_IMPORT_ERROR", "mistralai", "mistral"),
     ("litellm_engine", lambda: LiteLLMEngine(model="m"), "litellm", "_SDK_IMPORT_ERROR", "litellm", "litellm"),
-    ("llama_engine", lambda: LlamaCppEngine(model_path="x.gguf"), "Llama", "_LLAMA_IMPORT_ERROR", "llama-cpp-python", "llama"),
+    ("llama_engine", lambda: LlamaCppEngine(model="x.gguf"), "Llama", "_LLAMA_IMPORT_ERROR", "llama-cpp-python", "llama"),
 ]
 IDS = [row[0] for row in ENGINES]
 
@@ -64,12 +64,16 @@ class TestMissingSdkMessages:
 
 def test_llama_hf_hub_missing_names_huggingface_hub_and_extra(monkeypatch) -> None:
     module = _module("llama_engine")
-    monkeypatch.setattr(module, "Llama", lambda **kwargs: object())
-    monkeypatch.setattr(module, "hf_hub_download", None)
-    monkeypatch.setattr(module, "_HF_IMPORT_ERROR", None)
+
+    class _NoHubLlama:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            raise ImportError("no huggingface_hub")
+
+    monkeypatch.setattr(module, "Llama", _NoHubLlama)
 
     with pytest.raises(LLMEngineError) as excinfo:
-        LlamaCppEngine(repo_id="org/repo", filename="model.gguf")
+        LlamaCppEngine.from_pretrained("org/repo", "m.gguf")
 
     assert "huggingface-hub" in str(excinfo.value)
     assert "pip install atomic-agentic[llama]" in str(excinfo.value)

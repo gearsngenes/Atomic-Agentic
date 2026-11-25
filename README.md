@@ -52,9 +52,7 @@ pip install "atomic-agentic[all_llm]"     # every provider above
 ```
 
 Constructing an engine whose SDK is missing raises an error that names the
-extra to install. Other extras: `dev` (test tooling) and `python-a2a`
-(deprecated; the `python-a2a` client and host are removed in the final 2.0.0
-release, use `A2AClientHub` and `A2AtomicExecutor` instead).
+extra to install. The only other extra is `dev` (test tooling).
 
 `LiteLLMEngine` can also talk to a LiteLLM proxy over HTTP (`base_url`). The
 proxy server is a separate program: install it with `litellm[proxy]`, ideally
@@ -146,6 +144,53 @@ print(response.result)
 LLM Engines intentionally remain **thin adapters**.\
 They standardize provider APIs but do not perform reasoning or
 orchestration. Those responsibilities belong to agents.
+
+------------------------------------------------------------------------
+
+### Engine configuration
+
+**Messages.** `messages` is a non-empty list of `{"role", "content"}`
+mappings with string values. The role must be `system`, `user` or
+`assistant` (case-insensitive), at least one `user` message is required, and
+every message needs non-blank content, except that a `user` message may be
+blank while the engine has attachments. A system message is optional.
+Anything else raises `LLMEngineError`. A missing reply text is `""`; a
+structured call returns `None` only for a JSON `null`.
+
+**Runtime parameters.** Generation settings are the provider's own call
+parameters under that provider's own names (the snippet below uses OpenAI's),
+set after construction. `None` removes a key, every key is validated before
+any is applied, and the value is copied on the way in. `stream` is not
+supported on any engine.
+
+``` python
+engine.update_runtime_parameters(temperature=0.2, max_output_tokens=512)
+engine.update_runtime_parameters(temperature=None)   # removes the key
+print(engine.runtime_parameters)                      # a deep copy
+```
+
+**Engine attributes.**
+
+- `strict` (`OpenAIEngine`, `MistralEngine`): whether structured output
+  uses strict schema conformance; default `True`.
+- `block_separator` (`AnthropicEngine`): the string inserted between
+  multiple response text blocks; default `""`.
+- `require_usage` (every engine except `AnthropicEngine`, which always
+  reports usage): default `True`. A response that carries no usage object
+  raises; with `require_usage = False` the result carries all-zero token
+  usage instead.
+
+**From an SDK client.** `to_llm(client, model)` builds the matching engine
+from a pre-built SDK client, for example `to_llm(OpenAI(...), "gpt-4o")`
+returns an `OpenAIEngine`. A `llama_cpp.Llama` client takes no `model`; every
+other client requires one, and an unsupported client raises `TypeError`.
+Further settings go on the returned engine (`update_runtime_parameters`).
+
+**Attachments.** `OpenAIEngine`, `AnthropicEngine`, `GeminiEngine` and
+`MistralEngine` can hold files that ride along on every call:
+`engine.attach(path)`, `engine.detach(path)`, `engine.clear_attachments()`.
+`LlamaCppEngine` and `LiteLLMEngine` have no attach API. See
+[`examples/LLM_Examples/06_engine_configuration_demo.py`](examples/LLM_Examples/06_engine_configuration_demo.py).
 
 ------------------------------------------------------------------------
 
@@ -454,6 +499,7 @@ Atomic-Agentic/
 |-- src/
 |   |-- atomic_agentic/
 |       |-- a2a/
+|       |-- adapters/
 |       |-- agents/
 |       |-- composites/
 |       |-- constants/

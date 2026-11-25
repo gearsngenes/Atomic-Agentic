@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.composites import Graph
-from atomic_agentic.tools.toolification import to_invokable
+from atomic_agentic.adapters import to_invokable
 
 
 def inv(fn: Any, name: str = "n") -> Any:

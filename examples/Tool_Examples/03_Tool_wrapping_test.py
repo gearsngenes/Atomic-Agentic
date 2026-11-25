@@ -4,7 +4,7 @@ Base Tool demo: wrapping an Agent directly as a Tool.
 ``Tool`` treats any ``AtomicInvokable`` as a naturally well-behaved plain
 callable — no special wrapper type, no explicit "this is an invokable" flag.
 Schema comes straight from the wrapped Agent's own declared ``parameters``/
-``return_type`` (via ``extract_io``); name/description default to the
+``return_type`` (from the wrapped invokable, or via ``extract_io`` for a plain callable); name/description default to the
 Agent's own ``.name``/``.description`` (kept in sync as ``__name__``/
 ``__doc__`` by the base class). Invoking the resulting Tool calls the Agent
 through its own ``__call__``, which returns the unwrapped text response

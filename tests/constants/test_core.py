@@ -27,3 +27,34 @@ class TestNoValSentinel:
         assert NO_VAL != ""
         assert NO_VAL != []
         assert NO_VAL != {}
+
+
+class TestNoValSurvivesCopying:
+    """`is NO_VAL` is the contract; copying or pickling must not break it."""
+
+    def test_copy_and_deepcopy_return_the_sentinel(self) -> None:
+        import copy
+
+        from atomic_agentic.constants.core import NO_VAL
+
+        assert copy.copy(NO_VAL) is NO_VAL
+        assert copy.deepcopy(NO_VAL) is NO_VAL
+
+    def test_pickle_round_trip_returns_the_sentinel(self) -> None:
+        import pickle
+
+        from atomic_agentic.constants.core import NO_VAL
+
+        assert pickle.loads(pickle.dumps(NO_VAL)) is NO_VAL
+
+    def test_deepcopied_paramspec_keeps_its_no_default(self) -> None:
+        import copy
+
+        from atomic_agentic.constants.core import NO_VAL
+        from atomic_agentic.models.parameters import ParamSpec
+
+        spec = ParamSpec(name="q", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str")
+        clone = copy.deepcopy(spec)
+
+        assert clone == spec
+        assert clone.default is NO_VAL

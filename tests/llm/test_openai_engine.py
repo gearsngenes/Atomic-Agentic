@@ -5,7 +5,6 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 
 openai = pytest.importorskip("openai")
@@ -14,6 +13,7 @@ openai_module = importlib.import_module("atomic_agentic.llm.openai_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import OpenAIEngine
+from atomic_agentic.models.results import OpenAITokenUsage
 from atomic_agentic.utils.core import run_coro_sync
 
 
@@ -73,49 +73,32 @@ def _make_engine(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> OpenAIEngine
     return OpenAIEngine(model="gpt-4o-mini", **kwargs)
 
 
-class TestOpenAIImmutability:
-    def test_inline_cutoff_chars_is_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=500)
-        assert engine.inline_cutoff_chars == 500
-        with pytest.raises(AttributeError):
-            engine.inline_cutoff_chars = 999  # type: ignore[misc]
+class TestOpenAIClientKwargs:
+    def test_max_retries_goes_to_the_sdk_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        FakeOpenAIClient.instances.clear()
+        _make_engine(monkeypatch, max_retries=0)
+
+        assert FakeOpenAIClient.instances[-1].kwargs["max_retries"] == 0
 
 
 class TestOpenAIValidatingProperties:
-    def test_temperature_setter_rejects_non_number(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="temperature"):
-            engine.temperature = "not-a-number"  # type: ignore[assignment]
-
-    def test_max_output_tokens_setter_rejects_non_int(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="max_output_tokens"):
-            engine.max_output_tokens = "not-an-int"  # type: ignore[assignment]
-
-    def test_reasoning_setter_rejects_non_dict(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="reasoning"):
-            engine.reasoning = "not-a-dict"  # type: ignore[assignment]
-
-    def test_truncation_setter_rejects_non_str(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        with pytest.raises(LLMEngineError, match="truncation"):
-            engine.truncation = 123  # type: ignore[assignment]
-
     def test_strict_setter_rejects_non_bool(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="strict"):
             engine.strict = "not-a-bool"  # type: ignore[assignment]
+
+    def test_strict_defaults_true_and_is_settable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        assert engine.strict is True
+
+        engine.strict = False
+
+        assert engine.strict is False
+        assert "strict" not in engine.runtime_parameters
 
 
 class TestOpenAIEngine:
@@ -124,7 +107,7 @@ class TestOpenAIEngine:
         with pytest.raises(LLMEngineError, match="openai"):
             OpenAIEngine(model="gpt_test")
 
-    def test_constructor_uses_fake_client_and_sanitizes_name(
+    def test_constructor_uses_fake_client_and_default_name(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -136,17 +119,39 @@ class TestOpenAIEngine:
         engine = OpenAIEngine(
             model="gpt-4o-mini",
             api_key="secret",
-            timeout_seconds=12.0,
+            timeout=12.0,
         )
 
         assert len(FakeOpenAIClient.instances) == 1
         assert len(FakeAsyncOpenAIClient.instances) == 0
 
         fake = FakeOpenAIClient.instances[-1]
-        assert engine.name == "openai_gpt_4o_mini"
-        assert fake.kwargs["api_key"] == "secret"
-        assert fake.kwargs["timeout"] == 12.0
+        assert engine.name == "OpenAIEngine"
+        assert fake.kwargs == {"api_key": "secret", "timeout": 12.0}
         assert engine._client is fake
+
+    def test_no_timeout_is_injected_into_the_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        _make_engine(monkeypatch)
+
+        assert "timeout" not in FakeOpenAIClient.instances[-1].kwargs
+
+    def test_given_name_is_stored_as_given(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, name="my_engine", description="mine")
+
+        assert engine.name == "my_engine"
+        assert engine.to_dict()["description"] == "mine"
+
+    def test_client_with_client_kwargs_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        with pytest.raises(LLMEngineError, match="either 'client' or client kwargs"):
+            OpenAIEngine(model="gpt-4o-mini", client=FakeOpenAIClient(), api_key="secret")
 
     def test_sync_client_injection_skips_construction(
         self, monkeypatch: pytest.MonkeyPatch
@@ -185,7 +190,7 @@ class TestOpenAIEngine:
 
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
-        response = engine._call_provider({"blocks": [], "instructions": None})
+        response = engine._call_provider({"model": "gpt-4o-mini", "input": []})
 
         assert injected.response_calls
         assert engine._extract_result(response, requested_structured=False) == " openai async text "
@@ -198,7 +203,6 @@ class TestOpenAIEngine:
             {"role": "assistant", "content": "Hi"},
         ]
 
-        assert engine._collect_instructions(messages) == "Be concise."
         assert engine._build_role_blocks(messages) == [
             {
                 "role": "user",
@@ -210,22 +214,18 @@ class TestOpenAIEngine:
             },
         ]
 
-        blocks: list[dict[str, Any]] = []
-        assert engine._ensure_user_block(blocks) == 0
-        assert blocks == [{"role": "user", "content": []}]
+        assert engine._build_provider_payload(messages)["instructions"] == "Be concise."
 
     def test_openai_call_provider_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
         monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
-        engine = OpenAIEngine(model="gpt-4o-mini", temperature=0.25)
-        response = engine._call_provider(
-            {
-                "blocks": [{"role": "user", "content": []}],
-                "instructions": "system",
-            }
-        )
+        engine = OpenAIEngine(model="gpt-4o-mini")
+        engine.update_runtime_parameters(temperature=0.25)
+        response = engine._call_provider(engine._build_provider_payload(
+            [{"role": "system", "content": "system"}, {"role": "user", "content": "hi"}]
+        ))
 
         fake = FakeOpenAIClient.instances[-1]
         assert engine._extract_result(response, requested_structured=False) == " openai text "
@@ -233,74 +233,125 @@ class TestOpenAIEngine:
         assert fake.response_calls[-1]["instructions"] == "system"
         assert fake.response_calls[-1]["temperature"] == 0.25
 
-    def test_call_provider_kwargs_temperature_and_new_params(
+    def test_runtime_parameters_reach_the_responses_call_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
-
-        engine = OpenAIEngine(
-            model="gpt-4o-mini",
-            temperature=0.5,
-            max_output_tokens=512,
-            truncation="auto",
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(
+            temperature=0.5, max_output_tokens=512, truncation="auto"
         )
-        engine._call_provider({"blocks": [], "instructions": None})
+
+        engine._call_provider(engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}]
+        ))
         call = FakeOpenAIClient.instances[-1].response_calls[-1]
 
         assert call["temperature"] == 0.5
         assert call["max_output_tokens"] == 512
         assert call["truncation"] == "auto"
+        assert call["model"] == "gpt-4o-mini"
         assert "reasoning" not in call
 
-    def test_call_provider_reasoning_suppresses_temperature(
+    def test_reasoning_does_not_suppress_temperature(
         self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
-
-        engine = OpenAIEngine(
-            model="o3-mini",
-            temperature=0.7,
-            reasoning={"effort": "high"},
-        )
-        engine._call_provider({"blocks": [], "instructions": None})
-        call = FakeOpenAIClient.instances[-1].response_calls[-1]
-
-        assert "temperature" not in call
-        assert call["reasoning"] == {"effort": "high"}
-
-    def test_call_provider_temperature_none_not_sent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
-
-        engine = OpenAIEngine(model="gpt-4o-mini", temperature=None)
-        engine._call_provider({"blocks": [], "instructions": None})
-        call = FakeOpenAIClient.instances[-1].response_calls[-1]
-
-        assert "temperature" not in call
-
-    @pytest.mark.parametrize(
-        ("filename", "expected"),
-        [
-            ("doc.pdf", "pdf"),
-            ("image.png", "image"),
-            ("notes.txt", "text"),
-        ],
-    )
-    def test_openai_classify_path(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        filename: str,
-        expected: str,
     ) -> None:
         engine = _make_engine(monkeypatch)
-        assert engine._classify_path(filename) == expected
+        engine.update_runtime_parameters(temperature=0.7, reasoning={"effort": "high"})
+
+        engine._call_provider(engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}]
+        ))
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+
+        assert call["temperature"] == 0.7
+        assert call["reasoning"] == {"effort": "high"}
+
+    def test_payload_snapshots_runtime_parameters_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.1)
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        engine.update_runtime_parameters(temperature=0.9)
+        engine._call_provider(payload)
+
+        assert FakeOpenAIClient.instances[-1].response_calls[-1]["temperature"] == 0.1
+
+    @pytest.mark.parametrize("key", ["model", "input", "instructions", "stream"])
+    def test_reserved_runtime_keys_raise(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=key):
+            engine.update_runtime_parameters(**{key: "x"})
+
+    def test_payload_is_the_sdk_call_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(temperature=0.3)
+
+        payload = engine._build_provider_payload(
+            [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}]
+        )
+
+        assert payload == {
+            "temperature": 0.3,
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "instructions": "Be brief.",
+        }
+
+    def test_engine_owned_fields_win_over_runtime_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._runtime_parameters.update(model="smuggled", input="smuggled")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["model"] == "gpt-4o-mini"
+        assert isinstance(payload["input"], list)
+
+    def test_unrecognized_attachment_metadata_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["odd.bin"] = {"kind": "text"}
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}])
+
+        assert payload["input"][-1]["content"] == [{"type": "input_text", "text": "hi"}]
+
+    def test_text_option_survives_a_plain_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(text={"verbosity": "low"})
+
+        engine._call_provider(engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}]
+        ))
+
+        assert FakeOpenAIClient.instances[-1].response_calls[-1]["text"] == {"verbosity": "low"}
+
+    def test_structured_call_merges_format_into_runtime_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine.update_runtime_parameters(text={"verbosity": "low"})
+        schema = {"type": "object"}
+
+        engine._call_provider(engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], schema
+        ))
+        text = FakeOpenAIClient.instances[-1].response_calls[-1]["text"]
+
+        assert text["verbosity"] == "low"
+        assert text["format"]["schema"] == schema
+        assert engine.runtime_parameters["text"] == {"verbosity": "low"}
 
     def test_openai_to_dict_includes_non_secret_config(
         self,
@@ -309,22 +360,18 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
-        engine = OpenAIEngine(
-            model="gpt-4o-mini",
-            api_key="secret",
-            temperature=0.33,
-            inline_cutoff_chars=123,
-        )
+        engine = OpenAIEngine(model="gpt-4o-mini", api_key="secret")
+        engine.update_runtime_parameters(temperature=0.33)
 
         data = engine.to_dict()
 
         assert data["type"] == "OpenAIEngine"
         assert data["model"] == "gpt-4o-mini"
-        assert data["temperature"] == 0.33
-        assert data["max_output_tokens"] is None
-        assert data["reasoning"] is None
-        assert data["truncation"] is None
-        assert data["inline_cutoff_chars"] == 123
+        assert data["runtime_parameters"] == {"temperature": 0.33}
+        assert data["strict"] is True
+        for removed in ("inline_cutoff_chars", "max_retries", "attachments",
+                        "timeout_seconds", "temperature"):
+            assert removed not in data
         assert "secret" not in str(data)
 
     def test_call_provider_async_with_async_client(
@@ -337,7 +384,7 @@ class TestOpenAIEngine:
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
 
-        response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None}))
+        response = run_coro_sync(engine._call_provider_async({"model": "gpt-4o-mini", "input": []}))
 
         assert injected.response_calls
         assert engine._extract_result(response, requested_structured=False) == " openai async text "
@@ -350,7 +397,7 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
-        response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None}))
+        response = run_coro_sync(engine._call_provider_async({"model": "gpt-4o-mini", "input": []}))
 
         assert engine._extract_result(response, requested_structured=False) == " openai text "
 
@@ -361,14 +408,16 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
-        engine = OpenAIEngine(model="gpt-4o-mini", strict=True)
+        engine = OpenAIEngine(model="gpt-4o-mini")
         schema = {
             "type": "object",
             "properties": {"a": {"type": "string"}},
             "required": ["a"],
             "additionalProperties": False,
         }
-        engine._call_provider({"blocks": [], "instructions": None, "output_structure": schema})
+        engine._call_provider(
+            engine._build_provider_payload([{"role": "user", "content": "hi"}], schema)
+        )
 
         call = FakeOpenAIClient.instances[-1].response_calls[-1]
         assert call["text"] == {
@@ -388,7 +437,7 @@ class TestOpenAIEngine:
         monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
-        engine._call_provider({"blocks": [], "instructions": None})
+        engine._call_provider({"model": "gpt-4o-mini", "input": []})
 
         call = FakeOpenAIClient.instances[-1].response_calls[-1]
         assert "text" not in call
@@ -408,6 +457,24 @@ class TestOpenAIEngine:
         response = SimpleNamespace(output_text='{"a": 1}')
 
         assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_extract_result_no_text(
+        self, monkeypatch: pytest.MonkeyPatch, missing: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text=missing)
+
+        assert engine._extract_result(response, requested_structured=False) == ""
+        assert engine._extract_result(response, requested_structured=True) == ""
+
+    def test_extract_result_null_text_structured_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text="null")
+
+        assert engine._extract_result(response, requested_structured=True) is None
 
     def test_extract_result_requested_parse_failure_falls_back_to_text(
         self, monkeypatch: pytest.MonkeyPatch
@@ -495,6 +562,37 @@ class TestOpenAIExtractTokenUsage:
         with pytest.raises(LLMEngineError, match="did not include usage"):
             engine._extract_token_usage(response)
 
+    def test_usage_none_returns_zeros_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        engine.require_usage = False
+
+        result = engine._extract_token_usage(SimpleNamespace(usage=None))
+
+        assert isinstance(result, OpenAITokenUsage)
+        assert (result.input_tokens, result.generated_tokens,
+                result.total_tokens, result.response_tokens) == (0, 0, 0, 0)
+
+    def test_require_usage_rejects_a_non_bool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="require_usage"):
+            engine.require_usage = "no"  # type: ignore[assignment]
+
+    def test_partially_malformed_usage_still_raises_when_not_required(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        engine.require_usage = False
+        response = SimpleNamespace(usage=self._usage(
+            output_tokens=2,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=5),
+        ))
+
+        with pytest.raises(ValueError, match="response_tokens must be >= 0"):
+            engine._extract_token_usage(response)
+
     def test_negative_response_tokens_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A negative response_tokens value now fails TokenUsage's own
         # >= 0 field validation (base class), not an OpenAIEngine-level
@@ -508,47 +606,6 @@ class TestOpenAIExtractTokenUsage:
 
         with pytest.raises(ValueError, match="response_tokens must be >= 0"):
             engine._extract_token_usage(response)
-
-
-class TestOpenAIShouldRetry:
-    def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
-        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
-        return OpenAIEngine(model="gpt-4o-mini", max_retries=2)
-
-    def _status_error(self, status_code: int) -> openai.APIStatusError:
-        request = httpx.Request("POST", "https://example.com")
-        response = httpx.Response(status_code=status_code, request=request)
-        return openai.APIStatusError("error", response=response, body=None)
-
-    def test_connection_error_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        request = httpx.Request("POST", "https://example.com")
-        exc = openai.APIConnectionError(request=request)
-
-        assert engine._should_retry(exc, attempt=1) is True
-
-    def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        for code in (429, 500, 502, 503, 504):
-            assert engine._should_retry(self._status_error(code), attempt=1) is True
-
-    def test_non_retryable_status_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        assert engine._should_retry(self._status_error(400), attempt=1) is False
-
-    def test_generic_exception_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        engine = self._engine(monkeypatch)
-        assert engine._should_retry(ValueError("bad"), attempt=1) is False
-
-    def test_attempt_exceeding_max_retries_not_retried(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = self._engine(monkeypatch)
-        request = httpx.Request("POST", "https://example.com")
-        exc = openai.APIConnectionError(request=request)
-
-        assert engine._should_retry(exc, attempt=3) is False
 
 
 class TestOpenAIAttachments:
@@ -593,18 +650,25 @@ class TestOpenAIAttachments:
         assert meta["inlined"] is True
         assert "Hello world!" in meta["inlined_text"]
 
-    def test_prepare_attachment_truncates_long_text(
+    def test_prepare_attachment_inlines_long_text_whole(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        engine = _make_engine(monkeypatch, inline_cutoff_chars=10)
+        engine = _make_engine(monkeypatch)
         path = tmp_path / "long.txt"
-        path.write_text("A" * 50)
+        path.write_text("A" * 300_000)
 
         meta = engine._prepare_attachment(str(path))
 
-        assert meta["kind"] == "text"
-        assert "truncated" in meta["inlined_text"]
-        assert len(meta["inlined_text"]) < 100
+        assert meta["inlined_text"] == "A" * 300_000
+
+    def test_prepare_attachment_failure_names_the_cause(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        missing = tmp_path / "gone.txt"
+
+        with pytest.raises(LLMEngineError, match=r"_prepare_attachment failed for .*: .*gone\.txt"):
+            engine._prepare_attachment(str(missing))
 
     def test_prepare_attachment_pdf_uploads(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
@@ -634,30 +698,105 @@ class TestOpenAIAttachments:
         assert meta["uploaded"] is True
         assert meta["file_id"] == "file_123"
 
-    def test_on_detach_calls_delete_with_file_id(
+    def test_attach_rejects_blank_and_non_string_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach("")
+        with pytest.raises(LLMEngineError, match="non-empty string"):
+            engine.attach(123)  # type: ignore[arg-type]
+
+    def test_attach_rejects_missing_and_illegal_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        illegal = tmp_path / "payload.zip"
+        illegal.write_bytes(b"data")
+
+        with pytest.raises(LLMEngineError, match="does not exist"):
+            engine.attach(str(tmp_path / "missing.txt"))
+        with pytest.raises(LLMEngineError, match="not permitted"):
+            engine.attach(str(illegal))
+        assert engine.attachments == {}
+
+    def test_attach_stores_metadata_and_caches_the_same_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+
+        first = engine.attach(str(path))
+        second = engine.attach(str(path))
+
+        assert first == second
+        assert first is not second
+        assert engine.attachments == {str(path): first}
+
+    def test_attachments_property_returns_a_copy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        path = tmp_path / "notes.txt"
+        path.write_text("hello")
+        engine.attach(str(path))
+
+        engine.attachments.clear()  # type: ignore[attr-defined]
+        engine.attachments[str(path)]["kind"] = "changed"  # type: ignore[index]
+        engine.attach(str(path))["kind"] = "changed"  # type: ignore[index]
+
+        assert engine.attachments[str(path)]["kind"] == "text"
+
+    def test_detach_returns_false_for_unknown_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        assert engine.detach("never_attached.txt") is False
+
+    def test_detach_deletes_uploaded_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeOpenAIClient.instances.clear()
         engine = _make_engine(monkeypatch)
         fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["doc.pdf"] = {"file_id": "file_abc"}
 
-        engine._on_detach({"file_id": "file_abc"})
+        assert engine.detach("doc.pdf") is True
 
         assert fake.deleted_files == ["file_abc"]
+        assert engine.attachments == {}
 
-    def test_on_detach_noop_when_no_file_id(
+    def test_detach_without_file_id_deletes_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeOpenAIClient.instances.clear()
         engine = _make_engine(monkeypatch)
         fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["notes.txt"] = {"kind": "text"}
 
-        engine._on_detach({})
-        engine._on_detach({"kind": "text"})
+        assert engine.detach("notes.txt") is True
 
         assert fake.deleted_files == []
 
-    def test_on_detach_with_async_client_uses_run_coro_sync(
+    def test_detach_swallows_a_failing_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        engine = _make_engine(monkeypatch)
+
+        def _boom(file_id: str) -> None:
+            raise RuntimeError("delete failed")
+
+        engine._client.files.delete = _boom  # type: ignore[attr-defined]
+        engine._attachments["doc.pdf"] = {"file_id": "file_abc"}
+
+        assert engine.detach("doc.pdf") is True
+        assert engine.attachments == {}
+
+    def test_detach_with_async_client_uses_run_coro_sync(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeAsyncOpenAIClient.instances.clear()
@@ -666,9 +805,24 @@ class TestOpenAIAttachments:
 
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
-        engine._on_detach({"file_id": "file_xyz"})
+        engine._attachments["doc.pdf"] = {"file_id": "file_xyz"}
+        engine.detach("doc.pdf")
 
         assert "file_xyz" in injected.deleted_files
+
+    def test_clear_attachments_detaches_everything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        engine = _make_engine(monkeypatch)
+        fake = FakeOpenAIClient.instances[-1]
+        engine._attachments["a.pdf"] = {"file_id": "file_a"}
+        engine._attachments["b.txt"] = {"kind": "text"}
+
+        engine.clear_attachments()
+
+        assert engine.attachments == {}
+        assert fake.deleted_files == ["file_a"]
 
     def test_build_provider_payload_with_inlined_attachment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -679,8 +833,9 @@ class TestOpenAIAttachments:
             "notes.txt": {"kind": "text", "inlined": True, "inlined_text": "important note"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         texts = [p["text"] for p in user_block["content"] if p.get("type") == "input_text"]
 
         assert any("important note" in t for t in texts)
@@ -694,11 +849,29 @@ class TestOpenAIAttachments:
             "doc.pdf": {"kind": "pdf", "uploaded": True, "file_id": "file_pdf"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         file_parts = [p for p in user_block["content"] if p.get("type") == "input_file"]
 
         assert file_parts == [{"type": "input_file", "file_id": "file_pdf"}]
+
+    def test_blank_user_turn_is_rejected_even_with_attachments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        engine._attachments["doc.pdf"] = {"kind": "pdf", "uploaded": True, "file_id": "file_pdf"}
+
+        with pytest.raises(LLMEngineError, match=r"^OpenAIEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
+
+    def test_blank_user_turn_without_attachments_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        with pytest.raises(LLMEngineError, match=r"^OpenAIEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": " "}]})
 
     def test_build_provider_payload_with_uploaded_image(
         self, monkeypatch: pytest.MonkeyPatch
@@ -709,8 +882,9 @@ class TestOpenAIAttachments:
             "photo.png": {"kind": "image", "uploaded": True, "file_id": "file_img"},
         }
 
-        payload = engine._build_provider_payload(messages, attachments)
-        user_block = next(b for b in payload["blocks"] if b["role"] == "user")
+        engine._attachments.update(attachments)
+        payload = engine._build_provider_payload(messages)
+        user_block = next(b for b in payload["input"] if b["role"] == "user")
         img_parts = [p for p in user_block["content"] if p.get("type") == "input_image"]
 
         assert img_parts == [{"type": "input_image", "file_id": "file_img"}]

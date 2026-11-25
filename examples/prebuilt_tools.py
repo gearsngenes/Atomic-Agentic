@@ -22,7 +22,7 @@ not beside the importing script): each consumer adds `examples/` to
     from prebuilt_tools import BASIC_MATH_TOOLS
 
 Plain functions, not `Tool`-wrapped: `register_tool`/`register_tools`
-already normalize a bare callable via `toolify(name=fn.__name__,
+already normalize a bare callable via `to_tool(name=fn.__name__,
 description=description or fn.__doc__)` -- so a
 docstring alone supplies the description, and no `Tool(...)` construction
 is needed here. No two functions below share a bare name, so there's no
@@ -30,7 +30,7 @@ collision risk.
 `Tool_Examples/a2a_sdk_atomic_host_server.py` is the one consumer that
 needs real `Tool` instances (publishes skills directly via
 `A2AtomicExecutor`, which requires `AtomicInvokable`, not a bare callable)
--- it calls `toolify(fn)` itself at the call site rather
+-- it calls `to_tool(fn)` itself at the call site rather
 than this module pre-wrapping everything for that one special case.
 
 Example

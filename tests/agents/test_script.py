@@ -219,7 +219,7 @@ class TestRegistrationEdgeCases:
 
         assert agent.get_tool("add_tool") is wrapped
 
-    def test_register_tool_wraps_toolify_failure_as_registration_error(self) -> None:
+    def test_register_tool_wraps_conversion_failure_as_registration_error(self) -> None:
         with pytest.raises(ToolRegistrationError):
             _make_agent(_engine()).register_tool(_NoNameCallable())
 

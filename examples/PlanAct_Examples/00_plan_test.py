@@ -33,7 +33,7 @@ def tool_3(t2_result: str) -> str:
     return t2_result + "\n3) Result from tool_3"
 
 
-# Register tools (callables are toolified automatically;
+# Register tools (callables are converted to tools automatically;
 # each is reachable by its own bare name -- tool_1/tool_2/tool_3 -- since no
 # alias is given).
 agent.register_tools([tool_1, tool_2, tool_3])

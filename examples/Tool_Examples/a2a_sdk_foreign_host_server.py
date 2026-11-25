@@ -25,7 +25,7 @@ class ShoutBackExecutor(AgentExecutor):
     """
     A plain, non-Atomic a2a-sdk agent -- its AgentCard carries no
     Atomic-Agentic param-schema extension, so it is only reachable through
-    A2AProxyTool's generic mode (skill_id=None), never skill mode.
+    A2AProxyTool's generic mode (name=None), never skill mode.
 
     Transforms whatever Parts it receives instead of a pure echo, so a
     generic-mode caller can see its input actually got processed remotely:

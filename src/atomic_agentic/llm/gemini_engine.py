@@ -4,16 +4,15 @@ import json
 import mimetypes
 try:
     from google import genai
-    from google.genai import errors as genai_errors
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     genai = None
-    genai_errors = None
     _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -32,7 +31,7 @@ from ..models.results.llm import (
     RemoteLLMModelData
 )
 from ..utils.core import format_missing_dependency
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import collect_system_text, validate_attachment_path
 
 __all__ = ["GeminiEngine"]
 
@@ -47,10 +46,21 @@ class GeminiEngine(LLMEngine):
     ``genai.Client`` exposes both sync (``client.models``) and async
     (``client.aio.models``) paths — no isinstance routing is needed.
 
-    ``client=None`` builds ``genai.Client(**client_kwargs)``. ``timeout_seconds``
-    becomes ``http_options.timeout`` (milliseconds, as the SDK requires) unless
-    the ``http_options`` you pass already sets a timeout, which then wins. An
-    injected client is used as-is, so set its options on the client itself.
+    ``client=None`` builds ``genai.Client(**client_kwargs)`` with the kwargs
+    unchanged; timeout is the SDK's own ``http_options.timeout`` (milliseconds).
+    An injected client is used as-is, so set its options on the client itself;
+    combining ``client`` with ``client_kwargs`` raises.
+
+    Runtime parameters
+    ------------------
+    Generation settings (``temperature``, ``max_output_tokens``,
+    ``thinking_config``, ...) are ``GenerateContentConfig`` fields held in the
+    base engine's runtime-parameter store and forwarded verbatim, e.g.
+    ``engine.update_runtime_parameters(thinking_config={"thinking_budget": 0})``
+    (the SDK coerces a dict to ``ThinkingConfig``). Nothing is set by default,
+    so Gemini's own defaults apply. Keys are checked against
+    ``GenerateContentConfig`` when set (``_validate_runtime_keys``), so a typo
+    fails at ``update_runtime_parameters``.
 
     API version
     -----------
@@ -64,73 +74,41 @@ class GeminiEngine(LLMEngine):
         GeminiEngine(model="gemini-2.5-flash", api_key=key,
                      http_options={"api_version": "v1beta"})
 
-    Flow per call
-    -------------
-    1) Engine-level attachments are prepared via ``attach(path)``:
-       - ``_prepare_attachment`` uploads supported files via
-         ``client.files.upload``.
-       - Attachment metadata stores the returned File object and its resource
-         name.
-
-    2) ``invoke({"messages": messages, "output_structure": ...})`` runs the
-       shared ``LLMResult`` lifecycle:
-       - normalize chat messages;
-       - snapshot current attachments;
-       - build the Gemini provider payload, threading a cleaned
-         ``output_structure`` (when given) through to ``response_mime_type``/
-         ``response_json_schema`` on ``GenerateContentConfig``;
-       - call ``client.models.generate_content(...)``;
-       - extract assistant text, token usage, and configured model data;
-       - return ``LLMResult``.
-
-    3) ``detach(path)`` calls ``_on_detach`` for best-effort file deletion via
-       ``client.files.delete``.
-
-    Result extraction
-    ------------------
-    ``_extract_result`` returns ``response.text`` unchanged for a
-    non-structured call (``requested_structured=False``). For a structured
-    call, it attempts ``json.loads(response.text)`` and falls back to
-    ``response.text`` on ``json.JSONDecodeError`` or ``TypeError`` (the
-    latter covers ``response.text is None`` — no text parts in the
-    response), rather than raising. Renamed from ``_extract_text`` (Pass 1
-    base rename, applied this pass).
-
-    Token usage
+    Attachments
     -----------
-    ``_extract_token_usage`` maps ``response.usage_metadata`` into
-    ``GeminiTokenUsage``. The base ``generated_tokens`` value is derived as
-    ``total_token_count - prompt_token_count`` so it captures all non-prompt
-    usage counted by Gemini, including candidate, thoughts, and tool-use prompt
-    tokens when present.
+    ``attach(path)`` uploads the file once through ``client.files.upload`` and
+    stores its metadata and ``File`` object; the files are appended to the
+    last user turn on every call. ``detach(path)`` deletes the upload
+    best-effort.
 
-    Model data
-    ----------
-    ``_get_model_data`` returns configured model identity from ``self.model``.
+    Result extraction and usage
+    ---------------------------
+    ``_extract_result`` returns ``response.text`` (``""`` when absent); on a
+    structured call it parses it with ``json.loads`` and falls back to the raw
+    text on ``JSONDecodeError``. ``_extract_token_usage``
+    maps ``usage_metadata`` into ``GeminiTokenUsage``;
+    ``generated_tokens = total_token_count - prompt_token_count`` so it covers
+    every non-prompt token Gemini counts (candidates, thoughts, tool use).
+    With no ``usage_metadata`` it raises unless ``require_usage`` is ``False``.
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to
-    ``response_json_schema`` completely unmodified — this engine performs
-    no schema filtering (structured-generation Pass 8). A keyword Gemini's
-    JSON-Schema dialect doesn't support surfaces as Gemini's own API
-    behavior (accept, ignore, or reject — unconfirmed by this pass).
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``response_json_schema``
+    (together with ``response_mime_type="application/json"``); Gemini decides
+    natively whether to accept, ignore or reject a keyword.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({
+        "model", "contents", "system_instruction",
+        "response_mime_type", "response_json_schema", "stream",
+    })
 
     def __init__(
             self,
             model: str,
             name: str | None = None,
-            description: str = "Gemini LLM Engine",
+            description: str | None = None,
             client: genai.Client | None = None,
-            temperature: float | None = 0.1,
-            max_output_tokens: int | None = None,
-            thinking_config: dict[str, Any] | None = None,
-            *,
-            timeout_seconds: float = 600.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -139,77 +117,105 @@ class GeminiEngine(LLMEngine):
         model:
             Gemini model identifier (e.g. ``"gemini-2.5-flash"``, ``"gemini-2.0-pro"``).
         name:
-            Optional human-friendly engine name; defaults to ``gemini_{model}`` with
-            non-identifier characters replaced by underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
-            Pre-built ``genai.Client``. When provided, used directly; no client is
-            constructed from ``client_kwargs``. The same client handles both sync
+            Pre-built ``genai.Client``. When provided, used directly (combining
+            it with ``client_kwargs`` raises). The same client handles both sync
             (``client.models``) and async (``client.aio.models``) paths.
-        temperature:
-            Sampling temperature passed to ``GenerateContentConfig``. ``None`` omits
-            the parameter entirely.
-        max_output_tokens:
-            Optional maximum number of output tokens. Maps to
-            ``GenerateContentConfig.max_output_tokens``.
-        thinking_config:
-            Optional thinking configuration dict (e.g.
-            ``{"thinking_budget": 2000}`` or ``{"thinking_level": "high"}``).
-            Expanded into ``genai.types.ThinkingConfig(**thinking_config)`` at call
-            time. ``None`` omits the field.
-        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
-            during client construction. Common uses: ``api_key``, ``credentials``,
-            ``project``, ``location``, ``vertexai``, ``http_options`` (a dict or
-            ``types.HttpOptions``; every key is kept, and only a missing
-            ``timeout`` is filled in from ``timeout_seconds``). Not forwarded
-            when ``client`` is injected.
-        """
-        # Step 1 — Name sanitization and base init.
-        sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
-        super().__init__(
-            name=sanitized_name,
-            description=description or "Gemini LLM Engine",
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
-        )
+            Keyword arguments forwarded unchanged to ``genai.Client(...)``.
+            Common uses: ``api_key``, ``credentials``, ``project``, ``location``,
+            ``vertexai``, ``http_options`` (a dict or ``types.HttpOptions``,
+            including its ``timeout`` in milliseconds).
 
-        # Step 2 — SDK presence check.
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client.
+        """
+        # 1. SDK presence check.
         if genai is None:
             raise LLMEngineError(
                 "GeminiEngine "
                 + format_missing_dependency("google-genai", "gemini", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # Step 3 — Build client kwargs; fill http_options.timeout (milliseconds)
-        # from timeout_seconds unless the caller's http_options already sets one.
-        # Everything else the caller put in http_options (api_version, ...) is kept.
-        _ckw = dict(client_kwargs)
-        _timeout_ms = int(self._timeout_seconds * 1000)
-        _http = _ckw.get("http_options")
-        if _http is None:
-            _http = {"timeout": _timeout_ms}
-        elif isinstance(_http, Mapping):
-            _http = {**_http}
-            if _http.get("timeout") is None:
-                _http["timeout"] = _timeout_ms
-        elif _http.timeout is None:  # types.HttpOptions
-            _http = _http.model_copy(update={"timeout": _timeout_ms})
-        _ckw["http_options"] = _http
+        # 2. Exactly one client source.
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "GeminiEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # Step 4 — Single client: injected as-is or built from kwargs.
-        self._client: genai.Client = client if client is not None else genai.Client(**_ckw)
-
-        # Step 5 — Store model and generation config.
+        # 3. Base init, then engine state.
+        super().__init__(name=name, description=description or "Gemini LLM Engine")
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
+        self._client: genai.Client = (
+            client if client is not None else genai.Client(**client_kwargs)
+        )
         self.model = model
-        self.temperature = temperature
-        self._max_output_tokens = max_output_tokens
-        self._thinking_config = thinking_config
+
+    def _validate_runtime_keys(self, keys: Iterable[str]) -> None:
+        """
+        1. Reserved keys are rejected (base check).
+        2. Every key must be a ``GenerateContentConfig`` field.
+        """
+        keys = list(keys)
+        super()._validate_runtime_keys(keys)
+        valid = set(genai.types.GenerateContentConfig.model_fields)
+        unknown = set(keys) - valid
+        if unknown:
+            raise LLMEngineError(
+                f"GeminiEngine.update_runtime_parameters: unknown keys {sorted(unknown)}; "
+                f"valid keys: {sorted(valid - self._RESERVED_RUNTIME_KEYS)}"
+            )
+
+    # ------------------------------------------------------------------ #
+    # Attachments
+    # ------------------------------------------------------------------ #
+    @property
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Copy of attached local path -> provider metadata (shallow per entry)."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns a shallow copy of
+        its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("GeminiEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return dict(self._attachments[path])
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return dict(meta)
+
+    def detach(self, path: str) -> bool:
+        """
+        Detach ``path``; ``True`` when something was removed. The uploaded file
+        is deleted best-effort (a failed delete is ignored).
+        """
+        meta = self._attachments.pop(path, None)
+        if meta is None:
+            return False
+        name = meta.get("resource_name")
+        if name:
+            try:
+                self._client.files.delete(name=name)
+            except Exception:
+                pass
+        return True
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
 
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
@@ -237,7 +243,7 @@ class GeminiEngine(LLMEngine):
         """
         Prepare a local path for Gemini: upload once and store the File object.
 
-        The base engine has already validated the path and extension and applied
+        ``attach`` has already validated the path and extension and applied
         MIME-based checks via `_validate_attachment_path`. This method assumes
         the path is supported and focuses on:
 
@@ -253,8 +259,7 @@ class GeminiEngine(LLMEngine):
                 "resource_name": <str | None>,
             }
 
-        The metadata shape is opaque to the base engine and only interpreted
-        by this class.
+        The metadata shape is only interpreted by this class.
         """
         try:
             mime, _ = mimetypes.guess_type(path)
@@ -278,22 +283,8 @@ class GeminiEngine(LLMEngine):
             # Normalize unexpected errors into LLMEngineError so callers see a
             # consistent engine-level error type.
             raise LLMEngineError(
-                f"GeminiEngine._prepare_attachment failed for {path!r}"
+                f"GeminiEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Delete Gemini file resource if present.
-
-        This is best-effort; errors are ignored.
-        """
-        name = meta.get("resource_name")
-        if not name:
-            return
-        try:
-            self._client.files.delete(name=name)
-        except Exception:
-            return
 
     # ------------------------------------------------------------------ #
     # Template hooks for invocation
@@ -310,10 +301,8 @@ class GeminiEngine(LLMEngine):
 
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
-        turns. Attachment parts (uploaded files via ``Part.from_uri``; inlined text
-        via ``Part.from_text``) are appended to the last user ``Content``'s
-        ``parts`` list. If no user turn is present, a standalone trailing
-        ``Content(role='user', parts=attachment_parts)`` is inserted.
+        turns. Attachment parts (uploaded files via ``Part.from_uri``) are
+        appended to the last user ``Content``'s ``parts`` list.
         """
         # 1. Build attachment_parts list.
         attachment_parts: List[Any] = []
@@ -326,105 +315,67 @@ class GeminiEngine(LLMEngine):
                         mime_type=meta.get("mime") or file_obj.mime_type,
                     )
                 )
-            elif meta.get("inlined") and meta.get("inlined_text"):
-                attachment_parts.append(
-                    genai.types.Part.from_text(text=str(meta["inlined_text"]))
-                )
 
         # 2. Build contents list with role mapping (no attachment injection yet).
         contents: List[Any] = []
         for m in messages:
-            role = m.get("role", "").lower()
+            role = m["role"]
             if role == "system":
                 continue
             gemini_role = "model" if role == "assistant" else "user"
-            text = m.get("content") or ""
-            if not text:
-                continue
+            text = m["content"]
             contents.append(genai.types.Content(
                 role=gemini_role,
                 parts=[genai.types.Part.from_text(text=text)],
             ))
 
-        # 3. Append attachment_parts to the last user Content (backward scan);
-        #    insert a standalone trailing Content if no user turn exists.
+        # 3. Append attachment_parts to the last user Content.
         if attachment_parts:
-            idx = next(
-                (i for i in range(len(contents) - 1, -1, -1)
-                 if contents[i].role == "user"),
-                None,
-            )
-            if idx is not None:
-                contents[idx].parts = list(contents[idx].parts) + attachment_parts
-            else:
-                contents.append(genai.types.Content(role="user", parts=attachment_parts))
+            last_user = next(c for c in reversed(contents) if c.role == "user")
+            last_user.parts = list(last_user.parts) + attachment_parts
 
         return contents
 
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for ``generate_content`` from normalized messages, the
-        current attachments snapshot, and (optionally) the caller's raw
-        structured-output template, unmodified.
+        Build the exact keyword arguments of ``generate_content``.
 
-        System messages are extracted into ``system_instruction`` for
-        ``GenerateContentConfig``; all other turns are returned as
-        ``list[Content]`` via ``_build_content_list``. ``output_structure``
-        is the caller's raw schema, forwarded unmodified; stashed as-is.
+        1. ``contents``: non-system turns as ``Content`` objects, with a
+           snapshot of the engine's attachments appended to the last user turn.
+        2. ``config``: a ``GenerateContentConfig`` from a snapshot of the
+           runtime parameters, with the engine-owned fields (``system_instruction``
+           and, for a structured call, ``response_mime_type`` plus
+           ``response_json_schema``) updated over it so they always win. Mime
+           type alone is only a soft hint, so the two are always sent together;
+           the schema is the caller's raw one, unmodified. An unknown runtime key
+           fails here as the SDK's own validation error.
+        3. Return ``{"model", "contents", "config"}``.
         """
-        system_instruction = self._collect_system(messages)
-        contents = self._build_content_list(messages, attachments)
-        return {
-            "system_instruction": system_instruction,
-            "contents": contents,
-            "output_structure": output_structure,
-        }
+        contents = self._build_content_list(messages, dict(self._attachments))
 
-    def _build_generate_config(
-            self,
-            system_instruction: str | None,
-            output_structure: Optional[Dict[str, Any]] = None,
-    ) -> genai.types.GenerateContentConfig:
-        """
-        Build a ``GenerateContentConfig`` from stored engine params, the per-call
-        ``system_instruction``, and (optionally) the caller's raw
-        structured-output template, unmodified. Fields are omitted when their
-        stored value is ``None``.
-
-        When ``output_structure`` is given, ``response_mime_type`` and
-        ``response_json_schema`` are set together — mime type alone is only a
-        soft hint, not a real constraint, so the two are never sent
-        independently.
-        """
-        cfg: Dict[str, Any] = {}
+        cfg: Dict[str, Any] = dict(self._runtime_parameters)
+        system_instruction = collect_system_text(messages)
         if system_instruction:
-            cfg["system_instruction"] = system_instruction
-        if self.temperature is not None:
-            cfg["temperature"] = self.temperature
-        if self._max_output_tokens is not None:
-            cfg["max_output_tokens"] = self._max_output_tokens
-        if self._thinking_config is not None:
-            cfg["thinking_config"] = genai.types.ThinkingConfig(**self._thinking_config)
+            cfg.update(system_instruction=system_instruction)
         if output_structure is not None:
-            cfg["response_mime_type"] = "application/json"
-            cfg["response_json_schema"] = output_structure
-        return genai.types.GenerateContentConfig(**cfg)
+            cfg.update(
+                response_mime_type="application/json",
+                response_json_schema=output_structure,
+            )
+
+        return {
+            "model": self.model,
+            "contents": contents,
+            "config": genai.types.GenerateContentConfig(**cfg),
+        }
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """Perform a single synchronous ``models.generate_content`` call."""
-        cfg = self._build_generate_config(
-            payload.get("system_instruction"), payload.get("output_structure")
-        )
-        return self._client.models.generate_content(
-            model=self.model,
-            contents=payload["contents"],
-            config=cfg,
-        )
+        return self._client.models.generate_content(**payload)
 
     async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
         """
@@ -433,53 +384,22 @@ class GeminiEngine(LLMEngine):
         No thread offload needed — ``genai.Client`` exposes both sync and async
         paths on the same object.
         """
-        cfg = self._build_generate_config(
-            payload.get("system_instruction"), payload.get("output_structure")
-        )
-        return await self._client.aio.models.generate_content(
-            model=self.model,
-            contents=payload["contents"],
-            config=cfg,
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on ``genai_errors.ServerError`` (5xx) unconditionally, and on
-        ``ClientError`` (4xx) only when its ``.code`` is 429 (rate limit).
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, genai_errors.ServerError):
-            return True
-        if isinstance(exc, genai_errors.ClientError):
-            return exc.code == 429
-        return False
+        return await self._client.aio.models.generate_content(**payload)
 
     def _extract_result(
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Gen AI SDK
-        response object.
-
-        ``requested_structured`` is the base-supplied signal (was
-        ``output_structure`` given for this call) — Gemini's own response
-        object doesn't echo back the requested config, so this is the only
-        reliable detection mechanism (the SDK's own ``response.parsed`` field
-        conflates "wasn't requested" and "requested but failed to parse" into
-        the same ``None``, since it swallows ``JSONDecodeError`` internally).
-        When not requested, returns ``response.text`` unchanged. When
-        requested, attempts ``json.loads(response.text)``; a parse failure —
-        or ``response.text`` being ``None`` (no text parts in the response,
-        raises ``TypeError`` from ``json.loads``) — falls back to returning
-        ``response.text`` as-is instead of raising.
+        Return ``response.text`` (``""`` when absent); on a structured call,
+        its ``json.loads`` value, falling back to the text on a parse failure.
         """
+        text = response.text or ""
         if not requested_structured:
-            return response.text
+            return text
         try:
-            return json.loads(response.text)
-        except (json.JSONDecodeError, TypeError):
-            return response.text
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -495,10 +415,16 @@ class GeminiEngine(LLMEngine):
         - cached_content_token_count: cached input-token subset, when present
 
         ``generated_tokens`` is derived as
-        ``total_token_count - prompt_token_count``.
+        ``total_token_count - prompt_token_count``. Missing ``usage_metadata``
+        raises unless ``require_usage`` is ``False``, which yields an all-zero
+        record.
         """
         usage = response.usage_metadata
         if usage is None:
+            if not self.require_usage:
+                return GeminiTokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError("Gemini response did not include usage_metadata.")
 
         input_tokens = usage.prompt_token_count
@@ -536,12 +462,7 @@ class GeminiEngine(LLMEngine):
         )
 
     def _get_model_data(self) -> LLMModelData:
-        """
-        Return configured Gemini model identity data for this engine.
-
-        Model data is derived from engine configuration, not from the provider
-        response object.
-        """
+        """Return configured Gemini model identity (from ``self.model``)."""
         return RemoteLLMModelData(
             provider="gemini",
             model_name=self.model,
@@ -550,18 +471,6 @@ class GeminiEngine(LLMEngine):
     # ------------------------------------------------------------------ #
     # Gemini-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
-
-    def _collect_system(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """
-        Join system message contents into a single `system_instruction` string.
-        """
-        parts = [
-            m["content"]
-            for m in messages
-            if (m.get("role") or "").lower() == "system" and m.get("content")
-        ]
-        joined = "\n\n".join(parts).strip()
-        return joined or None
 
     def _upload_path(self, path: str) -> Any:
         """
@@ -578,15 +487,13 @@ class GeminiEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for GeminiEngine: provider + model + generation config.
+        Diagnostic snapshot for GeminiEngine: provider + model (the base adds the
+        runtime parameters).
 
         Keeps output minimal to avoid leaking client or API keys.
         """
         base = super().to_dict()
         base.update({
             "model": self.model,
-            "temperature": self.temperature,
-            "max_output_tokens": self._max_output_tokens,
-            "thinking_config": self._thinking_config,
         })
         return base

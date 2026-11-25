@@ -4,13 +4,11 @@ import asyncio
 import json
 import mimetypes
 try:
-    from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError
+    from openai import AsyncOpenAI, OpenAI
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     AsyncOpenAI = None
     OpenAI = None
-    APIConnectionError = None
-    APIStatusError = None
     _SDK_IMPORT_ERROR = _exc
 import os
 from typing import (
@@ -35,7 +33,13 @@ from ..models.results.llm import (
     LLMModelData,
     RemoteLLMModelData
 )
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import (
+    classify_path,
+    collect_system_text,
+    inlined_file_block,
+    read_text_file,
+    validate_attachment_path,
+)
 from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["OpenAIEngine"]
@@ -57,21 +61,21 @@ class OpenAIEngine(LLMEngine):
       directly; ``_call_provider_async`` offloads to a thread via
       ``asyncio.to_thread``.
 
-    ``_upload_file`` and ``_on_detach`` also use ``isinstance`` to route
+    ``_upload_file`` and ``detach`` also use ``isinstance`` to route
     file-API calls, wrapping async file operations in ``run_coro_sync``
     when needed.
 
     File policy
     -----------
-    Attachments are persistent engine state:
+    Attachments are persistent engine state, managed by this engine's own
+    ``attach``/``detach``/``clear_attachments``:
 
     - PDFs    → uploaded once via Files API; attached as
       ``{"type": "input_file", "file_id": ...}``
     - Images  → uploaded once via Files API; attached as
       ``{"type": "input_image", "file_id": ...}``
     - Text/Code → read and inlined as
-      ``{"type": "input_text", "text": ...}``
-      with a configurable character cutoff.
+      ``{"type": "input_text", "text": ...}`` (whole file).
 
     Unsupported file classes such as audio, video, archives, executables,
     databases, model weights, and obviously binary files are rejected at
@@ -85,59 +89,40 @@ class OpenAIEngine(LLMEngine):
 
     Result extraction
     -----------------
-    ``_extract_result`` reads the generated assistant reply from the Responses
-    API response. For a plain-text call (``requested_structured=False``) it
-    returns ``response.output_text`` unchanged. For a structured call, it
-    attempts ``json.loads(response.output_text)`` and falls back to
-    ``response.output_text`` on a parse failure rather than raising —
-    detection is the base-supplied ``requested_structured`` flag, not
-    response introspection (Pass 3 revision; previously inspected
-    ``response.text.format.type`` and raised uncaught on parse failure).
-    Renamed from ``_extract_text`` (structured-generation Pass 1 base
-    contract widening).
-    ``_extract_token_usage`` maps Responses API usage fields into an
-    ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
-    identity from ``self.model``.
+    ``_extract_result`` returns ``response.output_text`` (``""`` when missing),
+    parsed with ``json.loads`` on a structured call (raw text on a parse
+    failure).
+    ``_extract_token_usage`` maps Responses API usage into ``OpenAITokenUsage``.
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to the Responses API's
-    ``text.format`` field completely unmodified — this engine performs no
-    schema pruning (structured-generation Pass 8). A schema keyword OpenAI's
-    strict mode rejects (e.g. ``default``) surfaces as OpenAI's own API
-    error rather than being silently stripped. OpenAI's strict mode also
-    requires ``additionalProperties`` be set to exactly ``false`` on every
-    object schema — the caller's own responsibility, not validated or
-    corrected here.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``text.format``; OpenAI
+    rejects what it does not accept natively (strict mode, for example,
+    requires ``additionalProperties: false`` on every object).
 
-    Mutable configuration
-    ----------------------
-    ``temperature``, ``max_output_tokens``, ``reasoning``, ``truncation``, and
-    ``strict`` are call-time Responses API knobs, re-read fresh on every call —
-    each is a ``@property`` with a validating setter, freely settable after
-    construction. ``inline_cutoff_chars`` and (base) ``timeout_seconds`` stay
-    read-only instead: both are baked into already-constructed state
-    (attachment metadata / the SDK client's own timeout option respectively)
-    at the moment they're used, so mutating them later wouldn't propagate.
+    Runtime parameters and configuration
+    ------------------------------------
+    Generation settings (``temperature``, ``max_output_tokens``, ``reasoning``,
+    ``truncation``, ``text`` options such as ``verbosity``, ...) are Responses
+    API call parameters under OpenAI's own names, held in the base engine's
+    runtime-parameter store and forwarded verbatim:
+    ``engine.update_runtime_parameters(temperature=0.2, reasoning={"effort": "high"})``.
+    AA applies no gate between them (the provider decides which combinations are
+    valid). ``strict`` is the one AA behavior attribute: a validated, settable
+    bool that only shapes the structured-output envelope. Timeout and retry are
+    the SDK client's own settings (``timeout``, ``max_retries``), passed through
+    ``client_kwargs``. ``require_usage`` (base) controls a response with no
+    usage object.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "input", "instructions", "stream"})
 
     def __init__(
             self,
             model: str,
             name: str | None = None,
-            description: str = "OpenAI LLM Engine",
+            description: str | None = None,
             client: OpenAI | AsyncOpenAI | None = None,
-            temperature: float | None = None,
-            max_output_tokens: int | None = None,
-            reasoning: dict[str, str] | None = None,
-            truncation: str | None = None,
-            strict: bool = True,
-            inline_cutoff_chars: int = 200_000,
-            *,
-            timeout_seconds: float = 600.0,
-            max_retries: int = 2,
-            retry_backoff_base: float = 0.5,
-            retry_backoff_max: float = 8.0,
             **client_kwargs: Any,
     ) -> None:
         """
@@ -146,147 +131,50 @@ class OpenAIEngine(LLMEngine):
         model:
             OpenAI model identifier (e.g. ``"gpt-4.1"``, ``"gpt-4o-mini"``).
         name:
-            Optional human-friendly engine name; defaults to ``openai_{model}``
-            with non-identifier characters replaced by underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
             Pre-built ``OpenAI`` or ``AsyncOpenAI`` client. When provided, it is
-            used directly and no client is constructed from ``client_kwargs``.
-            When ``None``, a sync ``OpenAI(**client_kwargs)`` is built. An injected
+            used directly; combining it with ``client_kwargs`` raises. When
+            ``None``, a sync ``OpenAI(**client_kwargs)`` is built. An injected
             ``AsyncOpenAI`` routes sync calls through ``run_coro_sync``; an injected
             ``OpenAI`` routes async calls through ``asyncio.to_thread``.
-        temperature:
-            Responses API sampling temperature. Pass ``None`` to omit the parameter
-            entirely (required for reasoning models).
-        max_output_tokens:
-            Optional maximum number of output tokens to generate.
-        reasoning:
-            Optional reasoning configuration dict (e.g. ``{"effort": "high"}``).
-            When set, ``temperature`` is suppressed regardless of its value.
-        truncation:
-            Optional truncation strategy string (e.g. ``"auto"``).
-        strict:
-            Whether structured-output requests (``output_structure``) use
-            OpenAI's strict schema-conformance mode. ``True`` (default) is
-            OpenAI's own recommended setting. Controls only OpenAI's own
-            strict schema-conformance request mode; it has no effect on what
-            AA sends, since AA no longer prunes or filters
-            ``output_structure`` at all (structured-generation Pass 8).
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
-        timeout_seconds:
-            Per-call timeout inserted into the client's ``timeout`` option via
-            ``setdefault`` (user-supplied ``timeout`` in ``client_kwargs`` wins).
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/backoff configuration.
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to ``OpenAI(...)``
-            during client construction. Common uses: ``api_key``, ``base_url``,
-            ``organization``. Not forwarded when ``client`` is injected directly.
-        """
-        # Step 1 — Name sanitization and base init.
-        sanitized_name = (
-            (name or f"openai_{model}")
-            .replace(":", "_").replace("-", "_")
-            .replace(" ", "_").replace(".", "_")
-        )
-        super().__init__(
-            name=sanitized_name,
-            description=description or "OpenAI LLM Engine",
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
-        )
+            Keyword arguments forwarded unchanged to ``OpenAI(...)``. Common uses:
+            ``api_key``, ``base_url``, ``organization``, and the SDK's own
+            ``timeout`` and ``max_retries``.
 
-        # Step 2 — SDK presence check.
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client; ``strict``
+        starts ``True``. Generation parameters start empty
+        (``update_runtime_parameters``).
+        """
+        # 1. SDK presence check.
         if OpenAI is None:
             raise LLMEngineError(
                 "OpenAIEngine "
                 + format_missing_dependency("openai", "openai", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # Step 3 — Build shared client kwargs; seed timeout from the base-engine knob.
-        _ckw = dict(client_kwargs)
-        _ckw.setdefault("timeout", self._timeout_seconds)
+        # 2. Exactly one client source.
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "OpenAIEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # Step 4 — Single client: injected as-is or built sync from kwargs.
+        # 3. Base init, then engine state.
+        super().__init__(name=name, description=description or "OpenAI LLM Engine")
+        self._attachments: Dict[str, Mapping[str, Any]] = {}
         self._client: OpenAI | AsyncOpenAI = (
-            client if client is not None else OpenAI(**_ckw)
+            client if client is not None else OpenAI(**client_kwargs)
         )
-
-        # Step 5 — Store model and Responses API config. The five knobs below
-        # go through their own property setters (validation lives in one
-        # place, shared by construction and later mutation).
         self.model = model
-        self.temperature = temperature
-        self.max_output_tokens = max_output_tokens
-        self.reasoning = reasoning
-        self.truncation = truncation
-        self.strict = strict
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
+        self.strict = True
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
-
-    @property
-    def temperature(self) -> float | None:
-        """Responses API sampling temperature; ``None`` omits the parameter."""
-        return self._temperature
-
-    @temperature.setter
-    def temperature(self, value: float | None) -> None:
-        if value is not None and not isinstance(value, (int, float)):
-            raise LLMEngineError(
-                f"OpenAIEngine.temperature must be a number or None, got {type(value).__name__}."
-            )
-        self._temperature = value
-
-    @property
-    def max_output_tokens(self) -> int | None:
-        """Maximum output tokens to generate; ``None`` omits the parameter."""
-        return self._max_output_tokens
-
-    @max_output_tokens.setter
-    def max_output_tokens(self, value: int | None) -> None:
-        if value is not None and not isinstance(value, int):
-            raise LLMEngineError(
-                f"OpenAIEngine.max_output_tokens must be an int or None, got {type(value).__name__}."
-            )
-        self._max_output_tokens = value
-
-    @property
-    def reasoning(self) -> dict[str, str] | None:
-        """Reasoning configuration dict; suppresses ``temperature`` when set."""
-        return self._reasoning
-
-    @reasoning.setter
-    def reasoning(self, value: dict[str, str] | None) -> None:
-        if value is not None and not isinstance(value, dict):
-            raise LLMEngineError(
-                f"OpenAIEngine.reasoning must be a dict or None, got {type(value).__name__}."
-            )
-        self._reasoning = value
-
-    @property
-    def truncation(self) -> str | None:
-        """Truncation strategy string; ``None`` omits the parameter."""
-        return self._truncation
-
-    @truncation.setter
-    def truncation(self, value: str | None) -> None:
-        if value is not None and not isinstance(value, str):
-            raise LLMEngineError(
-                f"OpenAIEngine.truncation must be a str or None, got {type(value).__name__}."
-            )
-        self._truncation = value
-
     @property
     def strict(self) -> bool:
         """Whether structured-output requests use strict schema conformance."""
@@ -299,6 +187,56 @@ class OpenAIEngine(LLMEngine):
                 f"OpenAIEngine.strict must be a bool, got {type(value).__name__}."
             )
         self._strict = value
+
+    # ------------------------------------------------------------------ #
+    # Attachments
+    # ------------------------------------------------------------------ #
+    @property
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Copy of attached local path -> provider metadata."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns a copy of its metadata.
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, prepare the provider metadata, store it.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("OpenAIEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return dict(self._attachments[path])
+
+        self._validate_attachment_path(path)
+        meta = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        return dict(meta)
+
+    def detach(self, path: str) -> bool:
+        """
+        Detach ``path``; ``True`` when something was removed. An uploaded file
+        is deleted best-effort (a failed delete is ignored).
+        """
+        meta = self._attachments.pop(path, None)
+        if meta is None:
+            return False
+        file_id = meta.get("file_id")
+        if file_id:
+            try:
+                if isinstance(self._client, AsyncOpenAI):
+                    run_coro_sync(self._client.files.delete(file_id))
+                else:
+                    self._client.files.delete(file_id)
+            except Exception:
+                pass
+        return True
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
 
     # ------------------------------------------------------------------ #
     # Overrides / template hooks
@@ -325,115 +263,64 @@ class OpenAIEngine(LLMEngine):
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
-            attachments: Mapping[str, Mapping[str, Any]],
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for the OpenAI Responses API from normalized messages,
-        the current attachments snapshot, and (optionally) the caller's raw
-        structured-output template, unmodified.
+        Build the exact keyword arguments of ``responses.create``.
+
+        1. Start from a snapshot of the runtime parameters.
+        2. Convert messages into ``input`` blocks and system turns into
+           ``instructions``.
+        3. Append the engine's attachments (a snapshot) to the last ``user``
+           block.
+        4. ``update`` the engine-owned fields (``model``, ``input``,
+           ``instructions``) over the runtime snapshot, so they always win.
+        5. Structured call: set ``text["format"]`` on a copy of the runtime
+           ``text`` (the caller's raw schema, unmodified; other ``text``
+           options such as ``verbosity`` survive).
         """
-        instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
+        attachments = dict(self._attachments)
+        if attachments:
+            last_user = next(b for b in reversed(blocks) if b["role"] == "user")
+            user_parts: List[Dict[str, Any]] = last_user["content"]
+            for path, meta in attachments.items():
+                kind = str(meta.get("kind", "text"))
+                if meta.get("inlined"):
+                    text = str(meta.get("inlined_text") or "")
+                    if text:
+                        user_parts.append(
+                            {"type": "input_text", "text": inlined_file_block(path, text)}
+                        )
+                elif meta.get("uploaded") and meta.get("file_id"):
+                    part_type = "input_file" if kind == "pdf" else "input_image"
+                    user_parts.append({"type": part_type, "file_id": str(meta["file_id"])})
 
-        payload: Dict[str, Any] = {"blocks": blocks}
+        payload: Dict[str, Any] = dict(self._runtime_parameters)
+        payload.update(model=self.model, input=blocks)
+        instructions = collect_system_text(messages)
         if instructions:
-            payload["instructions"] = instructions
+            payload.update(instructions=instructions)
         if output_structure is not None:
-            # output_structure is the caller's raw schema, forwarded
-            # unmodified; stash as-is.
-            payload["output_structure"] = output_structure
-
-        # No attachments: avoid creating an artificial empty user turn.
-        if not attachments:
-            return payload
-
-        # Find or create a `user` block to hold attachments.
-        user_idx = self._ensure_user_block(blocks)
-        user_parts: List[Dict[str, Any]] = blocks[user_idx]["content"]
-
-        for path, meta in attachments.items():
-            kind = str(meta.get("kind", "text"))
-
-            # Inlined text (text/code attachments prepared by _prepare_attachment).
-            if meta.get("inlined"):
-                text = str(meta.get("inlined_text") or "")
-                if not text:
-                    continue
-                header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-                user_parts.append(
-                    {"type": "input_text", "text": header + text}
-                )
-                continue
-
-            # Uploaded files/images with a file_id
-            if meta.get("uploaded") and meta.get("file_id"):
-                file_id = str(meta["file_id"])
-                if kind == "pdf":
-                    user_parts.append({"type": "input_file", "file_id": file_id})
-                else:
-                    user_parts.append({"type": "input_image", "file_id": file_id})
-                continue
-
-            # Fallback: try to handle the local path directly (older metadata, etc.)
-            try:
-                self._attach_local_path(user_parts, path)
-            except Exception:
-                # Best-effort; silently skip failing attachments.
-                continue
-
-        return payload
-
-    def _build_call_kwargs(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        Build the shared Responses API kwargs from a pre-built payload dict.
-
-        Used by both sync and async call methods to avoid duplication.
-
-        Temperature gate: ``temperature`` is only forwarded when it is not
-        ``None`` AND ``reasoning`` is not set — reasoning-mode models reject
-        the ``temperature`` parameter.
-        """
-        blocks = payload["blocks"]
-        instructions = payload.get("instructions")
-
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "input": blocks,
-        }
-        if instructions:
-            kwargs["instructions"] = instructions
-        if self.temperature is not None and self.reasoning is None:
-            kwargs["temperature"] = self.temperature
-        if self.max_output_tokens is not None:
-            kwargs["max_output_tokens"] = self.max_output_tokens
-        if self.reasoning is not None:
-            kwargs["reasoning"] = self.reasoning
-        if self.truncation is not None:
-            kwargs["truncation"] = self.truncation
-        output_structure = payload.get("output_structure")
-        if output_structure is not None:
-            kwargs["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": "output_structure",
-                    "schema": output_structure,
-                    "strict": self.strict,
-                }
+            text = dict(payload.get("text") or {})
+            text["format"] = {
+                "type": "json_schema",
+                "name": "output_structure",
+                "schema": output_structure,
+                "strict": self.strict,
             }
-        return kwargs
+            payload.update(text=text)
+        return payload
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """
-        Perform a single Responses API call using the pre-built payload.
+        Perform a single Responses API call with the payload as its kwargs.
 
         Routes via ``run_coro_sync`` when the injected client is ``AsyncOpenAI``.
         """
         if isinstance(self._client, AsyncOpenAI):
-            return run_coro_sync(
-                self._client.responses.create(**self._build_call_kwargs(payload))
-            )
-        return self._client.responses.create(**self._build_call_kwargs(payload))
+            return run_coro_sync(self._client.responses.create(**payload))
+        return self._client.responses.create(**payload)
 
     async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
         """
@@ -442,46 +329,24 @@ class OpenAIEngine(LLMEngine):
         Falls back to ``asyncio.to_thread`` when only a sync client is available.
         """
         if isinstance(self._client, AsyncOpenAI):
-            return await self._client.responses.create(**self._build_call_kwargs(payload))
+            return await self._client.responses.create(**payload)
         return await asyncio.to_thread(self._call_provider, payload)
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on OpenAI connection/timeout errors and on retryable HTTP
-        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, APIConnectionError):
-            return True
-        if isinstance(exc, APIStatusError):
-            return exc.status_code in {429, 500, 502, 503, 504}
-        return False
 
     def _extract_result(
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Responses
-        API response object.
-
-        ``requested_structured`` is the base-supplied signal (was
-        ``output_structure`` given for this call) — authoritative, since it's
-        the same condition that decided whether ``_build_call_kwargs`` set
-        ``text.format`` in the first place; no response introspection needed.
-        When not requested, returns ``response.output_text`` unchanged (empty
-        string when no text is present; does not raise). When requested,
-        attempts ``json.loads(response.output_text)``; a parse failure
-        (shouldn't happen under ``strict: True``, but possible under e.g.
-        output-token truncation) falls back to returning the raw text instead
-        of raising.
+        Return ``response.output_text`` (``""`` when missing); on a structured
+        call, its ``json.loads`` value (raw text when it does not parse, e.g.
+        after output-token truncation).
         """
+        text = response.output_text or ""
         if not requested_structured:
-            return response.output_text
+            return text
         try:
-            return json.loads(response.output_text)
+            return json.loads(text)
         except json.JSONDecodeError:
-            return response.output_text
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -506,9 +371,15 @@ class OpenAIEngine(LLMEngine):
         ``cache_write_tokens`` both default to ``None`` (not reported).
 
         ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
+        A response with no usage object raises unless ``require_usage`` is
+        ``False``, which yields an all-zero record.
         """
         usage = response.usage
         if usage is None:
+            if not self.require_usage:
+                return OpenAITokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
             raise LLMEngineError("OpenAI response did not include usage.")
 
         output_details = usage.output_tokens_details
@@ -547,10 +418,10 @@ class OpenAIEngine(LLMEngine):
         Prepare a local path for reuse with this engine.
 
         - PDFs/images → upload once to Files API; metadata contains `file_id`.
-        - Text/code → inline as text (UTF-8, with a length cutoff).
+        - Text/code → inline whole as text (UTF-8).
         """
         try:
-            kind = self._classify_path(path)
+            kind = classify_path(path, OPENAI_IMAGE_EXTS)
             mime, _ = mimetypes.guess_type(path)
             mime = mime or ""
             ext = os.path.splitext(path)[1].lower()
@@ -567,9 +438,7 @@ class OpenAIEngine(LLMEngine):
                 }
 
             # Text/code → inline as text
-            text = self._read_text_file(path)
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
+            text = read_text_file(path)
 
             return {
                 "kind": "text",
@@ -583,57 +452,12 @@ class OpenAIEngine(LLMEngine):
         except Exception as exc:
             # Normalize unexpected errors to LLMEngineError so callers see a consistent type.
             raise LLMEngineError(
-                f"OpenAIEngine._prepare_attachment failed for {path!r}"
+                f"OpenAIEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Attempt to delete any remote file created via the Files API.
-
-        This is best-effort; errors are ignored.
-        """
-        file_id = meta.get("file_id")
-        if not file_id:
-            return
-        try:
-            if isinstance(self._client, AsyncOpenAI):
-                run_coro_sync(self._client.files.delete(file_id))
-            else:
-                self._client.files.delete(file_id)
-        except Exception:
-            return
 
     # ------------------------------------------------------------------ #
     # OpenAI-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
-
-    def _classify_path(self, path: str) -> str:
-        """
-        Classify `path` into 'pdf' | 'image' | 'text'.
-
-        Base validation has already run; this is a semantic bucketization.
-        """
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        ext = os.path.splitext(path)[1].lower()
-
-        if ext == ".pdf" or mime == "application/pdf":
-            return "pdf"
-        if ext in OPENAI_IMAGE_EXTS or mime.startswith("image/"):
-            return "image"
-        return "text"
-
-    def _collect_instructions(self, messages: List[Dict[str, str]]) -> Optional[str]:
-        """
-        Concatenate all system message contents into an `instructions` string.
-        """
-        parts = [
-            m["content"]
-            for m in messages
-            if (m.get("role") or "").lower() == "system" and m.get("content")
-        ]
-        joined = "\n\n".join(parts).strip()
-        return joined or None
 
     def _build_role_blocks(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """
@@ -642,43 +466,17 @@ class OpenAIEngine(LLMEngine):
         - `assistant` turns → `output_text`
         - Other non-system turns → `input_text`
         - `system` content is carried only via `instructions`.
+        - Attachments attach to the last user block.
         """
         blocks: List[Dict[str, Any]] = []
         for m in messages:
-            role = (m.get("role") or "user").lower()
+            role = m["role"]
             if role == "system":
-                continue  # handled by _collect_instructions
-            text = m.get("content") or ""
-            if not text and role != "user":
-                # Keep empty user (we attach into it), skip other empty roles.
-                continue
+                continue  # carried via `instructions`
+            text = m["content"]
             part_type = "output_text" if role == "assistant" else "input_text"
-            parts: List[Dict[str, Any]] = []
-            if text:
-                parts.append({"type": part_type, "text": text})
-            blocks.append({"role": role, "content": parts})
+            blocks.append({"role": role, "content": [{"type": part_type, "text": text}]})
         return blocks
-
-    def _ensure_user_block(self, blocks: List[Dict[str, Any]]) -> int:
-        """
-        Return the index of a `user` block; create an empty one at the end if none exist.
-        """
-        for i in range(len(blocks) - 1, -1, -1):
-            if blocks[i].get("role") == "user":
-                return i
-        blocks.append({"role": "user", "content": []})
-        return len(blocks) - 1
-
-    def _read_text_file(self, path: str) -> str:
-        """
-        Read a local file as UTF-8 (with replacement). Returns a best-effort string.
-        """
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            return raw.decode("utf-8", errors="replace")
-        except Exception as exc:  # pragma: no cover - unlikely IO failures
-            return f"[Error reading file '{os.path.basename(path)}': {exc}]"
 
     def _upload_file(self, path: str) -> str:
         """
@@ -695,42 +493,6 @@ class OpenAIEngine(LLMEngine):
                 f = self._client.files.create(file=fp, purpose="assistants")
         return str(f.id)
 
-    def _attach_local_path(
-            self,
-            user_parts: List[Dict[str, Any]],
-            path: str,
-    ) -> None:
-        """
-        Fallback helper for attaching a path directly when metadata is incomplete.
-
-        - PDFs   → upload + `input_file` reference
-        - Images → upload + `input_image` reference
-        - Other  → inline as text (UTF-8, truncated by `inline_cutoff_chars`).
-        """
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        lower = path.lower()
-        is_pdf = mime == "application/pdf" or lower.endswith(".pdf")
-        is_image = mime.startswith("image/") or lower.endswith(OPENAI_IMAGE_EXTS)
-
-        if is_pdf:
-            file_id = self._upload_file(path)
-            user_parts.append({"type": "input_file", "file_id": file_id})
-            return
-
-        if is_image:
-            file_id = self._upload_file(path)
-            user_parts.append({"type": "input_image", "file_id": file_id})
-            return
-
-        # Inline as text
-        text = self._read_text_file(path)
-        if len(text) > self._inline_cutoff_chars:
-            text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
-
-        header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-        user_parts.append({"type": "input_text", "text": header + text})
-
     # ------------------------------------------------------------------ #
     # Introspection
     # ------------------------------------------------------------------ #
@@ -739,18 +501,13 @@ class OpenAIEngine(LLMEngine):
         """
         Diagnostic snapshot for OpenAIEngine, without secrets.
 
-        Includes model, Responses API config, and inline cutoff in addition to
-        base engine info. Does not expose ``client_kwargs`` contents (which may
+        Includes model and the strict flag in addition to
+        base engine info (which carries the runtime parameters). Does not expose ``client_kwargs`` contents (which may
         include API keys).
         """
         base = super().to_dict()
         base.update({
             "model": self.model,
-            "temperature": self.temperature,
-            "max_output_tokens": self.max_output_tokens,
-            "reasoning": self.reasoning,
-            "truncation": self.truncation,
             "strict": self.strict,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

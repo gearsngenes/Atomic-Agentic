@@ -7,7 +7,7 @@ from typing import Any, Callable, ClassVar
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results import RouterResult
-from ..tools.toolification import to_invokable
+from ..adapters import to_invokable
 from .graph import Graph
 
 __all__ = ["Router"]

@@ -57,7 +57,7 @@ from ..invokables import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
-from ..a2a import A2AClientHub, PyA2AtomicClient
+from ..a2a import A2AClientHub
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.tasks import ReActTask
 from ..models.agents.records import ToolAgentRecord, LLMRecord
@@ -122,7 +122,7 @@ class ReActAgent(ToolAgent):
         description: str,
         llm_engine: LLMEngine,
         instructions: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
-        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub]] = None,
         pre_invoke: str | Callable[..., Any] | AtomicInvokable = DEFAULT_PRE_INVOKE,
         post_invoke: Optional[str | Callable[..., Any] | AtomicInvokable] = None,
         inputs_to_context: Iterable[str] | Mapping[str, str] = (),

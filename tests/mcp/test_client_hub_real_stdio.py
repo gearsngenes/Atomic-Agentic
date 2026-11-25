@@ -3,7 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
+from atomic_agentic.exceptions import ToolRegistrationError
 from atomic_agentic.mcp.mcp_client_hub import MCPClientHub
+
+from ..agents.conftest import make_stub_tool_agent
 
 _FIXTURE_SERVER = str(Path(__file__).parent / "_stdio_fixture_server.py")
 
@@ -25,9 +30,9 @@ class TestMCPClientHubRealStdioPersistence:
 
     def test_construct_call_close_does_not_raise(self) -> None:
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
         try:
@@ -41,9 +46,9 @@ class TestMCPClientHubRealStdioPersistence:
 
     def test_close_is_idempotent(self) -> None:
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
 
@@ -58,9 +63,9 @@ class TestMCPClientHubRealStdioPersistence:
         close_event.set() + await old_holder_task) -- a second real path
         into the exact constraint this file guards."""
         hub = MCPClientHub(
-            transport_mode="stdio",
+            sys.executable,
+            "stdio",
             persistent=True,
-            command=sys.executable,
             args=[_FIXTURE_SERVER],
         )
         try:
@@ -72,3 +77,66 @@ class TestMCPClientHubRealStdioPersistence:
             assert result["isError"] is False
         finally:
             hub.close()
+
+
+class TestRealHubRegistrationNaming:
+    """Hub tools register under ``<hub.name>_<remote name>`` (raw name for an
+    unnamed hub) against a real stdio fixture server."""
+
+    def test_named_hub_tool_registers_prefixed(self) -> None:
+        hub = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER], name="fx")
+        try:
+            agent = make_stub_tool_agent()
+            agent.register_tools([hub])
+            assert agent.has_tool("fx_echo")
+            assert not agent.has_tool("echo")
+            assert agent.list_tools()["fx_echo"].remote_name == "echo"
+        finally:
+            hub.close()
+
+    def test_unnamed_hub_tool_registers_raw(self) -> None:
+        hub = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER])
+        try:
+            agent = make_stub_tool_agent()
+            agent.register_tools([hub])
+            assert agent.has_tool("echo")
+        finally:
+            hub.close()
+
+    def test_two_hubs_same_remote_names_prefix_apart(self) -> None:
+        hub_a = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER], name="a")
+        hub_b = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER], name="b")
+        try:
+            agent = make_stub_tool_agent()
+            agent.register_tools([hub_a, hub_b])
+            assert agent.has_tool("a_echo")
+            assert agent.has_tool("b_echo")
+        finally:
+            hub_a.close()
+            hub_b.close()
+
+    def test_two_unnamed_hubs_collide_in_batch(self) -> None:
+        hub_a = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER])
+        hub_b = MCPClientHub(sys.executable, "stdio", args=[_FIXTURE_SERVER])
+        try:
+            agent = make_stub_tool_agent()
+            with pytest.raises(ToolRegistrationError):
+                agent.register_tools([hub_a, hub_b])
+        finally:
+            hub_a.close()
+            hub_b.close()
+
+
+class TestRealHubReadTimeout:
+    """The read timeout must be handed to the SDK as float seconds (mcp 2.x);
+    the unit tests fake ClientSession, so only a real session proves it."""
+
+    def test_read_timeout_with_real_session(self) -> None:
+        hub = MCPClientHub(
+            sys.executable,
+            "stdio",
+            args=[_FIXTURE_SERVER],
+            read_timeout_seconds=30.0,
+        )
+        assert list(hub.list_tools()) == ["echo"]
+        assert hub.call_tool("echo", {"value": "hi"})["isError"] is False

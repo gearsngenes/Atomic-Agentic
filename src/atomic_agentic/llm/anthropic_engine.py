@@ -3,17 +3,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import mimetypes
 import os
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
 try:
-    from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
+    from anthropic import Anthropic, AsyncAnthropic
     _SDK_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:
     Anthropic = None            # type: ignore[assignment,misc]
     AsyncAnthropic = None       # type: ignore[assignment,misc]
-    APIConnectionError = None   # type: ignore[assignment,misc]
-    APIStatusError = None       # type: ignore[assignment,misc]
     _SDK_IMPORT_ERROR = _exc
 
 from .base import LLMEngine
@@ -21,12 +20,16 @@ from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
     ANTHROPIC_IMAGE_EXTS,
-    ANTHROPIC_DOCUMENT_EXTS,
     ANTHROPIC_ALLOWED_EXTS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import AnthropicTokenUsage, RemoteLLMModelData
-from ..utils.llm import validate_attachment_path
+from ..utils.llm import (
+    classify_path,
+    collect_system_text,
+    read_text_file,
+    validate_attachment_path,
+)
 from ..utils.core import format_missing_dependency, run_coro_sync
 
 __all__ = ["AnthropicEngine"]
@@ -59,78 +62,65 @@ class AnthropicEngine(LLMEngine):
 
     File policy
     -----------
-    Inline-only attachment support (Anthropic Files API is still in beta —
-    deferred to a future pass):
+    Inline-only attachment support (no Files API):
 
     - Images (PNG, JPG, JPEG, GIF, WEBP) → base64 ``image`` content blocks.
     - PDFs → base64 ``document`` content blocks.
     - Text / code files → UTF-8 ``document/text`` content blocks
       (no base64 required).
 
-    Attachment blocks are appended to the last user-turn ``content`` list
-    in ``_build_provider_payload``.  ``_on_detach`` is a no-op.
+    ``attach`` stores light metadata (``kind``, ``mime``, ``ext``) in
+    ``attachments`` and keeps the content block privately; the blocks are
+    appended to the last user turn in ``_build_provider_payload``.
+    ``attach``/``detach``/``clear_attachments`` are this engine's own API;
+    detach has no provider cleanup.
 
     Invocation
     ----------
-    ``role="system"`` messages are extracted from the normalized input list
-    and forwarded as the top-level ``system=`` parameter (joined with
-    ``"\\n\\n"`` when multiple system messages are present).  The remaining
-    messages form the ``messages=`` list.  ``max_tokens`` is always sent
-    (required by Anthropic).  ``stop_sequences``, ``thinking`` and
-    ``extra_body`` (sampling fields such as ``temperature``) are omitted
-    when ``None``.
-    ``block_separator`` (default ``""``) controls how multiple response text
-    blocks are rejoined into the returned string — relevant when a response
-    contains more than one ``text`` block (e.g. Anthropic citations, which
-    can split a response into interleaved cited/uncited blocks). Defaults to
-    no inserted separator, matching Anthropic's own text-reconstruction
-    convention (the streaming SDK's ``text_stream`` concatenates raw text
-    deltas across content-block boundaries with nothing inserted).
+    System messages are joined and forwarded as the top-level ``system=``
+    parameter; the rest form ``messages=``. ``max_tokens`` is always sent
+    (required by Anthropic): ``_REQUIRED_RUNTIME_DEFAULTS`` supplies
+    ``max_tokens=8192`` under the runtime parameters, so the store starts empty
+    and removing ``max_tokens`` falls back to that default. Every other
+    generation setting (``stop_sequences``, ``thinking``, ``extra_body``, ...)
+    is a runtime parameter under Anthropic's own name, forwarded verbatim:
+    ``engine.update_runtime_parameters(thinking={"type": "adaptive"})``. Which
+    fields the API accepts depends on the SDK version (anthropic 2.x rejects
+    ``temperature``, which can travel in ``extra_body``); AA does not validate
+    them. Timeout and retry are the SDK client's own settings through
+    ``client_kwargs``. ``block_separator`` (default ``""``) is the string
+    inserted between multiple response ``text`` blocks (e.g. with citations);
+    it is a validated, settable attribute, not a runtime parameter. Anthropic
+    always reports usage, so ``require_usage`` has no effect here.
 
     Result extraction
-    ------------------
-    ``_extract_result`` reuses the same ``TextBlock``-joining logic as
-    before (``block_separator``-joined; empty string on refusal or no text
-    blocks). When the base class signals ``requested_structured=True``, the
-    joined text is parsed via ``json.loads``; a parse failure (including the
-    empty-string refusal case) falls back to returning the raw text rather
-    than raising, matching the base ``LLMEngine`` fallback contract
-    (``structured-generation`` Pass 3). No Anthropic-specific detection is
-    needed — the response shape is identical whether or not structured
-    output was requested.
+    -----------------
+    ``_extract_result`` joins the ``text`` blocks with ``block_separator``
+    (empty string on refusal or no text) and, on a structured call, parses
+    them with ``json.loads`` (raw text on a parse failure).
 
     Structured-output schema policy
-    ---------------------------------
-    ``output_structure``, when given, is forwarded to
-    ``output_config.format.schema`` completely unmodified — this engine
-    performs no schema pruning (structured-generation Pass 8). Keywords
-    Anthropic's JSON-Schema mode rejects unconditionally (confirmed live,
-    2026-08-19: ``minimum``, ``maximum``, ``multipleOf``, ``maxItems``) now
-    surface as Anthropic's own API error rather than being silently
-    stripped. ``oneOf`` and an over-constrained ``minItems`` are
-    structurally risky (can collapse a field to an unconstrained ``{}``)
-    and are not validated here; ``additionalProperties`` must be set to
-    exactly ``false`` on every object schema, the caller's own
-    responsibility.
+    -------------------------------
+    ``output_structure`` is forwarded unmodified to ``output_config.format.schema``;
+    Anthropic rejects what it does not accept natively (``additionalProperties``
+    must be ``false`` on every object).
+
+    A runtime ``output_config`` (e.g. ``effort``) is allowed: on a structured
+    call the engine copies it and sets only its ``format`` key; a plain call
+    passes it through untouched.
     """
+
+    _RESERVED_RUNTIME_KEYS = frozenset({"model", "messages", "system", "stream"})
+
+    # Fields the API requires on every call; runtime parameters override them.
+    _REQUIRED_RUNTIME_DEFAULTS: ClassVar[Mapping[str, Any]] = {"max_tokens": 8192}
 
     def __init__(
         self,
         model: str,
         name: str | None = None,
-        description: str = "Anthropic Claude language model engine.",
+        description: str | None = None,
         client: Anthropic | AsyncAnthropic | None = None,
-        max_output_tokens: int = 8192,
-        stop_sequences: list[str] | None = None,
-        thinking_config: dict[str, Any] | None = None,
-        extra_body: Mapping[str, Any] | None = None,
-        block_separator: str = "",
-        inline_cutoff_chars: int = 200_000,
-        *,
-        timeout_seconds: float = 600.0,
-        max_retries: int = 2,
-        retry_backoff_base: float = 0.5,
-        retry_backoff_max: float = 8.0,
         **client_kwargs: Any,
     ) -> None:
         """
@@ -139,89 +129,99 @@ class AnthropicEngine(LLMEngine):
         model:
             Anthropic model identifier (e.g. ``"claude-sonnet-4-6"``).
         name:
-            Optional human-friendly engine name; defaults to
-            ``anthropic_{model}`` with non-identifier characters replaced by
-            underscores.
+            Optional human-friendly engine name; defaults to the class name.
         description:
             Human-readable description for this engine instance.
         client:
             Pre-built ``Anthropic`` or ``AsyncAnthropic`` client. When
-            provided, used directly; when ``None``, a sync
-            ``Anthropic(**client_kwargs)`` is built.
-        max_output_tokens:
-            Always sent as ``max_tokens=`` (required by the Anthropic API).
-        stop_sequences:
-            Optional list of stop strings; omitted when ``None``.
-        thinking_config:
-            Optional extended-thinking configuration dict (e.g.
-            ``{"type": "adaptive"}``); sent as ``thinking=``, omitted when
-            ``None``.
-        extra_body:
-            Extra request fields forwarded verbatim through the SDK's
-            ``extra_body`` passthrough, e.g. ``{"temperature": 0.3}`` or
-            ``{"top_k": 5}``. Which fields the API accepts depends on the
-            API version the SDK speaks (anthropic 2.x rejects
-            ``temperature``); AA does not validate them. Omitted when ``None``.
-        block_separator:
-            Controls how multiple response text blocks are rejoined into the
-            returned string (relevant for citation-bearing responses).
-            Defaults to ``""`` (no inserted separator).
-        inline_cutoff_chars:
-            Maximum characters to inline from text/code attachments.
-        timeout_seconds:
-            Per-call timeout inserted into the client's ``timeout`` option.
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/backoff configuration.
+            provided, used directly (combining it with ``client_kwargs``
+            raises); when ``None``, a sync ``Anthropic(**client_kwargs)`` is
+            built.
         **client_kwargs:
-            Additional keyword arguments forwarded verbatim to
-            ``Anthropic(...)`` during client construction. Common uses:
-            ``api_key``, ``base_url``. Not forwarded when ``client`` is
-            injected directly.
-        """
-        # 1. Name sanitization + super init
-        sanitized = (name or f"anthropic_{model}").replace(":", "_").replace(
-            "-", "_").replace(" ", "_").replace(".", "_")
-        super().__init__(
-            name=sanitized,
-            description=description or "Anthropic Claude language model engine.",
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max,
-        )
+            Keyword arguments forwarded unchanged to ``Anthropic(...)``. Common
+            uses: ``api_key``, ``base_url``, and the SDK's own ``timeout`` and
+            ``max_retries``.
 
-        # 2. SDK presence check
+        Lifecycle: SDK presence check; reject ``client`` combined with
+        ``client_kwargs``; base init; build or adopt the client;
+        ``block_separator`` starts as ``""``.
+        """
+        # 1. SDK presence check
         if Anthropic is None:
             raise LLMEngineError(
                 "AnthropicEngine "
                 + format_missing_dependency("anthropic", "anthropic", _SDK_IMPORT_ERROR)
             ) from _SDK_IMPORT_ERROR
 
-        # 3. Build client kwargs; seed timeout default
-        _ckw = dict(client_kwargs)
-        _ckw.setdefault("timeout", self._timeout_seconds)
+        # 2. Exactly one client source
+        if client is not None and client_kwargs:
+            raise LLMEngineError(
+                "AnthropicEngine: pass either 'client' or client kwargs, not both."
+            )
 
-        # 4. Assign or build client
-        self._client: Anthropic | AsyncAnthropic = (
-            client if client is not None else Anthropic(**_ckw)
+        # 3. Base init, then engine state
+        super().__init__(
+            name=name,
+            description=description or "Anthropic Claude language model engine.",
         )
-
-        # 5. Store request-level params
+        self._attachments: Dict[str, Dict[str, Any]] = {}
+        self._blocks: Dict[str, Dict[str, Any]] = {}
+        self._client: Anthropic | AsyncAnthropic = (
+            client if client is not None else Anthropic(**client_kwargs)
+        )
         self.model = model
-        self.max_output_tokens = int(max_output_tokens)
-        self.stop_sequences = stop_sequences
-        self.thinking_config = thinking_config
-        self.extra_body = dict(extra_body) if extra_body is not None else None
-        self.block_separator = block_separator
-        self._inline_cutoff_chars = int(inline_cutoff_chars)
+        self.block_separator = ""
+
+    @property
+    def block_separator(self) -> str:
+        """String inserted between response text blocks when they are joined."""
+        return self._block_separator
+
+    @block_separator.setter
+    def block_separator(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise LLMEngineError(
+                f"AnthropicEngine.block_separator must be a str, got {type(value).__name__}."
+            )
+        self._block_separator = value
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Attachments
     # ------------------------------------------------------------------ #
     @property
-    def inline_cutoff_chars(self) -> int:
-        """Max characters inlined from text attachments; fixed at construction."""
-        return self._inline_cutoff_chars
+    def attachments(self) -> Mapping[str, Mapping[str, Any]]:
+        """Copy of attached local path -> metadata (``kind``, ``mime``, ``ext``)."""
+        return {path: dict(meta) for path, meta in self._attachments.items()}
+
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Attach a local file for every later call; returns its metadata copy
+        (never the content block).
+
+        1. Reject a blank or non-string path.
+        2. Return the stored metadata when ``path`` is already attached.
+        3. Validate the path, build the metadata and content block, store both.
+        """
+        if not isinstance(path, str) or not path:
+            raise LLMEngineError("AnthropicEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return dict(self._attachments[path])
+
+        self._validate_attachment_path(path)
+        meta, block = self._prepare_attachment(path)
+        self._attachments[path] = meta
+        self._blocks[path] = block
+        return dict(meta)
+
+    def detach(self, path: str) -> bool:
+        """Detach ``path``; ``True`` when something was removed (no provider cleanup)."""
+        self._blocks.pop(path, None)
+        return self._attachments.pop(path, None) is not None
+
+    def clear_attachments(self) -> None:
+        """Detach every attached path."""
+        for path in list(self._attachments):
+            self.detach(path)
 
     # ------------------------------------------------------------------ #
     # Client routing
@@ -239,19 +239,6 @@ class AnthropicEngine(LLMEngine):
             return await self._client.messages.create(**payload)
         return await asyncio.to_thread(self._call_provider, payload)
 
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        """
-        Retry on Anthropic connection/timeout errors and on retryable HTTP
-        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
-        """
-        if attempt > self._max_retries:
-            return False
-        if isinstance(exc, APIConnectionError):
-            return True
-        if isinstance(exc, APIStatusError):
-            return exc.status_code in {429, 500, 502, 503, 504}
-        return False
-
     # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
@@ -259,71 +246,49 @@ class AnthropicEngine(LLMEngine):
     def _build_provider_payload(
         self,
         messages: List[Dict[str, Any]],
-        attachments: Dict[str, Any],
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the ``messages.create`` payload from normalized messages and the
-        current attachments snapshot.
+        Build the ``messages.create`` payload from normalized messages and a
+        snapshot of the engine's attachments.
 
-        Lifecycle: (1) partition system vs. conversation; (2) convert to
-        Anthropic content-list format; (3) append attachment blocks to the
-        last user turn; (4) assemble final payload dict with optional
-        generation params; (5) if ``output_structure`` is given, wire it into
-        ``output_config.format`` (the caller's raw schema, forwarded
-        unmodified).
+        1. Join the system messages for ``system``.
+        2. Convert the other messages to content-list format.
+        3. Append the attachment blocks to the last user turn.
+        4. Start from the required defaults, then the runtime parameters, then
+           the engine-owned fields (``model``, ``messages``, ``system``), so
+           the engine-owned fields win.
+        5. Structured call: set ``output_config.format`` on a copy of any
+           runtime ``output_config`` (the caller's raw schema, unmodified).
         """
-        # 1. Partition system vs. conversation messages
-        system_parts = [
-            m["content"] for m in messages if m.get("role") == "system"
+        # 1-2. System text and conversation turns
+        system = collect_system_text(messages)
+        anthropic_msgs: list[dict[str, Any]] = [
+            {
+                "role": m["role"],
+                "content": [{"type": "text", "text": m["content"]}],
+            }
+            for m in messages
+            if m["role"] != "system"
         ]
-        conv = [m for m in messages if m.get("role") != "system"]
-
-        # 2. Convert to Anthropic format — content always a list
-        anthropic_msgs: list[dict[str, Any]] = []
-        for m in conv:
-            content = m["content"]
-            if not isinstance(content, list):
-                content = [{"type": "text", "text": content}]
-            anthropic_msgs.append({"role": m["role"], "content": content})
 
         # 3. Append attachment blocks to the last user turn
-        blocks = list(attachments.values())
+        blocks = list(self._blocks.values())
         if blocks:
-            idx = next(
-                (i for i in range(len(anthropic_msgs) - 1, -1, -1)
-                 if anthropic_msgs[i]["role"] == "user"),
-                None,
-            )
-            if idx is not None:
-                anthropic_msgs[idx]["content"] = anthropic_msgs[idx]["content"] + blocks
-            else:
-                anthropic_msgs.append({"role": "user", "content": blocks})
+            last_user = next(m for m in reversed(anthropic_msgs) if m["role"] == "user")
+            last_user["content"] = last_user["content"] + blocks
 
-        # 4. Assemble payload
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self.max_output_tokens,
-            "messages": anthropic_msgs,
-        }
-        if system_parts:
-            payload["system"] = "\n\n".join(system_parts)
+        # 4. Assemble the call kwargs
+        payload: dict[str, Any] = dict(self._REQUIRED_RUNTIME_DEFAULTS)
+        payload.update(self._runtime_parameters)
+        payload.update(model=self.model, messages=anthropic_msgs)
+        if system:
+            payload.update(system=system)
 
-        # Sampling params (temperature, top_p, top_k, ...) are no longer fixed
-        # engine knobs: newer Anthropic API versions (SDK 2.x) reject some of
-        # them, so they travel through the SDK's extra_body passthrough exactly
-        # as the caller supplied them.
-        if self.extra_body:
-            payload["extra_body"] = dict(self.extra_body)
-
-        if self.stop_sequences is not None:
-            payload["stop_sequences"] = self.stop_sequences
-        if self.thinking_config is not None:
-            payload["thinking"] = self.thinking_config
         if output_structure is not None:
-            payload["output_config"] = {
-                "format": {"type": "json_schema", "schema": output_structure}
-            }
+            output_config = dict(payload.get("output_config") or {})
+            output_config["format"] = {"type": "json_schema", "schema": output_structure}
+            payload.update(output_config=output_config)
         return payload
 
     # ------------------------------------------------------------------ #
@@ -334,18 +299,12 @@ class AnthropicEngine(LLMEngine):
         self, response: Any, requested_structured: bool
     ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
-        Extract the assistant's textual or structured reply from a Messages
-        API response object.
-
-        Joins all ``TextBlock`` parts with ``block_separator`` (empty string
-        on refusal or no text blocks) -- unchanged regardless of
-        ``requested_structured``. When not requested, returns that text
-        as-is. When requested, attempts ``json.loads`` on the joined text; a
-        parse failure (including the empty-string refusal case) falls back
-        to returning the raw text instead of raising.
+        Join the ``text`` blocks with ``block_separator`` (empty string on
+        refusal or no text); on a structured call, ``json.loads`` the joined
+        text (raw text on a parse failure, including the empty refusal).
         """
         text = self.block_separator.join(
-            block.text for block in response.content if block.type == "text"
+            block.text or "" for block in response.content if block.type == "text"
         )
         if not requested_structured:
             return text
@@ -368,10 +327,8 @@ class AnthropicEngine(LLMEngine):
         inp = u.input_tokens
         gen = u.output_tokens
 
-        # `output_tokens_details` is either `None` or a real
-        # `anthropic.OutputTokensDetails` Pydantic object (never a dict) —
-        # `getattr` avoids assuming dict-style `.get()` access, which crashes
-        # on the real object whenever extended thinking actually populates it.
+        # `output_tokens_details` is `None` or an `anthropic.OutputTokensDetails`
+        # Pydantic object (not a dict), so read it with `getattr`.
         details = getattr(u, "output_tokens_details", None)
         thinking_tokens = (
             getattr(details, "thinking_tokens", None) if details is not None else None
@@ -408,63 +365,40 @@ class AnthropicEngine(LLMEngine):
         except ValueError as exc:
             raise LLMEngineError(str(exc)) from exc
 
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
+    def _prepare_attachment(self, path: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Build an inline Anthropic content block for ``path`` (no upload).
+        Return ``(metadata, content block)`` for ``path`` (no upload).
 
-        Images → base64 ``image`` block; PDFs → base64 ``document`` block;
-        text/code → UTF-8 ``document/text`` block, truncated at
-        ``inline_cutoff_chars``.
+        Images become a base64 ``image`` block, PDFs a base64 ``document``
+        block, text/code a ``document`` block with a ``text`` source (whole
+        file, UTF-8 with replacement). The metadata is ``kind``
+        (``"image"``/``"pdf"``/``"text"``), ``mime`` and ``ext``.
         """
         try:
+            kind = classify_path(path, ANTHROPIC_IMAGE_EXTS)
+            mime, _ = mimetypes.guess_type(path)
             ext = os.path.splitext(path)[1].lower()
+            meta = {"kind": kind, "mime": mime or "", "ext": ext}
 
-            if ext in ANTHROPIC_IMAGE_EXTS:
+            if kind in ("image", "pdf"):
                 with open(path, "rb") as fh:
                     data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": _MIME_MAP[ext],
-                        "data": data,
-                    },
-                }
-
-            if ext in ANTHROPIC_DOCUMENT_EXTS:
-                with open(path, "rb") as fh:
-                    data = base64.b64encode(fh.read()).decode()
-                return {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": _MIME_MAP[ext],
-                        "data": data,
-                    },
-                }
-
-            # Text / code — document/text source (no base64 needed)
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-            if len(text) > self._inline_cutoff_chars:
-                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
-            return {
-                "type": "document",
-                "source": {
+                block_type = "image" if kind == "image" else "document"
+                source = {"type": "base64", "media_type": _MIME_MAP[ext], "data": data}
+            else:
+                block_type = "document"
+                source = {
                     "type": "text",
                     "media_type": "text/plain",
-                    "data": text,
-                },
-            }
+                    "data": read_text_file(path),
+                }
+            return meta, {"type": block_type, "source": source}
         except LLMEngineError:
             raise
         except Exception as exc:
             raise LLMEngineError(
-                f"AnthropicEngine._prepare_attachment failed for {path!r}"
+                f"AnthropicEngine._prepare_attachment failed for {path!r}: {exc}"
             ) from exc
-
-    def _on_detach(self, meta: Any) -> None:
-        """No-op — inline attachments leave no server-side state to clean up."""
 
     # ------------------------------------------------------------------ #
     # Serialization
@@ -474,11 +408,6 @@ class AnthropicEngine(LLMEngine):
         d = super().to_dict()
         d.update({
             "model": self.model,
-            "max_output_tokens": self.max_output_tokens,
-            "stop_sequences": self.stop_sequences,
-            "thinking_config": self.thinking_config,
-            "extra_body": self.extra_body,
             "block_separator": self.block_separator,
-            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return d

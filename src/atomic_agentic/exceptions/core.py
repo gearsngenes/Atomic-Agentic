@@ -122,37 +122,16 @@ class MCPToolError(MCPError):
     """Raised when a specific remote MCP tool invocation fails server-side."""
 
 
-class PyA2AtomicError(RuntimeError):
-    """Base exception for PyA2Atomic transport/protocol errors.
-
-    Named PyA2Atomic (matching PyA2AtomicClient/PyA2AtomicHost/
-    PyA2AtomicTool), not A2A* — the python_a2a dependency already exports
-    its own A2AError/A2AConnectionError hierarchy with the same names but
-    a different base (plain Exception, not RuntimeError); reusing those
-    names here would make tracebacks genuinely ambiguous about which
-    library raised what. Subclasses RuntimeError to match this codebase's
-    existing convention for domain error types that supersede a
-    previously-bare RuntimeError (see LLMEngineError, MCPError) — callers
-    doing `except RuntimeError` upstream still catch these.
-    """
-
-
-class PyA2AtomicConnectionError(PyA2AtomicError):
-    """Raised when PyA2Atomic agent-card refresh fails, message transport
-    fails, or a remote response doesn't match the expected protocol shape."""
-
-
 class A2AProxyError(RuntimeError):
-    """Base exception for A2AClientHub transport/protocol errors (the new,
-    additive a2a-sdk-backed track -- see PyA2AtomicError's own docstring for
-    the parallel: named A2A*, not PyA2Atomic*, and unrelated to a2a-sdk's
-    own A2AError/A2AClientError hierarchy despite similar naming, for the
-    same tracebacks-would-be-ambiguous reason. That hierarchy is wrapped,
-    not reused. Subclasses RuntimeError to match this codebase's existing
-    convention for domain error types (see LLMEngineError, MCPError,
-    PyA2AtomicError). Single, pragmatic exception for this pass, not a
-    hierarchy -- deep exception cleanup across the whole package is
-    explicitly deferred to a separate future release.
+    """Base exception for A2AClientHub transport/protocol errors.
+
+    Unrelated to a2a-sdk's own A2AError/A2AClientError hierarchy despite the
+    similar naming (reusing those names would make tracebacks ambiguous about
+    which library raised what); that hierarchy is wrapped, not reused.
+    Subclasses RuntimeError to match this codebase's convention for domain
+    error types (see LLMEngineError, MCPError). A single exception, not a
+    hierarchy; deep exception cleanup is deferred to the error-boundaries
+    stage.
     """
 
 
@@ -172,7 +151,5 @@ __all__ = [
     "MCPError",
     "MCPConnectionError",
     "MCPToolError",
-    "PyA2AtomicError",
-    "PyA2AtomicConnectionError",
     "A2AProxyError",
 ]

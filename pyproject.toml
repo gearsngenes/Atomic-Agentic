@@ -21,7 +21,7 @@ classifiers = [
 
 # Core: protocol/transport libraries only. No LLM provider SDKs.
 dependencies = [
-  "mcp>=1.25,<3",
+  "mcp>=2,<3",
   "a2a-sdk[grpc]>=1.1.2,<2",
   "httpx>=0.28.1,<1",
 ]
@@ -48,12 +48,6 @@ dev = [
   "a2a-sdk[http-server]>=1.1.2,<2",
 ]
 
-# Deprecated: removed in the final 2.0.0 release.
-python-a2a = ["python-a2a>=0.5.10,<0.6"]
-
-# python-a2a plus the test tooling.
-extras = ["atomic-agentic[python-a2a,dev]"]
-
 [project.urls]
 Homepage = "https://github.com/gearsngenes/Atomic-Agentic"
 Issues   = "https://github.com/gearsngenes/Atomic-Agentic/issues"
@@ -77,6 +71,7 @@ addopts = "-ra --basetemp=.pytest_tmp"
 tmp_path_retention_policy = "none"
 markers = [
   "integration: multi-component integration tests",
+  "live_catalog: MCPClientHub tests that need the real catalog fetch (default is a stubbed empty catalog)",
   "llm: tests that make real LLM API calls",
   "network: tests that require network access",
   "slow: tests with long runtimes",

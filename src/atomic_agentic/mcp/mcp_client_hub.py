@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import copy
 import logging
+import os
 import threading
 from contextlib import AsyncExitStack
-from datetime import timedelta
 from types import MappingProxyType
 from typing import (
     Any,
@@ -17,7 +18,7 @@ from typing import (
 )
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -27,6 +28,8 @@ from ..exceptions import MCPConnectionError, MCPToolError
 from ..utils.core import (
     apply_name_filter,
     normalize_headers,
+    normalize_optional_identifier,
+    normalize_timeout_seconds,
     run_coro_async,
     run_coro_sync,
     start_background_loop,
@@ -48,9 +51,15 @@ class MCPClientHub:
     """
     MCP transport/session hub, with an explicit connection-lifetime choice.
 
-    persistent=False: every list_tools()/call_tool() opens a fresh transport
-    + ClientSession, uses it once, and tears it down -- unchanged from this
-    class's original behavior.
+    The hub owns a fixed tool catalog: the remote tool metadata is fetched
+    once at construction and replaced only by refresh(). list_tools() and
+    get_tool() are local reads of that catalog (no network). A server that
+    cannot be reached or listed fails construction. include_names/
+    exclude_names are applied when the catalog is stored.
+
+    persistent=False: the catalog fetch and every call_tool() open a fresh
+    transport + ClientSession, use it once, and tear it down; nothing is
+    held between operations.
 
     persistent=True: the transport + ClientSession are opened once, at
     construction, and held open across every subsequent call via one
@@ -64,31 +73,53 @@ class MCPClientHub:
     the process exits normally (atexit-registered at construction), so a
     forgotten close() doesn't orphan the underlying stdio subprocess.
 
-    Immutable transport identity: transport_mode, endpoint, command, args,
-    persistent, include_names, exclude_names. Mutable request/session
-    configuration: headers (direct setter, or via refresh()),
-    client_kwargs/session_kwargs (via refresh() only). read_timeout_seconds
-    is fixed at construction.
+    Construction takes two required arguments, `location` (the command for
+    stdio, the URL for sse and streamable_http) and `transport_mode`; every
+    other option is keyword-only. `args` is stdio-only and `headers` is
+    sse/streamable_http-only; the wrong transport raises. `env` and `cwd`
+    for stdio travel in `client_kwargs`. A non-persistent stdio hub spawns
+    the server process for every call.
 
-    include_names/exclude_names filter list_tools()/async_list_tools()'s
-    output only -- discovery-only, not enforced on call_tool()/
-    async_call_tool(), which remain callable by any remote name regardless
-    of this filter.
+    The secondary constructors `stdio`, `sse` and `http` fix the transport and
+    expose only its options; each builds the same hub as the matching general
+    call. `stdio` takes `env` and `cwd` and carries them in `client_kwargs`.
+
+    Immutable identity: location, transport_mode, name, args, persistent,
+    include_names, exclude_names. Mutable through refresh() only: headers,
+    client_kwargs, session_kwargs. read_timeout_seconds is fixed at
+    construction.
+
+    include_names/exclude_names filter the stored catalog only --
+    discovery-only, not enforced on call_tool()/async_call_tool(), which
+    remain callable by any remote name regardless of this filter.
+
+    Lifecycle: a persistent hub holds a background thread, an event loop and
+    (for stdio) a server subprocess until close(). Use the hub in a `with`
+    block or call close() yourself. A forgotten hub is closed at normal
+    process exit through its atexit registration, which also keeps the hub
+    alive until then. That close() waits for teardown, so an unresponsive
+    server can slow process exit.
+
+    Limits: a persistent hub whose server dies still reports connected and
+    its calls fail until refresh(...) reconnects (there is no automatic
+    reconnect); refresh()/close() can fail a call already in flight on the
+    old connection.
     """
 
     def __init__(
         self,
+        location: str,
         transport_mode: Literal["stdio", "sse", "streamable_http"],
-        persistent: bool,
-        endpoint: str | None = None,
-        command: str | None = None,
+        *,
         args: list[str] | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
         read_timeout_seconds: float | None = None,
-        client_kwargs: Mapping[str, Any] | None = None,
-        session_kwargs: Mapping[str, Any] | None = None,
         include_names: list[str] | None = None,
         exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         mode = str(transport_mode).strip()
         if mode not in {"stdio", "sse", "streamable_http"}:
@@ -99,33 +130,32 @@ class MCPClientHub:
         if not isinstance(persistent, bool):
             raise TypeError("persistent must be a bool.")
 
-        normalized_endpoint: str | None = None
-        if endpoint is not None:
-            if not isinstance(endpoint, str):
-                raise ValueError("endpoint must be a string when provided.")
-            normalized_endpoint = endpoint.strip() or None
-
-        normalized_command: str | None = None
-        if command is not None:
-            if not isinstance(command, str):
-                raise ValueError("command must be a string when provided.")
-            normalized_command = command.strip() or None
+        if not isinstance(location, str):
+            raise ValueError("location must be a string.")
+        normalized_location = location.strip()
+        if not normalized_location:
+            what = "the command" if mode == "stdio" else "the URL"
+            raise ValueError(
+                f"{mode} transport requires a non-empty location ({what})."
+            )
 
         normalized_args: tuple[str, ...] | None = None
         if args is not None:
             if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
                 raise ValueError("args must be a list of strings when provided.")
+            if mode != "stdio":
+                raise ValueError("args is only valid for the stdio transport.")
             normalized_args = tuple(args)
 
         normalized_headers = normalize_headers(headers)
+        self._validate_headers_for_transport(mode, normalized_headers)
 
-        if mode == "stdio" and not normalized_command:
-            raise ValueError("stdio transport requires a non-empty command string.")
-        if mode in {"sse", "streamable_http"} and not normalized_endpoint:
-            raise ValueError(f"{mode} transport requires a non-empty endpoint string.")
+        normalized_name = normalize_optional_identifier(name)
 
         normalized_read_timeout_seconds: float | None = (
-            float(read_timeout_seconds) if read_timeout_seconds is not None else None
+            normalize_timeout_seconds(read_timeout_seconds, "read_timeout_seconds")
+            if read_timeout_seconds is not None
+            else None
         )
         normalized_client_kwargs = self._normalize_kwargs_mapping(
             client_kwargs, param_name="client_kwargs"
@@ -144,8 +174,8 @@ class MCPClientHub:
         )
 
         self._transport_mode: Literal["stdio", "sse", "streamable_http"] = mode
-        self._endpoint: str | None = normalized_endpoint
-        self._command: str | None = normalized_command
+        self._location: str = normalized_location
+        self._name: str | None = normalized_name
         self._args: tuple[str, ...] | None = normalized_args
         self._headers: Mapping[str, str] | None = normalized_headers
         self._read_timeout_seconds: float | None = normalized_read_timeout_seconds
@@ -154,6 +184,7 @@ class MCPClientHub:
         self._include_names: frozenset[str] | None = normalized_include_names
         self._exclude_names: frozenset[str] | None = normalized_exclude_names
         self._persistent: bool = persistent
+        self._tools: Dict[str, Dict[str, Any]] = {}
 
         # Persistent-connection state -- None/absent unless persistent=True.
         # No self._exit_stack field: the AsyncExitStack that opens the
@@ -172,26 +203,189 @@ class MCPClientHub:
         # even though it may later be awaited from the background loop's
         # own thread. Guards close()/refresh() against racing each other.
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Serializes non-persistent refresh() calls. An asyncio lock cannot do
+        # that: each such call runs on its own throwaway loop, so a thread
+        # lock is needed.
+        self._refresh_thread_lock: threading.Lock = threading.Lock()
 
-        if persistent:
-            self._bg_loop, self._bg_thread = start_background_loop()
+        if not persistent:
+            self._tools = self._fetch_tools()
+            return
+
+        self._bg_loop, self._bg_thread = start_background_loop()
+        try:
+            self._session, self._close_event, self._holder_task = run_coro_sync(
+                self._spawn_holder(
+                    self._headers, self._client_kwargs, self._session_kwargs
+                ),
+                loop=self._bg_loop,
+            )
+        except Exception:
+            stop_background_loop(self._bg_loop, self._bg_thread)
+            self._bg_loop = None
+            self._bg_thread = None
+            raise
+
+        try:
+            self._tools = self._fetch_tools()
+        except Exception:
+            # The session is open: tear it down through close(), but let the
+            # original fetch error be the one that propagates.
             try:
-                self._session, self._close_event, self._holder_task = run_coro_sync(
-                    self._spawn_holder(
-                        self._headers, self._client_kwargs, self._session_kwargs
-                    ),
-                    loop=self._bg_loop,
-                )
+                self.close()
             except Exception:
-                stop_background_loop(self._bg_loop, self._bg_thread)
-                self._bg_loop = None
-                self._bg_thread = None
-                raise
-            # Self-contained safety net: if the process exits normally
-            # without an explicit close(), still tear down the held
-            # connection (and any spawned stdio subprocess) rather than
-            # orphaning it. Unregistered by close() itself.
-            atexit.register(self.close)
+                logger.warning(
+                    "MCPClientHub: close() failed while unwinding a failed "
+                    "catalog fetch.",
+                    exc_info=True,
+                )
+            raise
+
+        # Self-contained safety net: if the process exits normally
+        # without an explicit close(), still tear down the held
+        # connection (and any spawned stdio subprocess) rather than
+        # orphaning it. Unregistered by close() itself.
+        atexit.register(self.close)
+
+    def _fetch_tools(self) -> Dict[str, Dict[str, Any]]:
+        """List the remote tools (on the live session when persistent, one
+        throwaway connection otherwise) and apply the name filters."""
+        result = run_coro_sync(
+            self._do_operation(self._list_tools_op()), loop=self._bg_loop
+        )
+        return apply_name_filter(result, self._include_names, self._exclude_names)
+
+    @classmethod
+    async def async_create(
+        cls,
+        location: str,
+        transport_mode: Literal["stdio", "sse", "streamable_http"],
+        **options: Any,
+    ) -> MCPClientHub:
+        """Non-blocking construction: a persistent hub connects inside
+        __init__ through a blocking run_coro_sync, so the constructor runs
+        on a worker thread. Takes the same options as __init__."""
+        return await asyncio.to_thread(cls, location, transport_mode, **options)
+
+    @classmethod
+    def stdio(
+        cls,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: str | os.PathLike[str] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """
+        A stdio hub: `command` is the server command, `args` its arguments.
+
+        `env` and `cwd` are merged into `client_kwargs` (a copy; the caller's
+        mapping is never mutated); naming either in both places raises.
+        """
+        extra: dict[str, Any] = {}
+        if env is not None:
+            extra["env"] = dict(env)
+        if cwd is not None:
+            extra["cwd"] = os.fspath(cwd)
+
+        merged = client_kwargs
+        if extra and isinstance(client_kwargs, Mapping):
+            clash = extra.keys() & client_kwargs.keys()
+            if clash:
+                raise ValueError(
+                    f"client_kwargs already sets {sorted(clash)!r}; pass env/cwd "
+                    "either by name or inside client_kwargs, not both."
+                )
+            merged = {**client_kwargs, **extra}
+        elif extra and client_kwargs is None:
+            merged = extra
+
+        return cls(
+            command,
+            "stdio",
+            args=args,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=merged,
+            session_kwargs=session_kwargs,
+        )
+
+    @classmethod
+    def sse(
+        cls,
+        url: str,
+        *,
+        headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """An SSE hub at `url`."""
+        return cls(
+            url,
+            "sse",
+            headers=headers,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+            session_kwargs=session_kwargs,
+        )
+
+    @classmethod
+    def http(
+        cls,
+        url: str,
+        *,
+        headers: Mapping[str, HeaderValue] | None = None,
+        name: str | None = None,
+        persistent: bool = False,
+        read_timeout_seconds: float | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        session_kwargs: Mapping[str, Any] | None = None,
+    ) -> "MCPClientHub":
+        """A streamable-HTTP hub at `url`."""
+        return cls(
+            url,
+            "streamable_http",
+            headers=headers,
+            name=name,
+            persistent=persistent,
+            read_timeout_seconds=read_timeout_seconds,
+            include_names=include_names,
+            exclude_names=exclude_names,
+            client_kwargs=client_kwargs,
+            session_kwargs=session_kwargs,
+        )
+
+    @staticmethod
+    def _validate_headers_for_transport(
+        transport_mode: str,
+        headers: Mapping[str, str] | None,
+    ) -> None:
+        """Raise if headers are given for the stdio transport. Takes explicit
+        candidate values (not self.*) so refresh() can validate before
+        committing."""
+        if transport_mode == "stdio" and headers is not None:
+            raise ValueError("headers are not valid for the stdio transport.")
 
     @staticmethod
     def _normalize_kwargs_mapping(
@@ -234,12 +428,12 @@ class MCPClientHub:
         return self._transport_mode
 
     @property
-    def endpoint(self) -> str | None:
-        return self._endpoint
+    def location(self) -> str:
+        return self._location
 
     @property
-    def command(self) -> str | None:
-        return self._command
+    def name(self) -> str | None:
+        return self._name
 
     @property
     def args(self) -> tuple[str, ...] | None:
@@ -248,10 +442,6 @@ class MCPClientHub:
     @property
     def headers(self) -> Mapping[str, str] | None:
         return self._headers
-
-    @headers.setter
-    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
-        self._headers = normalize_headers(value)
 
     @property
     def read_timeout_seconds(self) -> float | None:
@@ -296,57 +486,90 @@ class MCPClientHub:
         session_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         """
-        Update stored request/session configuration.
+        Re-list the remote tools and replace the stored catalog, optionally
+        updating request/session configuration first.
 
         Each provided bucket wholesale-replaces its stored value (never
-        merged). Raises if none of headers/client_kwargs/session_kwargs are
-        provided, since a no-op refresh() is a caller bug. Validation runs
-        against the resolved candidate values before anything is committed,
-        so a failed refresh() leaves stored config untouched.
+        merged); a bare refresh() just re-lists. Validation runs against the
+        resolved candidate values and the re-list runs on a candidate
+        connection before anything is committed, so a failed refresh()
+        leaves stored config, session and catalog untouched.
 
-        Non-persistent hubs (and persistent hubs after close()): pure local
-        mutation, no I/O -- there is no live connection to touch.
+        Non-persistent hubs (and persistent hubs after close()): opens one
+        throwaway connection to list, then commits.
 
         Persistent, connected hubs: sse/streamable_http reconnect
         transparently. stdio fully restarts the underlying server process
         (a warning is logged when this happens) -- there is no cheaper way
         to apply new stdio launch config to an already-running process.
         """
-        if headers is None and client_kwargs is None and session_kwargs is None:
-            raise ValueError(
-                "refresh() requires at least one of headers, client_kwargs, "
-                "or session_kwargs; none were provided."
-            )
-
         if self._bg_loop is None:
-            resolved_headers = (
-                normalize_headers(headers) if headers is not None else self._headers
-            )
-            resolved_client_kwargs = (
-                self._normalize_kwargs_mapping(client_kwargs, param_name="client_kwargs")
-                if client_kwargs is not None
-                else self._client_kwargs
-            )
-            resolved_session_kwargs = (
-                self._normalize_kwargs_mapping(session_kwargs, param_name="session_kwargs")
-                if session_kwargs is not None
-                else self._session_kwargs
-            )
+            with self._refresh_thread_lock:
+                resolved_headers, resolved_client_kwargs, resolved_session_kwargs = (
+                    self._resolve_refresh(headers, client_kwargs, session_kwargs)
+                )
+                tools = run_coro_sync(
+                    self._list_candidate(
+                        resolved_headers, resolved_client_kwargs, resolved_session_kwargs
+                    )
+                )
 
-            self._validate_streamable_http_collision(
-                transport_mode=self._transport_mode,
-                headers=resolved_headers,
-                client_kwargs=resolved_client_kwargs,
-            )
-
-            self._headers = resolved_headers
-            self._client_kwargs = resolved_client_kwargs
-            self._session_kwargs = resolved_session_kwargs
+                self._headers = resolved_headers
+                self._client_kwargs = resolved_client_kwargs
+                self._session_kwargs = resolved_session_kwargs
+                self._tools = tools
             return
 
         run_coro_sync(
             self._do_refresh(headers, client_kwargs, session_kwargs), loop=self._bg_loop
         )
+
+    def _resolve_refresh(
+        self,
+        headers: Mapping[str, HeaderValue] | None,
+        client_kwargs: Mapping[str, Any] | None,
+        session_kwargs: Mapping[str, Any] | None,
+    ) -> tuple[
+        Mapping[str, str] | None, Dict[str, Any] | None, Dict[str, Any] | None
+    ]:
+        """Resolve refresh() candidates (a provided bucket replaces, an omitted
+        one keeps the stored value) and validate them; commits nothing."""
+        resolved_headers = (
+            normalize_headers(headers) if headers is not None else self._headers
+        )
+        resolved_client_kwargs = (
+            self._normalize_kwargs_mapping(client_kwargs, param_name="client_kwargs")
+            if client_kwargs is not None
+            else self._client_kwargs
+        )
+        resolved_session_kwargs = (
+            self._normalize_kwargs_mapping(session_kwargs, param_name="session_kwargs")
+            if session_kwargs is not None
+            else self._session_kwargs
+        )
+
+        self._validate_headers_for_transport(self._transport_mode, resolved_headers)
+        self._validate_streamable_http_collision(
+            transport_mode=self._transport_mode,
+            headers=resolved_headers,
+            client_kwargs=resolved_client_kwargs,
+        )
+        return resolved_headers, resolved_client_kwargs, resolved_session_kwargs
+
+    async def _list_candidate(
+        self,
+        headers: Mapping[str, str] | None,
+        client_kwargs: Mapping[str, Any] | None,
+        session_kwargs: Mapping[str, Any] | None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Connect with candidate config, list the tools, close; returns the
+        name-filtered catalog. Commits nothing."""
+        stack, session = await self._connect_session(headers, client_kwargs, session_kwargs)
+        try:
+            result = await self._run_operation(self._list_tools_op(), session)
+        finally:
+            await stack.aclose()
+        return apply_name_filter(result, self._include_names, self._exclude_names)
 
     async def _do_refresh(
         self,
@@ -359,24 +582,8 @@ class MCPClientHub:
         Builds and validates the new connection before committing it --
         a failure here leaves stored config and the live session untouched."""
         async with self._lock:
-            resolved_headers = (
-                normalize_headers(headers) if headers is not None else self._headers
-            )
-            resolved_client_kwargs = (
-                self._normalize_kwargs_mapping(client_kwargs, param_name="client_kwargs")
-                if client_kwargs is not None
-                else self._client_kwargs
-            )
-            resolved_session_kwargs = (
-                self._normalize_kwargs_mapping(session_kwargs, param_name="session_kwargs")
-                if session_kwargs is not None
-                else self._session_kwargs
-            )
-
-            self._validate_streamable_http_collision(
-                transport_mode=self._transport_mode,
-                headers=resolved_headers,
-                client_kwargs=resolved_client_kwargs,
+            resolved_headers, resolved_client_kwargs, resolved_session_kwargs = (
+                self._resolve_refresh(headers, client_kwargs, session_kwargs)
             )
 
             if self._transport_mode == "stdio":
@@ -390,7 +597,23 @@ class MCPClientHub:
                 resolved_headers, resolved_client_kwargs, resolved_session_kwargs
             )
 
+            try:
+                new_tools = apply_name_filter(
+                    await self._run_operation(self._list_tools_op(), new_session),
+                    self._include_names,
+                    self._exclude_names,
+                )
+            except BaseException:
+                # Roll back: retire the candidate session, commit nothing.
+                new_close_event.set()
+                try:
+                    await new_holder_task
+                except Exception:
+                    pass
+                raise
+
             old_close_event, old_holder_task = self._close_event, self._holder_task
+            self._tools = new_tools
             self._session = new_session
             self._close_event = new_close_event
             self._holder_task = new_holder_task
@@ -412,9 +635,9 @@ class MCPClientHub:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
+            "location": self.location,
             "transport_mode": self.transport_mode,
-            "endpoint": self.endpoint,
-            "command": self.command,
             "args": list(self.args) if self.args is not None else None,
             "has_headers": self.headers is not None,
             "header_keys": sorted(self.headers.keys()) if self.headers is not None else [],
@@ -471,7 +694,7 @@ class MCPClientHub:
         try:
             if self.transport_mode == "stdio":
                 server_params = StdioServerParameters(
-                    command=self.command,
+                    command=self.location,
                     args=list(self.args or ()),
                     **transport_kwargs,
                 )
@@ -480,7 +703,7 @@ class MCPClientHub:
             elif self.transport_mode == "sse":
                 headers_dict = dict(headers) if headers is not None else None
                 client_context = sse_client(
-                    url=self.endpoint,
+                    url=self.location,
                     headers=headers_dict,
                     **transport_kwargs,
                 )
@@ -494,13 +717,13 @@ class MCPClientHub:
                         )
                     )
                     client_context = streamable_http_client(
-                        url=self.endpoint,
+                        url=self.location,
                         http_client=http_client,
                         **transport_kwargs,
                     )
                 else:
                     client_context = streamable_http_client(
-                        url=self.endpoint,
+                        url=self.location,
                         **transport_kwargs,
                     )
 
@@ -508,16 +731,11 @@ class MCPClientHub:
             read_stream, write_stream = self._unpack_transport_streams(transport)
 
             resolved_session_kwargs = dict(session_kwargs) if session_kwargs is not None else {}
-            resolved_timeout = (
-                timedelta(seconds=self._read_timeout_seconds)
-                if self._read_timeout_seconds is not None
-                else None
-            )
             session = await stack.enter_async_context(
                 ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=resolved_timeout,
+                    read_timeout_seconds=self._read_timeout_seconds,
                     **resolved_session_kwargs,
                 )
             )
@@ -535,6 +753,11 @@ class MCPClientHub:
             raise MCPConnectionError(
                 f"Failed to establish MCP session ({self.transport_mode}): {exc}"
             ) from exc
+        except BaseException:
+            # Cancellation must not orphan an already-entered transport
+            # (e.g. a stdio subprocess).
+            await stack.aclose()
+            raise
 
     async def _run_persistent_session(
         self,
@@ -627,10 +850,9 @@ class MCPClientHub:
 
         A typed MCPConnectionError/MCPToolError raised by operation is
         already meaningful and passes through unwrapped; any other
-        exception is wrapped as MCPConnectionError -- the same blanket
-        safety net the old _awith_session provided around every operation
-        it ran, preserved here even though list_tools()/call_tool()'s own
-        `_op` closures already wrap their specific failure points too.
+        exception is wrapped as MCPConnectionError -- a blanket safety net
+        around every operation, even though _list_tools_op/_call_tool_op
+        already wrap their specific failure points too.
         """
         if self._session is not None:
             return await self._run_operation(operation, self._session)
@@ -666,21 +888,28 @@ class MCPClientHub:
         """
         if self._bg_loop is None:
             return
-        run_coro_sync(self._do_close(), loop=self._bg_loop)
-        stop_background_loop(self._bg_loop, self._bg_thread)
-        atexit.unregister(self.close)
-        self._bg_loop = None
-        self._bg_thread = None
-        self._close_event = None
-        self._holder_task = None
-        self._session = None
+        loop, thread = self._bg_loop, self._bg_thread
+        try:
+            run_coro_sync(self._do_close(), loop=loop)
+        finally:
+            stop_background_loop(loop, thread)
+            self._reset_persistent_state()
 
     async def async_close(self) -> None:
         """Async counterpart to close()."""
         if self._bg_loop is None:
             return
-        await run_coro_async(self._do_close(), loop=self._bg_loop)
-        stop_background_loop(self._bg_loop, self._bg_thread)
+        loop, thread = self._bg_loop, self._bg_thread
+        try:
+            await run_coro_async(self._do_close(), loop=loop)
+        finally:
+            stop_background_loop(loop, thread)
+            self._reset_persistent_state()
+
+    def _reset_persistent_state(self) -> None:
+        """Drop every persistent-connection handle and the atexit hook. Runs
+        in close()'s finally, so the hub always ends closed even when the
+        teardown itself raised."""
         atexit.unregister(self.close)
         self._bg_loop = None
         self._bg_thread = None
@@ -707,34 +936,83 @@ class MCPClientHub:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Calls close() unconditionally; a no-op for non-persistent hubs
-        via close()'s own guard. No async counterpart -- matches
-        A2AClientHub's own precedent of cutting async context-manager
-        surface (__aenter__/__aexit__/async_close as a dunder pair) as
-        unneeded."""
+        via close()'s own guard. No async counterpart; use async_close()."""
         self.close()
 
-    def list_tools(self) -> Dict[str, Dict[str, Any]]:
-        """Sync entry point -- dispatches onto the background loop when
-        persistent and connected, else a fresh temporary loop per call."""
+    def _list_tools_op(self) -> Callable[[ClientSession], Awaitable[Dict[str, Dict[str, Any]]]]:
+        """The list-tools operation shared by the construction fetch and refresh()."""
+
         async def _op(session: ClientSession) -> Dict[str, Dict[str, Any]]:
-            try:
-                tools_result = await session.list_tools()
-            except Exception as exc:
-                raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
-
-            raw_tools = getattr(tools_result, "tools", tools_result)
             result: dict[str, dict[str, Any]] = {}
+            cursor: str | None = None
+            while True:
+                try:
+                    tools_result = await (
+                        session.list_tools()
+                        if cursor is None
+                        else session.list_tools(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        )
+                    )
+                except Exception as exc:
+                    raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
 
-            if raw_tools is None:
-                return result
+                raw_tools = getattr(tools_result, "tools", tools_result)
+                if raw_tools is not None:
+                    for raw_tool in raw_tools:
+                        result[raw_tool.name] = _build_mcp_tool_metadata(raw_tool)
 
-            for raw_tool in raw_tools:
-                result[raw_tool.name] = _build_mcp_tool_metadata(raw_tool)
+                cursor = getattr(tools_result, "next_cursor", None)
+                if not cursor:
+                    break
 
             return result
 
-        result = run_coro_sync(self._do_operation(_op), loop=self._bg_loop)
-        return apply_name_filter(result, self._include_names, self._exclude_names)
+        return _op
+
+    def _call_tool_op(
+        self,
+        remote_name: str,
+        inputs: Mapping[str, Any],
+    ) -> Callable[[ClientSession], Awaitable[Dict[str, Any]]]:
+        """Validate the call arguments and return the call-tool operation
+        shared by call_tool()/async_call_tool()."""
+        resolved_remote_name = str(remote_name).strip()
+        if not resolved_remote_name:
+            raise ValueError("remote_name must be a non-empty string.")
+        if not isinstance(inputs, Mapping):
+            raise ValueError("inputs must be a mapping.")
+
+        async def _op(session: ClientSession) -> Dict[str, Any]:
+            try:
+                raw_result = await session.call_tool(
+                    resolved_remote_name,
+                    arguments=dict(inputs),
+                )
+            except Exception as exc:
+                raise MCPToolError(
+                    f"Failed to call MCP tool '{resolved_remote_name}': {exc}"
+                ) from exc
+
+            return _normalize_mcp_call_result(raw_result)
+
+        return _op
+
+    def list_tools(self) -> Dict[str, Dict[str, Any]]:
+        """The stored, name-filtered {name: metadata} catalog, as deep copies:
+        editing them never changes the hub. Local read; no network."""
+        return {name: copy.deepcopy(entry) for name, entry in self._tools.items()}
+
+    def get_tool(self, name: str) -> Dict[str, Any]:
+        """A deep copy of the stored metadata for one remote tool (editing it
+        never changes the hub); raises MCPToolError naming the tool when it
+        is not in the catalog."""
+        if name not in self._tools:
+            raise MCPToolError(
+                f"MCPClientHub: remote tool {name!r} not found; "
+                f"available: {sorted(self._tools)!r}."
+            )
+        return copy.deepcopy(self._tools[name])
 
     def call_tool(
         self,
@@ -743,52 +1021,8 @@ class MCPClientHub:
     ) -> Dict[str, Any]:
         """Sync entry point -- dispatches onto the background loop when
         persistent and connected, else a fresh temporary loop per call."""
-        resolved_remote_name = str(remote_name).strip()
-        if not resolved_remote_name:
-            raise ValueError("remote_name must be a non-empty string.")
-        if not isinstance(inputs, Mapping):
-            raise ValueError("inputs must be a mapping.")
-
-        async def _op(session: ClientSession) -> Dict[str, Any]:
-            try:
-                raw_result = await session.call_tool(
-                    resolved_remote_name,
-                    arguments=dict(inputs),
-                )
-            except Exception as exc:
-                raise MCPToolError(
-                    f"Failed to call MCP tool '{resolved_remote_name}': {exc}"
-                ) from exc
-
-            return _normalize_mcp_call_result(raw_result)
-
-        return run_coro_sync(self._do_operation(_op), loop=self._bg_loop)
-
-    async def async_list_tools(self) -> Dict[str, Dict[str, Any]]:
-        """Native async implementation -- public so async callers can await
-        it directly instead of paying for run_coro_sync's thread bridging."""
-        async def _op(session: ClientSession) -> Dict[str, Dict[str, Any]]:
-            try:
-                tools_result = await session.list_tools()
-            except Exception as exc:
-                raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
-
-            raw_tools = getattr(tools_result, "tools", tools_result)
-            result: dict[str, dict[str, Any]] = {}
-
-            if raw_tools is None:
-                return result
-
-            for raw_tool in raw_tools:
-                result[raw_tool.name] = _build_mcp_tool_metadata(raw_tool)
-
-            return result
-
-        if self._bg_loop is not None:
-            result = await run_coro_async(self._do_operation(_op), loop=self._bg_loop)
-        else:
-            result = await self._do_operation(_op)
-        return apply_name_filter(result, self._include_names, self._exclude_names)
+        op = self._call_tool_op(remote_name, inputs)
+        return run_coro_sync(self._do_operation(op), loop=self._bg_loop)
 
     async def async_call_tool(
         self,
@@ -797,26 +1031,8 @@ class MCPClientHub:
     ) -> Dict[str, Any]:
         """Native async implementation -- public so async callers can await
         it directly instead of paying for run_coro_sync's thread bridging.
-        Owns input validation; call_tool no longer duplicates it."""
-        resolved_remote_name = str(remote_name).strip()
-        if not resolved_remote_name:
-            raise ValueError("remote_name must be a non-empty string.")
-        if not isinstance(inputs, Mapping):
-            raise ValueError("inputs must be a mapping.")
-
-        async def _op(session: ClientSession) -> Dict[str, Any]:
-            try:
-                raw_result = await session.call_tool(
-                    resolved_remote_name,
-                    arguments=dict(inputs),
-                )
-            except Exception as exc:
-                raise MCPToolError(
-                    f"Failed to call MCP tool '{resolved_remote_name}': {exc}"
-                ) from exc
-
-            return _normalize_mcp_call_result(raw_result)
-
+        Input validation lives in _call_tool_op, shared with call_tool."""
+        op = self._call_tool_op(remote_name, inputs)
         if self._bg_loop is not None:
-            return await run_coro_async(self._do_operation(_op), loop=self._bg_loop)
-        return await self._do_operation(_op)
+            return await run_coro_async(self._do_operation(op), loop=self._bg_loop)
+        return await self._do_operation(op)

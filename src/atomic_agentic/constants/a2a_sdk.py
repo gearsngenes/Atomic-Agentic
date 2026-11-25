@@ -9,11 +9,6 @@ from a2a.types import TaskState
 # - a2a/a2a_client_hub.py: transport_mode constructor validation and
 #   ClientConfig.supported_protocol_bindings selection
 #
-# Sibling to constants/python_a2a.py -- kept in a separate module, matching
-# remote-subsystems' deliberate PyA2Atomic*-vs-A2A* naming split, so the two
-# A2A tracks (the existing python_a2a-backed one and this new, additive
-# a2a-sdk-backed one) don't bleed into each other.
-#
 # Values are verified byte-for-byte against the installed a2a-sdk's own
 # a2a.utils.constants.TransportProtocol (a str, Enum):
 # TransportProtocol.JSONRPC.value == "JSONRPC", .HTTP_JSON.value ==
@@ -64,13 +59,12 @@ TERMINAL_FAILURE_STATES: frozenset[TaskState] = frozenset(
 #   async_call_atomic_skill routing and result unwrapping
 #
 # PARAM_SCHEMA_EXT_URI identifies AA's own AgentExtension on a published
-# AgentCard; its Struct payload is a skill_id -> A2AtomicSkillMetadata.to_dict()
+# AgentCard; its Struct payload is a remote_name -> A2AtomicSkillMetadata.to_dict()
 # map. SKILL_ROUTING_KEY is the Message.metadata key naming which registered
 # skill a call targets -- lives in metadata, not inside the DataPart's own
 # content, since no skill-selection field exists anywhere on Message itself
 # (confirmed against the full field list in a2a_pb2.pyi). ATOMIC_RESULT_KEY
-# wraps the single returned value, the direct a2a-sdk-track analog of
-# constants/python_a2a.py's PYA2A_RESULT_KEY.
+# wraps the single returned value.
 
 PARAM_SCHEMA_EXT_URI = "atomic-agentic.dev/ext/param-schema/v1"
 SKILL_ROUTING_KEY = "skill_id"

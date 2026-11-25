@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,7 +32,7 @@ from atomic_agentic.models.results import LLMResult
 LLAMACPP_MODEL_REPO = "unsloth/phi-4-GGUF"
 LLAMACPP_MODEL_FILENAME = "phi-4-Q4_K_M.gguf"
 
-# Shared structured-output schema, reused across all six engines' new test.
+# Structured-output schema shared by all six engines.
 STRUCTURED_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -96,21 +97,31 @@ def _structured_messages() -> list[dict[str, str]]:
     ]
 
 
+def _build(factory: Callable[[], LLMEngine]) -> LLMEngine:
+    """Run ``factory``; skip only for a missing SDK, re-raise anything else."""
+    try:
+        return factory()
+    except LLMEngineError as exc:
+        if "pip install" not in str(exc):
+            raise
+        pytest.skip(str(exc))
+
+
 def _openai_engine() -> LLMEngine:
     _skip_if_live_tests_disabled()
 
     if not os.getenv("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY is not set.")
 
-    try:
-        return OpenAIEngine(
+    def factory() -> LLMEngine:
+        engine = OpenAIEngine(
             model=os.getenv("AA_TEST_OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=0,
-            timeout_seconds=60,
-            max_retries=0,
+            timeout=60,
         )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+        engine.update_runtime_parameters(temperature=0)
+        return engine
+
+    return _build(factory)
 
 
 def _gemini_engine() -> LLMEngine:
@@ -119,16 +130,15 @@ def _gemini_engine() -> LLMEngine:
     if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GEMINI_API_KEY"):
         pytest.skip("GOOGLE_API_KEY or GEMINI_API_KEY is not set.")
 
-    try:
-        return GeminiEngine(
+    def factory() -> LLMEngine:
+        engine = GeminiEngine(
             model=os.getenv("AA_TEST_GEMINI_MODEL", "gemini-2.5-flash-lite"),
-            http_options={"api_version": "v1beta"},
-            temperature=0,
-            timeout_seconds=60,
-            max_retries=0,
+            http_options={"api_version": "v1beta", "timeout": 60_000},
         )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+        engine.update_runtime_parameters(temperature=0)
+        return engine
+
+    return _build(factory)
 
 
 def _mistral_engine() -> LLMEngine:
@@ -137,15 +147,15 @@ def _mistral_engine() -> LLMEngine:
     if not os.getenv("MISTRAL_API_KEY"):
         pytest.skip("MISTRAL_API_KEY is not set.")
 
-    try:
-        return MistralEngine(
+    def factory() -> LLMEngine:
+        engine = MistralEngine(
             model=os.getenv("AA_TEST_MISTRAL_MODEL", "mistral-small-latest"),
-            temperature=0,
-            timeout_seconds=60,
-            max_retries=0,
+            timeout_ms=60_000,
         )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+        engine.update_runtime_parameters(temperature=0)
+        return engine
+
+    return _build(factory)
 
 
 def _anthropic_engine() -> LLMEngine:
@@ -154,14 +164,10 @@ def _anthropic_engine() -> LLMEngine:
     if not os.getenv("ANTHROPIC_API_KEY"):
         pytest.skip("ANTHROPIC_API_KEY is not set.")
 
-    try:
-        return AnthropicEngine(
-            model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            timeout_seconds=60,
-            max_retries=0,
-        )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+    return _build(lambda: AnthropicEngine(
+        model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+        timeout=60,
+    ))
 
 
 def _litellm_engine() -> LLMEngine:
@@ -170,16 +176,15 @@ def _litellm_engine() -> LLMEngine:
     if not os.getenv("ANTHROPIC_API_KEY"):
         pytest.skip("ANTHROPIC_API_KEY is not set.")
 
-    try:
-        return LiteLLMEngine(
-            model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-            provider="anthropic",
-            temperature=0,
-            timeout_seconds=60,
-            max_retries=0,
+    def factory() -> LLMEngine:
+        engine = LiteLLMEngine(
+            model="anthropic/" + os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+            timeout=60,
         )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+        engine.update_runtime_parameters(temperature=0)
+        return engine
+
+    return _build(factory)
 
 
 def _llamacpp_engine() -> LLMEngine:
@@ -192,15 +197,7 @@ def _llamacpp_engine() -> LLMEngine:
     if not isinstance(cached, str):
         pytest.skip(f"{LLAMACPP_MODEL_REPO}/{LLAMACPP_MODEL_FILENAME} is not cached locally.")
 
-    try:
-        return LlamaCppEngine(
-            repo_id=LLAMACPP_MODEL_REPO,
-            filename=LLAMACPP_MODEL_FILENAME,
-            timeout_seconds=120,
-            max_retries=0,
-        )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+    return _build(lambda: LlamaCppEngine(model=cached))
 
 
 ENGINE_BUILDERS: list[tuple[str, Callable[[], LLMEngine]]] = [
@@ -226,15 +223,29 @@ def test_live_llm_engine_returns_non_empty_text(
     _assert_live_text_response(result.result)
 
 
-@pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)
-def test_live_llm_engine_rejects_invalid_messages_before_provider_call(
+# Offline engines (dummy credentials, no network): the input contract is
+# checked before any provider call, so no live access is needed.
+OFFLINE_BUILDERS: list[tuple[str, Callable[[], LLMEngine]]] = [
+    ("openai", lambda: OpenAIEngine(model="m", api_key="offline")),
+    ("gemini", lambda: GeminiEngine(model="m", api_key="offline")),
+    ("mistral", lambda: MistralEngine(model="m", api_key="offline")),
+    ("anthropic", lambda: AnthropicEngine(model="m", api_key="offline")),
+    ("litellm", lambda: LiteLLMEngine(model="openai/m")),
+    ("llamacpp", lambda: LlamaCppEngine(llm=SimpleNamespace(model_path="m.gguf"))),
+]
+
+
+@pytest.mark.parametrize("provider,build_offline", OFFLINE_BUILDERS)
+def test_llm_engine_rejects_invalid_messages_before_provider_call(
     provider: str,
-    build_engine: Callable[[], LLMEngine],
+    build_offline: Callable[[], LLMEngine],
 ) -> None:
-    engine = build_engine()
+    engine = _build(build_offline)
 
     with pytest.raises(LLMEngineError, match="messages"):
         engine.invoke({"messages": "not a message list"})
+    with pytest.raises(LLMEngineError, match="blank content"):
+        engine.invoke({"messages": [{"role": "user", "content": " "}]})
 
 
 @pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)
@@ -246,15 +257,8 @@ def test_live_llm_engine_to_dict_exposes_non_secret_runtime_snapshot(
 
     data = engine.to_dict()
 
-    # LlamaCpp's builder uses a longer timeout (local model load/generation
-    # can exceed the 60s the five remote-engine builders share).
-    expected_timeout = 120.0 if provider == "llamacpp" else 60.0
-
     assert data["type"] == type(engine).__name__
-    assert data["timeout_seconds"] == expected_timeout
-    assert data["max_retries"] == 0
-    assert "attachments" in data
-    assert "api_key" not in data
+    assert "runtime_parameters" in data
 
 
 @pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)

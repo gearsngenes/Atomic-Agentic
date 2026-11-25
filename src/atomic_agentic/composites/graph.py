@@ -11,7 +11,7 @@ from ..constants.core import IDENTIFIER_PATTERN
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results import GraphResult
-from ..tools.toolification import to_invokable
+from ..adapters import to_invokable
 from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import run_coro_sync
 

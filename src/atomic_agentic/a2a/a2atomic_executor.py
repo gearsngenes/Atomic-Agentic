@@ -53,11 +53,11 @@ class A2AtomicExecutor(AgentExecutor):
         invokables: list[AtomicInvokable] | Mapping[str, AtomicInvokable],
     ) -> dict[str, AtomicInvokable]:
         """
-        Direct mirror of PyA2AtomicHost._normalize_invokables, minus any
-        reserved-remote-name check -- no reserved names exist for this
-        executor (skill discovery happens via the AgentCard/extension, not a
-        callable-dispatch namespace the way python_a2a's list_invokables/
-        get_invokable_metadata function names are).
+        Normalize either construction form into a remote_name -> invokable
+        registry. Mapping keys are authoritative remote names (identifier-
+        validated); list items default their key to `.name`. There is no
+        reserved-name check: skill discovery happens via the AgentCard/
+        extension, not a callable-dispatch namespace.
         """
         registry: dict[str, AtomicInvokable] = {}
 
@@ -93,8 +93,8 @@ class A2AtomicExecutor(AgentExecutor):
         """
         The one place AtomicInvokable-awareness meets A2AtomicSkillMetadata --
         raw `_description` (not the rendered getter) and `_extra_description()`
-        called directly, matching PyA2AtomicHost's own metadata-payload
-        precedent for avoiding bullet-duplication on the receiving end.
+        called directly, so the receiving proxy builds its own parameter-
+        bullet block from `params` without duplicating it.
         """
         return A2AtomicSkillMetadata(
             remote_name=remote_name,

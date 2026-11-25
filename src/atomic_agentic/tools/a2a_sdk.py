@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Dict, Mapping, Optional
 from ..a2a.a2a_client_hub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
 from ..constants.core import NO_VAL
-from ..exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..models.results.tools import A2AProxyToolResult
 from ..utils.a2a import _dict_to_part, _part_to_dict
@@ -19,80 +19,59 @@ class A2AProxyTool(Tool):
     """
     Proxy an A2AClientHub as a normal AA Tool.
 
-    Two mutually exclusive modes, selected at construction by ``skill_id``:
+    Two mutually exclusive modes, selected at construction by ``name``:
 
-    - **Skill mode** (``skill_id`` given): bound to one already-discovered
+    - **Skill mode** (``name`` given): bound to one already-discovered
       Atomic skill; the Tool's typed signature is sourced directly from that
       skill's ``A2AtomicSkillMetadata`` (no re-derivation); ``execute``
       delegates straight to ``client_hub.call_atomic_skill``.
-    - **Generic mode** (``skill_id=None``): a fixed two-parameter signature
+    - **Generic mode** (``name=None``): a fixed two-parameter signature
       (``parts``, ``metadata``) for talking to arbitrary/foreign A2A agents.
       Each ``parts`` item is a plain JSON-safe dict normalized to/from an
       a2a-sdk ``Part`` via ``utils/a2a.py`` -- no a2a-sdk types or heuristic
       type-sniffing ever appear on this Tool's own schema.
 
-    Only ``client_hub``-based construction is supported (no raw-transport-
-    param alternative) -- deliberately lighter than ``MCPProxyTool``'s dual-
-    path constructor. Has no ``refresh()``/mutation lifecycle of its own --
-    same policy as ``PyA2AtomicTool``; call ``self.client_hub.refresh(...)``
-    directly to pick up remote-side changes.
+    The Tool name is ``<hub.name>_<name>`` or ``<hub.name>_send_parts``, the
+    raw name when the hub is unnamed; ``remote_name`` is the raw skill name
+    (``None`` in generic mode). Only hub-based construction is supported. Has
+    no ``refresh()`` of its own: ``client_hub.refresh(...)`` updates the hub's
+    catalog, but an existing proxy keeps the signature it was built with, so
+    rebuild proxies (via ``to_tool``/``to_tools``) after a refresh. Skill
+    metadata is read from the hub's cached skills
+    via ``client_hub.get_skill(name)``, which raises ``A2AProxyError`` for an
+    unknown name; the proxy adds no checks of its own.
     """
 
     result_cls: ClassVar[type[A2AProxyToolResult]] = A2AProxyToolResult
 
-    def __init__(
-        self,
-        client_hub: A2AClientHub,
-        skill_id: Optional[str] = None,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-    ) -> None:
-        if not isinstance(client_hub, A2AClientHub):
-            raise TypeError(f"client_hub must be an A2AClientHub, got {type(client_hub)!r}.")
-
-        resolved_skill_id: Optional[str] = None
-        skill_metadata = None
-        if skill_id is not None:
-            resolved_skill_id = str(skill_id).strip()
-            if not resolved_skill_id:
-                raise ValueError("skill_id must be a non-empty string when provided.")
-            atomic_skills = client_hub.get_atomic_skills()
-            if resolved_skill_id not in atomic_skills:
-                raise ToolDefinitionError(
-                    f"A2AProxyTool: skill_id {resolved_skill_id!r} not found; "
-                    f"available skills: {sorted(atomic_skills)!r}."
-                )
-            skill_metadata = atomic_skills[resolved_skill_id]
+    def __init__(self, client_hub: A2AClientHub, name: Optional[str] = None) -> None:
+        # An unknown skill name fails in the hub's get_skill.
+        skill_metadata = client_hub.get_skill(name) if name is not None else None
+        remote: Optional[str] = name
 
         # Set before super().__init__() -- _build_tool_signature/_get_mod_qual
         # (called from within it) read these attributes.
         self._client_hub: A2AClientHub = client_hub
-        self._skill_id: Optional[str] = resolved_skill_id
+        self._remote_name: Optional[str] = remote
         self._skill_metadata = skill_metadata
 
-        is_skill_mode = self._skill_id is not None
+        base = remote if remote is not None else "send_parts"
+        tool_name = f"{client_hub.name}_{base}" if client_hub.name is not None else base
 
-        resolved_name = str(name or "").strip()
-        if not resolved_name:
-            resolved_name = self._skill_id if is_skill_mode else "send_parts"
-
-        explicit_description = str(description or "").strip()
         card_description = str(getattr(client_hub.agent_card, "description", "") or "").strip()
-        if is_skill_mode:
+        if remote is not None:
             skill_description = str(skill_metadata.description or "").strip()
             resolved_description = (
-                explicit_description
-                or skill_description
+                skill_description
                 or card_description
-                or f"A2A atomic skill proxy tool {resolved_name!r}"
+                or f"A2A atomic skill proxy tool {tool_name!r}"
             )
-            function = functools.partial(client_hub.call_atomic_skill, self._skill_id)
+            function = functools.partial(client_hub.call_atomic_skill, remote)
         else:
             resolved_description = (
-                explicit_description
-                or card_description
+                card_description
                 or (
-                    f"A2A generic send-parts proxy tool {resolved_name!r} via "
+                    f"A2A generic send-parts proxy tool {tool_name!r} via "
                     f"{client_hub.transport_mode}. Sends one or more Parts to the "
                     "remote agent and returns its reply as a list of dicts in the "
                     "same shape as the 'parts' input (see parameter descriptions "
@@ -103,7 +82,7 @@ class A2AProxyTool(Tool):
 
         super().__init__(
             function=function,
-            name=resolved_name,
+            name=tool_name,
             description=resolved_description,
         )
 
@@ -115,26 +94,14 @@ class A2AProxyTool(Tool):
         return self._client_hub
 
     @property
-    def skill_id(self) -> Optional[str]:
-        return self._skill_id
-
-    @property
-    def transport_mode(self) -> str:
-        return self.client_hub.transport_mode
-
-    @property
-    def base_url(self) -> str:
-        return self.client_hub.base_url
-
-    @property
-    def persistent(self) -> bool:
-        return self.client_hub.persistent
+    def remote_name(self) -> Optional[str]:
+        return self._remote_name
 
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
     def _build_tool_signature(self) -> tuple[list[ParamSpec], tuple[str, ...]]:
-        if self._skill_id is not None:
+        if self._remote_name is not None:
             return list(self._skill_metadata.params), self._skill_metadata.return_type
 
         return (
@@ -163,9 +130,16 @@ class A2AProxyTool(Tool):
     # Tool helpers
     # ------------------------------------------------------------------ #
     def _get_mod_qual(self, function: Any) -> tuple[Optional[str], Optional[str]]:
-        if self._skill_id is not None:
+        if self._remote_name is not None:
             return A2AClientHub.call_atomic_skill.__module__, A2AClientHub.call_atomic_skill.__qualname__
         return A2AClientHub.send_parts.__module__, A2AClientHub.send_parts.__qualname__
+
+    def _extra_description(self) -> str:
+        """Skill mode surfaces the remote invokable's own extra description
+        (carried in the skill metadata); generic mode has none."""
+        if self._remote_name is not None:
+            return self._skill_metadata.extra_description
+        return ""
 
     def to_arg_kwarg(
         self,
@@ -192,7 +166,7 @@ class A2AProxyTool(Tool):
                 f"{self.full_name}: A2A tools do not accept positional arguments; got {args!r}."
             )
 
-        if self._skill_id is not None:
+        if self._remote_name is not None:
             try:
                 result = self._function(inputs=kwargs)
             except ToolInvocationError:
@@ -210,11 +184,14 @@ class A2AProxyTool(Tool):
                 raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
             result = [_part_to_dict(p) for p in result_parts]
 
+        return self._payload(result)
+
+    def _payload(self, result: Any) -> Dict[str, Any]:
+        """The proxy result payload shared by execute and async_execute."""
         return {
-            "transport_mode": self.transport_mode,
-            "base_url": self.base_url,
-            "persistent": self.persistent,
-            "skill_id": self.skill_id,
+            "transport_mode": self.client_hub.transport_mode,
+            "location": self.client_hub.location,
+            "remote_name": self.remote_name,
             "result": result,
         }
 
@@ -228,9 +205,9 @@ class A2AProxyTool(Tool):
                 f"{self.full_name}: A2A tools do not accept positional arguments; got {args!r}."
             )
 
-        if self._skill_id is not None:
+        if self._remote_name is not None:
             try:
-                result = await self.client_hub.async_call_atomic_skill(self._skill_id, kwargs)
+                result = await self.client_hub.async_call_atomic_skill(self._remote_name, kwargs)
             except ToolInvocationError:
                 raise
             except Exception as e:
@@ -246,13 +223,7 @@ class A2AProxyTool(Tool):
                 raise ToolInvocationError(f"{self.full_name}: async invocation failed: {e}") from e
             result = [_part_to_dict(p) for p in result_parts]
 
-        return {
-            "transport_mode": self.transport_mode,
-            "base_url": self.base_url,
-            "persistent": self.persistent,
-            "skill_id": self.skill_id,
-            "result": result,
-        }
+        return self._payload(result)
 
     # ------------------------------------------------------------------ #
     # Serialization
@@ -261,7 +232,7 @@ class A2AProxyTool(Tool):
         data = super().to_dict()
         data.update(
             {
-                "skill_id": self.skill_id,
+                "remote_name": self.remote_name,
                 "client_hub": self.client_hub.to_dict(),
             }
         )

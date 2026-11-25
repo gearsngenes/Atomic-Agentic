@@ -6,12 +6,11 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
-    Literal,
     Mapping,
     Optional,
 )
 
-from ..exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..mcp.mcp_client_hub import MCPClientHub
 from ..models.results.tools import MCPToolResult
@@ -23,61 +22,35 @@ class MCPProxyTool(Tool):
     """
     Proxy a single remote MCP tool as a normal AA Tool.
 
-    The proxy owns the AA-facing identity (`name`, `description`)
-    and a remote MCP binding (`remote_name`) backed by one `MCPClientHub`.
-    Only `client_hub`-based construction is supported (no raw-transport-param
-    alternative) -- matches `A2AProxyTool`'s convention; construct an
-    `MCPClientHub` explicitly and pass it in.
+    Built from an `MCPClientHub` and the remote tool's name; the tool's
+    metadata is read from the hub's stored catalog (`hub.get_tool(name)`, which
+    raises `MCPToolError` for an unknown name) with no checks of its own and no
+    network call. The Tool's own
+    name is `<hub.name>_<name>` (the raw name when the hub is unnamed); the raw
+    remote name is kept as `remote_name` and is what calls use. The description
+    comes from the remote tool and may be replaced through the `description`
+    setter. Only hub-based construction is supported; a different identity
+    comes from wrapping the proxy with `to_tool(proxy, name=..., description=...)`.
     """
 
     result_cls: ClassVar[type[MCPToolResult]] = MCPToolResult
 
-    def __init__(
-        self,
-        client_hub: MCPClientHub,
-        remote_name: str,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
-        if not isinstance(client_hub, MCPClientHub):
-            raise TypeError(
-                f"client_hub must be an MCPClientHub, got {type(client_hub)!r}."
-            )
-
-        resolved_remote_name = str(remote_name).strip()
-        if not resolved_remote_name:
-            raise ToolDefinitionError("remote_name must be a non-empty string.")
-
-        self._client_hub: MCPClientHub = client_hub
-        self._remote_name: str = resolved_remote_name
-
-        all_tools = self.client_hub.list_tools()
-        if self.remote_name not in all_tools:
-            raise ToolDefinitionError(
-                f"MCPProxyTool: remote tool {self.remote_name!r} not found for "
-                f"{self.client_hub.transport_mode!r} transport."
-            )
-
-        self._mcpdata: Dict[str, Any] = dict(all_tools[self.remote_name])
-
-        resolved_name = str(name or self.remote_name).strip()
-        if not resolved_name:
-            raise ToolDefinitionError("name must resolve to a non-empty string.")
-
-        explicit_description = str(description or "").strip()
-        remote_description = str(self._mcpdata.get("description") or "").strip()
-        resolved_description = (
-            explicit_description
-            or remote_description
-            or f"MCP proxy tool '{resolved_name}'"
+    def __init__(self, client_hub: MCPClientHub, name: str) -> None:
+        # State is set before Tool.__init__ runs (it reads _mcpdata). The
+        # remote metadata comes from the hub's stored catalog; an unknown
+        # name fails in get_tool.
+        self._client_hub = client_hub
+        self._remote_name = name
+        self._mcpdata: Dict[str, Any] = dict(client_hub.get_tool(name))
+        tool_name = f"{client_hub.name}_{name}" if client_hub.name is not None else name
+        description = (
+            str(self._mcpdata.get("description") or "").strip()
+            or f"MCP proxy tool '{tool_name}'"
         )
-
-        function = functools.partial(self.client_hub.call_tool, self.remote_name)
-
         super().__init__(
-            function=function,
-            name=resolved_name,
-            description=resolved_description,
+            function=functools.partial(client_hub.call_tool, name),
+            name=tool_name,
+            description=description,
         )
 
     @property
@@ -87,31 +60,6 @@ class MCPProxyTool(Tool):
     @property
     def remote_name(self) -> str:
         return self._remote_name
-
-    @property
-    def transport_mode(self) -> Literal["stdio", "sse", "streamable_http"]:
-        return self.client_hub.transport_mode
-
-    @property
-    def endpoint(self) -> str | None:
-        return self.client_hub.endpoint
-
-    @property
-    def command(self) -> str | None:
-        return self.client_hub.command
-
-    @property
-    def args(self) -> tuple[str, ...] | None:
-        return self.client_hub.args
-
-    @property
-    def headers(self) -> Mapping[str, str] | None:
-        """Read-only view of the underlying client hub's headers.
-
-        Mutate via ``self.client_hub.headers = ...`` directly — lifecycle
-        belongs to the client, not this wrapper.
-        """
-        return self.client_hub.headers
 
     @property
     def mcpdata(self) -> Dict[str, Any]:
@@ -166,23 +114,23 @@ class MCPProxyTool(Tool):
         except Exception as e:
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
+        return self._package(raw_result)
+
+    def _package(self, raw_result: Any) -> Dict[str, Any]:
+        """Check the hub's result envelope (mapping, isError) and build the
+        proxy payload; shared by execute and async_execute."""
         if not isinstance(raw_result, Mapping):
             raise ToolInvocationError(
                 f"{self.full_name}: MCP client hub returned a non-mapping result envelope."
             )
 
-        is_error = raw_result.get("isError")
-        if is_error is None:
-            is_error = False
-
-        if bool(is_error):
+        if bool(raw_result.get("isError")):
             self._raise_mcp_tool_error(raw_result)
 
         return {
-            "transport_mode": self.transport_mode,
+            "transport_mode": self.client_hub.transport_mode,
             "remote_name": self.remote_name,
-            "endpoint": self.endpoint,
-            "command": self.command,
+            "location": self.client_hub.location,
             "result": self._extract_proxy_result(raw_result),
         }
 
@@ -205,25 +153,7 @@ class MCPProxyTool(Tool):
                 f"{self.full_name}: async MCP invocation failed: {exc}"
             ) from exc
 
-        if not isinstance(raw_result, Mapping):
-            raise ToolInvocationError(
-                f"{self.full_name}: MCP client hub returned a non-mapping result envelope."
-            )
-
-        is_error = raw_result.get("isError")
-        if is_error is None:
-            is_error = False
-
-        if bool(is_error):
-            self._raise_mcp_tool_error(raw_result)
-
-        return {
-            "transport_mode": self.transport_mode,
-            "remote_name": self.remote_name,
-            "endpoint": self.endpoint,
-            "command": self.command,
-            "result": self._extract_proxy_result(raw_result),
-        }
+        return self._package(raw_result)
 
     def _extract_proxy_result(self, raw_result: Mapping[str, Any]) -> Any:
         mode = self._mcpdata.get("extraction_mode")

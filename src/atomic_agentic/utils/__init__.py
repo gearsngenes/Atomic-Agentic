@@ -1,24 +1,21 @@
-from .core import (
-    apply_name_filter,
-    dataclass_record_to_dict,
-    normalize_headers,
-    run_coro_async,
-    run_coro_sync,
-    start_background_loop,
-    stop_background_loop,
-    validate_name_filter,
+"""Public parameter API. Core helpers (async loop, headers, name filters,
+record conversion) import from ``atomic_agentic.utils.core``."""
+from .parameters import (
+    extract_io,
+    is_valid_parameter_order,
+    parameter_collisions,
+    parameter_overlap,
+    semantically_compatible,
+    semantically_identical,
+    to_parameter_list,
 )
-from .parameters import is_valid_parameter_order, to_paramspec_list
 
 __all__ = [
-    "apply_name_filter",
-    "dataclass_record_to_dict",
+    "extract_io",
     "is_valid_parameter_order",
-    "normalize_headers",
-    "run_coro_async",
-    "run_coro_sync",
-    "start_background_loop",
-    "stop_background_loop",
-    "to_paramspec_list",
-    "validate_name_filter",
+    "parameter_collisions",
+    "parameter_overlap",
+    "semantically_compatible",
+    "semantically_identical",
+    "to_parameter_list",
 ]
