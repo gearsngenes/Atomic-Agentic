@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..a2a import A2AClientHub
+from ..constants.core import NO_VAL
 from ..exceptions import ToolDefinitionError
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..mcp import MCPClientHub
@@ -17,10 +18,10 @@ __all__ = ["to_tool", "to_tools"]
 # to_tool
 # ───────────────────────────────────────────────────────────────────────────────
 def to_tool(
-    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | A2AClientHub,
+    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | A2AClientHub = NO_VAL,
     name: str | None = None,
     description: str | None = None,
-) -> Tool:
+) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """
     Normalize a single component into a single Tool instance.
 
@@ -54,6 +55,14 @@ def to_tool(
          ``__name__`` and the description to the docstring (inference and the
          nameless-callable error are the ``Tool`` constructor's).
 
+    Decorator form
+    --------------
+    5) If ``component`` is omitted, return a decorator that builds the Tool
+       from the function it receives, exactly as ``to_tool(fn, name,
+       description)``. So ``@to_tool``, ``@to_tool(name=..., description=...)``
+       and ``@to_tool()`` all work. ``to_tool(None)`` is still an error: only
+       omission selects the decorator.
+
     For a hub, ``name`` selects the remote tool or skill and the returned proxy
     is named ``<hub.name>_<name>`` (the raw name for an unnamed hub); for every
     other component ``name`` names the tool itself.
@@ -64,9 +73,23 @@ def to_tool(
         For invalid routing combinations, missing required metadata, or
         unsupported component types.
     """
+    # 5) Decorator form: configure now, build when the function arrives.
+    if component is NO_VAL:
+        def decorator(fn: Callable[..., Any]) -> Tool:
+            return to_tool(fn, name, description)
+
+        return decorator
+
     if component is None:
         raise ToolDefinitionError(
             "to_tool: expected a non-empty `component`."
+        )
+
+    # A positional string is almost certainly @to_tool("name").
+    if isinstance(component, str) and name is None and description is None:
+        raise ToolDefinitionError(
+            "to_tool: keyword arguments only for the decorator form; use "
+            "@to_tool(name=...), not a positional value."
         )
 
     # Local wrapper overrides are identity settings for local Tool wrapping.

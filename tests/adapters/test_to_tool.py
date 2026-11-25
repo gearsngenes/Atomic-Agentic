@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Mapping
 
 import pytest
@@ -16,6 +17,8 @@ from atomic_agentic.tools.a2a_sdk import A2AProxyTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.agents.tools import return_tool
+
+from ..agents.conftest import make_stub_tool_agent
 
 
 def add(a: int, b: int) -> int:
@@ -574,6 +577,93 @@ class TestToToolA2AClientHub:
 
         assert tool.invoke({"a": 12, "b": 5}).result == 17
         assert hub.skill_calls == [("add", {"a": 12, "b": 5})]
+
+
+class TestToToolDecoratorForm:
+    def test_bare_decorator(self) -> None:
+        @to_tool
+        def plus(a: int, b: int) -> int:
+            """Add two integers."""
+            return a + b
+
+        assert type(plus) is Tool
+        assert plus.name == "plus"
+        assert plus.description == "Add two integers."
+
+    def test_empty_call_returns_decorator(self) -> None:
+        decorated = to_tool()(add)
+
+        assert type(decorated) is Tool
+        assert decorated.name == "add"
+        assert decorated.description == "Add two integers."
+
+    def test_keyword_overrides(self) -> None:
+        @to_tool(name="adder", description="my description")
+        def plus(a, b):
+            return a + b
+
+        assert plus.name == "adder"
+        assert plus.description == "my description"
+
+    def test_name_only_keeps_docstring_description(self) -> None:
+        decorated = to_tool(name="sum_two")(add)
+
+        assert decorated.name == "sum_two"
+        assert decorated.description == "Add two integers."
+
+    def test_call_form_still_returns_tool(self) -> None:
+        result = to_tool(add)
+
+        assert type(result) is Tool
+        assert result.name == "add"
+
+    def test_matches_call_form(self) -> None:
+        decorated = to_tool(name="sum_two", description="Sum values.")(add)
+        direct = to_tool(add, "sum_two", "Sum values.")
+
+        assert decorated.name == direct.name
+        assert decorated.description == direct.description
+        assert decorated.parameters == direct.parameters
+
+    def test_unannotated_parameters_work(self) -> None:
+        @to_tool
+        def plus(a, b):
+            return a + b
+
+        assert plus.invoke({"a": 1, "b": 2}).result == 3
+
+    def test_sync_function_invokes(self) -> None:
+        assert to_tool(add).invoke({"a": 2, "b": 3}).result == 5
+
+    def test_async_function_awaits(self) -> None:
+        async def async_add(a: int, b: int) -> int:
+            return a + b
+
+        decorated = to_tool(async_add)
+
+        assert asyncio.run(decorated.async_invoke({"a": 2, "b": 3})).result == 5
+
+    def test_nameless_callable_raises(self) -> None:
+        with pytest.raises(ToolDefinitionError, match="cannot infer a name"):
+            to_tool()(CallableWithoutName())
+
+    def test_positional_string_raises_keyword_hint(self) -> None:
+        with pytest.raises(ToolDefinitionError, match="keyword arguments only"):
+            to_tool("name")  # type: ignore[arg-type]
+
+    def test_non_callable_raises_unsupported_type(self) -> None:
+        with pytest.raises(ToolDefinitionError, match="unsupported `component` type"):
+            to_tool(42)  # type: ignore[arg-type]
+
+    def test_explicit_none_is_not_a_decorator(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            to_tool(None)  # type: ignore[arg-type]
+
+    def test_decorated_function_registers_on_tool_agent(self) -> None:
+        agent = make_stub_tool_agent()
+
+        assert agent.register_tool(to_tool(add)) is True
+        assert agent.has_tool("add")
 
 
 class TestToToolInvalidInputs:

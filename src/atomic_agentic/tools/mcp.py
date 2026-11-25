@@ -35,14 +35,6 @@ class MCPProxyTool(Tool):
 
     result_cls: ClassVar[type[MCPToolResult]] = MCPToolResult
 
-    @classmethod
-    def of(cls, fn=None, /, *, name=None, description=None):
-        """Not available: a proxy tool is built from a hub, not a function."""
-        raise TypeError(
-            "MCPProxyTool.of is not supported; build it from an MCPClientHub "
-            "(or use to_tool)."
-        )
-
     def __init__(self, client_hub: MCPClientHub, name: str) -> None:
         # State is set before Tool.__init__ runs (it reads _mcpdata). The
         # remote metadata comes from the hub's stored catalog; an unknown

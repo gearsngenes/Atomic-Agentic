@@ -4,6 +4,9 @@ import tempfile
 from dotenv import load_dotenv
 
 from atomic_agentic.exceptions import LLMEngineError
+from openai import OpenAI
+
+from atomic_agentic.adapters import to_llm
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
@@ -19,6 +22,12 @@ if not api_key:
     raise SystemExit("Set OPENAI_API_KEY to run this demo.")
 
 engine = OpenAIEngine(model="gpt-4.1-mini", api_key=api_key)
+
+# --- to_llm: build an engine from a pre-built SDK client (no network call) ---
+# The engine class follows the client's SDK type; `model` is required except
+# for a llama_cpp.Llama client, which already carries its model path.
+built = to_llm(OpenAI(api_key="dummy-key"), "gpt-4.1-mini")
+print("to_llm built:", type(built).__name__, built.name, built.model_data)
 
 # --- Runtime parameters: the provider's own call parameters ---
 # None removes a key; `stream` is reserved because streaming is unsupported.

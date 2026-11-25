@@ -180,6 +180,12 @@ print(engine.runtime_parameters)                      # a deep copy
   raises; with `require_usage = False` the result carries all-zero token
   usage instead.
 
+**From an SDK client.** `to_llm(client, model)` builds the matching engine
+from a pre-built SDK client, for example `to_llm(OpenAI(...), "gpt-4o")`
+returns an `OpenAIEngine`. A `llama_cpp.Llama` client takes no `model`; every
+other client requires one, and an unsupported client raises `TypeError`.
+Further settings go on the returned engine (`update_runtime_parameters`).
+
 **Attachments.** `OpenAIEngine`, `AnthropicEngine`, `GeminiEngine` and
 `MistralEngine` can hold files that ride along on every call:
 `engine.attach(path)`, `engine.detach(path)`, `engine.clear_attachments()`.

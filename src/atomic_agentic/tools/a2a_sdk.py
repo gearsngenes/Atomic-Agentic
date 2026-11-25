@@ -44,14 +44,6 @@ class A2AProxyTool(Tool):
 
     result_cls: ClassVar[type[A2AProxyToolResult]] = A2AProxyToolResult
 
-    @classmethod
-    def of(cls, fn=None, /, *, name=None, description=None):
-        """Not available: a proxy tool is built from a hub, not a function."""
-        raise TypeError(
-            "A2AProxyTool.of is not supported; build it from an A2AClientHub "
-            "(or use to_tool)."
-        )
-
     def __init__(self, client_hub: A2AClientHub, name: Optional[str] = None) -> None:
         # An unknown skill name fails in the hub's get_skill.
         skill_metadata = client_hub.get_skill(name) if name is not None else None

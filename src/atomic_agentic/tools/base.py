@@ -162,48 +162,6 @@ class Tool(AtomicInvokable):
             return_type=return_type,
         )
 
-    @classmethod
-    def of(
-        cls,
-        fn: Callable[..., Any] | None = None,
-        /,
-        *,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-    ):
-        """Decorator form of the constructor.
-
-        ``@Tool.of`` and ``@Tool.of()`` / ``@Tool.of(name=..., description=...)``
-        bind the decorated name to a ``Tool`` built exactly as
-        ``Tool(fn, name, description)`` (same name and description inference).
-        ``name`` and ``description`` are keyword-only. A method loses ``self``
-        binding (``Tool`` is not a descriptor). Intended for ``Tool`` itself;
-        subclasses with a different constructor (the proxy tools) should not
-        be used with it.
-
-        1. If ``fn`` is None, return a decorator that builds the Tool from the
-           function it receives.
-        2. If ``fn`` is not callable (e.g. ``@Tool.of("name")``), raise
-           ``TypeError``: only keywords configure the decorator.
-        3. Otherwise return ``cls(fn, name, description)``.
-        """
-        # 1) Keyword form: configure now, build when the function arrives.
-        if fn is None:
-            def decorator(f: Callable[..., Any]):
-                return cls(f, name, description)
-
-            return decorator
-
-        # 2) A positional non-callable is almost certainly @Tool.of("name").
-        if not callable(fn):
-            raise TypeError(
-                "Tool.of: keyword arguments only; use @Tool.of(name=...), not a "
-                f"positional value (got {type(fn).__name__})."
-            )
-
-        # 3) Bare form.
-        return cls(fn, name, description)
-
     # ------------------------------------------------------------------ #
     # Tool Properties
     # ------------------------------------------------------------------ #

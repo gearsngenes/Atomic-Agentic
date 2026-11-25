@@ -1,5 +1,6 @@
 """Pure helpers shared by the LLM engine adapters (messages, attachments)."""
 
+import importlib
 import mimetypes
 import os
 from typing import Any, Iterable, Mapping
@@ -80,3 +81,22 @@ def validate_attachment_path(
         mime = mime or ""
         if any(mime.startswith(prefix) for prefix in illegal_mime_prefixes):
             raise ValueError(f"MIME type {mime!r} is not permitted")
+
+
+def import_client_types(
+    module_path: str, class_names: Iterable[str]
+) -> tuple[tuple[type, ...], ImportError | None]:
+    """
+    Import an SDK module and return its named client classes.
+
+    Returns ``(classes, None)`` on success and ``((), error)`` when the module
+    cannot be imported (absent, or present but broken) or lacks a named class.
+    Nothing is raised; the caller decides what a missing SDK means.
+    """
+    try:
+        module = importlib.import_module(module_path)
+        return tuple(getattr(module, name) for name in class_names), None
+    except ImportError as exc:
+        return (), exc
+    except AttributeError as exc:
+        return (), ImportError(str(exc))

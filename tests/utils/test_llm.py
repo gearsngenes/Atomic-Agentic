@@ -6,6 +6,7 @@ from atomic_agentic.constants.llm import MISTRAL_IMAGE_EXTS, OPENAI_IMAGE_EXTS
 from atomic_agentic.utils.llm import (
     classify_path,
     collect_system_text,
+    import_client_types,
     inlined_file_block,
     read_text_file,
     validate_attachment_path,
@@ -170,3 +171,23 @@ class TestValidateAttachmentPath:
             allowed_exts={".json", ".txt"},
             illegal_mime_prefixes=(),
         )
+
+
+class TestImportClientTypes:
+    def test_returns_named_classes(self) -> None:
+        classes, error = import_client_types("collections", ["OrderedDict", "deque"])
+
+        assert error is None
+        assert [c.__name__ for c in classes] == ["OrderedDict", "deque"]
+
+    def test_missing_module_returns_import_error(self) -> None:
+        classes, error = import_client_types("definitely_not_a_module_xyz", ["Thing"])
+
+        assert classes == ()
+        assert isinstance(error, ImportError)
+
+    def test_missing_class_returns_import_error(self) -> None:
+        classes, error = import_client_types("collections", ["NoSuchClass"])
+
+        assert classes == ()
+        assert isinstance(error, ImportError)

@@ -1,4 +1,4 @@
-"""Attachment policy constants for LLM engine adapters."""
+"""Constants for the LLM engines: attachment policy and ``to_llm`` client routing."""
 
 # ── Shared blacklist (all current providers use this identical set) ──────────
 
@@ -66,4 +66,20 @@ ANTHROPIC_ALLOWED_EXTS: frozenset[str] = (
     frozenset(ANTHROPIC_IMAGE_EXTS)
     | frozenset(ANTHROPIC_DOCUMENT_EXTS)
     | frozenset(ANTHROPIC_TEXT_EXTS)
+)
+
+# ── Client routing (`to_llm`) ────────────────────────────────────────────────
+# (SDK module to import, client class names there, engine class name in
+# ``atomic_agentic.llm``, PyPI distribution, atomic-agentic extra). Names are
+# strings so this module imports nothing. Order matters only for cost: the
+# lightest SDKs come first, because the resolver imports them in order and
+# stops at the first match.
+
+LLM_CLIENT_ROUTES: tuple[tuple[str, tuple[str, ...], str, str, str], ...] = (
+    ("openai", ("OpenAI", "AsyncOpenAI"), "OpenAIEngine", "openai", "openai"),
+    ("anthropic", ("Anthropic", "AsyncAnthropic"), "AnthropicEngine", "anthropic", "anthropic"),
+    ("mistralai.client", ("Mistral",), "MistralEngine", "mistralai", "mistral"),
+    ("google.genai", ("Client",), "GeminiEngine", "google-genai", "gemini"),
+    ("llama_cpp", ("Llama",), "LlamaCppEngine", "llama-cpp-python", "llama"),
+    ("litellm", ("Router",), "LiteLLMEngine", "litellm", "litellm"),
 )

@@ -231,14 +231,14 @@ def main() -> None:
     except Exception as exc:
         print("[A2A-sdk] Skipping batch A2A-sdk demo due to error:", exc)
 
-    print("\n[8] @Tool.of -> decorator form of the Tool constructor; the name is bound to a Tool")
+    print("\n[8] @to_tool -> decorator form of to_tool; the name is bound to a Tool")
 
-    @Tool.of
+    @to_tool
     def shout(text: str) -> str:
         """Upper-case the text."""
         return text.upper()
 
-    @Tool.of(name="join_words", description="Join words with a separator.")
+    @to_tool(name="join_words", description="Join words with a separator.")
     def join(words: list[str], sep: str = " ") -> str:
         return sep.join(words)
 
