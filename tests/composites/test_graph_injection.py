@@ -5,12 +5,14 @@ from typing import Any
 import pytest
 
 from atomic_agentic.composites import Graph
-from atomic_agentic.adapters import to_invokable
+from atomic_agentic.invokables.prompt_template import PromptTemplate
+from atomic_agentic.adapters import to_tool
+from atomic_agentic.exceptions import ToolDefinitionError
 
 
 def inv(fn: Any, name: str = "n") -> Any:
     """Wrap a callable as an invokable."""
-    return to_invokable(fn, name=name, description=f"{name} test node")
+    return to_tool(fn, name=name, description=f"{name} test node")
 
 
 def echo(**kwargs: Any) -> dict[str, Any]:
@@ -121,7 +123,7 @@ class TestInjectionCommon:
     def test_bad_entry_changes_nothing(self, kind: str) -> None:
         graph = base()
         before = snap(graph)
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             KINDS[kind][0](graph, {"x": echo, "y": 42})
         assert snap(graph) == before
 
@@ -129,7 +131,7 @@ class TestInjectionCommon:
     def test_every_entry_form_is_accepted(self, kind: str) -> None:
         graph = base()
         result = KINDS[kind][0](
-            graph, {"p": "Hello {who}", "q": echo, "r": (echo, "k"), "s": inv(echo, "s")}
+            graph, {"p": PromptTemplate(template="Hello {who}", name="p", description="d"), "q": echo, "r": (echo, "k"), "s": inv(echo, "s")}
         )
         assert result is None
         assert list(graph.nodes) == ["a", "b", "p", "q", "r", "s"]

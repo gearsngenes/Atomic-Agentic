@@ -11,7 +11,7 @@ from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.agents.scriptact import ScriptActAgent
-from atomic_agentic.exceptions import ToolAgentError, ToolRegistrationError
+from atomic_agentic.exceptions import ToolAgentError, ToolDefinitionError, ToolRegistrationError
 from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
@@ -245,7 +245,7 @@ class TestToolAgentConstruction:
         assert agent._extra_parameter_sources() == [agent.instructions]
 
     def test_instructions_invalid_type_raises(self) -> None:
-        with pytest.raises(TypeError, match="instructions"):
+        with pytest.raises(ToolDefinitionError):
             make_stub_tool_agent(instructions=123)  # type: ignore[arg-type]
 
     def test_instructions_has_no_setter(self) -> None:
@@ -427,10 +427,40 @@ class TestToolRegistration:
         with pytest.raises(ToolRegistrationError, match="name_collision_policy"):
             agent.register_tool(add, name_collision_policy="bogus")  # type: ignore[arg-type]
 
-    def test_register_unsupported_type_raises(self) -> None:
+    def test_register_unsupported_type_raises_naturally(self) -> None:
         agent = make_stub_tool_agent()
-        with pytest.raises(ToolRegistrationError, match="unsupported component type"):
+        with pytest.raises(ToolDefinitionError, match="unsupported"):
             agent.register_tool(42)  # type: ignore[arg-type]
+
+    def test_register_tool_name_and_description_rename_through_a_wrapper(self) -> None:
+        agent = make_stub_tool_agent()
+        original = Tool(function=add, name="add", description="Adds.")
+
+        assert agent.register_tool(original, name="plus", description="Plus.") is True
+
+        wrapper = agent.get_tool("plus")
+        assert wrapper is not original
+        assert wrapper.description == "Plus."
+        assert original.name == "add"
+
+    def test_register_tool_keeps_an_invokable_as_is_without_overrides(self) -> None:
+        agent = make_stub_tool_agent()
+        original = Tool(function=add, name="add", description="Adds.")
+        agent.register_tool(original)
+        assert agent.get_tool("add") is original
+
+    def test_register_tools_conversion_failure_is_unwrapped_and_leaves_toolbox_alone(self) -> None:
+        agent = make_stub_tool_agent()
+        before = set(agent.list_tools())
+        with pytest.raises(ToolDefinitionError):
+            agent.register_tools([add, 42])  # type: ignore[list-item]
+        assert set(agent.list_tools()) == before
+
+    def test_register_tools_keeps_caller_order(self) -> None:
+        agent = make_stub_tool_agent()
+        agent.register_tools([multiply, add])
+        names = list(agent.list_tools())
+        assert names.index("multiply") < names.index("add")
 
     def test_get_tool_unknown_raises(self) -> None:
         agent = make_stub_tool_agent()
@@ -1164,13 +1194,13 @@ class TestResultClassWiring:
 class TestRegistrationKeyIsToolName:
     """Stage 4 Pass 4: aliases are gone; the toolbox key is always ``tool.name``."""
 
-    def test_registration_apis_have_no_alias_or_description_parameters(self) -> None:
+    def test_registration_apis_signatures_and_keyword_only_policy(self) -> None:
         import inspect
 
         register_tool = inspect.signature(ToolAgent.register_tool).parameters
         register_tools = inspect.signature(ToolAgent.register_tools).parameters
 
-        assert list(register_tool) == ["self", "tool", "name_collision_policy"]
+        assert list(register_tool) == ["self", "tool", "name", "description", "name_collision_policy"]
         assert register_tool["name_collision_policy"].kind is inspect.Parameter.KEYWORD_ONLY
         assert list(register_tools) == ["self", "tools", "name_collision_policy"]
         assert register_tools["name_collision_policy"].kind is inspect.Parameter.KEYWORD_ONLY

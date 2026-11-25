@@ -52,7 +52,7 @@ from ..constants.agents import TASK_RESULT_PREFIX
 from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..adapters import to_invokables, to_invokable
+from ..adapters import to_tool, to_tools
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult
@@ -159,7 +159,7 @@ class ToolAgent(Agent, ABC):
             first"), rendered after the family prompt inside a
             ``USER-DEFINED INSTRUCTIONS`` frame, only when set. A string,
             callable or invokable (an agent included; recursion is allowed
-            and unguarded), coerced through ``to_invokable``. Its parameters
+            and unguarded), coerced by the agent's slot rule. Its parameters
             (a string's ``{name}`` fields) become declared parameters of this
             agent -- validated/defaulted by the normal ``invoke(inputs)``
             pipeline. ``None`` means no user instructions; ``""`` or a
@@ -194,10 +194,10 @@ class ToolAgent(Agent, ABC):
         # Set before super().__init__(): _extra_parameter_sources reads it there.
         self._instructions: Optional[AtomicInvokable] = (
             None if instructions is None
-            else to_invokable(
+            else self._slot(
                 instructions,
-                name=f"{name}_instructions",
-                description=f"Instructions of agent {name}",
+                f"{name}_instructions",
+                f"Instructions of agent {name}",
             )
         )
 
@@ -360,45 +360,30 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     def register_tool(
         self,
-        tool: AtomicInvokable | Callable,
+        tool: AtomicInvokable | Callable | MCPClientHub | A2AClientHub,
+        name: str | None = None,
+        description: str | None = None,
         *,
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
     ) -> bool:
         """
-        Register one invokable under its own ``name`` -- never the dotted
-        ``full_name``, which only confuses an LLM asked to copy a tool id
-        verbatim. An ``AtomicInvokable`` is stored as-is (never wrapped or
-        renamed; build a differently named tool with ``to_tool`` first). A
-        callable (function or bound method) goes through the shared
-        ``to_invokable`` converter: its name comes from ``__name__``, its description from its docstring and
-        its parameters from its signature.
-
-        A name collision follows ``name_collision_policy``.
+        Register exactly one tool, stored under its own ``name`` -- never the
+        dotted ``full_name``. An ``AtomicInvokable`` given no ``name`` or
+        ``description`` is stored as-is (an agent is not wrapped); otherwise
+        ``to_tool(tool, name, description)`` builds the tool. This is how a
+        single MCP/A2A tool is registered: pass the hub and ``name`` selects
+        the remote tool or skill (``to_tool``'s hub rules). The result goes
+        through ``register_tools``, which owns validation and the collision
+        policy.
 
         Returns whether the tool was newly registered (``False`` only when
         ``name_collision_policy="skip"`` hits an existing name).
         """
-        policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
-
-        try:
-            invokable = to_invokable(tool)
-        except Exception as exc:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: failed to convert component: {exc}"
-            ) from exc
-
-        self._validate_tool_name(invokable.name)
-
-        if invokable.name in self._toolbox:
-            if policy == "raise":
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: tool already registered: {invokable.name!r}."
-                )
-            if policy == "skip":
-                return False
-
-        self._toolbox[invokable.name] = invokable
-        return True
+        if name is None and description is None and isinstance(tool, AtomicInvokable):
+            converted = tool
+        else:
+            converted = to_tool(tool, name, description)
+        return self.register_tools([converted], name_collision_policy=name_collision_policy)
 
     def register_tools(
         self,
@@ -407,17 +392,16 @@ class ToolAgent(Agent, ABC):
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
     ) -> bool:
         """
-        Register a mixed batch of plain invokables/callables and hub objects
-        (``MCPClientHub``/``A2AClientHub``) in one pass, converting it with
-        ``to_invokables``. A hub entry expands
-        into every tool it exposes, each under its own intrinsic bare ``name``
-        (``<hub.name>_<remote name>``, or the raw remote name for an unnamed hub)
-        -- never the dotted ``full_name``. Every candidate's name is validated
-        via ``_validate_tool_name`` as soon as it's computed, during this
-        same expansion pass -- not a second, separate pass afterward.
-        Whole-batch validation happens before any toolbox mutation;
-        intra-batch duplicate names always raise regardless of
-        ``name_collision_policy``.
+        Register a mixed batch of invokables, callables and hub objects
+        (``MCPClientHub``/``A2AClientHub``) in one pass. Items convert in
+        caller order: an invokable is stored as-is, a callable becomes a
+        ``Tool``, and a hub expands into every tool it exposes, each under its
+        own bare ``name`` (``<hub.name>_<remote name>``, or the raw remote name
+        for an unnamed hub) -- never the dotted ``full_name``. Conversion
+        errors propagate unwrapped. Every candidate's name is validated via
+        ``_validate_tool_name`` and the whole batch is vetted before any
+        toolbox mutation; intra-batch duplicate names always raise regardless
+        of ``name_collision_policy``.
 
         Returns ``True`` iff every item was newly registered (only ``"skip"``
         can make this ``False``; ``"raise"``/``"replace"`` are unconditionally
@@ -426,12 +410,12 @@ class ToolAgent(Agent, ABC):
         policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
         # Convert the whole batch (hubs expanded) before touching self._toolbox.
-        try:
-            converted = to_invokables(tools)
-        except Exception as exc:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: failed to convert tools: {exc}"
-            ) from exc
+        converted: list[AtomicInvokable] = []
+        for item in tools:
+            if isinstance(item, AtomicInvokable):
+                converted.append(item)
+            else:
+                converted.extend(to_tools([item]))
 
         candidates: list[tuple[str, AtomicInvokable]] = []
         for invokable in converted:
@@ -545,13 +529,15 @@ class ToolAgent(Agent, ABC):
         ``register_tool`` entirely — the one sanctioned way to populate a
         reserved tool name (``register_tool``/``register_tools`` reject
         any name in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
-        converted first, exactly like ``register_tool``'s own callable
-        branch; ``AtomicInvokable`` instances are stored as-is. Intended to
+        converted with ``to_tool``; ``AtomicInvokable`` instances are stored as-is. Intended to
         be called from a subclass's own ``__init__``, after
         ``super().__init__()``, once per reserved name that subclass
         declares.
         """
-        self._toolbox[name] = to_invokable(tool, name=name, description=description)
+        self._toolbox[name] = (
+            tool if isinstance(tool, AtomicInvokable)
+            else to_tool(tool, name=name, description=description)
+        )
 
     # ------------------------------------------------------------------ #
     # Docstring rendering

@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
-from ..adapters import to_invokable
+from ..adapters import to_tool
 from ..utils.binding import Binding, normalize_binding
 from .graph import Graph
 
@@ -17,11 +17,11 @@ class Pipeline(AtomicInvokable):
 
     Construction contract
     ---------------------
-    - ``steps`` is a non-empty list. Each entry is an invokable, a ``str``
-      (becomes a ``PromptTemplate``), a callable (becomes a ``Tool``), or a
+    - ``steps`` is a non-empty list. Each entry is an invokable, a callable
+      (becomes a ``Tool``), or a
       2-tuple ``(entry, binding)``. ``(entry, None)`` is the same as a bare
       entry. Duplicate instances and a single step are legal.
-    - Entries are coerced through the shared ``to_invokable``; a coerced step
+    - Entries are coerced by ``to_tool`` when not invokables; a coerced step
       is named ``<pipeline name>_{i}`` and the private graph's node names match.
     - The pipeline holds its graph by composition and has no mutators: topology
       and step instances are fixed at construction (shallow immutability:
@@ -80,7 +80,7 @@ class Pipeline(AtomicInvokable):
             else:
                 obj, raw_binding = entry, None
             binding = normalize_binding(raw_binding, label=f"{name} step {index} binding")
-            invokable = to_invokable(
+            invokable = obj if isinstance(obj, AtomicInvokable) else to_tool(
                 obj,
                 name=f"{name}_{index}",
                 description=f"Step {index} of pipeline {name}",

@@ -23,7 +23,8 @@ from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
-from ..adapters import to_invokable
+from ..adapters import to_tool
+from ..invokables.prompt_template import PromptTemplate
 from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask
@@ -255,18 +256,18 @@ class Agent(AtomicInvokable, ABC):
 
         # ── Pre and post stages ──────────────────────────────────────────────
         # A str becomes a PromptTemplate, a callable a Tool, an invokable (a
-        # sub-agent included) is used as is; anything else raises TypeError.
-        pre_tool = to_invokable(
+        # sub-agent included) is used as is; anything else raises from to_tool.
+        pre_tool = self._slot(
             pre_invoke,
-            name=f"{name}_pre_invoke",
-            description=f"The tool that preprocesses inputs into a string for Agent {name}",
+            f"{name}_pre_invoke",
+            f"The tool that preprocesses inputs into a string for Agent {name}",
         )
         post_tool = (
             None if post_invoke is None
-            else to_invokable(
+            else self._slot(
                 post_invoke,
-                name=f"{name}_post_invoke",
-                description=f"The tool that postprocesses outputs of Agent {name}",
+                f"{name}_post_invoke",
+                f"The tool that postprocesses outputs of Agent {name}",
             )
         )
 
@@ -432,6 +433,16 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _slot(obj: Any, name: str, description: str) -> AtomicInvokable:
+        """Coerce a prompt-slot argument: an invokable is used as is, a ``str``
+        becomes a ``PromptTemplate``, anything else goes through ``to_tool``."""
+        if isinstance(obj, AtomicInvokable):
+            return obj
+        if isinstance(obj, str):
+            return PromptTemplate(template=obj, name=name, description=description)
+        return to_tool(obj, name=name, description=description)
+
     @staticmethod
     def _normalize_binding(
         value: Any,

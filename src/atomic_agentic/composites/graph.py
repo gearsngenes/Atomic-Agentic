@@ -11,7 +11,7 @@ from ..constants.core import IDENTIFIER_PATTERN
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results import GraphResult
-from ..adapters import to_invokable
+from ..adapters import to_tool
 from ..utils.binding import Binding, normalize_binding, slice_response
 from ..utils.core import run_coro_sync
 
@@ -25,9 +25,9 @@ class Graph(AtomicInvokable):
 
     Construction contract
     ---------------------
-    - ``nodes`` is an optional dict of name to entry (an invokable, a ``str``, a
-      callable, or ``(entry, binding)``); a graph may start empty. Entries are
-      coerced through the shared ``to_invokable`` and named by their dict key.
+    - ``nodes`` is an optional dict of name to entry (an invokable, a
+      callable, or ``(entry, binding)``); a graph may start empty. A callable
+      is wrapped by ``to_tool`` and named by its dict key.
       A node name must be a valid invokable name (alphanumeric/underscore, no
       leading digit) or ``ValueError`` is raised.
     - ``edges`` are ``(source, target)`` pairs: a ``str`` target is a node name
@@ -195,7 +195,7 @@ class Graph(AtomicInvokable):
         binding = normalize_binding(
             raw_binding, label=f"{graph_name} node {node_name!r} binding"
         )
-        invokable = to_invokable(
+        invokable = obj if isinstance(obj, AtomicInvokable) else to_tool(
             obj,
             name=node_name,
             description=f"Node {node_name} of graph {graph_name}",
@@ -205,7 +205,9 @@ class Graph(AtomicInvokable):
     @staticmethod
     def _coerce_router(graph_name: str, target: Any, index: int) -> AtomicInvokable:
         """Turn a router target into an invokable named from ``index``."""
-        return to_invokable(
+        if isinstance(target, AtomicInvokable):
+            return target
+        return to_tool(
             target,
             name=f"{graph_name}_router_{index}",
             description=f"Router {index} of graph {graph_name}",

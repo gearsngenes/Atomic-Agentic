@@ -7,7 +7,7 @@ import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.constants.prompts import DEFAULT_INSTRUCTIONS
-from atomic_agentic.exceptions import AgentError, ToolInvocationError
+from atomic_agentic.exceptions import AgentError, ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.agents.conversations import Conversation
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.invokables.prompt_template import PromptTemplate
@@ -51,8 +51,8 @@ class TestBasicAgentInstructions:
         agent = make_basic_agent()
         assert agent.instructions.template == DEFAULT_INSTRUCTIONS
 
-    def test_none_instructions_raise_type_error(self) -> None:
-        with pytest.raises(TypeError, match="instructions"):
+    def test_none_instructions_raise_tool_definition_error(self) -> None:
+        with pytest.raises(ToolDefinitionError):
             make_basic_agent(instructions=None)
 
     def test_blank_instructions_raise_value_error(self) -> None:
@@ -69,8 +69,8 @@ class TestBasicAgentInstructions:
         assert agent.instructions is config
         assert agent.instructions.template == "Act like {role}."
 
-    def test_invalid_instructions_type_raises_type_error(self) -> None:
-        with pytest.raises(TypeError, match="instructions"):
+    def test_invalid_instructions_type_raises_tool_definition_error(self) -> None:
+        with pytest.raises(ToolDefinitionError):
             make_basic_agent(instructions=123)
 
     def test_instructions_have_no_setter(self) -> None:
@@ -102,6 +102,10 @@ class TestBasicAgentInstructionSources:
 
         assert isinstance(agent.instructions, PromptTemplate)
         assert agent.instructions.name == "basic_agent_instructions"
+
+    def test_unsupported_instructions_type_raises_naturally(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            make_basic_agent(instructions=42)  # type: ignore[arg-type]
 
     def test_tool_instructions_is_used_as_is(self) -> None:
         tool = Tool(_persona_instructions, name="my_instructions", description="d")

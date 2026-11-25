@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.composites import Graph, Pipeline, Router
+from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import RouterResult
@@ -90,11 +91,19 @@ class TestConstruction:
 
     def test_accepts_every_entry_form(self) -> None:
         tool = make_tool(left, "mine")
-        router = build("{kind}", {"a": tool, "b": "plain text", "c": right})
-        assert isinstance(router.selector, PromptTemplate)
+        template = PromptTemplate(template="plain text", name="plain", description="d")
+        selector = PromptTemplate(template="{kind}", name="sel", description="d")
+        router = build(selector, {"a": tool, "b": template, "c": right})
+        assert router.selector is selector
         assert router.routes["a"] is tool
-        assert isinstance(router.routes["b"], PromptTemplate)
+        assert router.routes["b"] is template
         assert isinstance(router.routes["c"], Tool)
+
+    def test_bare_str_selector_or_route_is_rejected(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            build("{kind}", {"go": left})
+        with pytest.raises(ToolDefinitionError):
+            build(pick_kind, {"go": "plain text"})
 
     def test_coerced_names(self) -> None:
         router = build(pick_kind, {"a": left, "b": right}, name="r")
@@ -199,8 +208,9 @@ class TestRuntime:
         with pytest.raises(ValueError):
             asyncio.run(router.async_invoke({"kind": "nope"}))
 
-    def test_str_selector_template(self) -> None:
-        router = build("{kind}", {"go": left, "stop": right})
+    def test_prompt_template_selector(self) -> None:
+        selector = PromptTemplate(template="{kind}", name="sel", description="d")
+        router = build(selector, {"go": left, "stop": right})
         assert router.invoke({"kind": "stop"}).result == "right0"
 
 

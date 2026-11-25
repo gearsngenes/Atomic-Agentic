@@ -7,7 +7,7 @@ from typing import Any, Callable, ClassVar
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results import RouterResult
-from ..adapters import to_invokable
+from ..adapters import to_tool
 from .graph import Graph
 
 __all__ = ["Router"]
@@ -24,7 +24,7 @@ class Router(AtomicInvokable):
     - Neither the selector nor a route entry may be a tuple: branches are bare,
       so shape a branch's result by wrapping it in a ``Pipeline``. There is no
       default route.
-    - Entries are coerced through the shared ``to_invokable``; coerced names are
+    - Entries are coerced by ``to_tool`` when not invokables; coerced names are
       ``<router name>_select`` and ``<router name>_route_{i}`` in dict order.
       The private graph's node names (``select``, ``route_{i}``) are internal.
     - ``parameters`` default to the selector's. Pass ``parameters=[...]`` to
@@ -79,13 +79,13 @@ class Router(AtomicInvokable):
                 )
 
         # 2. coerce the selector and the branches
-        selector_invokable = to_invokable(
+        selector_invokable = selector if isinstance(selector, AtomicInvokable) else to_tool(
             selector,
             name=f"{name}_select",
             description=f"Selector of router {name}",
         )
         branches = [
-            to_invokable(
+            entry if isinstance(entry, AtomicInvokable) else to_tool(
                 entry,
                 name=f"{name}_route_{i}",
                 description=f"Route {i} of router {name}",

@@ -16,7 +16,7 @@ from atomic_agentic.constants.prompts import (
     DEFAULT_THINKING_INSTRUCTIONS,
     STOP_EARLY_PROMPT_SECTION,
 )
-from atomic_agentic.exceptions import AgentError, AgentInvocationError
+from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolDefinitionError
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.agents.records import ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ScratchpadTask
@@ -152,7 +152,7 @@ class TestConstruction:
             make_agent(response_schema="not a dict")  # type: ignore[arg-type]
 
     def test_thinking_instructions_rejects_bad_type(self) -> None:
-        with pytest.raises(TypeError, match="thinking_instructions"):
+        with pytest.raises(ToolDefinitionError):
             make_agent(thinking_instructions=123)  # type: ignore[arg-type]
 
     def test_stop_early_is_read_only(self) -> None:
@@ -445,10 +445,10 @@ class TestSystemMessage:
         assert calls(agent)[0][0]["content"] == DEFAULT_THINKING_INSTRUCTIONS
         assert calls(agent)[1][0]["content"] == DEFAULT_INSTRUCTIONS
 
-    def test_none_instructions_raise_type_error_and_blank_instructions_value_error(self) -> None:
-        with pytest.raises(TypeError, match="thinking_instructions"):
+    def test_none_instructions_raise_tool_definition_error_and_blank_instructions_value_error(self) -> None:
+        with pytest.raises(ToolDefinitionError):
             make_agent(thinking_instructions=None)
-        with pytest.raises(TypeError, match="instructions"):
+        with pytest.raises(ToolDefinitionError):
             make_agent(instructions=None)
         with pytest.raises(ValueError):
             make_agent(thinking_instructions="   ")

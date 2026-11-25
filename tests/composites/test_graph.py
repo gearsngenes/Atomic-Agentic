@@ -8,8 +8,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.composites import Graph, Pipeline
-from atomic_agentic.exceptions import ToolInvocationError
-from atomic_agentic.invokables.prompt_template import PromptTemplate
+from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import GraphResult
 from atomic_agentic.tools.base import Tool
@@ -93,10 +92,9 @@ class TestConstruction:
             build({1: echo}, [], "n")  # type: ignore[dict-item]
 
     @pytest.mark.parametrize("bad", ["a-b", "1st", "a b"])
-    @pytest.mark.parametrize("entry", [echo, "template {x}"])
-    def test_rejects_invalid_invokable_name(self, bad: str, entry) -> None:
+    def test_rejects_invalid_invokable_name(self, bad: str) -> None:
         with pytest.raises(ValueError, match="alphanumeric/underscore"):
-            Graph("g", "d", {bad: entry})
+            Graph("g", "d", {bad: echo})
 
     def test_rejects_wrong_tuple_length(self) -> None:
         with pytest.raises(ValueError, match="length 3"):
@@ -108,7 +106,7 @@ class TestConstruction:
 
     @pytest.mark.parametrize("entry", [42, None, object()])
     def test_rejects_unsupported_entry(self, entry: Any) -> None:
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             build({"n": entry}, [], "n")
 
     def test_rejects_non_list_edges(self) -> None:
@@ -130,7 +128,7 @@ class TestConstruction:
             build({"n": echo}, [("n", "zzz")], "n")
 
     def test_rejects_none_edge_target(self) -> None:
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             build({"n": echo}, [("n", None)], "n")
 
     def test_duplicate_fixed_edges_collapse(self) -> None:
@@ -216,9 +214,9 @@ class TestCoercion:
         assert invokable.name == "first"
         assert invokable.description.startswith("Node first of graph g")
 
-    def test_str_becomes_prompt_template(self) -> None:
-        graph = build({"hello": "Hello {who}"}, [], "hello", returns="result")
-        assert isinstance(graph.nodes["hello"].invokable, PromptTemplate)
+    def test_bare_str_node_is_rejected(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            build({"hello": "Hello {who}"}, [], "hello", returns="result")
 
     def test_invokable_is_kept_and_may_repeat(self) -> None:
         tool = Tool(function=echo, name="mine", description="Mine.")

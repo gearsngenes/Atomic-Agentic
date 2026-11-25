@@ -6,6 +6,7 @@ from typing import Any, Callable
 import pytest
 
 from atomic_agentic.composites import Graph
+from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.tools.base import Tool
 
 GRAPH_LOGGER = "atomic_agentic.composites.graph"
@@ -75,7 +76,7 @@ class TestAddNode:
         graph = abc_graph()
         with pytest.raises(TypeError):
             graph.add_node(1, echo)  # type: ignore[arg-type]
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             graph.add_node("x", 42)
         with pytest.raises(ValueError, match="length 3"):
             graph.add_node("x", (echo, "k", "extra"))
@@ -111,7 +112,7 @@ class TestUpdateNode:
             abc_graph().update_node("zzz", echo)
 
     def test_bad_entry_raises(self) -> None:
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             abc_graph().update_node("a", 42)
 
 
@@ -190,7 +191,7 @@ class TestAddEdge:
     def test_unsupported_target_raises_without_burning_a_router_name(self) -> None:
         graph = abc_graph()
         for bad in (None, 5):
-            with pytest.raises(TypeError):
+            with pytest.raises(ToolDefinitionError):
                 graph.add_edge("a", bad)  # type: ignore[arg-type]
         graph.add_edge("a", router_returning(None))
         assert graph.nodes["a"].routers[0].name == "g_router_0"
@@ -331,7 +332,7 @@ class TestAtomicity:
     def test_failed_call_leaves_graph_unchanged(self, call: Callable[[Graph], Any]) -> None:
         graph = abc_graph(collision_handling_order=["c"])
         before = snapshot(graph)
-        with pytest.raises((TypeError, ValueError)):
+        with pytest.raises((TypeError, ValueError, ToolDefinitionError)):
             call(graph)
         assert snapshot(graph) == before
 

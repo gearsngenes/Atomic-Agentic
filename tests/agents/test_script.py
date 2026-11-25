@@ -20,6 +20,7 @@ from atomic_agentic.constants.agents import (
 from atomic_agentic.exceptions import (
     AgentInvocationError,
     ToolAgentError,
+    ToolDefinitionError,
     ToolInvocationError,
     ToolRegistrationError,
 )
@@ -54,9 +55,8 @@ class _Node:
 
 
 class _NoNameCallable:
-    """A callable with no ``__name__`` -- register_tool/register_tools must
-    wrap the resulting AttributeError as a ToolRegistrationError, not let it
-    escape raw."""
+    """A callable with no ``__name__``: ``Tool`` cannot infer a name, and the
+    ``ToolDefinitionError`` surfaces unwrapped from register_tool."""
 
     def __call__(self, value: int = 0) -> int:
         return value
@@ -219,12 +219,12 @@ class TestRegistrationEdgeCases:
 
         assert agent.get_tool("add_tool") is wrapped
 
-    def test_register_tool_wraps_conversion_failure_as_registration_error(self) -> None:
-        with pytest.raises(ToolRegistrationError):
+    def test_register_tool_conversion_failure_surfaces_naturally(self) -> None:
+        with pytest.raises(ToolDefinitionError):
             _make_agent(_engine()).register_tool(_NoNameCallable())
 
     def test_register_tool_rejects_an_unsupported_component_type(self) -> None:
-        with pytest.raises(ToolRegistrationError):
+        with pytest.raises(ToolDefinitionError):
             _make_agent(_engine()).register_tool(123)  # type: ignore[arg-type]
 
     def test_register_tool_duplicate_raises_by_default(self) -> None:

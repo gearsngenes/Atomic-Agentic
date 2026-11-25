@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.composites import Pipeline
+from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import AtomicResult
@@ -106,7 +107,7 @@ class TestConstruction:
 
     @pytest.mark.parametrize("entry", [42, None, object()])
     def test_rejects_unsupported_entry(self, entry: Any) -> None:
-        with pytest.raises(TypeError):
+        with pytest.raises(ToolDefinitionError):
             build([entry])
 
     def test_rejects_bad_binding_type(self) -> None:
@@ -142,10 +143,14 @@ class TestConstruction:
 
 
 class TestCoercion:
-    def test_str_step_becomes_prompt_template(self) -> None:
-        pipe = build(["Hello {who}"], name="p")
-        assert isinstance(pipe.steps[0].invokable, PromptTemplate)
-        assert pipe.steps[0].invokable.name == "p_0"
+    def test_bare_str_step_is_rejected(self) -> None:
+        with pytest.raises(ToolDefinitionError):
+            build(["Hello {who}"], name="p")
+
+    def test_prompt_template_step_is_kept(self) -> None:
+        template = PromptTemplate(template="Hello {who}", name="hello", description="d")
+        pipe = build([template], name="p")
+        assert pipe.steps[0].invokable is template
         assert pipe.invoke({"who": "AA"}).result == "Hello AA"
 
     def test_callable_step_becomes_named_tool(self) -> None:

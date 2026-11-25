@@ -26,7 +26,6 @@ from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import ScratchpadTask
-from ..adapters import to_invokable
 from ..utils.rendering import frame_content
 
 
@@ -39,7 +38,7 @@ class ScratchpadAgent(ThinkingAgent):
     see the instructions; an author who wants the persona there writes it into
     ``thinking_instructions``, ideally through a placeholder shared with
     ``instructions``. Both accept a string, a callable or any
-    ``AtomicInvokable`` and are coerced through ``to_invokable``; their
+    ``AtomicInvokable`` and are coerced by the agent's slot rule; their
     placeholders join the agent's signature through the parameter sources
     (``[instructions, thinking_instructions]``: the instructions win on a
     compatible-but-not-identical overlap, a true collision raises).
@@ -114,10 +113,10 @@ class ScratchpadAgent(ThinkingAgent):
         self.thinking_rounds = thinking_rounds
 
         # 2. Store the thinking state the parameter-source hook and hooks read.
-        self._thinking_instructions = to_invokable(
+        self._thinking_instructions = self._slot(
             thinking_instructions,
-            name=f"{name}_thinking_instructions",
-            description=f"Thinking instructions of agent {name}",
+            f"{name}_thinking_instructions",
+            f"Thinking instructions of agent {name}",
         )
         self._stop_early = stop_early
         # Built once; the wrapper is the only structured thinking output.

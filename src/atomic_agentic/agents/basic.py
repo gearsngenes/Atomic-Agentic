@@ -10,7 +10,6 @@ from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import LLMRecord
 from ..models.agents.tasks import AgentTask
-from ..adapters import to_invokable
 from .base import Agent
 
 
@@ -20,7 +19,7 @@ class BasicAgent(Agent):
 
     ``BasicAgent`` is the simplest ``Agent`` subclass: one instructions
     parameter, one LLM call per invocation. The instructions are a string, a callable or any
-    ``AtomicInvokable`` (an agent included), coerced through ``to_invokable``;
+    ``AtomicInvokable`` (an agent included), coerced by the agent's slot rule;
     a string becomes a ``PromptTemplate`` and its ``{placeholder}``s are
     auto-discovered. The instructions' parameters join the agent's flat parameter
     schema through the parameter-source hook -- callers supply them as
@@ -64,10 +63,10 @@ class BasicAgent(Agent):
     ) -> None:
         # 1. Coerce the instructions. Set before the base init because
         # _extra_parameter_sources reads it there.
-        self._instructions = to_invokable(
+        self._instructions = self._slot(
             instructions,
-            name=f"{name}_instructions",
-            description=f"Instructions of agent {name}",
+            f"{name}_instructions",
+            f"Instructions of agent {name}",
         )
 
         # 2. Validate and store response_schema -- no deeper validation

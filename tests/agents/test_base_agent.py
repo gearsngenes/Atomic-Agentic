@@ -14,7 +14,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.invokables.atomic_invokable import AtomicInvokable
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.results import AgentResult
-from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
+from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolDefinitionError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.conversations import Conversation
@@ -3205,8 +3205,8 @@ class TestPreInvokeStage:
         assert agent.invoke({"prompt": "go"}).result == "r"
 
     @pytest.mark.parametrize("bad", [None, 5, {"a": 1}])
-    def test_wrong_pre_types_raise_type_error(self, bad: Any) -> None:
-        with pytest.raises(TypeError):
+    def test_wrong_pre_types_raise_tool_definition_error(self, bad: Any) -> None:
+        with pytest.raises(ToolDefinitionError):
             make_value_agent("r", pre_invoke=bad)
 
     @pytest.mark.parametrize("bad", ["", "   "])
@@ -3286,8 +3286,8 @@ class TestPostInvokeStage:
         assert asyncio.run(agent.async_invoke({"prompt": "q"})).result == "post-reply"
 
     @pytest.mark.parametrize("bad", [5, {"a": 1}])
-    def test_wrong_post_types_raise_type_error(self, bad: Any) -> None:
-        with pytest.raises(TypeError):
+    def test_wrong_post_types_raise_tool_definition_error(self, bad: Any) -> None:
+        with pytest.raises(ToolDefinitionError):
             make_value_agent("r", post_invoke=bad)
 
 
