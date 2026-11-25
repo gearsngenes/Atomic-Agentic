@@ -83,7 +83,7 @@ class LiteLLMEngine(LLMEngine):
             ``"ollama/llama3"``, ``"litellm_proxy/alias"``) or, with a Router,
             a group name from its ``model_list``.
         name:
-            Defaults to the class name; stored as given.
+            Defaults to the class name.
         description:
             Defaults to ``"LiteLLM provider-agnostic language model engine."``.
         client:
@@ -93,8 +93,9 @@ class LiteLLMEngine(LLMEngine):
         **kwargs:
             Per-call litellm settings merged into every call: ``api_key``,
             ``base_url``, ``api_version``, ``timeout``, ``num_retries``, ...
-            Kept private and never dumped (credentials). ``stream`` is
-            rejected (streaming is unsupported). Credentials belong here (or
+            Kept private and never dumped (credentials). The
+            engine-owned keys (``model``, ``messages``, ``response_format``,
+            ``stream``) are rejected. Credentials belong here (or
             on a Router), not in runtime parameters, which ``to_dict``
             redacts by key name (key, token, secret, auth, password,
             credential, header) as a safety net.
@@ -123,9 +124,13 @@ class LiteLLMEngine(LLMEngine):
                 "LiteLLMEngine: pass either 'client' or call kwargs, not both."
             )
 
-        # Streaming is unsupported
-        if "stream" in kwargs:
-            raise LLMEngineError("LiteLLMEngine: 'stream' is not supported (streaming is unsupported).")
+        # Engine-owned keys (and unsupported streaming) cannot be call kwargs
+        reserved = sorted(set(kwargs) & self._RESERVED_RUNTIME_KEYS)
+        if reserved:
+            raise LLMEngineError(
+                f"LiteLLMEngine: {reserved} are managed by the engine and cannot be "
+                "passed as call kwargs (streaming is unsupported)."
+            )
 
         # 4. Base init and state
         super().__init__(

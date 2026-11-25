@@ -133,7 +133,6 @@ class TestConstructor:
         assert len(FakeLlama.instances) == count
         assert engine._llm is preloaded
         assert engine.model == "pre.gguf"
-        assert engine._client_kwargs == {}
 
     def test_default_and_custom_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -189,7 +188,6 @@ class TestFromPretrained:
             "verbose": False,
             "n_threads": 8,
         }
-        assert engine._client_kwargs == {"n_ctx": 512, "n_threads": 8}
         assert engine.name == "LlamaCppEngine"
 
     def test_missing_huggingface_hub_raises_engine_error(
@@ -495,3 +493,34 @@ class TestRealSignatureContract:
 
         with pytest.raises(LLMEngineError, match="managed by the engine"):
             engine.update_runtime_parameters(**{key: 1})
+
+
+class TestCallSerialization:
+    def test_concurrent_calls_never_overlap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import threading
+        import time
+
+        engine = _make_engine(monkeypatch)
+        state = {"active": 0, "peak": 0}
+        guard = threading.Lock()
+
+        def slow_completion(**payload: Any) -> Any:
+            with guard:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            time.sleep(0.02)
+            with guard:
+                state["active"] -= 1
+            return {}
+
+        monkeypatch.setattr(engine._llm, "create_chat_completion", slow_completion)
+        threads = [
+            threading.Thread(target=engine._call_provider, args=({"messages": []},))
+            for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert state["peak"] == 1

@@ -88,9 +88,8 @@ class LLMEngine(AtomicInvokable, ABC):
        ``[{"role", "content"}]`` with lowercased roles. The messages contract:
        a non-empty list of mappings with string ``role`` and ``content``; the
        role must be ``system``, ``user`` or ``assistant``; at least one
-       ``user`` message is required; every message needs non-blank content,
-       except that a ``user`` message may be blank while the engine has
-       attachments (``_allows_blank_user_content``). A system message is
+       ``user`` message is required; every message needs non-blank content
+       (not empty, not whitespace-only). A system message is
        optional. Anything else raises ``LLMEngineError``. Content must be a
        plain ``str``, so a structured ``LLMResult.result`` cannot be fed back
        unmodified.
@@ -107,7 +106,7 @@ class LLMEngine(AtomicInvokable, ABC):
        runs the sync hook in a worker thread; engines with a native async
        client override it.
     6. ``extract(response, requested_structured)``: calls the three hooks
-       below, checks their return types, strips a string result and returns
+       below, checks their return types, strips a plain-call string result and returns
        ``(result, token_usage, model_data)``. ``requested_structured`` is
        ``output_structure is not None``, computed once by the caller.
 
@@ -127,7 +126,7 @@ class LLMEngine(AtomicInvokable, ABC):
     ``_call_provider_async`` for a native async client), ``_extract_result``,
     ``_extract_token_usage`` and ``_get_model_data``; optionally
     ``_RESERVED_RUNTIME_KEYS``, ``_validate_runtime_keys``,
-    ``_allows_blank_user_content`` and ``to_dict``.
+    and ``to_dict``.
     Retry and timeout are each SDK client's own settings, and attachments are
     an API of the individual engines that support them.
 
@@ -205,9 +204,7 @@ class LLMEngine(AtomicInvokable, ABC):
                               "(one of 'system', 'user', 'assistant') and a "
                               "string 'content' key (free-form text). "
                               "At least one message must have role 'user'. "
-                              "Content must not be blank, except that a "
-                              "'user' message may be blank when the engine "
-                              "has attachments."
+                              "Content must not be blank."
                           )),
                 ParamSpec(name="output_structure",
                           index=1,
@@ -353,7 +350,8 @@ class LLMEngine(AtomicInvokable, ABC):
            be a JSON-shaped type.
         2. ``_extract_token_usage(response)``; must be a ``TokenUsage``.
         3. ``_get_model_data()``; must be ``LLMModelData``.
-        4. Return the three, with a string result stripped.
+        4. Return the three; a plain-call string result is stripped (a
+           structured result is returned as parsed).
         """
         result = self._extract_result(response, requested_structured)
         if not isinstance(result, (str, int, float, bool, list, dict, type(None))):
@@ -376,7 +374,9 @@ class LLMEngine(AtomicInvokable, ABC):
                 f"LLMModelData, got {type(model_data)!r}."
             )
 
-        return (result.strip() if isinstance(result, str) else result), token_usage, model_data
+        if isinstance(result, str) and not requested_structured:
+            result = result.strip()
+        return result, token_usage, model_data
 
 
     def _normalize_messages(
@@ -390,8 +390,7 @@ class LLMEngine(AtomicInvokable, ABC):
         2. Each entry must be a mapping with string ``role`` and ``content``.
         3. Each role (lowercased) must be ``system``, ``user`` or ``assistant``.
         4. At least one ``user`` message must be present.
-        5. Every content must be non-blank (not empty, not whitespace-only),
-           except a ``user`` message when ``_allows_blank_user_content()``.
+        5. Every content must be non-blank (not empty, not whitespace-only).
         """
         prefix = f"{type(self).__name__}.invoke"
         if not messages:
@@ -415,9 +414,7 @@ class LLMEngine(AtomicInvokable, ABC):
                     f"{prefix}: message {idx} has unsupported role {role!r}; "
                     f"expected one of {sorted(_VALID_ROLES)}"
                 )
-            if not content.strip() and not (
-                role == "user" and self._allows_blank_user_content()
-            ):
+            if not content.strip():
                 raise LLMEngineError(
                     f"{prefix}: message {idx} ({role}) has blank content"
                 )
@@ -425,14 +422,6 @@ class LLMEngine(AtomicInvokable, ABC):
         if not any(m["role"] == "user" for m in normalized):
             raise LLMEngineError(f"{prefix}: messages must include at least one user message")
         return normalized
-
-    def _allows_blank_user_content(self) -> bool:
-        """
-        Whether a ``user`` message may have blank content. ``False`` by
-        default; engines that attach files to the user turn return
-        ``bool(self._attachments)``.
-        """
-        return False
 
     # --------------------------------------------------------------------- #
     # Abstract Helpers

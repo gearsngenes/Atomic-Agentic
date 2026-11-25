@@ -564,6 +564,14 @@ class TestLiteLLMEngine:
         with pytest.raises(LLMEngineError, match="stream"):
             LiteLLMEngine(model="gpt-4o-mini", stream=True)
 
+    @pytest.mark.parametrize("key", ["model", "messages", "response_format"])
+    def test_constructor_rejects_engine_owned_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        with pytest.raises(LLMEngineError, match="managed by the engine"):
+            LiteLLMEngine("gpt-4o-mini", **{key: 1})
+
     # ── to_dict ──────────────────────────────────────────────────────────────
 
     def test_to_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -200,15 +200,6 @@ class TestMistralEngine:
         assert messages[2]["content"] == [{"type": "text", "text": "hello"}]
         assert messages[0]["content"] == "first"
 
-    def test_mistral_ensure_user_parts_empty_content_becomes_empty_parts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        messages = [{"role": "user", "content": ""}]
-
-        assert engine._ensure_user_parts(messages) == 0
-        assert messages[0]["content"] == []
-
     def test_prepare_attachment_failure_names_the_cause(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
@@ -372,19 +363,6 @@ class TestMistralEngine:
         payload = engine._build_provider_payload([{"role": "system", "content": "be brief"}])
 
         assert payload["messages"] == [{"role": "system", "content": "be brief"}]
-
-    def test_blank_user_turn_with_attachment_carries_only_the_attachment_part(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        engine._attachments["doc.pdf"] = {"kind": "pdf", "signed_url": "https://doc"}
-        messages = engine._normalize_messages([{"role": "user", "content": ""}])
-
-        payload = engine._build_provider_payload(messages)
-
-        assert payload["messages"] == [
-            {"role": "user", "content": [{"type": "document_url", "document_url": "https://doc"}]}
-        ]
 
     def test_blank_user_turn_without_attachments_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch

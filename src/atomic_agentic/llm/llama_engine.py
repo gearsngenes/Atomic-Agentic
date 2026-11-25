@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import threading
 
 try:
     from llama_cpp import Llama
@@ -154,7 +155,8 @@ class LlamaCppEngine(LLMEngine):
         # 6. Store state
         self._llm = llm
         self._model_path = str(llm.model_path)
-        self._client_kwargs = dict(client_kwargs)
+        # ``Llama`` is not thread-safe and holds one context; serialize calls.
+        self._call_lock = threading.Lock()
 
     @staticmethod
     def _require_sdk() -> None:
@@ -216,7 +218,6 @@ class LlamaCppEngine(LLMEngine):
 
         # 4-5. Wrap and record
         engine = cls(name=name, description=description, llm=llm)
-        engine._client_kwargs = dict(client_kwargs)
         return engine
 
     # ------------------------------------------------------------------ #
@@ -273,8 +274,13 @@ class LlamaCppEngine(LLMEngine):
         return payload
 
     def _call_provider(self, payload: Any) -> Any:
-        """One ``create_chat_completion`` call; error wrapping is the template's."""
-        return self._llm.create_chat_completion(**payload)
+        """One ``create_chat_completion`` call; error wrapping is the template's.
+
+        Calls on one engine are serialized (``Llama`` is not thread-safe),
+        for the sync path and the worker-thread async path alike.
+        """
+        with self._call_lock:
+            return self._llm.create_chat_completion(**payload)
 
     def _extract_result(
         self, response: Any, requested_structured: bool

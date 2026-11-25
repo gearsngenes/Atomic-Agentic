@@ -750,20 +750,6 @@ class TestAnthropicEngine:
         assert content[0] == {"type": "text", "text": "Describe this."}
         assert content[1] is fake_block
 
-    def test_blank_user_turn_with_attachment_carries_only_the_attachment_block(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
-        engine = AnthropicEngine(model="claude-opus-4-8")
-        fake_block = {"type": "document", "source": {"type": "text", "data": "notes"}}
-        engine._attachments["notes.txt"] = {"kind": "text", "mime": "", "ext": ".txt"}
-        engine._blocks["notes.txt"] = fake_block
-        messages = engine._normalize_messages([{"role": "user", "content": ""}])
-
-        payload = engine._build_provider_payload(messages)
-
-        assert payload["messages"] == [{"role": "user", "content": [fake_block]}]
-
     def test_blank_user_turn_without_attachments_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

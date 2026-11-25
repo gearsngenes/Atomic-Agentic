@@ -221,10 +221,6 @@ class GeminiEngine(LLMEngine):
     # Attachment validation & preparation
     # ------------------------------------------------------------------ #
 
-    def _allows_blank_user_content(self) -> bool:
-        """A blank user turn is allowed while attachments exist (they attach to it)."""
-        return bool(self._attachments)
-
     def _validate_attachment_path(self, path: str) -> None:
         """
         Validate ``path`` against the shared illegal-ext set and MIME-prefix rules.
@@ -306,9 +302,7 @@ class GeminiEngine(LLMEngine):
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
         turns. Attachment parts (uploaded files via ``Part.from_uri``) are
-        appended to the last user ``Content``'s ``parts`` list. A blank user
-        turn (allowed only with attachments) has no text part, so its parts
-        are the attachment parts alone.
+        appended to the last user ``Content``'s ``parts`` list.
         """
         # 1. Build attachment_parts list.
         attachment_parts: List[Any] = []
@@ -332,7 +326,7 @@ class GeminiEngine(LLMEngine):
             text = m["content"]
             contents.append(genai.types.Content(
                 role=gemini_role,
-                parts=[genai.types.Part.from_text(text=text)] if text else [],
+                parts=[genai.types.Part.from_text(text=text)],
             ))
 
         # 3. Append attachment_parts to the last user Content.

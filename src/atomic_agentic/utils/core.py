@@ -18,6 +18,7 @@ __all__ = [
     "is_reserved_name",
     "normalize_headers",
     "normalize_optional_identifier",
+    "normalize_timeout_seconds",
     "run_coro_async",
     "run_coro_sync",
     "start_background_loop",
@@ -88,6 +89,13 @@ def normalize_optional_identifier(name: str | None) -> str | None:
             "when provided."
         )
     return name
+
+
+def normalize_timeout_seconds(value: Any, param_name: str) -> float:
+    """Return ``value`` as a float; it must be a real number (not a bool) above zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ValueError(f"{param_name} must be a positive number.")
+    return float(value)
 
 
 async def _await_value(awaitable: Awaitable[T]) -> T:

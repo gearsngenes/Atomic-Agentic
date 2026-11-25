@@ -856,18 +856,14 @@ class TestOpenAIAttachments:
 
         assert file_parts == [{"type": "input_file", "file_id": "file_pdf"}]
 
-    def test_blank_user_turn_with_attachment_carries_only_the_attachment(
+    def test_blank_user_turn_is_rejected_even_with_attachments(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
         engine._attachments["doc.pdf"] = {"kind": "pdf", "uploaded": True, "file_id": "file_pdf"}
-        messages = engine._normalize_messages([{"role": "user", "content": ""}])
 
-        payload = engine._build_provider_payload(messages)
-
-        assert payload["input"] == [
-            {"role": "user", "content": [{"type": "input_file", "file_id": "file_pdf"}]}
-        ]
+        with pytest.raises(LLMEngineError, match=r"^OpenAIEngine\.invoke: .*blank content"):
+            engine.invoke({"messages": [{"role": "user", "content": ""}]})
 
     def test_blank_user_turn_without_attachments_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch

@@ -34,6 +34,7 @@ from ..utils.core import (
     apply_name_filter,
     normalize_headers,
     normalize_optional_identifier,
+    normalize_timeout_seconds,
     run_coro_async,
     run_coro_sync,
     start_background_loop,
@@ -158,8 +159,14 @@ class A2AClientHub:
 
         self._name: str | None = normalize_optional_identifier(name)
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
-        self._timeout_seconds: float = float(timeout_seconds)
+        self._timeout_seconds: float = normalize_timeout_seconds(
+            timeout_seconds, "timeout_seconds"
+        )
         self._client_kwargs: dict[str, Any] | None = self._normalize_client_kwargs(client_kwargs)
+        if relative_card_path is not None and (
+            not isinstance(relative_card_path, str) or not relative_card_path.strip()
+        ):
+            raise ValueError("relative_card_path must be a non-empty string when provided.")
         self._relative_card_path: str | None = relative_card_path
         self._location: str = resolved_location
         self._transport_mode: str = mode
@@ -613,7 +620,9 @@ class A2AClientHub:
         """
         resolved_headers = normalize_headers(headers) if headers is not None else self._headers
         resolved_timeout = (
-            float(timeout_seconds) if timeout_seconds is not None else self._timeout_seconds
+            normalize_timeout_seconds(timeout_seconds, "timeout_seconds")
+            if timeout_seconds is not None
+            else self._timeout_seconds
         )
         resolved_client_kwargs = (
             self._normalize_client_kwargs(client_kwargs)

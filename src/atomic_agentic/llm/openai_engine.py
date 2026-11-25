@@ -242,10 +242,6 @@ class OpenAIEngine(LLMEngine):
     # Overrides / template hooks
     # ------------------------------------------------------------------ #
 
-    def _allows_blank_user_content(self) -> bool:
-        """A blank user turn is allowed while attachments exist (they attach to it)."""
-        return bool(self._attachments)
-
     def _validate_attachment_path(self, path: str) -> None:
         """
         Validate `path` against the OpenAI illegal-ext set and MIME-prefix rules.
@@ -470,8 +466,7 @@ class OpenAIEngine(LLMEngine):
         - `assistant` turns → `output_text`
         - Other non-system turns → `input_text`
         - `system` content is carried only via `instructions`.
-        - A blank user turn (allowed only with attachments) becomes a block
-          with no text part; attachments attach to the last user block.
+        - Attachments attach to the last user block.
         """
         blocks: List[Dict[str, Any]] = []
         for m in messages:
@@ -480,10 +475,7 @@ class OpenAIEngine(LLMEngine):
                 continue  # carried via `instructions`
             text = m["content"]
             part_type = "output_text" if role == "assistant" else "input_text"
-            parts: List[Dict[str, Any]] = []
-            if text:
-                parts.append({"type": part_type, "text": text})
-            blocks.append({"role": role, "content": parts})
+            blocks.append({"role": role, "content": [{"type": part_type, "text": text}]})
         return blocks
 
     def _upload_file(self, path: str) -> str:

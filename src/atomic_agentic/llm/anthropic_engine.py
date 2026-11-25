@@ -227,10 +227,6 @@ class AnthropicEngine(LLMEngine):
     # Client routing
     # ------------------------------------------------------------------ #
 
-    def _allows_blank_user_content(self) -> bool:
-        """A blank user turn is allowed while attachments exist (they attach to it)."""
-        return bool(self._attachments)
-
     def _call_provider(self, payload: Any) -> Any:
         """Synchronous Messages API call; bridges via ``run_coro_sync`` when an async client is held."""
         if isinstance(self._client, AsyncAnthropic):
@@ -257,8 +253,7 @@ class AnthropicEngine(LLMEngine):
         snapshot of the engine's attachments.
 
         1. Join the system messages for ``system``.
-        2. Convert the other messages to content-list format (a blank user
-           turn, allowed only with attachments, gets no text block).
+        2. Convert the other messages to content-list format.
         3. Append the attachment blocks to the last user turn.
         4. Start from the required defaults, then the runtime parameters, then
            the engine-owned fields (``model``, ``messages``, ``system``), so
@@ -271,7 +266,7 @@ class AnthropicEngine(LLMEngine):
         anthropic_msgs: list[dict[str, Any]] = [
             {
                 "role": m["role"],
-                "content": [{"type": "text", "text": m["content"]}] if m["content"] else [],
+                "content": [{"type": "text", "text": m["content"]}],
             }
             for m in messages
             if m["role"] != "system"

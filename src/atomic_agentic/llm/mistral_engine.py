@@ -204,10 +204,6 @@ class MistralEngine(LLMEngine):
     # Attachment validation & preparation
     # ------------------------------------------------------------------ #
 
-    def _allows_blank_user_content(self) -> bool:
-        """A blank user turn is allowed while attachments exist (they attach to it)."""
-        return bool(self._attachments)
-
     def _validate_attachment_path(self, path: str) -> None:
         """
         Validate ``path`` against the shared illegal-ext set and MIME-prefix rules.
@@ -463,11 +459,11 @@ class MistralEngine(LLMEngine):
     def _ensure_user_parts(self, messages: List[Dict[str, Any]]) -> int:
         """
         Convert the last user message's string content into a parts list
-        (``[]`` for empty content) and return its index.
+        and return its index.
         """
         idx = next(i for i in reversed(range(len(messages))) if messages[i]["role"] == "user")
         content = messages[idx]["content"]
-        messages[idx]["content"] = [{"type": "text", "text": content}] if content else []
+        messages[idx]["content"] = [{"type": "text", "text": content}]
         return idx
 
     def _upload_file(self, path: str) -> str:

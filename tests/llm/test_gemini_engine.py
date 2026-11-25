@@ -202,23 +202,6 @@ class TestGeminiEngine:
         assert len(contents[2].parts) == 2  # last user turn gets the attachment
         assert contents[2].parts[1].file_data.file_uri == "gs://fake/f1"
 
-    def test_blank_user_turn_with_attachment_carries_only_the_file_part(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        engine = _make_engine(monkeypatch)
-        file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
-        engine._attachments["file.txt"] = {
-            "uploaded": True, "file_obj": file_obj, "mime": "text/plain"
-        }
-        messages = engine._normalize_messages([{"role": "user", "content": ""}])
-
-        contents = engine._build_provider_payload(messages)["contents"]
-
-        assert len(contents) == 1
-        assert contents[0].role == "user"
-        assert len(contents[0].parts) == 1
-        assert contents[0].parts[0].file_data.file_uri == "gs://fake/f1"
-
     def test_blank_user_turn_without_attachments_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

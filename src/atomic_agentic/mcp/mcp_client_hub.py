@@ -29,6 +29,7 @@ from ..utils.core import (
     apply_name_filter,
     normalize_headers,
     normalize_optional_identifier,
+    normalize_timeout_seconds,
     run_coro_async,
     run_coro_sync,
     start_background_loop,
@@ -152,7 +153,9 @@ class MCPClientHub:
         normalized_name = normalize_optional_identifier(name)
 
         normalized_read_timeout_seconds: float | None = (
-            float(read_timeout_seconds) if read_timeout_seconds is not None else None
+            normalize_timeout_seconds(read_timeout_seconds, "read_timeout_seconds")
+            if read_timeout_seconds is not None
+            else None
         )
         normalized_client_kwargs = self._normalize_kwargs_mapping(
             client_kwargs, param_name="client_kwargs"

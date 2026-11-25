@@ -23,8 +23,7 @@ class TestLLMEngineConstruction:
             "mapping must have a string 'role' key (one of 'system', "
             "'user', 'assistant') and a string 'content' key (free-form "
             "text). At least one message must have role 'user'. Content "
-            "must not be blank, except that a 'user' message may be blank "
-            "when the engine has attachments.\n"
+            "must not be blank.\n"
             "- output_structure: Optional JSON-Schema-shaped mapping "
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
@@ -51,8 +50,7 @@ class TestLLMEngineConstruction:
             "mapping must have a string 'role' key (one of 'system', "
             "'user', 'assistant') and a string 'content' key (free-form "
             "text). At least one message must have role 'user'. Content "
-            "must not be blank, except that a 'user' message may be blank "
-            "when the engine has attachments.\n"
+            "must not be blank.\n"
             "- output_structure: Optional JSON-Schema-shaped mapping "
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
@@ -255,17 +253,6 @@ class TestLLMEngineAbstractHooks:
             IncompleteEngine()
 
 
-class _AttachFake(FakeLLMEngine):
-    """Fake that behaves like an attach-capable engine for the blank-user rule."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._attachments: dict[str, Any] = {}
-
-    def _allows_blank_user_content(self) -> bool:
-        return bool(self._attachments)
-
-
 class TestLLMEngineBlankContent:
     @pytest.mark.parametrize("blank", ["", "   ", " \n\t "])
     def test_blank_user_without_attachments_is_rejected(self, blank: str) -> None:
@@ -295,32 +282,6 @@ class TestLLMEngineBlankContent:
                 {"role": "assistant", "content": blank},
             ]})
 
-    def test_blank_user_is_allowed_while_attachments_exist(self) -> None:
-        engine = _AttachFake()
-        engine._attachments["a.txt"] = {}
-
-        engine.invoke({"messages": [{"role": "user", "content": ""}]})
-
-        assert engine.calls[0] == [{"role": "user", "content": ""}]
-
-    def test_blank_user_is_rejected_again_after_attachments_clear(self) -> None:
-        engine = _AttachFake()
-
-        with pytest.raises(LLMEngineError, match="has blank content"):
-            engine.invoke({"messages": [{"role": "user", "content": ""}]})
-
-    def test_blank_assistant_is_still_rejected_with_attachments(self) -> None:
-        engine = _AttachFake()
-        engine._attachments["a.txt"] = {}
-
-        with pytest.raises(LLMEngineError, match=r"\(assistant\) has blank content"):
-            engine.invoke({"messages": [
-                {"role": "user", "content": ""},
-                {"role": "assistant", "content": ""},
-            ]})
-
-    def test_default_predicate_is_false(self) -> None:
-        assert FakeLLMEngine()._allows_blank_user_content() is False
 
 
 class TestLLMEngineOutputStructure:
@@ -574,3 +535,20 @@ class TestLLMEngineModelData:
                 return LLMModelData(provider="other")
 
         assert _OtherEngine().model_data.provider == "other"
+
+
+class TestLLMEngineResultStripping:
+    def test_plain_string_result_is_stripped(self) -> None:
+        engine = FakeLLMEngine(["  hi  "])
+
+        assert engine.invoke({"messages": [{"role": "user", "content": "q"}]}).result == "hi"
+
+    def test_structured_string_value_is_not_stripped(self) -> None:
+        engine = FakeLLMEngine(["  hi  "])
+
+        result = engine.invoke({
+            "messages": [{"role": "user", "content": "q"}],
+            "output_structure": {"type": "string"},
+        }).result
+
+        assert result == "  hi  "
