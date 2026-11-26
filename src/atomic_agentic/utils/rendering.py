@@ -103,7 +103,6 @@ def render_context_entries(
     context: Mapping[str, ContextVariable],
     *,
     limit: int | None,
-    name_prefix: str = "",
 ) -> str:
     """Render ``context`` as ``---``-separated labeled entries, or ``""``.
 
@@ -119,8 +118,6 @@ def render_context_entries(
        replaces the value row with ``value hidden``. A multi-line value is
        fenced with backticks longer than any backtick run inside it.
        Description and value are marker-elided.
-    4. ``name_prefix`` is prepended to each shown name (the agent family
-       decides: ``"$"`` for sigil-referencing families, ``""`` otherwise).
 
     Pure function of its arguments: the same input renders byte-identically.
     """
@@ -132,7 +129,7 @@ def render_context_entries(
     )
     entries: list[str] = []
     for variable in ordered:
-        lines = [f"name: {name_prefix}{variable.name}", f"type: {variable.type}"]
+        lines = [f"name: {variable.name}", f"type: {variable.type}"]
         if variable.readonly:
             lines.append("readonly: yes")
         if variable.description is not None:

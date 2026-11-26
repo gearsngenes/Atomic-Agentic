@@ -4,7 +4,7 @@ from .atomic import AtomicResult
 from .agents import (
     AgentResult,
     ToolAgentResult,
-    ScriptActAgentResult,
+    PlanActAgentResult,
     ThinkingAgentResult,
     ToolUsageRecord,
     ToolUsageReport,
@@ -48,7 +48,7 @@ __all__ = [
     "ToolUsageReport",
     "AgentResult",
     "ToolAgentResult",
-    "ScriptActAgentResult",
+    "PlanActAgentResult",
     "ThinkingAgentResult",
     "GraphResult",
     "RouterResult",

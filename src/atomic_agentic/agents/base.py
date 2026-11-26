@@ -230,10 +230,6 @@ class Agent(AtomicInvokable, ABC):
     # class to build. Further per-family seeding goes through ``_seed_task``.
     _TASK_CLS: type[AgentTask] = AgentTask
 
-    # Context-entry name prefix, read by _render_task_block. A family overrides
-    # it as a class attribute; nothing else about the block varies.
-    _CONTEXT_NAME_PREFIX: str = ""   # "$" for the sigil families (Pass 14b)
-
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
@@ -944,9 +940,7 @@ class Agent(AtomicInvokable, ABC):
         limit.
         """
         limit = self._conversations[task.conversation].context_preview_limit
-        entries = render_context_entries(
-            task.context, limit=limit, name_prefix=self._CONTEXT_NAME_PREFIX
-        )
+        entries = render_context_entries(task.context, limit=limit)
         return render_task_block(task.user_prompt, entries)
 
     def _bind_response(self, task: AgentTask) -> dict[str, Any]:
@@ -1059,7 +1053,7 @@ class Agent(AtomicInvokable, ABC):
         """Assemble a complete AgentRecord from a finished AgentTask.
 
         ``BasicAgent`` uses this base implementation as-is; ``PlanActAgent``/
-        ``ReActAgent``/``ScriptActAgent``/``ThinkingAgent`` each override it
+        ``ReActAgent``/``ThinkingAgent`` each override it
         to return their own richer record subclass, built from
         ``_record_base_fields`` plus their own fields.
         """

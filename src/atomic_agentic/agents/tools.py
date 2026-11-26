@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import builtins
-from typing import Any, Literal
+from typing import Any
 
 from ..tools import Tool
 from ..constants.agents import (
@@ -9,38 +9,13 @@ from ..constants.agents import (
     ALLOWED_PY_BUILTINS,
     ATTR_CALL_ALIAS,
     PY_BUILTIN_ALIAS,
-    RETURN_TOOL_DESCRIPTION,
-    RETURN_TOOL_NAME,
-    RETURN_VALUE_FIELD,
 )
 
 __all__ = [
-    "return_tool",
     "builtin_call_tool",
     "attr_call_tool",
     "call_python_builtin",
-    "make_sequence",
-    "make_dict",
 ]
-
-
-def _return(val: Any) -> Any:
-    return val
-
-
-# The executable Tool instance lives in this module.
-return_tool = Tool(
-    function=_return,
-    name=RETURN_TOOL_NAME,
-    description=RETURN_TOOL_DESCRIPTION,
-)
-
-_return_param_names = [spec.name for spec in return_tool.parameters]
-if _return_param_names != [RETURN_VALUE_FIELD]:
-    raise RuntimeError(
-        f"return_tool parameter mismatch: expected {[RETURN_VALUE_FIELD]!r}, "
-        f"got {_return_param_names!r}."
-    )
 
 
 def _reject_callable_arguments(args: tuple, kwargs: dict) -> None:
@@ -59,7 +34,7 @@ def _reject_callable_arguments(args: tuple, kwargs: dict) -> None:
 
 def call_python_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptActAgent's approved-Python-builtin calls.
+    Dispatch body for PlanActAgent's approved-Python-builtin calls.
 
     ``args``/``kwargs`` are the real target call's own positional/keyword
     arguments, passed as opaque packed values (a tuple and a dict) rather
@@ -85,16 +60,16 @@ def call_python_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptActAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
+# PlanActAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
 # sentinel, never through get_tool(). Nothing references this Tool by a
-# full_name string, only by direct object reference from agents/scriptact.py.
+# full_name string, only by direct object reference from agents/planact.py.
 builtin_call_tool = Tool(
     function=call_python_builtin,
     name=PY_BUILTIN_ALIAS,
     description=(
-        "Internal ScriptActAgent dispatcher for approved Python builtin calls. "
+        "Internal PlanActAgent dispatcher for approved Python builtin calls. "
         "Never registered into any agent's toolbox -- resolved directly by "
-        "ScriptActAgent.prepare()/_gather_batch_results() via the "
+        "PlanActAgent.prepare()/_gather_batch_results() via the "
         "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
     ),
 )
@@ -102,7 +77,7 @@ builtin_call_tool = Tool(
 
 def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptActAgent's attribute/method-call slots
+    Dispatch body for PlanActAgent's attribute/method-call slots
     (``obj.method(...)``).
 
     ``args``/``kwargs`` are the real target method's own positional/keyword
@@ -136,68 +111,16 @@ def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> 
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptActAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
+# PlanActAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
 # sentinel, never through get_tool(). Same treatment as builtin_call_tool.
 attr_call_tool = Tool(
     function=_call_attr_method,
     name=ATTR_CALL_ALIAS,
     description=(
-        "Internal ScriptActAgent dispatcher for attribute/method calls on a "
+        "Internal PlanActAgent dispatcher for attribute/method calls on a "
         "value the plan already holds. Never registered into any agent's "
-        "toolbox -- resolved directly by ScriptActAgent.prepare()/"
+        "toolbox -- resolved directly by PlanActAgent.prepare()/"
         "_gather_batch_results() via the ATTR_CALL_ALIAS sentinel, never "
         "through get_tool()."
     ),
 )
-
-
-def make_sequence(*items: Any, sequence_type: Literal["list", "tuple", "set"] = "list") -> list | tuple | set:
-    """
-    Builds a list, tuple, or set from the given items. ALWAYS call this tool if a future
-    tool requires one of these container types as input that was not already built by a previous tool call.
-    Each item from items becomes one element of the container, in the order given.
-
-    "sequence_type" selects the container type -- exactly "list", "tuple", or "set"
-    (case-sensitive) -- and must always be given as its own keyword
-    argument. Each remaining value becomes one element of the container,
-    in the order given, and must always be given positionally, never as a
-    keyword argument.
-
-    Raises ValueError if "sequence_type" is not one of the three allowed values.
-    """
-    # sequence_type is deliberately keyword-only (*items precedes it): a
-    # (sequence_type, *items) ordering is a real footgun -- naming
-    # sequence_type by its own parameter name while leaving items
-    # positional collides under Python's own calling convention (the first
-    # positional value binds to sequence_type, by left-to-right declared
-    # position, before the explicit keyword is ever applied) -- TypeError:
-    # got multiple values for argument 'sequence_type'. Making sequence_type
-    # keyword-only removes the ambiguity structurally: items can only ever
-    # be positional, sequence_type can only ever be a keyword.
-    if sequence_type == "list":
-        return list(items)
-    elif sequence_type == "tuple":
-        return tuple(items)
-    elif sequence_type == "set":
-        return set(items)
-    else:
-        raise ValueError(
-            f"make_sequence: sequence_type must be 'list', 'tuple', or 'set'; got {sequence_type!r}."
-        )
-
-
-def make_dict(**pairs: Any) -> dict:
-    """
-    Builds a dict from the given keyword arguments. ALWAYS call this tool if a future
-    tool or return value requires a dict as input that was not already built by a 
-    previous tool call. Each pair in pairs contains the key and value for one entry
-    in the dict. The keyword is the key, and its value is that key's value. The order
-    of the entries in the dict is the order the keyword arguments were given in the call.
-    """
-    # Split into its own tool along calling-convention lines (**kwargs, not
-    # *args) rather than folding into one make_collection(kind, *items,
-    # **pairs) tool, since a single tool whose correct calling convention
-    # depends on a runtime kind value would reintroduce the same
-    # implicit-contract ambiguity make_sequence's own sequence_type/items
-    # ordering avoids structurally (see its own comment).
-    return dict(**pairs)

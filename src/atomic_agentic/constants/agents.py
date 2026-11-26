@@ -88,36 +88,14 @@ RUNTIME_PARAM: ParamSpec = ParamSpec(
     type=("Any",),
 )
 
-# RETURN_VALUE_FIELD is the kwargs key PlanActAgent uses for its
-# synthesized RETURN_ALIAS call's resolved value (utils/sigils.py's
-# parse_generation/utils/agents.py's resolve_statement_args), and the
-# parameter name return_tool's own real signature uses (agents/tools.py's
-# `_return(val)`).
+# RETURN_VALUE_FIELD is the kwargs key of a RETURN_ALIAS / RHS_ASSIGN_ALIAS
+# slot's value (utils/script.py builds it; utils/agents.py's
+# resolve_statement_args and ToolStatement.to_code read it).
 RETURN_VALUE_FIELD = "val"
 
 
 # =============================================================================
-# ReActAgent canonical return-tool identity
-# =============================================================================
-# Used by:
-# - agents/react.py: construction and registration of the executable return_tool
-#   (PlanActAgent never registers this -- its return value comes from the
-#   synthesized RETURN_ALIAS call instead)
-# - constants/prompts.py: REACT_PROMPT's finalization instructions name the
-#   `return` tool
-# - tests around planner/ReAct final return behavior
-#
-# Do not put the executable Tool instance here; only the identity literals the
-# ReAct prompt refers to.
-
-
-RETURN_TOOL_NAME = "return"
-RETURN_TOOL_DESCRIPTION = (
-    "Returns the passed-in value. Tool agents should use this to signal completion."
-)
-
-# =============================================================================
-# ScriptActAgent code-statement reserved literals
+# PlanActAgent code-statement reserved literals
 # =============================================================================
 # Used by:
 # - models/agents/blackboard_models.py: ToolStatement.tool default alias
@@ -141,7 +119,7 @@ PY_BUILTIN_ALIAS = "py_builtin"
 """Reserved ToolStatement.tool sentinel for a rewritten Python builtin call
 -- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
 name may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_name,
-extended by agents/scriptact.py's ScriptActAgent._validate_tool_name).
+extended by agents/planact.py's PlanActAgent._validate_tool_name).
 Unlike
 those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
@@ -163,7 +141,7 @@ ALLOWED_PY_BUILTINS: frozenset[str] = frozenset(
         "set", "slice", "sorted", "str", "sum", "tuple", "type", "zip",
     }
 )
-"""The only builtins ScriptActAgent's py_builtin dispatch will call -- an
+"""The only builtins PlanActAgent's py_builtin dispatch will call -- an
 explicit allowlist of value-in/value-out functions, never a blocklist over
 ``dir(builtins)`` (which also holds ``__loader__``, ``__spec__`` and the like).
 Checked by utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
@@ -180,7 +158,7 @@ KWARGS_UNPACK_KEY = "**"
 # Matches a single markdown code fence wrapping the *entire* generation --
 # any (or no) language tag on the opening fence line (```python, ```py,
 # ```text, a bare ```, ...), not just ```python. Tried first by
-# utils/agents.py's strip_code_fence (ScriptActAgent's own code-statement
+# utils/agents.py's strip_code_fence (PlanActAgent's own code-statement
 # parsing), since a matched pair unambiguously marks everything between
 # them as the intended code.
 CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
@@ -204,7 +182,7 @@ EMBEDDED_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(
 
 # Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
 # Rejected unconditionally by utils/agents.py's reject_unsupported_forms
-# (for a bare `ast.Attribute` anywhere in an expression -- ScriptActAgent's
+# (for a bare `ast.Attribute` anywhere in an expression -- PlanActAgent's
 # own code-statement grammar) and utils/script.py's _build_call_slot (for
 # a method-call's own method name, the one position
 # reject_unsupported_forms's own walk never scans) -- closes the classic
@@ -215,7 +193,7 @@ DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
 
 _INT_METHODS: frozenset[str] = frozenset({"bit_length", "to_bytes"})
 
-# Method calls (`obj.method(...)`) a ScriptAct script may make, keyed by the
+# Method calls (`obj.method(...)`) a PlanAct script may make, keyed by the
 # builtin class they belong to. agents.tools._call_attr_method resolves the
 # receiver's most specific class in this table (walking its MRO, so a
 # subclass resolves to its nearest table class) and calls the method off
@@ -276,134 +254,6 @@ UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
     ast.YieldFrom: "yield from",
 }
 
-# PlanActAgent's own output_structure schema (agent-taxonomy `planact-
-# rewrite` design record) -- a one-shot planner has no continuation round
-# to defer to, so there is no `remaining_work`-style field at all. `return`
-# is unconditionally in `required` (always present), but its *value* may
-# still legitimately be `null` when the task has nothing meaningful to hand
-# back -- presence and nullability are separate concerns.
-PLANACT_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "plan", "return"],
-    "properties": {
-        "summary": {
-            "type": "string",
-            "description": "Briefly describe the work this plan accomplishes.",
-        },
-        "plan": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["call", "arguments", "result_name"],
-                "properties": {
-                    "call": {"type": "string", "enum": []},
-                    "arguments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["name", "value"],
-                            "properties": {
-                                "name": {"type": ["string", "null"]},
-                                "value": {
-                                    "type": ["number", "boolean", "null", "string"],
-                                    "description": (
-                                        "A literal value (any JSON scalar), or a "
-                                        "string. A string that is *exactly* '$name' "
-                                        "(nothing else) must name an earlier result_name or a context variable (otherwise it is rejected), and is substituted with its real value and type. "
-                                        "A '$name' appearing inside a longer string "
-                                        "is spliced in as text (stringified) at that "
-                                        "position. One that matches nothing is left as literal text, sigil included -- not an error. To build a "
-                                        "list/tuple/set or dict, call "
-                                        "make_sequence/make_dict instead of writing "
-                                        "a container here."
-                                    ),
-                                },
-                            },
-                        },
-                    },
-                    "result_name": {"type": ["string", "null"]},
-                },
-            },
-        },
-        "return": {
-            "type": ["number", "boolean", "null", "string"],
-            "description": (
-                "Follows the same rules as an argument's value (a literal, "
-                "or a '$name' reference/interpolation). Always required in "
-                "the response -- there is no continuation round to defer "
-                "to, so decide it now. 'null' is a legitimate answer when "
-                "the task genuinely has nothing to hand back; it does not "
-                "mean 'come back later'."
-            ),
-        },
-    },
-}
-
-# ReActAgent's own output_structure schema (agent-taxonomy `reactagent-
-# models` design record) -- the flattened form of PLANACT_OUTPUT_SCHEMA's
-# per-`plan`-item shape: `call`/`arguments`/`result_name` promoted to the
-# top level directly, no `plan` array wrapper (exactly one call per round,
-# never a list of them) and no `remaining_work` field (a per-step family has
-# no continuation-round concept for a model to signal -- termination is
-# simply calling the registered return tool, an ordinary `call` value, not a
-# separate field). Field order matters (constrained decoding assigns zero
-# probability to a token generated for a field declared after the one that
-# would need it) -- `summary` first, same reasoning-before-decision
-# principle as PLANACT_OUTPUT_SCHEMA.
-REACT_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "call", "arguments", "result_name"],
-    "properties": {
-        "summary": {
-            "type": "string",
-            "description": (
-                "Briefly describe what this one call accomplishes and why "
-                "it's needed now."
-            ),
-        },
-        "call": {"type": "string", "enum": []},
-        "arguments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name", "value"],
-                "properties": {
-                    "name": {"type": ["string", "null"]},
-                    "value": {
-                        "type": ["number", "boolean", "null", "string"],
-                        "description": (
-                            "A literal value (any JSON scalar), or a "
-                            "string. A string that is *exactly* '$name' "
-                            "(nothing else) must name an earlier result_name or a context variable (otherwise it is rejected), and is substituted with its real value and type. "
-                            "A '$name' appearing inside a longer string "
-                            "is spliced in as text (stringified) at that "
-                            "position. One that matches nothing is left as literal text, sigil included -- not an error. To build a "
-                            "list/tuple/set or dict, call "
-                            "make_sequence/make_dict instead of writing "
-                            "a container here."
-                        ),
-                    },
-                },
-            },
-        },
-        "result_name": {"type": ["string", "null"]},
-    },
-}
-
-# Matches a `$`-sigil reference inside a PlanActAgent-/ReActAgent-generated
-# `value`/`return` string -- used exclusively inside utils/sigils.py's
-# translate_calls (candidate-token scanning during JSON -> ast translation:
-# `SIGIL_REF_PATTERN.fullmatch(s)` for a whole-string reference,
-# `SIGIL_REF_PATTERN.finditer(s)` for every embedded occurrence), not a
-# resolve-time mechanism anymore. No anchors baked into the text itself
-# (fullmatch anchors on its own, exactly like this file's own
-# IDENTIFIER_PATTERN precedent elsewhere).
-SIGIL_REF_PATTERN: re.Pattern[str] = re.compile(rf"\$({IDENTIFIER_PATTERN_TEXT})")
 
 
 __all__ = [
@@ -417,7 +267,7 @@ __all__ = [
     "STOP_EARLY_SCHEMA_TEMPLATE",
     # Built-in agent parameters
     "RUNTIME_PARAM",
-    # ScriptActAgent code-statement reserved literals
+    # PlanActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",
     "RETURN_ALIAS",
@@ -434,12 +284,4 @@ __all__ = [
     "MUTATING_ATTR_METHODS",
     "UNSUPPORTED_EXPR_LABELS",
     "RETURN_VALUE_FIELD",
-    # Canonical return tool
-    "RETURN_TOOL_NAME",
-    "RETURN_TOOL_DESCRIPTION",
-    "SIGIL_REF_PATTERN",
-    # PlanActAgent output_structure schema
-    "PLANACT_OUTPUT_SCHEMA",
-    # ReActAgent output_structure schema
-    "REACT_OUTPUT_SCHEMA",
 ]

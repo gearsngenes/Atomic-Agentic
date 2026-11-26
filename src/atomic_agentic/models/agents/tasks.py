@@ -11,7 +11,6 @@ from .records import AgentRecord, LLMRecord
 __all__ = [
     "AgentTask",
     "ToolAgentTask",
-    "ScriptActAgentTask",
     "PlanActTask",
     "ReActTask",
     "ThinkingTask",
@@ -152,8 +151,8 @@ class AgentTask:
 class ToolAgentTask(AgentTask):
     """
     Base task shape shared by every concrete ``ToolAgent`` family
-    (``ScriptActAgent``/``PlanActAgent``/``ReActAgent``). Promotes every
-    field genuinely shared by all three concrete agents.
+    (``PlanActAgent``/``ReActAgent``). Promotes every field genuinely
+    shared by both concrete agents.
 
     Fields
     ------
@@ -163,7 +162,7 @@ class ToolAgentTask(AgentTask):
         commit time.
 
     failed_statements : list[ToolStatement]
-        Every call whose dispatch (or, for ``ScriptActAgent``, resolution)
+        Every call whose dispatch (or, for ``PlanActAgent``, resolution)
         actually failed this run, in the order observed.
 
     regenerations_used : int
@@ -202,12 +201,12 @@ class ToolAgentTask(AgentTask):
 
 
 @dataclass(slots=True)
-class ScriptActAgentTask(ToolAgentTask):
+class PlanActTask(ToolAgentTask):
     """
-    ScriptActAgent-flavored task, a ``ToolAgentTask`` subclass.
+    PlanActAgent-flavored task, a ``ToolAgentTask`` subclass.
     ``completed``/``failed_statements``/``regenerations_used``/
     ``tool_calls_used`` are all inherited; only genuinely
-    ``ScriptActAgent``-specific fields remain declared here. Result
+    ``PlanActAgent``-specific fields remain declared here. Result
     bindings live in ``task.context`` as context variables, not on the task.
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
@@ -280,8 +279,7 @@ class ScriptActAgentTask(ToolAgentTask):
         whole invoke. Note: ``failed_statements`` (inherited from
         ``ToolAgentTask``; see that class's own docstring) is populated by
         BOTH ``prepare()`` (a resolution/binding failure, ``slot.exception``
-        set to a synthesized ``ToolAgentError``, mirroring ``PlanActTask``'s
-        own resolution-failure pattern) and ``_apply_batch_results`` (a
+        set to a synthesized ``ToolAgentError``) and ``_apply_batch_results`` (a
         real dispatch failure, ``slot.exception`` set to the actual raised
         value). ``repair_batch_start`` marks where each triggering batch's
         own slice into it begins.
@@ -295,50 +293,11 @@ class ScriptActAgentTask(ToolAgentTask):
 
 
 @dataclass(slots=True)
-class PlanActTask(ToolAgentTask):
-    """
-    PlanActAgent-flavored task -- ``ToolStatement``-based batch-execution
-    fields, with no continuation-related fields at all: ``think()`` runs the
-    generation once per invoke (a repeat call is a no-op while ``pending``
-    exists or the task is complete), so there is nothing analogous to a
-    voluntary multi-round continuation flag, round counter, or continuation
-    note to carry. ``completed``/``failed_statements``/``tool_calls_used``
-    are inherited from ``ToolAgentTask``, and result bindings live in the
-    inherited ``task.context`` (written through ``Agent._write_context``) --
-    only ``pending``/``resolved_args`` are genuinely ``PlanActAgent``-specific.
-
-    Fields
-    ------
-    pending : list[list[ToolStatement]]
-        Dependency batches compiled once (via ``compile_batches``) from the
-        single generated plan. ``pending[0]`` is the next batch ``act()``
-        runs. A cascade-failure may remove calls from batches here without
-        popping them (see ``find_cascade_failures``) -- only ``act()``
-        pops a batch once it's been executed.
-
-    resolved_args : list[dict[str, Any]]
-        Positionally matched to ``pending[0]``'s surviving calls -- the
-        resolved kwargs ``prepare()`` computed for the batch ``act()`` is
-        about to run.
-
-    No ``batch_counter`` field -- a single ``compile_batches`` call per
-    invoke needs no cross-round ``ToolStatement.batch_index`` uniqueness
-    tracking; a local variable in ``think()`` suffices. The inherited
-    ``tool_calls_used`` formula (``ToolAgentTask``) holds correctly here
-    too: a cascade-skipped call is never dispatched, so it never enters
-    ``completed`` or ``failed_statements`` either way.
-    """
-    pending: list[list[ToolStatement]] = field(default_factory=list)
-    resolved_args: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(slots=True)
 class ReActTask(ToolAgentTask):
     """
-    ReActAgent-flavored task: one registered-tool call generated, resolved,
-    and dispatched per round, via provider-native structured output
-    (``REACT_OUTPUT_SCHEMA``) -- the per-step sibling to ``PlanActTask``'s
-    one-shot multi-call plan. ``completed``/``failed_statements``/
+    ReActAgent-flavored task: one Python statement generated, validated and
+    run per round -- the per-step sibling to ``PlanActTask``'s
+    one-shot plan. ``completed``/``failed_statements``/
     ``tool_calls_used`` are all inherited from ``ToolAgentTask`` -- only
     ``generated_step``/``resolved_args``/``last_call_failed`` are genuinely
     ``ReActAgent``-specific. Result bindings live in ``task.context``
@@ -347,14 +306,14 @@ class ReActTask(ToolAgentTask):
     No fixed-size preallocated board and no observability-decay window --
     every round renders the full ``completed`` call log (plus the last
     failure) as the steps block, and the bound values through the context
-    block (``utils.sigils.render_completed_as_json``/``render_failed_as_json``).
+    block.
     No ``pending: list[list[ToolStatement]]`` batch
-    field either -- unlike ``PlanActTask``, this family dispatches exactly
-    one call per round, never a concurrency batch. No ``__post_init__`` --
+    field either -- unlike ``PlanActTask``, this family dispatches
+    exactly one call per round, never a concurrency batch. No ``__post_init__`` --
     matches every other ``*Task`` in this family: an in-flight,
     internal-only object, not a real construction-time boundary.
 
-    A resolution failure (a ``$name`` reference that doesn't resolve, or a
+    A resolution failure (a name that doesn't resolve, or a
     resolved value's type mismatching the target tool's parameter contract)
     never reaches ``failed_statements`` at all under this family's design --
     both are caught and fed back for regeneration inside ``think()``'s own
@@ -370,8 +329,8 @@ class ReActTask(ToolAgentTask):
     ------
     generated_step : ToolStatement | None
         The one call ``think()`` validated and resolved this round -- set
-        only once both ``utils.sigils.translate_calls`` and
-        ``utils.agents.resolve_statement_args`` succeed against it, ``None``
+        only once ``utils.agents.resolve_statement_args``
+        succeeds against it, ``None``
         before that and after ``act()`` consumes it. ``None`` is the
         idiomatic "not yet decided" value for a field genuinely typed
         ``Optional[ToolStatement]``, so no ``NO_VAL`` sentinel is needed
@@ -384,8 +343,7 @@ class ReActTask(ToolAgentTask):
         ``prepare()`` is a documented no-op for this family (both
         ``think()`` and ``prepare()`` operate on the same single call;
         nothing is deferred to a later loop iteration the way a multi-batch
-        plan requires). Singular, not ``PlanActTask.resolved_args``'s
-        ``list[dict[str, Any]]`` -- there is no batch to index into.
+        plan requires). Singular: there is no batch to index into.
 
     last_call_failed : bool
         Set by ``act()``/``async_act()`` at the end of every round --
@@ -400,21 +358,21 @@ class ReActTask(ToolAgentTask):
         no duplicate reference stored.
 
     pending : list[ToolStatement]
-        ``ReAct2Agent`` only: the validated slot queue for this round,
+        ``ReActAgent`` only: the validated slot queue for this round,
         ``[hoisted calls..., own slot]``. ``think()`` sets it; ``act()`` drains
         it from the front and clears it on a failure. Empty between rounds.
 
     source : str
-        ``ReAct2Agent`` only: the current statement as the model wrote it.
+        ``ReActAgent`` only: the current statement as the model wrote it.
         ``think()`` sets it; ``act()`` appends it to ``history`` or builds
         ``failure_note`` from it.
 
     history : list[str]
-        ``ReAct2Agent`` only: the source of every fully completed statement,
+        ``ReActAgent`` only: the source of every fully completed statement,
         in order -- what the steps block renders.
 
     failure_note : str
-        ``ReAct2Agent`` only: the model-facing description of the last failed
+        ``ReActAgent`` only: the model-facing description of the last failed
         statement (the statement, the failing sub-step and the sub-steps that
         already ran); ``""`` when the last statement succeeded.
     """

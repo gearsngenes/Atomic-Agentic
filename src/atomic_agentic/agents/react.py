@@ -1,120 +1,93 @@
 """
-ReActAgent: Iterative LLM Actor with Per-Step Reactive Planning
+ReActAgent: one Python statement per round.
 
-Generates, resolves, and dispatches exactly one registered-tool call per
-round via provider-native structured output (``REACT_OUTPUT_SCHEMA``),
-observes the result, and repeats until the model calls the registered
-``return`` tool. Design lineage: mirrors ``PlanActAgent``'s own
-``$name``-sigil machinery (``utils/sigils.py``, reused directly) collapsed to
-a single call per round instead of a whole batched plan -- the per-step
-sibling to ``PlanActAgent``'s one-shot multi-call plan. See
-``agents/planact.py``'s own module docstring for the shared design lineage
-this mirrors.
+Each round the model writes a statement in a fenced ``python`` block; only the
+first statement is used (later ones are dropped and logged, never
+regenerated). The agent validates it, runs it, and shows the outcome next
+round through the runtime-context block; the run ends only when the model
+writes ``return``. A cousin of ``PlanActAgent`` (one generated plan, many
+statements): it shares that family's statement parser, allow-lists, validator
+and renderers (``utils/script.py``), collapsed to one statement per round,
+with no sigil code.
 
-Values live in ``task.context``: pre-existing context variables are
-referenced as ``$name``, and each successful call's ``result_name`` (or an
-auto-assigned ``__rN__``) is written there, so the next round sees the
-observation as an ordinary context entry in the runtime-context block. The
-steps block shows only the call log and the last failure, never values.
+Statement forms: a bare ``call(...)``, ``x = <expression>``, ``return`` and
+``return <expression>``. An expression may contain calls (a registered tool,
+an allowed builtin, a method on any value) anywhere, including inside other
+calls, alongside literals, names, subscripts, attribute reads, container
+literals, f-strings, binary and unary operators, ``not`` and comparisons.
+``and``/``or``, ternaries, comprehensions, lambdas, ``await`` and control flow
+are rejected.
 
-Distinguishing features relative to ``PlanActAgent``:
-- ``return`` is an ordinary, really-dispatched tool call (``return_tool``,
-  registered under its own bare name) -- never a synthesized,
-  non-dispatched ``RETURN_ALIAS`` sentinel, and ``act()``/``async_act()``
-  never gate *dispatch* on ``is_dispatched`` (every call, including
-  ``return``, is always actually invoked). That claim is scoped to dispatch
-  specifically: ``RETURN_TOOL_NAME`` and ``RETURN_ALIAS`` are the identical
-  literal string ``"return"`` (`constants/agents.py`), so anywhere else
-  ``is_dispatched`` is consulted for *accounting* purposes (see
-  ``result_payload_from_task`` below), a real, successful ``return`` call
-  is still indistinguishable from the sentinel and gets excluded --
-  correctly, per ``ToolUsageRecord.call_count``'s own "non-return
-  executions" contract, but via the same string coincidence, not a
-  deliberate discriminator.
-- ``think()`` owns validation AND argument resolution in one retry loop;
-  ``prepare()`` is a documented no-op. Exactly one call is generated per
-  round and every value it may reference already exists at generation time,
-  so a bad resolution (an unbound reference, a value of the wrong type for
-  the target tool) is cheap regeneration feedback -- no round and no
-  tool-call budget is spent on it.
-- No batching, no gathering, no cascade machinery -- exactly one call is
-  dispatched per round, and a tolerated failure (``fail_fast=False``) is
-  simply information the model sees and redirects around next round.
+A statement's calls are hoisted and run in order within the round, innermost
+first and left to right; every call runs, nothing short-circuits. Hoisted
+results live in a per-statement scratch namespace and never reach the context;
+a bare call's non-``None`` result is auto-named ``__rN__``. A failure stops the
+statement: calls already run stay committed, the rest are dropped.
+
+``tool_calls_limit`` counts actions: one per call run (a failed call included),
+and one for a call-free ``x = <expression>``; the expression around calls and
+a ``return`` are free. Failures cost a regeneration before a statement runs
+(parse, reference, binding and budget errors, inside ``think()``) and a
+recorded failed statement after (a call, resolution or evaluation error);
+``fail_fast=False`` shows it next round, ``True`` raises at the failure site.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterable
-from typing import Any, Callable, ClassVar, Mapping, Optional
+from dataclasses import replace
+from typing import Any, Callable, Mapping, Optional
 
 from .toolagent import ToolAgent
-from ..constants.prompts import DEFAULT_PRE_INVOKE, REACT_PROMPT
-from .tools import make_dict, make_sequence, return_tool
-from ..constants.agents import RETURN_TOOL_NAME
+from .tools import attr_call_tool, builtin_call_tool
+from ..a2a import A2AClientHub
+from ..constants.agents import (
+    ATTR_CALL_ALIAS,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+    SUB_NAME_PREFIX,
+)
+from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, REACTOR_PROMPT
+from ..exceptions import (
+    AgentInvocationError,
+    BlackboardParseError,
+    ToolAgentError,
+    ToolInvocationError,
+)
 from ..invokables import AtomicInvokable
 from ..llm.base import LLMEngine
-from ..exceptions import ToolAgentError, ToolInvocationError
 from ..mcp import MCPClientHub
-from ..a2a import A2AClientHub
 from ..models.agents.blackboard_models import ToolStatement
+from ..models.agents.records import LLMRecord, ToolAgentRecord
 from ..models.agents.tasks import ReActTask
-from ..models.agents.records import ToolAgentRecord, LLMRecord
-from ..utils.agents import resolve_statement_args
-from ..utils.sigils import (
-    build_react_schema,
-    parse_react_call,
-    render_completed_as_json,
-    render_failed_as_json,
-    translate_calls,
+from ..utils.agents import (
+    check_call_bindings,
+    extract_identifiers,
+    is_dispatched,
+    resolve_statement_args,
+)
+from ..utils.script import (
+    check_script_tool_name,
+    dispatch_inputs,
+    parse_first_statement,
+    rewrite_builtin_calls,
+    script_context_clashes,
+    validate_references,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# ReAct Agent
-# --------------------------------------------------------------------------- #
 class ReActAgent(ToolAgent):
     """
-    Iterative agent with reactive step-by-step planning (ReAct-style
-    architecture): one call generated, resolved, and dispatched per round,
-    observed before the next round's decision.
-
-    Advantages
-    ~~~~~~~~~~
-    - Fully adaptive: each step can react to prior tool results, including
-      failures -- ``fail_fast=False`` (this family's own default) makes a
-      failure simply a redirect signal, not an abort.
-    - Schema-guaranteed shape: ``output_structure`` strict mode makes a
-      malformed-shape generation structurally impossible.
-
-    Limitations
-    ~~~~~~~~~~~
-    - Higher latency: one LLM call per step, no concurrency.
-    - Step quality depends on the model's ability to select the next best
-      action from the rendered history alone.
-    - ``tool_calls_limit=None`` removes the only run-level stop: nothing else
-      ends a run whose model never calls ``return`` (``regeneration_limit``
-      restarts each round, so it does not bound the run). The default is 25;
-      pass ``None`` only when the model is trusted to finish.
+    Iterative agent that runs one Python statement per round (see the module
+    docstring for the grammar and the budget rule).
     """
 
-    # A class attribute (active before __init__ runs) — return_tool plus the
-    # two composite-value-building utility tools this family's schema text
-    # tells the model to use. Reserved so no caller can register a different
-    # tool under any of these ids, or remove/replace them once seeded.
-    _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
-        {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
-    )
-
-    # This family's $name-sigil grammar (utils/sigils.py): context entries
-    # render as "$name", history labels as "$task_result_i".
-    _CONTEXT_NAME_PREFIX: str = "$"
-
     _TASK_CLS = ReActTask
-    TOOL_INSTRUCTIONS = REACT_PROMPT
+    TOOL_INSTRUCTIONS = REACTOR_PROMPT
 
     def __init__(
         self,
@@ -137,23 +110,11 @@ class ReActAgent(ToolAgent):
         fail_fast: bool = False,
     ) -> None:
         """
-        Every parameter except ``fail_fast`` forwards verbatim to
-        ``ToolAgent.__init__`` (``instructions`` is the optional standing
-        user guidance, framed into the system message by the base class).
-        There are no constants: pre-existing values are context variables
-        (remembered on the conversation, bound from inputs, or runtime).
-        There is no ``tool_concurrency_limit`` parameter: exactly one call is
-        dispatched per round, so the base's limit is fixed at ``1``.
-        ``fail_fast`` has no shared home on ``ToolAgent`` (see the
-        ``fail_fast`` property below) -- validated and stored locally
-        instead. Two defaults deliberately diverge from ``ToolAgent``'s own:
-        ``tool_calls_limit`` defaults to ``25`` (not ``None`` -- this family
-        has no second round-ceiling knob the way ``ScriptActAgent`` has
-        ``replanning_limit``, so an unbounded default would have zero
-        structural backstop), and ``fail_fast`` defaults to ``False`` (not
-        ``True`` -- redirecting on failure is this family's entire reason
-        for existing; a caller who genuinely wants one failure to be fatal
-        can still pass ``fail_fast=True`` explicitly).
+        Everything but ``fail_fast`` forwards to ``ToolAgent.__init__``; the
+        concurrency limit is fixed at ``1`` (one statement per round).
+        ``tool_calls_limit`` defaults to ``25`` (the only run-level stop, since
+        ``regeneration_limit`` restarts each round) and ``fail_fast`` to
+        ``False`` (redirecting on failure is this family's point).
         """
         super().__init__(
             name=name,
@@ -180,88 +141,110 @@ class ReActAgent(ToolAgent):
             )
         self._fail_fast = fail_fast
 
-        # Seeded directly, bypassing register_tool -- all three are reserved
-        # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
-        # attempt to register something under a reserved id, including this
-        # one. return_tool's own bare name already equals RETURN_TOOL_NAME;
-        # naming it explicitly here decouples seeding from that incidental
-        # fact.
-        self._seed_reserved_tool(return_tool, RETURN_TOOL_NAME)
-        self._seed_reserved_tool(make_sequence, "make_sequence")
-        self._seed_reserved_tool(make_dict, "make_dict")
-
     @property
     def fail_fast(self) -> bool:
-        """
-        A failure with ``fail_fast=True`` raises immediately, aborting the
-        run. With ``fail_fast=False`` (this family's own default) it is
-        recorded and the model sees it next round to redirect around --
-        this family's entire reason for existing. Declared directly on
-        this class -- not shared with ``PlanActAgent``, whose own
-        ``fail_fast`` governs a whole batch's cascade behavior, not a
-        single per-round call.
-        """
+        """``True`` raises at the first failed statement; ``False`` (default)
+        records it and shows it next round so the model can redirect."""
         return self._fail_fast
 
     def to_dict(self) -> dict[str, Any]:
-        """Extends ``ToolAgent.to_dict()`` with this class's own ``fail_fast``."""
+        """Extends ``ToolAgent.to_dict()`` with ``fail_fast``."""
         d = super().to_dict()
         d["fail_fast"] = self._fail_fast
         return d
+
+    # ------------------------------------------------------------------ #
+    # Shared Python-grammar hooks (same checks as PlanActAgent)
+    # ------------------------------------------------------------------ #
+    def _render_actions(self) -> str:
+        """The tools frame body plus the permitted Python builtins text."""
+        return f"{super()._render_actions()}\n\n{BUILTINS_PREAMBLE}"
+
+    def _validate_tool_name(self, name: str) -> None:
+        """Rejects names a statement could never reach."""
+        super()._validate_tool_name(name)
+        check_script_tool_name(name)
+
+    def _seed_task(self, task: ReActTask) -> None:
+        """Adds the ``task_result_i`` entries, then rejects any context
+        variable name a statement could not use unambiguously."""
+        super()._seed_task(task)
+        clashes = script_context_clashes(task.context, self._toolbox)
+        if clashes:
+            detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
+            raise AgentInvocationError(
+                f"{type(self).__name__}.{self.name}: context variable name(s) "
+                f"unusable in a script: {detail}. Rename or forget the "
+                "variable, or rename the tool with to_tool."
+            )
+
+    @staticmethod
+    def _action_cost(slot: ToolStatement) -> int:
+        """
+        Actions one slot spends. A dispatched slot (tool, builtin, method)
+        costs 1. A pure assignment costs 1 only when its value references no
+        hoisted ``_SUB_`` name (a statement with calls is charged on its call
+        slots, so the expression around them is free). A ``return`` is free.
+        """
+        if is_dispatched(slot):
+            return 1
+        if slot.tool == RHS_ASSIGN_ALIAS:
+            names = extract_identifiers(slot.kwargs["val"])
+            return 0 if any(n.startswith(SUB_NAME_PREFIX) for n in names) else 1
+        return 0
+
+    def _actions_used(self, task: ReActTask) -> int:
+        """Actions spent this run: ``_action_cost`` over every completed and
+        failed slot."""
+        return sum(
+            self._action_cost(s) for s in (*task.completed, *task.failed_statements)
+        )
+
+    def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
+        """The invokable that runs a dispatched slot: a builtin or attribute
+        dispatcher, else the registered tool."""
+        if tool_id == PY_BUILTIN_ALIAS:
+            return builtin_call_tool
+        if tool_id == ATTR_CALL_ALIAS:
+            return attr_call_tool
+        return self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
     def _render_steps(self, task: ReActTask) -> str:
         """
-        The call log: every call completed so far as wire-schema JSON and,
-        only when the last call failed, that one failed call with its error.
-        ``""`` on round 1 (nothing completed, no failure), so the base emits
-        no steps block. Values are not rendered here; they are in the
-        runtime-context block.
-
-        Only the single most recent failure is shown, never the accumulated
-        history: ``task.last_call_failed`` answers "is there anything to
-        react to" precisely (False the instant a later call succeeds), so
-        the render is gated on it, not on ``failed_statements`` being
-        non-empty.
+        The statements log: every completed statement as the model wrote it
+        and, only when the last one failed, its failure note. ``""`` on round
+        1. Values are not rendered here; they are in the runtime-context block.
         """
-        if not task.completed and not task.last_call_failed:
+        if not task.history and not task.last_call_failed:
             return ""
-        completed = render_completed_as_json(task.completed) or "(nothing completed yet)"
-        steps = f"# STEPS COMPLETED SO FAR:\n{completed}"
+        completed = "\n".join(task.history) or "(nothing completed yet)"
+        steps = f"# STATEMENTS COMPLETED SO FAR:\n{completed}"
         if task.last_call_failed:
-            steps += (
-                "\n\n# YOUR LAST CALL FAILED:\n"
-                f"{render_failed_as_json([task.failed_statements[-1]])}"
-            )
+            steps += f"\n\n# YOUR LAST STATEMENT FAILED:\n{task.failure_note}"
         return steps
 
     def _render_directive(self, task: ReActTask) -> str:
-        """
-        The closing instruction: the next-call request (with failure wording
-        after a tolerated failure), then the live remaining-budget line when
-        a limit is set. Recomputed every round, since the figure depletes.
-        Enforcement itself is structural (the schema enum narrows to
-        ``return`` only at the boundary, see ``_run_step_retry_loop``); the
-        text only lets the model see it coming.
-        """
+        """The next-statement request (failure wording after a failure), then
+        the live remaining-calls line when a limit is set."""
         base = (
-            "Produce the NEXT BEST single tool call for the current task, "
-            "or call the return tool if the task is complete."
+            "Write the NEXT single statement for the current task, or write "
+            "`return` with the answer if the task is complete."
         )
         directive = (
-            "Your last call failed -- see YOUR LAST CALL FAILED above for "
-            f"why. Adjust your approach. {base}"
+            "Your last statement failed -- see YOUR LAST STATEMENT FAILED above "
+            f"for why. Adjust your approach. {base}"
             if task.last_call_failed
             else base
         )
         limit = self.tool_calls_limit
         if limit is not None:
-            remaining = max(limit - task.tool_calls_used, 0)
-            line = f"Tool calls remaining: {remaining} of {limit}."
+            remaining = max(limit - self._actions_used(task), 0)
+            line = f"Actions remaining: {remaining} of {limit}."
             if remaining == 0:
-                line += " Only the return tool is available now."
+                line += " Only a return with no call in it is allowed now."
             directive += f"\n\n{line}"
         return directive
 
@@ -269,89 +252,81 @@ class ReActAgent(ToolAgent):
     # Generation (think())
     # ------------------------------------------------------------------ #
     def _process_generation_output(
-        self, raw_output: dict[str, Any], task: ReActTask,
-    ) -> tuple[ToolStatement, dict[str, Any]] | str:
+        self, raw_text: str, task: ReActTask,
+    ) -> tuple[list[ToolStatement], str] | str:
         """
-        Pure-computation validate-and-resolve callback for the step retry
-        loop: parse (``parse_react_call``, raw JSON -> draft), translate
-        (``translate_calls``, draft -> validated ``ToolStatement`` against
-        the names in ``task.context``, the registered tool ids and the remaining
-        tool-call budget),
-        then attempt argument resolution against the context values -- the
-        one failure category ``translate_calls`` structurally can't catch (a
-        resolved value's real type mismatching the target tool's parameter
-        contract). Returns ``(call, resolved_kwargs)`` on success, or a
-        feedback string describing the problem on failure.
+        Validate callback for the retry loop: parse the first statement into
+        its slot queue, rewrite builtin calls, enforce the action budget
+        against the whole queue, then check references and call bindings.
+        Returns ``(slots, source)``, or a feedback string for regeneration.
         """
-        draft = parse_react_call(raw_output)
-
-        remaining_budget = (
-            None if self._tool_calls_limit is None
-            else self._tool_calls_limit - task.tool_calls_used
-        )
-        context_names = frozenset(task.context)
-        readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
-        issues, calls = translate_calls(
-            [draft], remaining_budget, context_names, readonly_names,
-            frozenset(self._toolbox),
-        )
-
-        if issues:
-            issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            logger.debug(f"ReActAgent.{self.name}: step rejected, issues:\n{issues_msg}")
-            return issues_msg
-
-        call = calls[0]
         try:
-            namespace = {n: v.value for n, v in task.context.items()}
-            positional, keyword = resolve_statement_args(call, namespace)
-            tool = self.get_tool(call.tool)
-            resolved = tool._args_kwargs_to_dict(*positional, **keyword)
-        except Exception as e:
-            # Fed back to the model as regeneration feedback; the traceback is
-            # kept at DEBUG so a genuine framework bug is not lost.
-            logger.debug(
-                f"ReActAgent.{self.name}: could not resolve or bind step", exc_info=True
+            slots, source, dropped = parse_first_statement(
+                raw_text, start_index=len(task.completed) + len(task.failed_statements),
             )
-            label = call.identifier if call.identifier is not None else "(unassigned)"
-            return f"{label}: could not resolve or bind argument(s): {e!r}"
+        except BlackboardParseError as e:
+            return str(e)
+        if dropped:
+            logger.debug(
+                f"ReActAgent.{self.name}: ignored {dropped} statement(s) after the first"
+            )
 
-        return call, resolved
+        rewrite_builtin_calls(slots)
 
-    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
+        limit = self._tool_calls_limit
+        if limit is not None:
+            cost = sum(self._action_cost(s) for s in slots)
+            remaining = max(limit - self._actions_used(task), 0)
+            if cost > remaining:
+                if remaining == 0:
+                    return (
+                        "no actions remain in the budget; the only statement "
+                        "allowed now is a return with no call in it."
+                    )
+                return (
+                    f"this statement needs {cost} action(s) but {remaining} "
+                    "remain; split it into smaller statements, or finish with "
+                    "a return that has no call in it."
+                )
+
+        readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
+        issues = (
+            validate_references(
+                slots, frozenset(self._toolbox), frozenset(task.context), readonly_names, None,
+            )
+            + check_call_bindings(slots, self._toolbox)
+        )
+        if issues:
+            return "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+
+        return slots, source
+
+    def _feedback_messages(self, raw_output: str, feedback: str) -> list[dict[str, str]]:
+        """The assistant/user pair that asks for a corrected statement."""
+        return [
+            {"role": "assistant", "content": raw_output},
+            {"role": "user", "content": (
+                f"Your statement could not be used:\n\n{feedback}\n\n"
+                "Write a corrected statement."
+            )},
+        ]
+
+    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[list[ToolStatement], str]:
         """
-        Render, compute the schema's tool set, call the engine (with
-        ``output_structure``), record the attempt, validate+resolve via
-        ``_process_generation_output``, and retry with injected feedback on
-        failure until success or the regeneration budget
-        (``self._regeneration_limit``, counted per
-        generation; ``task.regenerations_used`` keeps the run total) is exhausted. Mirrors ``PlanActAgent``'s
-        own ``DEBUG``-level logging of every raw generated step (see
-        ``_process_generation_output`` for the matching rejected-issues log).
+        Render, call the engine, record the attempt, validate and resolve via
+        ``_process_generation_output``, and retry with injected feedback until
+        success or the regeneration budget (``self._regeneration_limit``,
+        counted per generation; ``task.regenerations_used`` keeps the run
+        total) is exhausted.
         """
         additional_messages: list[dict[str, str]] = []
         rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
-
-            tool_names = (
-                [RETURN_TOOL_NAME]
-                if (
-                    self._tool_calls_limit is not None
-                    and task.tool_calls_used >= self._tool_calls_limit
-                )
-                else self._toolbox.keys()
-            )
-            schema = build_react_schema(tool_names)
-
-            engine_result = self._llm_engine.invoke(
-                {"messages": messages, "output_structure": schema}
-            )
-            raw_output: dict[str, Any] = engine_result.result
-            logger.debug(
-                f"ReActAgent.{self.name}: generated step:\n{json.dumps(raw_output, indent=2)}"
-            )
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            raw_output: str = engine_result.result
+            logger.debug(f"ReActAgent.{self.name}: generated statement:\n{raw_output}")
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
@@ -360,53 +335,34 @@ class ReActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
+                logger.debug(
+                    f"ReActAgent.{self.name}: statement rejected ({rejections + 1}):\n"
+                    f"{raw_output.strip()}\n-> {result}"
+                )
                 if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
                         f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
-                additional_messages = [
-                    {"role": "assistant", "content": json.dumps(raw_output)},
-                    {"role": "user", "content": (
-                        f"Your step could not be used:\n\n{result}\n\n"
-                        "Produce a corrected step."
-                    )},
-                ]
+                additional_messages = self._feedback_messages(raw_output, result)
                 rejections += 1
                 task.regenerations_used += 1
                 continue
 
             return result
 
-    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
-        """Async mirror of ``_run_step_retry_loop``, using
-        ``async_invoke`` for the engine call. Same regeneration-budget
-        check, feedback-message construction, and ``DEBUG``-level logging
-        of every raw generated step."""
+    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[list[ToolStatement], str]:
+        """Async mirror of ``_run_step_retry_loop``: ``async_invoke`` for the
+        engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
         rejections = 0
 
         while True:
             messages = self.render_task(task, additional_messages=additional_messages)
-
-            tool_names = (
-                [RETURN_TOOL_NAME]
-                if (
-                    self._tool_calls_limit is not None
-                    and task.tool_calls_used >= self._tool_calls_limit
-                )
-                else self._toolbox.keys()
-            )
-            schema = build_react_schema(tool_names)
-
-            engine_result = await self._llm_engine.async_invoke(
-                {"messages": messages, "output_structure": schema}
-            )
-            raw_output: dict[str, Any] = engine_result.result
-            logger.debug(
-                f"ReActAgent.{self.name}: generated step:\n{json.dumps(raw_output, indent=2)}"
-            )
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            raw_output: str = engine_result.result
+            logger.debug(f"ReActAgent.{self.name}: generated statement:\n{raw_output}")
 
             task.llm_records.append(LLMRecord(
                 messages=list(task.task_messages),
@@ -415,19 +371,17 @@ class ReActAgent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
+                logger.debug(
+                    f"ReActAgent.{self.name}: statement rejected ({rejections + 1}):\n"
+                    f"{raw_output.strip()}\n-> {result}"
+                )
                 if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
                         f"exhausted after {rejections + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
-                additional_messages = [
-                    {"role": "assistant", "content": json.dumps(raw_output)},
-                    {"role": "user", "content": (
-                        f"Your step could not be used:\n\n{result}\n\n"
-                        "Produce a corrected step."
-                    )},
-                ]
+                additional_messages = self._feedback_messages(raw_output, result)
                 rejections += 1
                 task.regenerations_used += 1
                 continue
@@ -435,149 +389,160 @@ class ReActAgent(ToolAgent):
             return result
 
     def think(self, task: ReActTask) -> ReActTask:
-        """
-        Generate and validate this round's single call, without dispatching
-        it. Stashes the resolved decision onto ``task.generated_step``/
-        ``task.resolved_args`` for ``act()`` to run.
-        """
-        call, resolved = self._run_step_retry_loop(task=task)
-        task.generated_step = call
-        task.resolved_args = resolved
+        """Generate and validate this round's statement without running it;
+        stashes its slot queue and source for ``act()``."""
+        task.pending, task.source = self._run_step_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
     async def async_think(self, task: ReActTask) -> ReActTask:
-        """Async mirror of ``think``, using ``_arun_step_retry_loop``."""
-        call, resolved = await self._arun_step_retry_loop(task=task)
-        task.generated_step = call
-        task.resolved_args = resolved
+        """Async mirror of ``think``."""
+        task.pending, task.source = await self._arun_step_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
-    # ------------------------------------------------------------------ #
-    # Prepare (no-op for this family)
-    # ------------------------------------------------------------------ #
     def prepare(self, task: ReActTask) -> ReActTask:
-        """
-        Documented no-op -- all validation/resolution already happened
-        inside ``think()``'s own retry loop (see the module docstring for
-        why); nothing is deferred to this hook for this family. Unlike
-        ``PlanActAgent``, whose ``prepare()`` resolves a batch compiled by an
-        earlier ``think()`` call, this family's ``think()`` and ``prepare()``
-        are logically inseparable -- one call, resolved immediately.
-        """
+        """No-op: validation and resolution already happened in ``think()``."""
         return task
 
     async def async_prepare(self, task: ReActTask) -> ReActTask:
-        """Direct passthrough -- ``prepare`` has no I/O of its own to
-        justify a thread offload."""
+        """Direct passthrough to ``prepare``."""
         return self.prepare(task)
 
     # ------------------------------------------------------------------ #
     # Execute (act())
     # ------------------------------------------------------------------ #
-    def _apply_call_result(
-        self, task: ReActTask, call: ToolStatement, raw_result: Any,
-    ) -> ReActTask:
-        """
-        Shared post-dispatch bookkeeping for ``act``/``async_act``.
+    def _prepare_slot(
+        self, task: ReActTask, slot: ToolStatement, scratch: dict[str, Any],
+    ) -> tuple[Optional[AtomicInvokable], Any]:
+        """Resolve ``slot``'s arguments against the context plus the statement's
+        scratch results. Returns ``(tool, dispatch inputs)`` for a call, or
+        ``(None, value)`` for an expression or ``return``."""
+        namespace = {n: v.value for n, v in task.context.items()} | scratch
+        positional, keyword = resolve_statement_args(slot, namespace)
+        if not is_dispatched(slot):
+            return None, keyword["val"]
+        tool = self._resolve_dispatch_tool(slot.tool)
+        return tool, dispatch_inputs(slot, tool, positional, keyword)
 
-        A failure with ``fail_fast=True`` raises immediately (preserving
-        ``ToolInvocationError`` as-is, wrapping anything else in
-        ``ToolAgentError``); with ``fail_fast=False`` it is recorded into
-        ``task.failed_statements`` and ``task.last_call_failed`` is set, so
-        the model sees it next round and redirects -- no cascade machinery
-        of any kind. Every successful call, including a call to
-        ``return_tool``, is unwrapped and recorded identically -- there is
-        no synthesized, never-dispatched sentinel in this family to skip.
-
-        Two identifier normalizations happen on a successful call, before
-        it's appended to ``task.completed``: a ``return_tool`` call's
-        identifier is always forced to ``None`` (matches ``RETURN_ALIAS``'s
-        own always-``None`` convention on ``PlanActAgent`` -- a ``return``
-        call ends the task, so there is no later round for any
-        name of its to ever be referenced in); any other call whose
-        identifier is still ``None`` and whose real result isn't ``None``
-        gets auto-named ``__r{N}__`` (``N`` = count of successful calls
-        so far), so a result the model forgot to name stays referenceable
-        instead of becoming permanently unrecoverable the moment this round
-        ends -- this family has no lookahead across rounds the way a
-        one-shot planner does, so "forgot to name it" would otherwise never
-        be repairable.
-
-        A named result is written to ``task.context`` (creating the
-        variable, or updating a writable existing one); persistence follows
-        the normal destination rule.
-        """
-        if isinstance(raw_result, BaseException):
-            if self._fail_fast:
-                if isinstance(raw_result, ToolInvocationError):
-                    raise raw_result
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed "
-                    f"for {call.tool!r} (identifier={call.identifier!r}): {raw_result}"
-                ) from raw_result
-
-            call.exception = raw_result
-            task.failed_statements.append(call)
-            task.last_call_failed = True
+    def _on_slot_success(
+        self, task: ReActTask, slot: ToolStatement, raw: Any, scratch: dict[str, Any],
+    ) -> Any:
+        """Commit one successful slot and return its value: route it (scratch
+        for a hoisted result, ``__rN__`` for an unnamed non-``None`` call
+        result, the context for a named one), log it, and finish the run on a
+        ``return``."""
+        dispatched = is_dispatched(slot)
+        if dispatched:
+            slot.result = raw
+            value = raw.result
         else:
-            call.result = raw_result
-            unwrapped = raw_result.result
+            value = raw
+        if slot.identifier is None and dispatched and value is not None:
+            slot.identifier = f"__r{len(task.history)}__"
+        task.completed.append(slot)
+        if slot.identifier is not None:
+            if slot.identifier.startswith(SUB_NAME_PREFIX):
+                scratch[slot.identifier] = value
+            else:
+                self._write_context(task, {slot.identifier: value}, create=True)
+        logger.info(
+            f"ReActAgent.{self.name}: ran {slot.to_code()}"
+            f"{'' if slot.identifier is None else f'  -> {value!r:.80}'}"
+        )
+        if slot.tool == RETURN_ALIAS:
+            task.generated_response = value
+            task.complete = True
+        return value
 
-            if call.tool == RETURN_TOOL_NAME:
-                call.identifier = None
-            elif call.identifier is None and unwrapped is not None:
-                call.identifier = f"__r{len(task.completed)}__"
+    def _on_slot_failure(
+        self,
+        task: ReActTask,
+        slot: ToolStatement,
+        error: BaseException,
+        ran: list[tuple[ToolStatement, Any]],
+        total: int,
+    ) -> None:
+        """Record a failed slot: ``fail_fast`` raises; otherwise the slot joins
+        ``failed_statements``, the failure note is built and the rest of the
+        queue is dropped."""
+        if self._fail_fast:
+            if isinstance(error, ToolInvocationError):
+                raise error
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: statement failed at "
+                f"{slot.to_code()!r}: {error}"
+            ) from error
+        slot.exception = error
+        task.failed_statements.append(slot)
+        task.last_call_failed = True
+        if total == 1:
+            task.failure_note = f"{task.source}  # FAILED: {error!r}"
+        else:
+            note = (
+                f"{task.source}\n# sub-step `{replace(slot, identifier=None).to_code()}` "
+                f"failed: {error!r}"
+            )
+            if ran:
+                done = ", ".join(
+                    f"`{replace(s, identifier=None).to_code()}` -> {v!r:.80}" for s, v in ran
+                )
+                note += f"\n# sub-steps that already ran: {done}"
+            task.failure_note = note
+        task.pending.clear()
+        logger.info(f"ReActAgent.{self.name}: FAILED {slot.to_code()}  # {error!r}")
 
-            task.completed.append(call)
-            if call.identifier is not None:
-                self._write_context(task, {call.identifier: unwrapped}, create=True)
-            task.last_call_failed = False
-
-            if call.tool == RETURN_TOOL_NAME:
-                task.generated_response = unwrapped
-                task.complete = True
-
-        task.generated_step = None
-        task.resolved_args = None
-        return task
+    def _finish_statement(self, task: ReActTask) -> None:
+        """A statement whose whole queue succeeded joins ``history``."""
+        task.history.append(task.source)
+        task.last_call_failed = False
+        task.failure_note = ""
+        task.source = ""
 
     def act(self, task: ReActTask) -> ReActTask:
         """
-        Dispatch this round's one resolved call for real -- no gathering,
-        no ``asyncio``/``run_coro_sync`` of any kind, since exactly one
-        call is ever dispatched per round.
+        Run this round's slot queue, front to back: resolve each slot against
+        the context plus this statement's scratch results, dispatch it (or
+        evaluate its expression), and commit or fail it. A failure stops the
+        statement; a clean finish records it in ``history``.
         """
-        call = task.generated_step
-        resolved = task.resolved_args
-        tool = self.get_tool(call.tool)
-        try:
-            raw_result = tool.invoke(resolved)
-        except Exception as e:
-            raw_result = e
-        return self._apply_call_result(task, call, raw_result)
+        scratch: dict[str, Any] = {}
+        ran: list[tuple[ToolStatement, Any]] = []
+        total = len(task.pending)
+        while task.pending:
+            slot = task.pending.pop(0)
+            try:
+                tool, inputs = self._prepare_slot(task, slot, scratch)
+                raw = inputs if tool is None else tool.invoke(inputs)
+            except Exception as e:
+                self._on_slot_failure(task, slot, e, ran, total)
+                return task
+            ran.append((slot, self._on_slot_success(task, slot, raw, scratch)))
+        self._finish_statement(task)
+        return task
 
     async def async_act(self, task: ReActTask) -> ReActTask:
-        """Async mirror of ``act``."""
-        call = task.generated_step
-        resolved = task.resolved_args
-        tool = self.get_tool(call.tool)
-        try:
-            raw_result = await tool.async_invoke(resolved)
-        except Exception as e:
-            raw_result = e
-        return self._apply_call_result(task, call, raw_result)
+        """Async mirror of ``act``: ``async_invoke`` for the dispatch."""
+        scratch: dict[str, Any] = {}
+        ran: list[tuple[ToolStatement, Any]] = []
+        total = len(task.pending)
+        while task.pending:
+            slot = task.pending.pop(0)
+            try:
+                tool, inputs = self._prepare_slot(task, slot, scratch)
+                raw = inputs if tool is None else await tool.async_invoke(inputs)
+            except Exception as e:
+                self._on_slot_failure(task, slot, e, ran, total)
+                return task
+            ran.append((slot, self._on_slot_success(task, slot, raw, scratch)))
+        self._finish_statement(task)
+        return task
 
     # ------------------------------------------------------------------ #
-    # Record / result construction
+    # Record construction
     # ------------------------------------------------------------------ #
     def _build_record_from_task(self, task: ReActTask) -> ToolAgentRecord:
-        """
-        Assemble a completed ``ToolAgentRecord`` from a finished
-        ``ReActTask``. Mirrors ``PlanActAgent._build_record_from_task``
-        exactly -- no agent-level global blackboard to persist into.
-        """
+        """Assemble the completed ``ToolAgentRecord`` from a finished task."""
         return ToolAgentRecord(
             **self._record_base_fields(task),
             statements=tuple(task.completed),

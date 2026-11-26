@@ -43,8 +43,8 @@ __all__ = [
     "render_failed_as_python",
 ]
 # compile_batches, is_dispatched, and resolve_statement_args live in
-# utils/agents.py, shared with agents/planact.py and agents/react.py --
-# agents/scriptact.py imports them from there.
+# utils/agents.py; agents/planact.py and agents/react.py import them from
+# there.
 
 
 def _process_call_args(
@@ -608,7 +608,7 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
 
     Falling off the end of the generation with neither a ``return`` nor an
     error simply means the plan is done as written -- the caller
-    (``ScriptActAgent._finalize_without_continuation``) infers ``None`` if
+    (``PlanActAgent._finalize_without_continuation``) infers ``None`` if
     nothing was ever returned.
     """
     text = strip_code_fence(raw_text)
@@ -679,7 +679,7 @@ def rewrite_builtin_calls(slots: list[ToolStatement]) -> None:
     A slot is eligible when its ``tool`` isn't already a sentinel and is in
     ``ALLOWED_PY_BUILTINS``. A registered tool can no longer share a name
     with an allowed builtin at all (enforced at registration time
-    by ``ScriptActAgent._validate_tool_name``), so there is no precedence
+    by ``PlanActAgent._validate_tool_name``), so there is no precedence
     rule to apply here -- a name reaching this function is either a
     registered tool (never a builtin) or not, mutually exclusive by
     construction. An eligible slot gets its builtin name spliced in as a
@@ -824,12 +824,12 @@ def render_completed_as_python(
 
     ``show_batches`` (default ``False``) controls whether output is
     grouped under a ``# Batch N:`` header per concurrently-dispatched
-    batch. Model-facing callers (``ScriptActAgent``'s own continuation-message
+    batch. Model-facing callers (``PlanActAgent``'s own continuation-message
     building) must leave this ``False`` -- ``# Batch N:`` headers appearing
     in text shown to the model were found, empirically, to get echoed and
     fabricated back into later generations. The grouped form remains
     available, opt-in, for standalone human inspection
-    (``ScriptActAgentRecord.render_as_code``), where there is no such risk.
+    (``PlanActAgentRecord.render_as_code``), where there is no such risk.
     Consecutive slots sharing the same ``.batch_index`` are already
     contiguous in ``completed`` (a batch drains fully before the next one
     starts), so grouping only needs to detect index changes, not sort.
@@ -858,12 +858,10 @@ def render_completed_as_python(
 
 def render_failed_as_python(failed: list[ToolStatement]) -> str:
     """
-    Mirrors ``utils/sigils.py``'s ``render_failed_as_json`` shape exactly,
-    translated to this grammar's own source-line vocabulary: one line per
-    failed slot (via ``ToolStatement.to_code()``), each suffixed with its
+    One line per failed slot (via ``ToolStatement.to_code()``), each suffixed with its
     own exception text. No batch-header grouping -- these are always all
     from the one batch that most recently triggered a repair round, by
-    construction of the caller (``ScriptActAgent.prepare``/
+    construction of the caller (``PlanActAgent.prepare``/
     ``_apply_batch_results``, which slice ``task.failed_statements`` down
     to just that batch before ever calling this).
 

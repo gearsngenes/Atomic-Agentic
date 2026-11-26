@@ -46,7 +46,7 @@ def extract_identifiers(
     Walk any ``ast.Name`` reference in ``source`` and return every referenced
     identifier, deduplicated in first-seen order (not a set: multiplicity
     isn't meaningful for a dependency list, but a list keeps a stable,
-    orderable contract). Used by ``ScriptActAgent`` (``utils/script.py``) to
+    orderable contract). Used by ``PlanActAgent`` (``utils/script.py``) to
     find a statement's real dependencies from its parsed argument tree.
 
     Accepts a single parsed expression node, a slot's ``kwargs`` dict, or a
@@ -82,10 +82,10 @@ def extract_identifiers(
 def strip_code_fence(raw_text: str) -> str:
     """
     Extract the code from a markdown code fence around generated text, if
-    present. ``ScriptActAgent`` asks for its plan as a single fenced block;
+    present. ``PlanActAgent`` asks for its plan as a single fenced block;
     this also tolerates a missing or one-sided fence and prose around the
     block. Generic to any language tag (or none) on the opening fence line.
-    Used by ``ScriptActAgent``'s statement parsing (``utils/script.py``).
+    Used by ``PlanActAgent``'s statement parsing (``utils/script.py``).
 
     1. A fully matched pair wrapping the whole text (``CODE_FENCE_PATTERN``)
        -- its inner text is used as-is.
@@ -112,7 +112,7 @@ def strip_code_fence(raw_text: str) -> str:
 def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     """
     Evaluate one parsed expression node against a namespace, with no
-    builtins available. Used by ``ScriptActAgent`` (``utils/script.py``, safe
+    builtins available. Used by ``PlanActAgent`` (``utils/script.py``, safe
     because every arg reaching this function is guaranteed Call-free by its
     hoisting rule) -- nothing reachable through ``namespace`` can itself be
     invoked.
@@ -134,7 +134,7 @@ def reject_unsupported_forms(node: ast.expr) -> None:
     either branch contains a ``Call``, an ``ast.Await`` anywhere, a
     comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
     ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    anywhere -- the exact set ``ScriptActAgent`` (``utils/script.py``) needs.
+    anywhere -- the exact set ``PlanActAgent`` (``utils/script.py``) needs.
 
     Raises before any hoisting/unparsing proceeds -- every check here is
     unconditional over the whole tree passed in, at any depth, regardless
@@ -178,11 +178,8 @@ def is_dispatched(call: ToolStatement) -> bool:
     """
     True iff ``call`` represents a real dispatched call rather than a
     non-dispatched sentinel (``RETURN_ALIAS`` or ``RHS_ASSIGN_ALIAS``).
-    Shared across every ``ToolAgent`` family: a ``PlanActAgent``/
-    ``ReActAgent``-sourced statement never has ``tool == RHS_ASSIGN_ALIAS``,
-    so excluding it is a correct no-op for those families; a
-    ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` statement (``ScriptActAgent``-
-    only) is still a real dispatch either way.
+    A ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` statement is a
+    real dispatch.
     """
     return call.tool not in (RETURN_ALIAS, RHS_ASSIGN_ALIAS)
 
@@ -190,7 +187,7 @@ def is_dispatched(call: ToolStatement) -> bool:
 def tool_identity(call: ToolStatement) -> str:
     """
     Resolve ``call``'s real, human-meaningful tool identity -- correctly
-    unsplicing ``ScriptActAgent``'s two sentinel dispatch forms, which
+    unsplicing ``PlanActAgent``'s two sentinel dispatch forms, which
     otherwise hide the real identity behind a fixed sentinel string in
     ``call.tool``.
 
@@ -340,13 +337,8 @@ def resolve_statement_args(
     ``(positional, keyword)`` pair ready to splat into
     ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
     ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
-    directly). Shared across every ``ToolAgent`` family, including
-    ``ast.Starred`` (``*expr`` unpack) and ``KWARGS_UNPACK_KEY``
-    (``**expr`` unpack) handling. Those branches are ``ScriptActAgent``-only
-    grammar features that simply never trigger for a ``PlanActAgent``/
-    ``ReActAgent``-sourced statement (``translate_calls`` never produces a
-    ``Starred`` arg or a ``KWARGS_UNPACK_KEY``-keyed kwarg), so sharing this
-    one function is safe with zero behavior change for either family.
+    directly). Handles ``ast.Starred`` (``*expr`` unpack) and
+    ``KWARGS_UNPACK_KEY`` (``**expr`` unpack).
 
     Substitutes every ``ast.expr`` value with its concrete value from
     ``resolved`` (identifier -> value) via ``evaluate_expr``, passing

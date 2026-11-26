@@ -35,16 +35,13 @@ class BlackboardParseError(RuntimeError):
     """Raised when parsing one raw statement into ToolStatement object(s)
     fails, or when the shared expression-parsing/rejection helpers in
     utils/agents.py (`evaluate_expr`, `reject_unsupported_forms`) reject an
-    expression -- ScriptActAgent's own statement-parsing mechanism.
+    expression -- PlanActAgent's own statement-parsing mechanism.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,
     MCPError) -- callers doing `except RuntimeError` upstream still catch
-    these. Deliberately not rooted in ToolAgentError: ScriptActAgent's own
-    native-statement grammar is a distinct parsing mechanism from
-    PlanActAgent/ReActAgent's output_structure-based generation, so sharing
-    ToolAgentError's lineage here for this specific error would imply a
-    closer relationship to that mechanism than actually exists.
+    these. Deliberately not rooted in ToolAgentError: a statement that fails
+    to parse is regeneration feedback, not an agent failure.
 
     Unifies every rejection category from parse_statement_to_slots under one
     catchable type: genuine ast.parse SyntaxErrors, illegal assignment

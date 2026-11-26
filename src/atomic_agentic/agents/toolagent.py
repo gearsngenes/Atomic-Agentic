@@ -1,8 +1,7 @@
 """
 ToolAgent: shared ancestor for every tool-registering Agent family.
 
-Owns the surface that ``PlanActAgent``/``ReActAgent`` and ``ScriptActAgent``
-share: tool registration (keyed by tool name, ``register_tool``/``register_tools``),
+Owns the surface that ``PlanActAgent`` and ``ReActAgent`` share: tool registration (keyed by tool name, ``register_tool``/``register_tools``),
 the optional user-defined ``instructions``, the execution knobs common to every
 grammar (``tool_calls_limit``, ``regeneration_limit``,
 ``tool_concurrency_limit``), and the context-native task frame. There are no
@@ -19,11 +18,8 @@ family supplies only the two string hooks (``_render_steps``,
 hooks stay ``@abstractmethod``, since each family's generation, resolution and
 dispatch logic genuinely differs.
 
-``fail_fast`` is deliberately NOT here: ``PlanActAgent``'s version governs
-whole-batch cascade-vs-abort, ``ReActAgent``'s governs single-call
-raise-vs-tolerate -- different granularity, coincidentally the same name and
-type, never one shared feature. Each declares its own independently.
-``ScriptActAgent`` declares its own (repair-round budget exhaustion).
+``fail_fast`` is deliberately NOT here: each concrete agent declares its own
+(what it governs differs).
 """
 
 from __future__ import annotations
@@ -72,8 +68,8 @@ class ToolAgent(Agent, ABC):
       tool's ``name``, never the dotted ``full_name``) and the read accessors
       (``list_tools``/``has_tool``/``get_tool``/``remove_tool``/
       ``clear_tools``/``actions_context``), plus a ``_validate_tool_name``
-      hook (default: reserved-name check only) a subclass with its own
-      additional naming constraints (e.g. ``ScriptActAgent``'s parser
+      hook (default: accepts every name) a subclass with its own
+      additional naming constraints (e.g. ``PlanActAgent``'s parser
       sentinels/real-builtin collision) extends via ``super()``.
     - ``instructions`` (construction-time only, read-only property returning
       the instructions invokable or ``None``): standing user guidance rendered once per
@@ -122,12 +118,6 @@ class ToolAgent(Agent, ABC):
     result_cls: ClassVar[type[ToolAgentResult]] = ToolAgentResult
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
-
-    #: Effective tool ids no subclass instance may ever register, remove, or
-    #: replace through the public API -- seeded only via ``_seed_reserved_tool``,
-    #: bypassing ``register_tool`` entirely. Empty by default; each subclass
-    #: that needs reserved tools overrides this.
-    _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
         self,
@@ -343,17 +333,11 @@ class ToolAgent(Agent, ABC):
         (called from ``register_tool``/``register_tools`` for every
         candidate).
 
-        Default body: reject only a real reserved-tool-name collision
-        (``self._RESERVED_TOOL_NAMES``). A subclass with additional naming
+        The default accepts every name; a subclass with additional naming
         constraints (e.g. parser sentinels or real-builtin-name collisions)
-        overrides this, calling ``super()._validate_tool_name(...)``
-        first and adding its own checks after.
+        overrides this, calling ``super()._validate_tool_name(...)`` first and
+        adding its own checks after.
         """
-        if name in self._RESERVED_TOOL_NAMES:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: {name!r} is "
-                "reserved and cannot be registered through this API."
-            )
 
     # ------------------------------------------------------------------ #
     # Tool registration
@@ -492,52 +476,17 @@ class ToolAgent(Agent, ABC):
     def remove_tool(self, tool_id: str) -> bool:
         """Remove the tool stored under ``tool_id``.
 
-        Raises
-        ------
-        ToolRegistrationError
-            If ``tool_id`` is reserved (see ``_RESERVED_TOOL_NAMES``) —
-            reserved tools can never be removed through this API, regardless
-            of whether they're actually present.
-
         Returns
         -------
         bool
             ``True`` if the tool was present and removed; ``False`` if it was
             not registered.
         """
-        if tool_id in self._RESERVED_TOOL_NAMES:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: {tool_id!r} is reserved "
-                "and cannot be removed."
-            )
         return self._toolbox.pop(tool_id, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove every registered tool except reserved ones (see
-        ``_RESERVED_TOOL_NAMES``) — reserved tools are never cleared,
-        regardless of how they were seeded."""
-        self._toolbox = {
-            tid: tool for tid, tool in self._toolbox.items()
-            if tid in self._RESERVED_TOOL_NAMES
-        }
-
-    def _seed_reserved_tool(
-        self, tool: AtomicInvokable | Callable, name: str, description: Optional[str] = None,
-    ) -> None:
-        """
-        Directly insert ``tool`` into the toolbox under ``name``, bypassing
-        ``register_tool`` entirely — the one sanctioned way to populate a
-        reserved tool name (``register_tool``/``register_tools`` reject
-        any name in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
-        converted with ``to_tool``; ``AtomicInvokable`` instances are stored as-is. Intended to
-        be called from a subclass's own ``__init__``, after
-        ``super().__init__()``, once per reserved name that subclass
-        declares.
-        """
-        self._toolbox[name] = (
-            tool if isinstance(tool, AtomicInvokable)
-            else to_tool(tool, name=name, description=description)
-        )
+        """Remove every registered tool."""
+        self._toolbox = {}
 
     # ------------------------------------------------------------------ #
     # Docstring rendering
@@ -572,13 +521,13 @@ class ToolAgent(Agent, ABC):
            boundary). It is the turn's 0-based position within *this
            invocation's* ``task.turns``, matching ``_seed_task``.
         2. ``messages = super().render_turn(turn, **kwargs)``
-        3. Prepend ``{_CONTEXT_NAME_PREFIX}task_result_{index}: <type> = `` to
+        3. Prepend ``task_result_{index}: <type> = `` to
            the last message's content.
         """
         index = kwargs["index"]
         messages = super().render_turn(turn, **kwargs)
         label = (
-            f"{self._CONTEXT_NAME_PREFIX}{TASK_RESULT_PREFIX}{index}: "
+            f"{TASK_RESULT_PREFIX}{index}: "
             f"{type(turn.generated_response).__name__} = "
         )
         messages[-1]["content"] = label + messages[-1]["content"]

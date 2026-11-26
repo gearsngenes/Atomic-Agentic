@@ -12,7 +12,7 @@ __all__ = [
     "ToolUsageReport",
     "AgentResult",
     "ToolAgentResult",
-    "ScriptActAgentResult",
+    "PlanActAgentResult",
     "ThinkingAgentResult",
 ]
 
@@ -58,7 +58,7 @@ class ToolUsageRecord:
 class ToolUsageReport:
     """
     Per-invocation tool-usage report, shared identically by every concrete
-    ToolAgent (ScriptActAgent/PlanActAgent/ReActAgent).
+    ToolAgent (PlanActAgent/ReActAgent).
 
     Fields
     ------
@@ -194,8 +194,7 @@ class AgentResult(AtomicResult):
 class ToolAgentResult(AgentResult):
     """
     Successful ToolAgent invocation result. Shared directly by
-    ``PlanActAgent``/``ReActAgent``, and the base class of
-    ``ScriptActAgentResult`` too.
+    ``ReActAgent``, and the base class of ``PlanActAgentResult``.
 
     Extends ``AgentResult`` with per-tool call-count accounting and a
     lightweight failure summary when the agent ran with ``fail_fast=False``.
@@ -205,7 +204,7 @@ class ToolAgentResult(AgentResult):
     usage_report:
         ``ToolUsageReport`` summarizing per-tool call counts plus
         ``total_dispatched``/``total_failed`` for the invocation. Re-derived
-        (by the caller, e.g. ``PlanActAgent.result_payload_from_task``) via
+        (by the caller, e.g. ``ToolAgent.result_payload_from_task``) via
         ``utils.agents.build_usage_report`` over the task's statements.
 
     failed_call_count:
@@ -241,23 +240,23 @@ class ToolAgentResult(AgentResult):
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptActAgentResult(ToolAgentResult):
+class PlanActAgentResult(ToolAgentResult):
     """
-    Successful ScriptActAgent invocation result, a ``ToolAgentResult``
+    Successful PlanActAgent invocation result, a ``ToolAgentResult``
     subclass. ``usage_report``/``failed_call_count``/``regenerations_used``
-    are all real, inherited, required fields -- ``agents/scriptact.py``'s
+    are all real, inherited, required fields -- ``agents/planact.py``'s
     ``result_payload_from_task`` populates ``usage_report``/
     ``failed_call_count`` via ``build_usage_report``/
     ``len(task.failed_statements)``, mirroring ``PlanActAgent``'s/
     ``ReActAgent``'s own pattern. Only ``repair_rounds_used`` remains
-    genuinely ``ScriptActAgent``-specific.
+    genuinely ``PlanActAgent``-specific.
 
     Fields
     ------
     repair_rounds_used:
         Threaded from ``record.repair_rounds_used`` verbatim -- framework-
         granted repair rounds actually consumed after a resolution or
-        execution failure (see ``ScriptActAgent``'s ``replanning_limit``).
+        execution failure (see ``PlanActAgent``'s ``replanning_limit``).
         ``0`` means the plan finished without ever needing one.
     """
 
@@ -273,7 +272,7 @@ class ScriptActAgentResult(ToolAgentResult):
         # zero-arg super()'s implicit __class__ closure cell (the same
         # slotted-dataclass-subclass gotcha records.py's own __post_init__
         # methods already document and work around).
-        data = super(ScriptActAgentResult, self).to_dict()
+        data = super(PlanActAgentResult, self).to_dict()
         data["repair_rounds_used"] = self.repair_rounds_used
         return data
 

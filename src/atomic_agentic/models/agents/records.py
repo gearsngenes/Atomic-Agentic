@@ -11,7 +11,7 @@ from .blackboard_models import ToolStatement
 
 # is_dispatched/tool_identity/render_completed_as_python are imported
 # locally inside the methods that use them (ToolAgentRecord.render_as_code/
-# usage_report, ScriptActAgentRecord.dispatch_breakdown below), not at module
+# usage_report, PlanActAgentRecord.dispatch_breakdown below), not at module
 # level -- utils.agents/utils.script themselves import ToolStatement from
 # .blackboard_models (a sibling in this same models.agents package), and
 # models/agents/__init__.py imports this module before blackboard_models.
@@ -31,8 +31,8 @@ __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
-    "ScriptActAgentRecord",
-    "ScriptActAgentToolUsage",
+    "PlanActAgentRecord",
+    "PlanActAgentToolUsage",
     "ThinkingAgentRecord",
 ]
 
@@ -58,10 +58,8 @@ class LLMRecord:
         ToolAgentRecord.
 
         For base Agent: a one-element tuple containing the current user
-        prompt message. For PlanActAgent: the same — one new user message.
-        For ReActAgent: a three-element tuple — the original user task
-        (user), the running-plan snapshot (assistant), and the step-request
-        stub (user).
+        prompt message. For the tool agents: the task frame, the STEPS
+        frame (when there is work to show) and the directive.
 
     llm_result:
         The complete LLMResult produced by this generation, including token
@@ -232,10 +230,9 @@ class ToolAgentRecord(AgentRecord):
     Canonical memory record for one completed ToolAgent invocation.
 
     ``statements``/``failed_statements`` as ``ToolStatement`` tuples, no
-    blackboard span of any kind. Shared directly by ``PlanActAgent``/
-    ``ReActAgent`` (constructed directly, no further subclass needed -- would
-    add zero fields beyond what's here); ``ScriptActAgentRecord`` is now a
-    real subclass of this class too.
+    blackboard span of any kind. Shared directly by ``ReActAgent``
+    (no further subclass needed -- it would add zero fields beyond what's
+    here); ``PlanActAgentRecord`` is a real subclass of this class.
 
     Fields
     ------
@@ -327,7 +324,7 @@ class ToolAgentRecord(AgentRecord):
         Walks ``self.statements`` then ``self.failed_statements``, in that
         order, counting only dispatched calls (``is_dispatched``) under
         their real identity (``tool_identity`` -- correctly unsplices
-        ``ScriptActAgent``'s ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``
+        ``PlanActAgent``'s ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``
         sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
         statement, whose ``tool`` is already the real identity).
         """
@@ -337,9 +334,9 @@ class ToolAgentRecord(AgentRecord):
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptActAgentToolUsage:
+class PlanActAgentToolUsage:
     """
-    Five orthogonal counts derived from one completed ``ScriptActAgentRecord``'s
+    Five orthogonal counts derived from one completed ``PlanActAgentRecord``'s
     ``statements``, for debugging/observability only -- never used to
     reconstruct or re-plan. ``registered_tool_calls`` + ``builtin_calls`` +
     ``attribute_calls`` is the same total already enforced (silently)
@@ -390,13 +387,13 @@ class ScriptActAgentToolUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptActAgentRecord(ToolAgentRecord):
+class PlanActAgentRecord(ToolAgentRecord):
     """
-    Canonical memory record for one completed ScriptActAgent invocation, a
+    Canonical memory record for one completed PlanActAgent invocation, a
     ``ToolAgentRecord`` subclass. ``statements``/``failed_statements``/
     ``regenerations_used``/``render_as_code()`` are all inherited; only
     ``repair_rounds_used`` and the 5-category dispatch-mechanism breakdown
-    (``dispatch_breakdown()``) remain genuinely ``ScriptActAgent``-specific.
+    (``dispatch_breakdown()``) remain genuinely ``PlanActAgent``-specific.
 
     No agent-level global blackboard for this family -- each record owns
     its own slots outright, with no blackboard_start/blackboard_end span to
@@ -420,11 +417,11 @@ class ScriptActAgentRecord(ToolAgentRecord):
         # live: bare super() raises "obj must be an instance or subtype of
         # type" here). Targets ToolAgentRecord now -- it already validates/
         # normalizes statements/failed_statements, inherited unchanged.
-        super(ScriptActAgentRecord, self).__post_init__()
+        super(PlanActAgentRecord, self).__post_init__()
 
-    def dispatch_breakdown(self) -> ScriptActAgentToolUsage:
+    def dispatch_breakdown(self) -> PlanActAgentToolUsage:
         """
-        Compute a ``ScriptActAgentToolUsage`` snapshot from ``self.statements``
+        Compute a ``PlanActAgentToolUsage`` snapshot from ``self.statements``
         and ``self.failed_statements`` in one pass. Pure/derived -- not
         stored, recomputed on each call. Named apart from the inherited
         ``ToolAgentRecord.usage_report()`` because the two measure different
@@ -466,7 +463,7 @@ class ScriptActAgentRecord(ToolAgentRecord):
             elif is_dispatched(slot):
                 registered_tool_calls += 1
 
-        return ScriptActAgentToolUsage(
+        return PlanActAgentToolUsage(
             registered_tool_calls=registered_tool_calls,
             builtin_calls=builtin_calls,
             attribute_calls=attribute_calls,
@@ -481,7 +478,7 @@ class ScriptActAgentRecord(ToolAgentRecord):
         with just ``repair_rounds_used``."""
         # Explicit two-argument super() -- same slotted-dataclass gotcha
         # __post_init__ documents above; bare super() raises here too.
-        d = super(ScriptActAgentRecord, self).to_dict()
+        d = super(PlanActAgentRecord, self).to_dict()
         d["repair_rounds_used"] = self.repair_rounds_used
         return d
 
@@ -506,7 +503,7 @@ class ThinkingAgentRecord(AgentRecord):
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
         # the class object to add __slots__, which invalidates the
         # zero-arg super()'s implicit __class__ closure cell (same
-        # slotted-dataclass-subclass gotcha ScriptActAgentRecord.__post_init__
+        # slotted-dataclass-subclass gotcha PlanActAgentRecord.__post_init__
         # already documents above).
         super(ThinkingAgentRecord, self).__post_init__()
 

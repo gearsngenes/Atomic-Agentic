@@ -22,17 +22,12 @@ __all__ = ["ToolStatement"]
 class ToolStatement:
     """
     One slot in a per-invocation call/statement sequence -- the single,
-    unified representation shared by ``ScriptActAgent`` (built directly from
-    real ``ast.parse`` output), ``PlanActAgent``, and ``ReActAgent`` (built
-    by ``utils/sigils.py``'s ``translate_calls`` from a JSON wire payload).
-    Exactly one concrete representation, no ABC, no per-grammar hook.
+    unified representation shared by ``PlanActAgent`` and ``ReActAgent``
+    (built from real ``ast.parse`` output by ``utils/script.py``). Exactly one
+    concrete representation, no ABC, no per-grammar hook.
 
-    ``args``/``kwargs`` are always real ``ast.expr`` nodes, regardless of
-    origin: for ``ScriptActAgent`` that's unchanged (its parser already
-    builds real ast nodes directly); for ``PlanActAgent``/``ReActAgent`` the
-    JSON wire payload's plain scalars are translated into ``ast.Constant``/
-    ``ast.Name``/``ast.JoinedStr`` nodes by ``translate_calls`` before a
-    ``ToolStatement`` is ever constructed. No ``.dependencies``/
+    ``args``/``kwargs`` are real ``ast.expr`` nodes, except the plain ``str``
+    values ``rewrite_builtin_calls`` splices in. No ``.dependencies``/
     ``.resolved_refs`` field exists here, ever -- dependencies are always
     derived on demand via ``extract_identifiers`` (``utils/agents.py``) over
     the real ``ast.expr`` tree.
@@ -44,20 +39,13 @@ class ToolStatement:
     ------
     identifier : str | None
         This slot's bound name. ``None`` for a bare (unassigned) call or a
-        terminal ``return``. A JSON-sourced identifier has already been
-        normalized (stripped, ``$``-prefix removed, blank-collapsed to
-        ``None``) by ``translate_calls`` *before* this constructor ever
-        runs; a ``ScriptActAgent``-sourced identifier is always already
-        ast-sourced-legal. One uniform legality check applies here either
-        way -- no per-grammar leniency hook.
+        terminal ``return``. An identifier is always already ast-sourced-legal; one
+        legality check applies here, no per-grammar leniency hook.
 
     tool : str
         The call's identity -- a dotted call name, a registered tool's
         name, or a grammar-specific sentinel (``RHS_ASSIGN_
-        ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` for
-        a ``ScriptActAgent``-sourced statement; ``RETURN_ALIAS`` is the only
-        sentinel a ``PlanActAgent``/``ReActAgent``-sourced statement ever
-        carries). Must be a non-empty string.
+        ALIAS``/``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``). Must be a non-empty string.
 
     args : tuple[ast.expr, ...]
         Positional call arguments, in source order. Normalized to a tuple
@@ -93,12 +81,8 @@ class ToolStatement:
 
     def __post_init__(self) -> None:
         # 1. identifier: if not None, must be a non-empty, IDENTIFIER_
-        # PATTERN-legal string -- hard raise otherwise. Safe unconditionally
-        # now: a ScriptActAgent-sourced identifier is always already
-        # ast-sourced-legal; a JSON-sourced identifier has already been
-        # normalized (stripped, $-prefix removed, blank-collapsed to None)
-        # by translate_calls before this constructor ever runs -- no
-        # leniency needed here.
+        # PATTERN-legal string -- hard raise otherwise. An identifier is
+        # always already ast-sourced-legal, so no leniency is needed here.
         if self.identifier is not None and (
             not isinstance(self.identifier, str)
             or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
@@ -157,30 +141,14 @@ class ToolStatement:
 
     def to_code(self) -> str:
         """
-        Render this statement as one line of real Python source. For a
-        ``PlanActAgent``/``ReActAgent``-sourced statement (``tool`` is a
-        real registered tool or ``RETURN_ALIAS``, ``args``/``kwargs`` are
-        ``Name``/``Constant``/``JoinedStr`` only), this produces real Python
-        source with zero extra code -- the renderer only ever inspects
-        ``ast.expr``-ness, never which grammar produced the node.
-
-        ``RETURN_ALIAS`` needs its value read from either ``kwargs`` or
-        ``args``, not ``kwargs`` alone: ``RETURN_TOOL_NAME`` (``ReActAgent``'s
-        real, dispatched ``return`` tool) and ``RETURN_ALIAS``
-        (``PlanActAgent``'s synthesized, non-dispatched sentinel) are the
-        identical string ``"return"`` (see ``agents/react.py``'s own module
-        docstring). ``PlanActAgent``'s sentinel is always framework-built
-        with ``kwargs={"val": ...}``, but ``ReActAgent``'s real call is
-        model-authored like any other tool call -- its one argument may be
-        given positionally (``"name": null``) just as legally as by keyword,
-        landing in ``args`` instead.
+        Render this statement as one line of real Python source.
         """
 
         def render_value(value: Any) -> str:
             return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
 
         if self.tool == RETURN_ALIAS:
-            value = self.kwargs[RETURN_VALUE_FIELD] if RETURN_VALUE_FIELD in self.kwargs else self.args[0]
+            value = self.kwargs[RETURN_VALUE_FIELD]
             return f"return {render_value(value)}"
 
         prefix = f"{self.identifier} = " if self.identifier is not None else ""
