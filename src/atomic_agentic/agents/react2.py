@@ -1,38 +1,54 @@
 """
 ReAct2Agent: one Python statement per round.
 
-Each round the model writes exactly one statement in a fenced ``python`` block.
-The agent validates it, executes it, and shows the outcome next round through
-the runtime-context block; the run ends only when the model writes ``return``.
-A cousin of ``ScriptActAgent`` (one generated plan, many statements): it shares
-that family's statement parser, allow-lists, validator and renderers
-(``utils/script.py``), collapsed to one statement per round, with no sigil
-code.
+Each round the model writes a statement in a fenced ``python`` block; only the
+first statement is used (later ones are dropped and logged, never
+regenerated). The agent validates it, runs it, and shows the outcome next
+round through the runtime-context block; the run ends only when the model
+writes ``return``. A cousin of ``ScriptActAgent`` (one generated plan, many
+statements): it shares that family's statement parser, allow-lists, validator
+and renderers (``utils/script.py``), collapsed to one statement per round,
+with no sigil code.
 
-Statement shapes: ``x = call(...)``, a bare ``call(...)``, ``x = <expression>``
-and ``return [<expression>]``. At most one call per statement, and it must be
-the whole right-hand side or the whole statement; the call is a registered
-tool, an allowed builtin or an allowed attribute method. A bare call's
-non-``None`` result is auto-named ``__rN__`` so it stays referenceable.
+Statement forms: a bare ``call(...)``, ``x = <expression>``, ``return`` and
+``return <expression>``. An expression may contain calls (a registered tool,
+an allowed builtin, a method on any value) anywhere, including inside other
+calls, alongside literals, names, subscripts, attribute reads, container
+literals, f-strings, binary and unary operators, ``not`` and comparisons.
+``and``/``or``, ternaries, comprehensions, lambdas, ``await`` and control flow
+are rejected.
 
-``tool_calls_limit`` counts statements executed (pure assignments included,
-``return`` excluded), unlike the dispatched-calls-only count the inherited
-``tool_calls_used`` reports. Failures cost a regeneration before a statement
-runs (parse, reference, binding and resolution errors, inside ``think()``) and
-a recorded failed statement after (the tool raised); ``fail_fast=False``
-shows it next round, ``True`` raises at the failure site.
+A statement's calls are hoisted and run in order within the round, innermost
+first and left to right; every call runs, nothing short-circuits. Hoisted
+results live in a per-statement scratch namespace and never reach the context;
+a bare call's non-``None`` result is auto-named ``__rN__``. A failure stops the
+statement: calls already run stay committed, the rest are dropped.
+
+``tool_calls_limit`` counts actions: one per call run (a failed call included),
+and one for a call-free ``x = <expression>``; the expression around calls and
+a ``return`` are free. Failures cost a regeneration before a statement runs
+(parse, reference, binding and budget errors, inside ``think()``) and a
+recorded failed statement after (a call, resolution or evaluation error);
+``fail_fast=False`` shows it next round, ``True`` raises at the failure site.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any, Callable, Mapping, Optional
 
 from .toolagent import ToolAgent
 from .tools import attr_call_tool, builtin_call_tool
 from ..a2a import A2AClientHub
-from ..constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RETURN_ALIAS, RHS_ASSIGN_ALIAS
+from ..constants.agents import (
+    ATTR_CALL_ALIAS,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+    SUB_NAME_PREFIX,
+)
 from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, REACTOR_PROMPT
 from ..exceptions import (
     AgentInvocationError,
@@ -46,13 +62,16 @@ from ..mcp import MCPClientHub
 from ..models.agents.blackboard_models import ToolStatement
 from ..models.agents.records import LLMRecord, ToolAgentRecord
 from ..models.agents.tasks import ReActTask
-from ..utils.agents import check_call_bindings, is_dispatched, resolve_statement_args
+from ..utils.agents import (
+    check_call_bindings,
+    extract_identifiers,
+    is_dispatched,
+    resolve_statement_args,
+)
 from ..utils.script import (
     check_script_tool_name,
     dispatch_inputs,
-    parse_one_statement,
-    render_completed_as_python,
-    render_failed_as_python,
+    parse_first_statement,
     rewrite_builtin_calls,
     script_context_clashes,
     validate_references,
@@ -161,10 +180,25 @@ class ReAct2Agent(ToolAgent):
             )
 
     @staticmethod
-    def _statements_used(task: ReActTask) -> int:
-        """Executed statements this run, ``return`` excluded."""
+    def _action_cost(slot: ToolStatement) -> int:
+        """
+        Actions one slot spends. A dispatched slot (tool, builtin, method)
+        costs 1. A pure assignment costs 1 only when its value references no
+        hoisted ``_SUB_`` name (a statement with calls is charged on its call
+        slots, so the expression around them is free). A ``return`` is free.
+        """
+        if is_dispatched(slot):
+            return 1
+        if slot.tool == RHS_ASSIGN_ALIAS:
+            names = extract_identifiers(slot.kwargs["val"])
+            return 0 if any(n.startswith(SUB_NAME_PREFIX) for n in names) else 1
+        return 0
+
+    def _actions_used(self, task: ReActTask) -> int:
+        """Actions spent this run: ``_action_cost`` over every completed and
+        failed slot."""
         return sum(
-            1 for s in (*task.completed, *task.failed_statements) if s.tool != RETURN_ALIAS
+            self._action_cost(s) for s in (*task.completed, *task.failed_statements)
         )
 
     def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
@@ -181,25 +215,21 @@ class ReAct2Agent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _render_steps(self, task: ReActTask) -> str:
         """
-        The statements log: every statement completed so far as Python source
-        and, only when the last one failed, that one failure with its error.
-        ``""`` on round 1. Values are not rendered here; they are in the
-        runtime-context block.
+        The statements log: every completed statement as the model wrote it
+        and, only when the last one failed, its failure note. ``""`` on round
+        1. Values are not rendered here; they are in the runtime-context block.
         """
-        if not task.completed and not task.last_call_failed:
+        if not task.history and not task.last_call_failed:
             return ""
-        completed = render_completed_as_python(task.completed) or "(nothing completed yet)"
+        completed = "\n".join(task.history) or "(nothing completed yet)"
         steps = f"# STATEMENTS COMPLETED SO FAR:\n{completed}"
         if task.last_call_failed:
-            steps += (
-                "\n\n# YOUR LAST STATEMENT FAILED:\n"
-                f"{render_failed_as_python([task.failed_statements[-1]])}"
-            )
+            steps += f"\n\n# YOUR LAST STATEMENT FAILED:\n{task.failure_note}"
         return steps
 
     def _render_directive(self, task: ReActTask) -> str:
         """The next-statement request (failure wording after a failure), then
-        the live remaining-statements line when a limit is set."""
+        the live remaining-calls line when a limit is set."""
         base = (
             "Write the NEXT single statement for the current task, or write "
             "`return` with the answer if the task is complete."
@@ -212,10 +242,10 @@ class ReAct2Agent(ToolAgent):
         )
         limit = self.tool_calls_limit
         if limit is not None:
-            remaining = max(limit - self._statements_used(task), 0)
-            line = f"Statements remaining: {remaining} of {limit}."
+            remaining = max(limit - self._actions_used(task), 0)
+            line = f"Actions remaining: {remaining} of {limit}."
             if remaining == 0:
-                line += " Only a return statement is allowed now."
+                line += " Only a return with no call in it is allowed now."
             directive += f"\n\n{line}"
         return directive
 
@@ -224,53 +254,53 @@ class ReAct2Agent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ReActTask,
-    ) -> tuple[ToolStatement, dict[str, Any]] | str:
+    ) -> tuple[list[ToolStatement], str] | str:
         """
-        Validate-and-resolve callback for the retry loop: parse the one
-        statement, rewrite a builtin call, enforce the statement budget, check
-        references and call bindings, then resolve the arguments. Returns
-        ``(statement, dispatch inputs)``, or a feedback string for
-        regeneration.
+        Validate callback for the retry loop: parse the first statement into
+        its slot queue, rewrite builtin calls, enforce the action budget
+        against the whole queue, then check references and call bindings.
+        Returns ``(slots, source)``, or a feedback string for regeneration.
         """
         try:
-            slot = parse_one_statement(raw_text)
+            slots, source, dropped = parse_first_statement(
+                raw_text, start_index=len(task.completed) + len(task.failed_statements),
+            )
         except BlackboardParseError as e:
             return str(e)
+        if dropped:
+            logger.debug(
+                f"ReAct2Agent.{self.name}: ignored {dropped} statement(s) after the first"
+            )
 
-        rewrite_builtin_calls([slot])
+        rewrite_builtin_calls(slots)
 
         limit = self._tool_calls_limit
-        if limit is not None and limit - self._statements_used(task) <= 0 and slot.tool != RETURN_ALIAS:
-            return "no statements remain in the budget; the only statement allowed now is return."
+        if limit is not None:
+            cost = sum(self._action_cost(s) for s in slots)
+            remaining = max(limit - self._actions_used(task), 0)
+            if cost > remaining:
+                if remaining == 0:
+                    return (
+                        "no actions remain in the budget; the only statement "
+                        "allowed now is a return with no call in it."
+                    )
+                return (
+                    f"this statement needs {cost} action(s) but {remaining} "
+                    "remain; split it into smaller statements, or finish with "
+                    "a return that has no call in it."
+                )
 
         readonly_names = frozenset(n for n, v in task.context.items() if v.readonly)
         issues = (
             validate_references(
-                [slot], frozenset(self._toolbox), frozenset(task.context), readonly_names, None,
+                slots, frozenset(self._toolbox), frozenset(task.context), readonly_names, None,
             )
-            + check_call_bindings([slot], self._toolbox)
+            + check_call_bindings(slots, self._toolbox)
         )
         if issues:
             return "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
 
-        label = slot.identifier if slot.identifier is not None else "(unassigned)"
-        try:
-            namespace = {n: v.value for n, v in task.context.items()}
-            positional, keyword = resolve_statement_args(slot, namespace)
-            if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
-                inputs = {"val": keyword["val"]}
-            else:
-                tool = self._resolve_dispatch_tool(slot.tool)
-                inputs = dispatch_inputs(slot, tool, positional, keyword)
-        except Exception as e:
-            # Fed back as regeneration feedback; the traceback stays at DEBUG
-            # so a genuine framework bug is not lost.
-            logger.debug(
-                f"ReAct2Agent.{self.name}: could not resolve or bind statement", exc_info=True
-            )
-            return f"{label}: could not resolve or bind argument(s): {e!r}"
-
-        return slot, inputs
+        return slots, source
 
     def _feedback_messages(self, raw_output: str, feedback: str) -> list[dict[str, str]]:
         """The assistant/user pair that asks for a corrected statement."""
@@ -282,7 +312,7 @@ class ReAct2Agent(ToolAgent):
             )},
         ]
 
-    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
+    def _run_step_retry_loop(self, *, task: ReActTask) -> tuple[list[ToolStatement], str]:
         """
         Render, call the engine, record the attempt, validate and resolve via
         ``_process_generation_output``, and retry with injected feedback until
@@ -306,6 +336,10 @@ class ReAct2Agent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
+                logger.debug(
+                    f"ReAct2Agent.{self.name}: statement rejected ({rejections + 1}):\n"
+                    f"{raw_output.strip()}\n-> {result}"
+                )
                 if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
@@ -319,7 +353,7 @@ class ReAct2Agent(ToolAgent):
 
             return result
 
-    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[ToolStatement, dict[str, Any]]:
+    async def _arun_step_retry_loop(self, *, task: ReActTask) -> tuple[list[ToolStatement], str]:
         """Async mirror of ``_run_step_retry_loop``: ``async_invoke`` for the
         engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -338,6 +372,10 @@ class ReAct2Agent(ToolAgent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
+                logger.debug(
+                    f"ReAct2Agent.{self.name}: statement rejected ({rejections + 1}):\n"
+                    f"{raw_output.strip()}\n-> {result}"
+                )
                 if rejections >= self._regeneration_limit:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: regeneration budget "
@@ -353,18 +391,14 @@ class ReAct2Agent(ToolAgent):
 
     def think(self, task: ReActTask) -> ReActTask:
         """Generate and validate this round's statement without running it;
-        stashes it and its dispatch inputs for ``act()``."""
-        slot, inputs = self._run_step_retry_loop(task=task)
-        task.generated_step = slot
-        task.resolved_args = inputs
+        stashes its slot queue and source for ``act()``."""
+        task.pending, task.source = self._run_step_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
     async def async_think(self, task: ReActTask) -> ReActTask:
         """Async mirror of ``think``."""
-        slot, inputs = await self._arun_step_retry_loop(task=task)
-        task.generated_step = slot
-        task.resolved_args = inputs
+        task.pending, task.source = await self._arun_step_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
@@ -379,82 +413,131 @@ class ReAct2Agent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Execute (act())
     # ------------------------------------------------------------------ #
-    def _apply_statement_result(
-        self, task: ReActTask, slot: ToolStatement, raw: Any,
-    ) -> ReActTask:
-        """
-        Post-execution bookkeeping shared by ``act``/``async_act``.
+    def _prepare_slot(
+        self, task: ReActTask, slot: ToolStatement, scratch: dict[str, Any],
+    ) -> tuple[Optional[AtomicInvokable], Any]:
+        """Resolve ``slot``'s arguments against the context plus the statement's
+        scratch results. Returns ``(tool, dispatch inputs)`` for a call, or
+        ``(None, value)`` for an expression or ``return``."""
+        namespace = {n: v.value for n, v in task.context.items()} | scratch
+        positional, keyword = resolve_statement_args(slot, namespace)
+        if not is_dispatched(slot):
+            return None, keyword["val"]
+        tool = self._resolve_dispatch_tool(slot.tool)
+        return tool, dispatch_inputs(slot, tool, positional, keyword)
 
-        1. A dispatched call that raised: ``fail_fast`` re-raises a
-           ``ToolInvocationError`` as is and wraps anything else in
-           ``ToolAgentError``; otherwise the statement joins
-           ``task.failed_statements`` and ``task.last_call_failed`` is set.
-        2. Otherwise a dispatched call's envelope is stored on the slot and its
-           payload taken; a bare call with a non-``None`` payload is auto-named
-           ``__rN__``; the statement joins ``task.completed`` and a named value
-           is written to ``task.context``.
-        3. A ``return`` sets the response and completes the task.
-        """
+    def _on_slot_success(
+        self, task: ReActTask, slot: ToolStatement, raw: Any, scratch: dict[str, Any],
+    ) -> Any:
+        """Commit one successful slot and return its value: route it (scratch
+        for a hoisted result, ``__rN__`` for an unnamed non-``None`` call
+        result, the context for a named one), log it, and finish the run on a
+        ``return``."""
         dispatched = is_dispatched(slot)
-        if dispatched and isinstance(raw, BaseException):
-            if self._fail_fast:
-                if isinstance(raw, ToolInvocationError):
-                    raise raw
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed "
-                    f"for {slot.tool!r} (identifier={slot.identifier!r}): {raw}"
-                ) from raw
-            slot.exception = raw
-            task.failed_statements.append(slot)
-            task.last_call_failed = True
+        if dispatched:
+            slot.result = raw
+            value = raw.result
         else:
-            if dispatched:
-                slot.result = raw
-                value = raw.result
+            value = raw
+        if slot.identifier is None and dispatched and value is not None:
+            slot.identifier = f"__r{len(task.history)}__"
+        task.completed.append(slot)
+        if slot.identifier is not None:
+            if slot.identifier.startswith(SUB_NAME_PREFIX):
+                scratch[slot.identifier] = value
             else:
-                value = raw
-            if slot.identifier is None and dispatched and value is not None:
-                slot.identifier = f"__r{len(task.completed)}__"
-            task.completed.append(slot)
-            if slot.identifier is not None:
                 self._write_context(task, {slot.identifier: value}, create=True)
-            task.last_call_failed = False
-            if slot.tool == RETURN_ALIAS:
-                task.generated_response = value
-                task.complete = True
+        logger.info(
+            f"ReAct2Agent.{self.name}: ran {slot.to_code()}"
+            f"{'' if slot.identifier is None else f'  -> {value!r:.80}'}"
+        )
+        if slot.tool == RETURN_ALIAS:
+            task.generated_response = value
+            task.complete = True
+        return value
 
-        task.generated_step = None
-        task.resolved_args = None
-        return task
+    def _on_slot_failure(
+        self,
+        task: ReActTask,
+        slot: ToolStatement,
+        error: BaseException,
+        ran: list[tuple[ToolStatement, Any]],
+        total: int,
+    ) -> None:
+        """Record a failed slot: ``fail_fast`` raises; otherwise the slot joins
+        ``failed_statements``, the failure note is built and the rest of the
+        queue is dropped."""
+        if self._fail_fast:
+            if isinstance(error, ToolInvocationError):
+                raise error
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: statement failed at "
+                f"{slot.to_code()!r}: {error}"
+            ) from error
+        slot.exception = error
+        task.failed_statements.append(slot)
+        task.last_call_failed = True
+        if total == 1:
+            task.failure_note = f"{task.source}  # FAILED: {error!r}"
+        else:
+            note = (
+                f"{task.source}\n# sub-step `{replace(slot, identifier=None).to_code()}` "
+                f"failed: {error!r}"
+            )
+            if ran:
+                done = ", ".join(
+                    f"`{replace(s, identifier=None).to_code()}` -> {v!r:.80}" for s, v in ran
+                )
+                note += f"\n# sub-steps that already ran: {done}"
+            task.failure_note = note
+        task.pending.clear()
+        logger.info(f"ReAct2Agent.{self.name}: FAILED {slot.to_code()}  # {error!r}")
+
+    def _finish_statement(self, task: ReActTask) -> None:
+        """A statement whose whole queue succeeded joins ``history``."""
+        task.history.append(task.source)
+        task.last_call_failed = False
+        task.failure_note = ""
+        task.source = ""
 
     def act(self, task: ReActTask) -> ReActTask:
-        """Run this round's one statement: dispatch the call, or take the
-        already-resolved value of a pure expression or ``return``."""
-        slot = task.generated_step
-        inputs = task.resolved_args
-        if is_dispatched(slot):
-            tool = self._resolve_dispatch_tool(slot.tool)
+        """
+        Run this round's slot queue, front to back: resolve each slot against
+        the context plus this statement's scratch results, dispatch it (or
+        evaluate its expression), and commit or fail it. A failure stops the
+        statement; a clean finish records it in ``history``.
+        """
+        scratch: dict[str, Any] = {}
+        ran: list[tuple[ToolStatement, Any]] = []
+        total = len(task.pending)
+        while task.pending:
+            slot = task.pending.pop(0)
             try:
-                raw = tool.invoke(inputs)
+                tool, inputs = self._prepare_slot(task, slot, scratch)
+                raw = inputs if tool is None else tool.invoke(inputs)
             except Exception as e:
-                raw = e
-        else:
-            raw = inputs["val"]
-        return self._apply_statement_result(task, slot, raw)
+                self._on_slot_failure(task, slot, e, ran, total)
+                return task
+            ran.append((slot, self._on_slot_success(task, slot, raw, scratch)))
+        self._finish_statement(task)
+        return task
 
     async def async_act(self, task: ReActTask) -> ReActTask:
-        """Async mirror of ``act``."""
-        slot = task.generated_step
-        inputs = task.resolved_args
-        if is_dispatched(slot):
-            tool = self._resolve_dispatch_tool(slot.tool)
+        """Async mirror of ``act``: ``async_invoke`` for the dispatch."""
+        scratch: dict[str, Any] = {}
+        ran: list[tuple[ToolStatement, Any]] = []
+        total = len(task.pending)
+        while task.pending:
+            slot = task.pending.pop(0)
             try:
-                raw = await tool.async_invoke(inputs)
+                tool, inputs = self._prepare_slot(task, slot, scratch)
+                raw = inputs if tool is None else await tool.async_invoke(inputs)
             except Exception as e:
-                raw = e
-        else:
-            raw = inputs["val"]
-        return self._apply_statement_result(task, slot, raw)
+                self._on_slot_failure(task, slot, e, ran, total)
+                return task
+            ran.append((slot, self._on_slot_success(task, slot, raw, scratch)))
+        self._finish_statement(task)
+        return task
 
     # ------------------------------------------------------------------ #
     # Record construction

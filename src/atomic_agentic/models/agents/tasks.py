@@ -398,10 +398,33 @@ class ReActTask(ToolAgentTask):
         exists somewhere in ``failed_statements``. The failed call itself
         is always ``task.failed_statements[-1]`` when this is ``True`` --
         no duplicate reference stored.
+
+    pending : list[ToolStatement]
+        ``ReAct2Agent`` only: the validated slot queue for this round,
+        ``[hoisted calls..., own slot]``. ``think()`` sets it; ``act()`` drains
+        it from the front and clears it on a failure. Empty between rounds.
+
+    source : str
+        ``ReAct2Agent`` only: the current statement as the model wrote it.
+        ``think()`` sets it; ``act()`` appends it to ``history`` or builds
+        ``failure_note`` from it.
+
+    history : list[str]
+        ``ReAct2Agent`` only: the source of every fully completed statement,
+        in order -- what the steps block renders.
+
+    failure_note : str
+        ``ReAct2Agent`` only: the model-facing description of the last failed
+        statement (the statement, the failing sub-step and the sub-steps that
+        already ran); ``""`` when the last statement succeeded.
     """
     generated_step: Optional[ToolStatement] = None
     resolved_args: Optional[dict[str, Any]] = None
     last_call_failed: bool = False
+    pending: list[ToolStatement] = field(default_factory=list)
+    source: str = ""
+    history: list[str] = field(default_factory=list)
+    failure_note: str = ""
 
 
 @dataclass(slots=True)

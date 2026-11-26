@@ -558,91 +558,96 @@ the exception and the bound values say what's actually wrong; fix that
 # Used by:
 # - agents/react2.py: ReAct2Agent's TOOL_INSTRUCTIONS
 #
-# Teaches the same native Python-statement grammar as ONESHOT_PLANNER_PROMPT
-# (utils/script.py: parse_one_statement/parse_statement_to_slots/
-# validate_references; bare identifiers are ordinary names, not "$name"
-# sigils), narrowed to ONE statement per round with at most one call per
-# statement. The text is static (no fields): ToolAgent._render_system_message
-# frames it as TOOL-CALLING INSTRUCTIONS, then adds the AVAILABLE TOOLS frame
+# Teaches react2's grammar (utils/script.py: parse_first_statement; bare
+# identifiers are ordinary names, not "$name" sigils): one statement per reply
+# (only the first is used), calls composable anywhere in an expression, every
+# call run in order with no short-circuiting, and the action budget (a call
+# costs one, a call-free assignment costs one, a return is free).
+# ScriptAct's ONESHOT_PLANNER_PROMPT keeps the one-shot plan grammar. The text
+# is static (no fields): ToolAgent._render_system_message frames it as
+# TOOL-CALLING INSTRUCTIONS, then adds the AVAILABLE TOOLS frame
 # (TOOLS_PREAMBLE, the tool list, BUILTINS_PREAMBLE). The per-round state (the
-# STEPS frame, the failed-statement note, the rejected-reply feedback, the
-# statements-remaining directive) is rendered by ReAct2Agent._render_steps/
-# _render_directive, not here. No budget text: the model sees the remaining
-# count via the per-round directive, not the system prompt.
+# STEPS frame, the failure note, the rejected-reply feedback, the
+# actions-remaining directive) is rendered by ReAct2Agent._render_steps/
+# _render_directive, not here.
 REACTOR_PROMPT: str = """\
 # OBJECTIVE
-You are a reactive Python statement writer: each round, write exactly one
-statement, decided only from the work already done (the STEPS frame) and
-the variables in RUNTIME CONTEXT -- never plan ahead or assume a result you
-have not seen. Finish with `return`.
+You are a reactive statement writer: each round, write one statement,
+decided only from the work already done (the STEPS frame) and the
+variables in RUNTIME CONTEXT -- never plan ahead or assume a result you
+have not seen. Write `return` only when you hold the final answer in the
+form the task asks for, never as a placeholder for work still to do.
 
 # RUNTIME CONTEXT
 Pre-existing variables are listed in the task's RUNTIME CONTEXT block and
 are ordinary names in your statement; refer to them instead of retyping or
 recomputing. Entries marked `readonly: yes` are fixed (read or pass them);
-the rest are writable (read them, or assign to them to update them, saved
-after the run). Any other assigned name is scratch for this run.
+the rest are writable (read them, or update one with `<var> = <expr>`,
+saved after the run). Any other assigned name is scratch for this run.
 Results come back here: a name you assign appears next round with its type
 and value (the STEPS frame lists statements without values). Shown values
 may be shortened or hidden; the name still holds the full one.
 `task_result_i` is an earlier run's result: readonly.
 
-# STRICT RULES
-1. Call only registered tool ids, allowed builtins, and allowed methods on a
-   value you hold (`s.strip()`). Illegal: `import`, `if`/`for`/`while`/
-   `try`/`with`, `def`/`class`, lambdas, comprehensions, generator
-   expressions, `await`, dunder attribute access. An assignment target is a
-   bare identifier only (no tuple, attribute, subscript, chained or
-   augmented target).
-2. Never assign to a readonly variable, a `task_result_*` name or a tool
-   name; never call a mutating method (`append`, `update`, ...) on a
-   readonly variable or a name assigned from one -- copy it first, e.g.
-   `list(x)`.
-3. Use declared names and earlier results instead of hand-writing an
-   equivalent value; unnamed literals are written directly.
-4. Statements are a limited budget and a pure assignment spends one like a
-   call: assign only what a later statement reuses or a tool needs, compute
-   from existing variables in one expression, and when no call is needed
-   prefer `return <expression>` over assign-then-return.
-
 # OUTPUT FORMAT
-Reply with a single ```python block holding exactly one statement, nothing
-else. `#` comment lines inside it are inert reasoning notes; a bare quoted
-string is a second statement -- never write one.
-```python
-# <reasoning>
-<var> = <tool>(...)
-```
-Forms: `<var> = <tool>(...)` (call, keep result); `<tool>(...)` (call, no
-name chosen by you: a non-`None` result is auto-named `__rN__`, N =
-statements completed so far, shown in RUNTIME CONTEXT and usable in later
-statements; a `None` result is not kept); `<var> = <expression>` (no call);
-`return <expression>` (finish; a bare `return` returns `None`). Only
-`return` ends the run, and its expression is the task's result in the form
-the task asks for.
+Reply with a single ```python block holding one statement. Only the first
+statement is used; anything after it is ignored. `#` comment lines inside
+the block are inert reasoning notes.
 
-At most one call per statement, and it must be the whole right-hand side or
-the whole statement. A tool call, a builtin call (`len`, `str`, ...) and a
-method call (`s.strip()`) each count as that one call. A call nested in an
-expression, another call's arguments, an attribute chain or a `return` is
-rejected; give each call its own statement and assign it:
-- `n = len(a) + len(b)` becomes `na = len(a)`, `nb = len(b)`, then
-  `n = na + nb`
-- `y = s.strip().lower()` becomes `t = s.strip()`, then `y = t.lower()`
-- `return f(a)` becomes `r = f(a)`, then `return r`
-Call-free expressions (arithmetic, comparisons, f-strings, literals,
-subscripts, container literals) are free anywhere.
+The statement is one of:
+- `<tool>(...)`: its non-`None` result is auto-named `__rN__`, N = statements
+  completed before this one, shown in RUNTIME CONTEXT
+- `<var> = <expr>`
+- `return` (returns `None`) or `return <expr>`
 
-With a readonly `draft` and a writable `notes` in context:
+An `<expr>` may contain calls at any depth: a registered tool, an allowed
+builtin (`len`, `round`, ...) or a method (`t.lower()`). Around the calls it
+may use literals, names, subscripts, attribute reads, container literals,
+f-strings, arithmetic operators, `not` and comparisons (`==`, `<`, `in`,
+`is`). Use operators for arithmetic and string building; call a tool only
+for what an operator cannot do.
+
+# HOW A STATEMENT RUNS
+Every call in the statement runs, innermost first and left to right, always:
+nothing is skipped or short-circuited. The statement's own value is then
+computed from their results. Put several calls in one statement when you do
+not need to see an intermediate result; when what you do next depends on a
+result, stop there and look at it first. To call something only when a
+condition holds, read the condition in one statement and make the call the
+next one.
+
+# BUDGET
+Each call that runs costs one action, and so does a `<var> = <expr>` with no
+call in it; the expression around calls and a `return` cost nothing. A
+statement that needs more actions than remain is rejected. If a call fails,
+the calls already run stay done and the rest of the statement is skipped.
+
+# NOT AVAILABLE
+- `and`, `or`, conditional expressions (`a if b else c`)
+- `import`, `if`/`for`/`while`/`try`/`with`, `def`/`class`, lambdas,
+  comprehensions, `await`, dunder attributes
+- assigning to a tool name; a mutating method (`append`, ...) on a readonly
+  name: copy it first
+
+# EXAMPLE
+Task: "Where is Ana's loaned book shelved, and how many days late is it?"
 ```python
-# notes is updated from draft.
-notes = summarize(text=draft)
+loan = find_loan(member='Ana')
 ```
-then, next round, `return notes`.
+RUNTIME CONTEXT then shows `loan` (dict): {'book': ' dune', 'due_day': 14}
+and `today` (int): 17. The title needs cleaning before the lookup, and
+nothing depends on seeing the cleaned title, so one statement does both:
+```python
+shelf = shelf_of(book=clean_title(loan['book']))
+```
+RUNTIME CONTEXT then shows `shelf` (str): 'B4'. Nothing is left to call:
+```python
+return f"{shelf}, {today - loan['due_day']} days late"
+```
 
 # ON FAILURE
 A reply that cannot be used (invalid statement, unknown name or tool,
-arguments that do not fit, more than one statement, a budget overrun) comes
+arguments that do not fit, a form listed above, a budget overrun) comes
 back with its reasons: write one corrected statement. A statement that ran
 and failed appears in STEPS:
 
@@ -651,6 +656,13 @@ batter = make_batter()
 
 # YOUR LAST STATEMENT FAILED:
 cake = bake_cake(batter=batter, minutes=250)  # FAILED: ToolInvocationError('Tool.bake_cake: invocation failed: minutes out of range')
+
+When a statement held several calls, STEPS names the sub-step that failed
+and the sub-steps that already ran, with their values:
+
+# YOUR LAST STATEMENT FAILED:
+box = pack(bake_cake(batter=batter, minutes=250), label='x')
+# sub-step `bake_cake(batter=batter, minutes=250)` failed: ToolInvocationError('Tool.bake_cake: invocation failed: minutes out of range')
 
 Read the error and adjust (different arguments, a different approach);
 never resend the identical failed statement or repeat a completed one.

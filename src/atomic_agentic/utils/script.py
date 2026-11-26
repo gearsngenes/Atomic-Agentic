@@ -4,7 +4,6 @@ import ast
 import builtins
 import keyword
 from collections.abc import Collection, Iterable
-from dataclasses import replace
 from typing import Any, Optional
 
 from ..constants.agents import (
@@ -34,7 +33,7 @@ from .agents import (
 __all__ = [
     "parse_statement_to_slots",
     "parse_generation",
-    "parse_one_statement",
+    "parse_first_statement",
     "dispatch_inputs",
     "check_script_tool_name",
     "script_context_clashes",
@@ -322,6 +321,10 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[ToolS
     running count of hoisted slots already emitted so far for this block;
     this function is otherwise pure/stateless.
 
+    Every call anywhere in the statement is hoisted and later executed,
+    post-order and left to right, including the operands of ``and``/``or``,
+    comparisons and chained comparisons: nothing short-circuits.
+
     Raises ``BlackboardParseError`` for every rejection category (always via
     ``raise ... from e`` where an underlying exception exists) -- never
     silently repaired, never returned as an issues list.
@@ -461,39 +464,65 @@ def _compile_gate(nodes: list[ast.stmt]) -> None:
         raise BlackboardParseError(f"line {e.lineno}: {e.msg}") from e
 
 
-def parse_one_statement(raw_text: str) -> ToolStatement:
-    """
-    Parse one generation into exactly one ``ToolStatement``, for an agent that
-    runs one statement per round. Raises ``BlackboardParseError`` for every
-    rejection.
+_MSG_NO_BOOLOP = (
+    "`and`/`or` are not available: every call in a statement runs, in order, "
+    "with no short-circuiting. Use a comparison or `not`, or read the value "
+    "first and decide in the next statement."
+)
+_MSG_NO_TERNARY = (
+    "conditional expressions (`a if b else c`) are not available. Read the "
+    "value first; the next statement is your decision."
+)
 
-    1. ``strip_code_fence`` (one fenced block with prose around it is fine),
-       ``ast.parse``; the body must hold exactly one statement.
-    2. ``parse_statement_to_slots`` (shape checks, hoisting), then the
-       compile gate.
-    3. More than one slot means a call was nested inside the statement: the
-       generation is rejected, naming each nested call as written.
+
+def parse_first_statement(
+    raw_text: str, start_index: int = 0,
+) -> tuple[list[ToolStatement], str, int]:
+    """
+    Parse one generation into the slot queue of its FIRST statement. Raises
+    ``BlackboardParseError`` for every rejection.
+
+    Returns ``(slots, source, dropped)``: ``slots`` is ``[hoisted..., own
+    slot]`` from ``parse_statement_to_slots`` (hoisted names
+    ``_SUB_{start_index}...``); ``source`` is ``ast.unparse`` of the statement
+    as the model wrote it; ``dropped`` is how many later statements were
+    ignored.
+
+    1. ``strip_code_fence``, ``ast.parse``.
+    2. Drop leading bare-string statements (inert notes); none left is an
+       error.
+    3. Take the first statement; every later one is ignored unparsed.
+    4. React2-only form check: ``and``/``or`` and a ternary are rejected.
+    5. ``parse_statement_to_slots``, then the compile gate.
     """
     text = strip_code_fence(raw_text)
     try:
         tree = ast.parse(text, mode="exec")
     except SyntaxError as e:
         raise BlackboardParseError(str(e)) from e
-    if len(tree.body) != 1:
-        raise BlackboardParseError(
-            f"expected exactly one statement; got {len(tree.body)}."
-        )
-    slots = parse_statement_to_slots(ast.unparse(tree.body[0]))
-    _compile_gate(tree.body)
-    if len(slots) > 1:
-        nested = ", ".join(replace(slot, identifier=None).to_code() for slot in slots[:-1])
-        raise BlackboardParseError(
-            "a statement may contain at most one call, and it must be the whole "
-            f"right-hand side or the whole statement; found nested call(s): {nested}. "
-            "Make each nested call its own statement and assign its result, "
-            "then use that name."
-        )
-    return slots[0]
+
+    body = list(tree.body)
+    while (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body.pop(0)
+    if not body:
+        raise BlackboardParseError("no statement found in the reply.")
+
+    first, dropped = body[0], len(body) - 1
+    for node in ast.walk(first):
+        if isinstance(node, ast.BoolOp):
+            raise BlackboardParseError(_MSG_NO_BOOLOP)
+        if isinstance(node, ast.IfExp):
+            raise BlackboardParseError(_MSG_NO_TERNARY)
+
+    source = ast.unparse(first)
+    slots = parse_statement_to_slots(source, start_index)
+    _compile_gate([first])
+    return slots, source, dropped
 
 
 def dispatch_inputs(
