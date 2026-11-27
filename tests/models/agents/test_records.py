@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import ast
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
@@ -426,7 +428,8 @@ def _statement(
     args: tuple = (), error: Exception | None = None,
 ) -> Statement:
     """A one-step tool statement in the given status (a failed one carries ``error``)."""
-    step = Step(kind="tool", tool=tool, args=args, status=status, error=error)
+    output = SimpleNamespace(result=1, to_dict=lambda: {"result": 1}) if status == "ran" else NO_VAL
+    step = Step(kind="tool", tool=tool, args=args, output=output, status=status, error=error)
     kind = "assign" if target is not None else "call"
     return Statement(ordinal=ordinal, source="", kind=kind, target=target, steps=(step,))
 
@@ -503,7 +506,7 @@ class TestToolAgentRecord:
     def test_render_as_code_merges_done_and_failed_in_source_order(self) -> None:
         done = Statement(
             ordinal=0, source="a = add(1, 2)", kind="assign", target="a",
-            steps=(Step(kind="tool", tool="add", status="ran"),),
+            steps=(Step(kind="tool", tool="add", output=SimpleNamespace(result=3, to_dict=lambda: {"result": 3}), status="ran"),),
         )
         failed = Statement(
             ordinal=1, source="b = boom(1)", kind="assign", target="b",
@@ -511,7 +514,7 @@ class TestToolAgentRecord:
         )
         later = Statement(
             ordinal=2, source="c = add(a, 1)", kind="assign", target="c",
-            steps=(Step(kind="tool", tool="add", status="ran"),),
+            steps=(Step(kind="tool", tool="add", output=SimpleNamespace(result=3, to_dict=lambda: {"result": 3}), status="ran"),),
         )
         record = ToolAgentRecord(
             run_id="run-37", user_prompt="do it", generated_response=None,
