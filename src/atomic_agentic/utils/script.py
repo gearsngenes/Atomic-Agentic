@@ -579,7 +579,9 @@ def script_context_clashes(names: Iterable[str], tool_ids: Collection[str]) -> d
     }
 
 
-def parse_generation(raw_text: str) -> list[ToolStatement]:
+def parse_generation(
+    raw_text: str, *, with_sources: bool = False,
+) -> list[ToolStatement] | tuple[list[ToolStatement], list[str]]:
     """
     Parse one whole generation (a fresh plan, or a repair-triggered
     continuation -- both use this same grammar; there is no separate
@@ -606,6 +608,9 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     skipping the gate otherwise keeps a statement-level message from being
     shadowed by the compiler's wording.
 
+    ``with_sources=True`` returns ``(slots, sources)`` instead of ``slots``:
+    one ``ast.unparse`` source per statement that produced slots, in order.
+
     Falling off the end of the generation with neither a ``return`` nor an
     error simply means the plan is done as written -- the caller
     (``PlanActAgent._finalize_without_continuation``) infers ``None`` if
@@ -614,10 +619,11 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     text = strip_code_fence(raw_text)
 
     flat_slots: list[ToolStatement] = []
+    sources: list[str] = []
     hoist_index = 0
 
     if not text.strip():
-        return flat_slots
+        return (flat_slots, sources) if with_sources else flat_slots
 
     try:
         tree = ast.parse(text, mode="exec")
@@ -652,6 +658,7 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
             continue
 
         flat_slots.extend(slots)
+        sources.append(ast.unparse(node))
         hoist_index += len(slots)
 
         if slots and slots[-1].tool == RETURN_ALIAS:
@@ -666,7 +673,7 @@ def parse_generation(raw_text: str) -> list[ToolStatement]:
     if errors:
         raise BlackboardParseError("\n".join(errors))
 
-    return flat_slots
+    return (flat_slots, sources) if with_sources else flat_slots
 
 
 def rewrite_builtin_calls(slots: list[ToolStatement]) -> None:

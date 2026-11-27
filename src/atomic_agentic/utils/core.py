@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import threading
 from collections.abc import Awaitable, Mapping
@@ -19,12 +20,18 @@ __all__ = [
     "normalize_headers",
     "normalize_optional_identifier",
     "normalize_timeout_seconds",
+    "render_value",
     "run_coro_async",
     "run_coro_sync",
     "start_background_loop",
     "stop_background_loop",
     "validate_name_filter",
 ]
+
+
+def render_value(value: Any) -> Any:
+    """``ast.unparse`` of an ``ast.expr``; any other value unchanged."""
+    return ast.unparse(value) if isinstance(value, ast.expr) else value
 
 
 def dataclass_record_to_dict(record: Any) -> dict[str, Any]:
