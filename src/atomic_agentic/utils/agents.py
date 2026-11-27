@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 
@@ -13,13 +13,11 @@ from ..constants.agents import (
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
     PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
 from ..exceptions import BlackboardParseError
-from ..models.agents.blackboard_models import ToolStatement
+from ..models.agents.blackboard_models import Statement, Step
 from ..models.results.agents import ToolUsageRecord, ToolUsageReport
 
 if TYPE_CHECKING:
@@ -30,10 +28,8 @@ __all__ = [
     "extract_identifiers",
     "reject_unsupported_forms",
     "strip_code_fence",
-    "is_dispatched",
     "tool_identity",
     "build_usage_report",
-    "compile_batches",
     "resolve_statement_args",
     "check_call_bindings",
 ]
@@ -49,10 +45,10 @@ def extract_identifiers(
     orderable contract). Used by ``PlanActAgent`` (``utils/script.py``) to
     find a statement's real dependencies from its parsed argument tree.
 
-    Accepts a single parsed expression node, a slot's ``kwargs`` dict, or a
-    slot's ``args`` tuple/list -- in the dict/tuple/list forms, only values
+    Accepts a single parsed expression node, a step's ``kwargs`` dict, or a
+    step's ``args`` tuple/list -- in the dict/tuple/list forms, only values
     that are still unresolved ``ast.expr`` nodes contribute identifiers; an
-    already-folded raw literal value contributes none. A ``ToolStatement``
+    already-folded raw literal value contributes none. A ``Step``
     with both containers calls this once per container and merges the
     results -- this function stays single-container. An ``ast.Starred``
     entry (a ``*expr`` unpack in ``args``) is itself an ``ast.expr``
@@ -174,177 +170,57 @@ def reject_unsupported_forms(node: ast.expr) -> None:
             )
 
 
-def is_dispatched(call: ToolStatement) -> bool:
-    """
-    True iff ``call`` represents a real dispatched call rather than a
-    non-dispatched sentinel (``RETURN_ALIAS`` or ``RHS_ASSIGN_ALIAS``).
-    A ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS`` statement is a
-    real dispatch.
-    """
-    return call.tool not in (RETURN_ALIAS, RHS_ASSIGN_ALIAS)
+def tool_identity(step: Step) -> str:
+    """The real tool name of a tool step: the builtin name (``args[0]``) for
+    ``PY_BUILTIN_ALIAS``, the method name (``args[1]``) for
+    ``ATTR_CALL_ALIAS``, else ``step.tool``."""
+    if step.tool == PY_BUILTIN_ALIAS:
+        return step.args[0]
+    if step.tool == ATTR_CALL_ALIAS:
+        return step.args[1]
+    return step.tool
 
 
-def tool_identity(call: ToolStatement) -> str:
+def build_usage_report(statements: Iterable[Statement]) -> ToolUsageReport:
     """
-    Resolve ``call``'s real, human-meaningful tool identity -- correctly
-    unsplicing ``PlanActAgent``'s two sentinel dispatch forms, which
-    otherwise hide the real identity behind a fixed sentinel string in
-    ``call.tool``.
-
-    A ``PY_BUILTIN_ALIAS`` call's real builtin name lives in ``call.args[0]``
-    (spliced in as a plain ``str`` by ``rewrite_builtin_calls``, not an ast
-    node). An ``ATTR_CALL_ALIAS`` call's real method name lives in
-    ``call.args[1]`` (also a plain ``str``, from ``_build_call_slot``'s own
-    ``args=(obj_expr, method_name, *positional)`` construction). Any other
-    call (a real registered tool's name, or ``RETURN_ALIAS``)
-    returns ``call.tool`` directly -- callers are expected to have already
-    filtered to ``is_dispatched(call)`` before calling this, so
-    ``RETURN_ALIAS``/``RHS_ASSIGN_ALIAS`` never actually reach this function
-    in practice, but it is not itself responsible for that filtering.
+    One ``ToolUsageRecord`` per distinct real tool identity among the tool
+    steps that ran or failed, in first-seen order across ``statements`` as
+    given. ``total_dispatched`` counts those steps and ``total_failed`` the
+    failed ones. Shared by ``ToolAgentRecord.usage_report()`` and each
+    family's ``result_payload_from_task``.
     """
-    if call.tool == PY_BUILTIN_ALIAS:
-        return call.args[0]
-    if call.tool == ATTR_CALL_ALIAS:
-        return call.args[1]
-    return call.tool
-
-
-def build_usage_report(
-    statements: Iterable[ToolStatement],
-    failed_statements: Iterable[ToolStatement],
-) -> ToolUsageReport:
-    """
-    Compute per-tool call-count accounting -- one ``ToolUsageRecord`` per
-    distinct real tool identity actually dispatched, ordered by first-call
-    order, ``call_count >= 1`` each (an identity with zero dispatched calls
-    never produces an entry) -- plus ``total_dispatched``/``total_failed``
-    summary counts, bundled into a single ``ToolUsageReport``.
-
-    Walks ``statements`` then ``failed_statements``, in that order, counting
-    only dispatched calls (``is_dispatched``) under their real identity
-    (``tool_identity``). Shared by ``ToolAgentRecord.usage_report()`` and
-    each ``ToolAgent`` family's ``result_payload_from_task``, so a result can
-    be built from a task without a record.
-    """
-    failed_statements = tuple(failed_statements)
     counts: dict[str, int] = {}
-    for call in (*statements, *failed_statements):
-        if is_dispatched(call):
-            identity = tool_identity(call)
+    total_failed = 0
+    for statement in statements:
+        for step in statement.steps:
+            if step.kind != "tool" or step.status == "not_run":
+                continue
+            identity = tool_identity(step)
             counts[identity] = counts.get(identity, 0) + 1
-
-    by_tool = tuple(
-        ToolUsageRecord(tool_name=name, call_count=count)
-        for name, count in counts.items()
-    )
+            total_failed += step.status == "failed"
+    by_tool = tuple(ToolUsageRecord(tool_name=name, call_count=n) for name, n in counts.items())
     return ToolUsageReport(
         by_tool=by_tool,
-        total_dispatched=sum(r.call_count for r in by_tool),
-        total_failed=sum(1 for call in failed_statements if is_dispatched(call)),
+        total_dispatched=sum(counts.values()),
+        total_failed=total_failed,
     )
-
-
-def compile_batches(
-    calls: list[ToolStatement],
-    max_concurrency: Optional[int] = None,
-    start_batch_index: int = 0,
-) -> list[list[ToolStatement]]:
-    """
-    Group ``calls`` into dependency batches for concurrent execution, and
-    stamp each call's ``.batch_index`` with the batch it landed in. Generic
-    over ``ToolStatement`` regardless of which agent family produced it.
-
-    A call joins the currently-open batch only if none of its dependencies
-    (``extract_identifiers(call.args) | extract_identifiers(call.kwargs)``)
-    were bound by a call already sitting in that same open batch (i.e. every
-    dependency is satisfiable from an earlier, already-closed batch, a
-    registered tool, or a context variable -- reference validity itself
-    is assumed already checked upstream). Otherwise the open batch closes
-    first and this call starts a new one.
-
-    Additionally, when about to add a *dispatched* call (``is_dispatched``,
-    this module) to a batch that already holds ``max_concurrency`` dispatched
-    calls, the batch closes first -- a purely additive concurrency cap, never
-    replacing the dependency-conflict closure rule above.
-    ``max_concurrency=None`` means no cap (greedy default).
-
-    A ``RETURN_ALIAS`` call is never grouped with anything else -- it always
-    closes the current batch, lands alone in a batch of its own, then closes
-    that batch too. This guarantees a batch-partial failure elsewhere can
-    never suppress an already-resolved return.
-
-    Every call in a batch is stamped with the same ``batch_index`` --
-    ``start_batch_index`` plus that batch's own 0-based position among the
-    batches this call produces -- the moment the batch closes. Lets a caller
-    running multiple generation rounds in one invoke keep indices globally
-    unique across rounds by passing the running total in as
-    ``start_batch_index``.
-    """
-    batches: list[list[ToolStatement]] = []
-    current_batch: list[ToolStatement] = []
-    current_batch_identifiers: set[str] = set()
-    current_batch_dispatched = 0
-
-    def close_current() -> None:
-        nonlocal current_batch, current_batch_identifiers, current_batch_dispatched
-        if not current_batch:
-            return
-        index = start_batch_index + len(batches)
-        for call in current_batch:
-            call.batch_index = index
-        batches.append(current_batch)
-        current_batch = []
-        current_batch_identifiers = set()
-        current_batch_dispatched = 0
-
-    for call in calls:
-        if call.tool == RETURN_ALIAS:
-            # A return is never grouped with anything else -- closing
-            # before AND after guarantees it lands alone in its own batch,
-            # so an unrelated failure elsewhere can never suppress it.
-            close_current()
-            current_batch.append(call)
-            close_current()
-            continue
-
-        deps = (*extract_identifiers(call.args), *extract_identifiers(call.kwargs))
-        if any(name in current_batch_identifiers for name in deps):
-            close_current()
-
-        dispatched = is_dispatched(call)
-        if (
-            dispatched
-            and max_concurrency is not None
-            and current_batch_dispatched >= max_concurrency
-        ):
-            close_current()
-
-        current_batch.append(call)
-        if call.identifier is not None:
-            current_batch_identifiers.add(call.identifier)
-        if dispatched:
-            current_batch_dispatched += 1
-
-    close_current()
-    return batches
 
 
 def resolve_statement_args(
-    call: ToolStatement, resolved: dict[str, Any],
+    step: Step, resolved: dict[str, Any],
 ) -> tuple[list[Any], dict[str, Any]]:
     """
-    Resolve one statement's ``args``/``kwargs`` into a plain
+    Resolve one step's ``args``/``kwargs`` into a plain
     ``(positional, keyword)`` pair ready to splat into
-    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
-    ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
-    directly). Handles ``ast.Starred`` (``*expr`` unpack) and
+    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for an eval
+    step, to read ``positional[0]`` directly). Handles ``ast.Starred`` (``*expr`` unpack) and
     ``KWARGS_UNPACK_KEY`` (``**expr`` unpack).
 
     Substitutes every ``ast.expr`` value with its concrete value from
     ``resolved`` (identifier -> value) via ``evaluate_expr``, passing
     through any already-plain (non-``ast.expr``) value unchanged (e.g. the
-    spliced-in builtin name string from ``rewrite_builtin_calls``). Purely
-    transient -- never persisted back onto a ``ToolStatement``.
+    spliced-in builtin or method name string). Purely transient -- never
+    persisted back onto the step.
 
     Assumes every dependency is already present in ``resolved``; does not
     itself check readiness. A missing identifier is not defensively guarded
@@ -356,20 +232,20 @@ def resolve_statement_args(
         return evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
 
     positional: list[Any] = []
-    for entry in call.args:
+    for entry in step.args:
         if isinstance(entry, ast.Starred):
             positional.extend(resolve_one(entry.value))
         else:
             positional.append(resolve_one(entry))
 
     keyword: dict[str, Any] = {}
-    for name, value in call.kwargs.items():
+    for name, value in step.kwargs.items():
         if name == KWARGS_UNPACK_KEY:
             continue
         keyword[name] = resolve_one(value)
 
-    if KWARGS_UNPACK_KEY in call.kwargs:
-        unpacked = resolve_one(call.kwargs[KWARGS_UNPACK_KEY])
+    if KWARGS_UNPACK_KEY in step.kwargs:
+        unpacked = resolve_one(step.kwargs[KWARGS_UNPACK_KEY])
         overlap = set(unpacked) & set(keyword)
         if overlap:
             raise TypeError(
@@ -381,37 +257,38 @@ def resolve_statement_args(
 
 
 def check_call_bindings(
-    slots: list[ToolStatement],
+    statements: Sequence[Statement],
     toolbox: Mapping[str, AtomicInvokable],
 ) -> list[str]:
     """
-    Dry bind: catch argument-shape mistakes at plan time. For each slot whose
-    ``tool`` is a registered tool id (sentinel, builtin and attribute-call
-    slots are skipped), bind placeholder values through the tool's
+    Dry bind: catch argument-shape mistakes at plan time. For each tool step
+    whose ``tool`` is a registered tool id (eval, builtin and method steps are
+    skipped), bind placeholder values through the tool's
     ``_args_kwargs_to_dict`` and report a ``TypeError`` (too many positionals,
     unknown keyword, duplicate argument) as an issue.
 
-    A slot with a ``*`` unpack or a ``**`` unpack is skipped (arity unknown).
+    A step with a ``*`` unpack or a ``**`` unpack is skipped (arity unknown).
     No values are evaluated and nothing is dispatched. A missing required
     argument is not reported (binding does not check it); it still surfaces
     at invoke time. Returns ``[]`` when every checked call binds.
     """
     issues: list[str] = []
-    for slot in slots:
-        if slot.tool not in toolbox:
-            continue
-        if KWARGS_UNPACK_KEY in slot.kwargs or any(
-            isinstance(arg, ast.Starred) for arg in slot.args
-        ):
-            continue
-        try:
-            toolbox[slot.tool]._args_kwargs_to_dict(
-                *([None] * len(slot.args)), **{key: None for key in slot.kwargs}
-            )
-        except TypeError as e:
-            label = slot.identifier if slot.identifier is not None else "(unassigned)"
-            issues.append(
-                f"statement producing {label} calls {slot.tool!r} with arguments "
-                f"that do not fit its signature: {e}"
-            )
+    for statement in statements:
+        for step in statement.steps:
+            if step.kind != "tool" or step.tool not in toolbox:
+                continue
+            if KWARGS_UNPACK_KEY in step.kwargs or any(
+                isinstance(arg, ast.Starred) for arg in step.args
+            ):
+                continue
+            try:
+                toolbox[step.tool]._args_kwargs_to_dict(
+                    *([None] * len(step.args)), **{key: None for key in step.kwargs}
+                )
+            except TypeError as e:
+                label = step.name or statement.target or "(unassigned)"
+                issues.append(
+                    f"statement producing {label} calls {step.tool!r} with arguments "
+                    f"that do not fit its signature: {e}"
+                )
     return issues

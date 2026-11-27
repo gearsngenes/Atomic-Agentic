@@ -15,8 +15,6 @@ from atomic_agentic.constants.agents import (
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
     PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
     STOP_EARLY_SCHEMA_TEMPLATE,
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
@@ -27,8 +25,6 @@ from atomic_agentic.constants.agents import (
 
 class TestScriptAgentSentinelLiterals:
     def test_reserved_call_sentinels(self) -> None:
-        assert RHS_ASSIGN_ALIAS == "rhs_assign"
-        assert RETURN_ALIAS == "return"
         assert PY_BUILTIN_ALIAS == "py_builtin"
         assert ATTR_CALL_ALIAS == "attr_call"
 

@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import pytest
 
+from atomic_agentic.models.agents.blackboard_models import Statement, Step
 from atomic_agentic.models.agents.tasks import (
     AgentTask,
     ToolAgentTask,
     PlanActTask,
     ReActTask,
     ScratchpadTask,
-    ScriptActAgentTask,
     ThinkingTask,
 )
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.agents.context import ContextVariable
+
+
+def _statement(kind: str = "assign", target: str | None = "x", *steps: Step, status: str = "ran") -> Statement:
+    """A one-step statement: a tool step by default, ``status`` applied to every step."""
+    from dataclasses import replace
+
+    steps = steps or (Step(kind="tool", tool="add"),)
+    return Statement(
+        ordinal=0, source="", kind=kind, target=target,
+        steps=tuple(replace(step, status=status) for step in steps),
+    )
 
 
 class TestAgentTask:
@@ -91,9 +102,22 @@ class TestToolAgentTask:
 
     def test_tool_calls_used_is_derived_not_stored(self) -> None:
         # No stored counter field -- tool_calls_used is a @property computed
-        # from completed/failed_statements via is_dispatched.
+        # from completed/failed_statements via actions_used.
         assert "tool_calls_used" not in ToolAgentTask.__dataclass_fields__
         assert isinstance(ToolAgentTask.__dict__["tool_calls_used"], property)
+
+    def test_tool_calls_used_counts_actions_over_both_lists(self) -> None:
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
+        composed = _statement(
+            "assign", "x",
+            Step(kind="tool", tool="inner", name="_SUB_0"), Step(kind="tool", tool="add"),
+        )
+        task.completed.append(composed)                                   # 2 tool steps
+        task.completed.append(_statement("assign", "y", Step(kind="eval", args=())))  # call-free: 1
+        task.completed.append(_statement("return", None, Step(kind="eval", args=())))  # return: 0
+        task.failed_statements.append(_statement("call", None, status="failed"))  # a failed call counts: 1
+
+        assert task.tool_calls_used == 4
 
     def test_no_blackboard_fields(self) -> None:
         # The pre-toolstatement-unification blackboard model (running_
@@ -120,8 +144,8 @@ class TestToolAgentTask:
         first = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
         second = ToolAgentTask(turns=[], inputs={}, user_prompt="hi")
 
-        first.completed.append("marker")  # type: ignore[arg-type]
-        first.failed_statements.append("marker")  # type: ignore[arg-type]
+        first.completed.append(_statement())
+        first.failed_statements.append(_statement())
         first.task_messages.append({"role": "user", "content": "hi"})
 
         assert second.completed == []
@@ -139,17 +163,53 @@ class TestPlanActTask:
         task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.pending == []
-        assert task.resolved_args == []
+        assert task.needs_repair is False
+        assert task.repair_rounds_used == 0
+        assert task.repair_batch_start == 0
+        # Inherited from ToolAgentTask, not redeclared here.
+        assert task.completed == []
+        assert task.failed_statements == []
+        assert task.regenerations_used == 0
+        assert task.tool_calls_used == 0
         assert not hasattr(task, "cache")
         assert not hasattr(task, "constant_values")
 
-    def test_no_batch_counter_field(self) -> None:
-        # A single compile_batches call per invoke needs no cross-round
-        # ToolStatement.batch_index uniqueness tracking -- unlike
-        # ScriptActAgentTask, which can regenerate multiple times.
+    def test_no_batch_or_resolved_args_fields(self) -> None:
+        # Concurrency comes from plan_waves over statements, and resolved
+        # arguments are never stored.
         task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "batch_counter")
+        assert not hasattr(task, "resolved_args")
+
+    def test_no_pre_repair_rework_fields(self) -> None:
+        # planning_rounds_used/continue_planning/continuation_note were all
+        # retired by the repair-on-failure rework -- needs_repair/
+        # repair_rounds_used/repair_batch_start replace them.
+        task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
+
+        assert not hasattr(task, "planning_rounds_used")
+        assert not hasattr(task, "continue_planning")
+        assert not hasattr(task, "continuation_note")
+
+    def test_default_factories_are_independent_per_instance(self) -> None:
+        first = PlanActTask(turns=[], inputs={}, user_prompt="hi")
+        second = PlanActTask(turns=[], inputs={}, user_prompt="hi")
+
+        first.completed.append(_statement())
+        first.failed_statements.append(_statement())
+        first.pending.append(_statement(status="not_run"))
+
+        assert second.completed == []
+        assert second.failed_statements == []
+        assert second.pending == []
+
+    def test_needs_repair_round_trips(self) -> None:
+        task = PlanActTask(turns=[], inputs={}, user_prompt="hi")
+
+        task.needs_repair = True
+
+        assert task.needs_repair is True
 
 
 class TestReActTask:
@@ -161,32 +221,39 @@ class TestReActTask:
     def test_added_field_defaults(self) -> None:
         task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
-        assert task.generated_step is None
-        assert task.resolved_args is None
-        assert task.last_call_failed is False
+        assert task.statement is None
+        assert task.source == ""
+        assert task.history == []
+        assert task.failure_note == ""
         assert not hasattr(task, "cache")
         assert not hasattr(task, "constant_values")
 
-    def test_generated_step_holds_a_tool_statement(self) -> None:
-        from atomic_agentic.models.agents.blackboard_models import ToolStatement
+    def test_statement_holds_a_statement(self) -> None:
+        statement = _statement(status="not_run")
+        task = ReActTask(turns=[], inputs={}, user_prompt="hi", statement=statement)
 
-        step = ToolStatement(identifier=None, tool="add")
-        task = ReActTask(
-            turns=[], inputs={}, user_prompt="hi",
-            generated_step=step,
-        )
+        assert task.statement is statement
 
-        assert task.generated_step is step
+    def test_no_json_only_fields(self) -> None:
+        task = ReActTask(turns=[], inputs={}, user_prompt="hi")
+
+        for removed in ("generated_step", "resolved_args", "last_call_failed", "pending"):
+            assert not hasattr(task, removed)
 
     def test_no_step_meta_or_next_step_index_fields(self) -> None:
-        # No fixed-size preallocated board/observability-decay window --
-        # both dropped from the pre-rewrite shape, along with
-        # next_step_index/step_meta. Every round renders a full snapshot of
-        # completed/cache instead.
+        # No fixed-size preallocated board/observability-decay window.
         task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert not hasattr(task, "next_step_index")
         assert not hasattr(task, "step_meta")
+
+    def test_history_is_independent_per_instance(self) -> None:
+        first = ReActTask(turns=[], inputs={}, user_prompt="hi")
+        second = ReActTask(turns=[], inputs={}, user_prompt="hi")
+
+        first.history.append("x = add(1, 2)")
+
+        assert second.history == []
 
 
 class TestThinkingTask:
@@ -266,59 +333,6 @@ class TestScratchpadTask:
         assert not hasattr(task, "more_thinking_required")
 
 
-class TestScriptActAgentTask:
-    def test_inherits_tool_agent_task_fields(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-
-        assert isinstance(task, ToolAgentTask)
-
-    def test_added_field_defaults(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-
-        assert task.pending == []
-        assert task.resolved_args == []
-        assert task.needs_repair is False
-        assert task.repair_rounds_used == 0
-        assert task.repair_batch_start == 0
-        assert task.batch_counter == 0
-        # Inherited from ToolAgentTask, not redeclared here.
-        assert task.completed == []
-        assert task.failed_statements == []
-        assert not hasattr(task, "cache")
-        assert not hasattr(task, "constant_values")
-        assert task.regenerations_used == 0
-        assert task.tool_calls_used == 0
-
-    def test_no_pre_repair_rework_fields(self) -> None:
-        # planning_rounds_used/continue_planning/continuation_note were all
-        # retired by the repair-on-failure rework (Pass 8) -- needs_repair/
-        # repair_rounds_used/repair_batch_start replace them.
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-
-        assert not hasattr(task, "planning_rounds_used")
-        assert not hasattr(task, "continue_planning")
-        assert not hasattr(task, "continuation_note")
-
-    def test_default_factories_are_independent_per_instance(self) -> None:
-        first = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-        second = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-
-        first.completed.append("marker")  # type: ignore[arg-type]
-        first.failed_statements.append("marker")  # type: ignore[arg-type]
-        first.pending.append(["marker"])  # type: ignore[list-item]
-
-        assert second.completed == []
-        assert second.failed_statements == []
-        assert second.pending == []
-
-    def test_needs_repair_round_trips(self) -> None:
-        task = ScriptActAgentTask(turns=[], inputs={}, user_prompt="hi")
-
-        task.needs_repair = True
-
-        assert task.needs_repair is True
-
-
 class TestAgentTaskContextFields:
     def test_new_fields_default(self) -> None:
         task = AgentTask(turns=[], inputs={})
@@ -351,7 +365,7 @@ class TestAgentTaskContextFields:
         assert second.agentic_inputs == {}
 
     @pytest.mark.parametrize(
-        "task_cls", [ToolAgentTask, ScriptActAgentTask, PlanActTask, ReActTask, ThinkingTask]
+        "task_cls", [ToolAgentTask, PlanActTask, ReActTask, ThinkingTask]
     )
     def test_subclass_tasks_inherit_new_fields(self, task_cls: type[AgentTask]) -> None:
         task = task_cls(turns=[], inputs={})

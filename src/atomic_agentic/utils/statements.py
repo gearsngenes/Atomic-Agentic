@@ -7,8 +7,8 @@ A statement is the unit of execution and concurrency. Its steps (hoisted calls
 first, its own step last) run in order against a snapshot of the context plus
 the statement's own scratch results, so a failure is local to the statement and
 ``run_statement`` never touches a task or the context: the caller commits the
-named results. Parsing is the existing ``utils/script.py`` parser (no fork); the
-slots it builds are regrouped into ``Statement``/``Step`` here.
+named results. Parsing is ``utils/script.py``, which builds the
+``Statement``/``Step`` objects directly.
 """
 
 from __future__ import annotations
@@ -17,14 +17,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, Callable, Optional
 
-from ..constants.agents import (
-    ATTR_CALL_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
-    SUB_NAME_PREFIX,
-)
+from ..constants.agents import ATTR_CALL_ALIAS
 from ..invokables.atomic_invokable import AtomicInvokable
-from ..models.agents.blackboard_models import Statement, Step, ToolStatement
+from ..models.agents.blackboard_models import Statement
 from .agents import (
     check_call_bindings,
     extract_identifiers,
@@ -34,7 +29,6 @@ from .script import (
     dispatch_inputs,
     parse_first_statement,
     parse_generation,
-    rewrite_builtin_calls,
     validate_references,
 )
 
@@ -54,21 +48,6 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # Compile
 # --------------------------------------------------------------------------- #
-def _is_hoisted(slot: ToolStatement) -> bool:
-    return slot.identifier is not None and slot.identifier.startswith(SUB_NAME_PREFIX)
-
-
-def _step_from_slot(slot: ToolStatement) -> Step:
-    return Step(
-        text=replace(slot, identifier=None).to_code(),
-        kind="eval" if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) else "tool",
-        tool=slot.tool,
-        name=slot.identifier if _is_hoisted(slot) else None,
-        args=slot.args,
-        kwargs=dict(slot.kwargs),
-    )
-
-
 def compile_statements(
     raw_text: str, *, limit: Optional[int], start_ordinal: int = 0,
 ) -> tuple[list[Statement], int]:
@@ -77,54 +56,13 @@ def compile_statements(
     statement (the rest are dropped unparsed); ``limit=None`` keeps them all.
     Returns ``(statements, dropped)`` where ``dropped`` counts the ignored
     later statements. Raises ``BlackboardParseError`` for every rejection.
-
-    1. Parse with ``parse_first_statement`` or ``parse_generation``.
-    2. ``rewrite_builtin_calls`` over the slots.
-    3. Group the slots: hoisted slots join the next own slot.
-    4. Build the steps and statements.
     """
     if limit is None:
-        slots, sources = parse_generation(raw_text, with_sources=True)
-        dropped = 0
-    elif limit == 1:
-        slots, source, dropped = parse_first_statement(raw_text)
-        sources = [source]
-    else:
-        raise ValueError(f"compile_statements: limit must be 1 or None; got {limit!r}.")
-
-    rewrite_builtin_calls(slots)
-
-    groups: list[list[ToolStatement]] = []
-    pending: list[ToolStatement] = []
-    for slot in slots:
-        pending.append(slot)
-        if not _is_hoisted(slot):
-            groups.append(pending)
-            pending = []
-
-    statements: list[Statement] = []
-    for offset, (group, source) in enumerate(zip(groups, sources)):
-        own = group[-1]
-        statements.append(Statement(
-            ordinal=start_ordinal + offset,
-            source=source,
-            kind=(
-                "return" if own.tool == RETURN_ALIAS
-                else "assign" if own.identifier is not None
-                else "call"
-            ),
-            target=own.identifier,
-            steps=tuple(_step_from_slot(slot) for slot in group),
-        ))
-    return statements, dropped
-
-
-def _slot(step: Step, identifier: Optional[str]) -> ToolStatement:
-    """The parser-shaped slot the shared helpers take (goes away when those
-    helpers take steps)."""
-    return ToolStatement(
-        identifier=identifier, tool=step.tool, args=step.args, kwargs=step.kwargs,
-    )
+        return parse_generation(raw_text, start_ordinal=start_ordinal), 0
+    if limit == 1:
+        statement, dropped = parse_first_statement(raw_text, ordinal=start_ordinal)
+        return [statement], dropped
+    raise ValueError(f"compile_statements: limit must be 1 or None; got {limit!r}.")
 
 
 def check_statements(
@@ -137,21 +75,22 @@ def check_statements(
     """
     Validate names, tools and argument bindings across ``statements`` (the
     existing ``validate_references`` and ``check_call_bindings`` over the
-    steps, in order). ``remaining_budget`` is ``validate_references``' own
-    dispatched-call limit; an agent that enforces the action cost itself passes
-    ``None``. Returns the issue list, ``[]`` when clean.
+    steps, in order), then, when ``remaining_budget`` is not ``None``, that
+    the statements' planned cost fits it. An agent that enforces the action
+    cost itself passes ``None``. Returns the issue list, ``[]`` when clean.
     """
-    slots = [
-        _slot(step, step.name if step.name is not None else statement.target)
-        for statement in statements
-        for step in statement.steps
-    ]
-    return (
-        validate_references(
-            slots, frozenset(toolbox), context_names, readonly_names, remaining_budget,
-        )
-        + check_call_bindings(slots, toolbox)
+    issues = (
+        validate_references(statements, frozenset(toolbox), context_names, readonly_names)
+        + check_call_bindings(statements, toolbox)
     )
+    if remaining_budget is not None:
+        cost = sum(planned_cost(statement) for statement in statements)
+        if cost > remaining_budget:
+            issues.append(
+                f"the plan costs {cost} action(s), exceeding the remaining "
+                f"budget of {remaining_budget}."
+            )
+    return issues
 
 
 # --------------------------------------------------------------------------- #
@@ -178,14 +117,13 @@ def run_statement(
     scratch: dict[str, Any] = {}
     steps = list(statement.steps)
     for index, step in enumerate(steps):
-        slot = _slot(step, None)
         try:
-            positional, keyword = resolve_statement_args(slot, {**namespace, **scratch})
+            positional, keyword = resolve_statement_args(step, {**namespace, **scratch})
             if step.kind == "eval":
-                output = keyword["val"]
+                output = positional[0]
             else:
                 tool = resolve_tool(step.tool)
-                output = tool.invoke(dispatch_inputs(slot, tool, positional, keyword))
+                output = tool.invoke(dispatch_inputs(step, tool, positional, keyword))
         except Exception as error:
             steps[index] = replace(step, error=error, status="failed")
             break
@@ -204,14 +142,13 @@ async def async_run_statement(
     scratch: dict[str, Any] = {}
     steps = list(statement.steps)
     for index, step in enumerate(steps):
-        slot = _slot(step, None)
         try:
-            positional, keyword = resolve_statement_args(slot, {**namespace, **scratch})
+            positional, keyword = resolve_statement_args(step, {**namespace, **scratch})
             if step.kind == "eval":
-                output = keyword["val"]
+                output = positional[0]
             else:
                 tool = resolve_tool(step.tool)
-                output = await tool.async_invoke(dispatch_inputs(slot, tool, positional, keyword))
+                output = await tool.async_invoke(dispatch_inputs(step, tool, positional, keyword))
         except Exception as error:
             steps[index] = replace(step, error=error, status="failed")
             break

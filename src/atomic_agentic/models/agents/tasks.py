@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import ToolStatement
+from .blackboard_models import Statement
 from .context import ContextVariable
 from .records import AgentRecord, LLMRecord
 
@@ -156,48 +156,41 @@ class ToolAgentTask(AgentTask):
 
     Fields
     ------
-    completed : list[ToolStatement]
-        Every call that executed successfully so far this run, in commit
-        order. Becomes the owning record's ``statements`` tuple verbatim at
-        commit time.
+    completed : list[Statement]
+        Every statement that ran to the end this run (status ``done``), in
+        commit order. Becomes the owning record's ``statements`` tuple
+        verbatim at commit time.
 
-    failed_statements : list[ToolStatement]
-        Every call whose dispatch (or, for ``PlanActAgent``, resolution)
-        actually failed this run, in the order observed.
+    failed_statements : list[Statement]
+        Every statement that failed this run (status ``failed``), in the order
+        observed. A failed statement keeps the steps that ran and the failing
+        step's ``error``. A statement that never ran is held by the family
+        (``PlanActTask.pending``) and is never recorded.
 
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
         call this run -- irreducible; a rejected/regenerated draft leaves
         no artifact anywhere else to derive this from (contrast
-        ``tool_calls_used``, fully derivable from ``completed``/
-        ``failed_statements``).
+        ``tool_calls_used``, fully derivable from the statements).
 
     Result bindings and referenceable prior results live in ``task.context``
     (``task_result_i`` entries seeded by ``ToolAgent._seed_task``; run-local
     bindings written through ``Agent._write_context``), not on this task.
     """
-    completed: list[ToolStatement] = field(default_factory=list)
-    failed_statements: list[ToolStatement] = field(default_factory=list)
+    completed: list[Statement] = field(default_factory=list)
+    failed_statements: list[Statement] = field(default_factory=list)
     regenerations_used: int = 0
 
     @property
     def tool_calls_used(self) -> int:
         """
-        Derived, not stored -- ``completed``/``failed_statements`` are the
-        single source of truth for every concrete subclass. Counts every
-        dispatched (non-``RETURN_ALIAS``/``RHS_ASSIGN_ALIAS``) call in
-        either list, whether it ultimately succeeded or raised --
-        ``is_dispatched`` is purely a function of ``call.tool``, not of
-        whether dispatch was ever actually attempted, so a call the plan
-        committed to spends budget whether or not the tool itself ever ran,
-        regardless of which lifecycle stage (``prepare()``'s resolution, or
-        a real dispatch attempt) caught the failure.
+        Actions spent this run, derived, not stored: ``actions_used`` over
+        ``completed`` and ``failed_statements``. A statement costs
+        ``max(1, tool steps that ran or failed)``, and a ``return`` is exempt
+        from the minimum. This is what ``tool_calls_limit`` caps.
         """
-        from ...utils.agents import is_dispatched
-        return (
-            sum(1 for c in self.completed if is_dispatched(c))
-            + sum(1 for c in self.failed_statements if is_dispatched(c))
-        )
+        from ...utils.statements import actions_used
+        return actions_used([*self.completed, *self.failed_statements])
 
 
 @dataclass(slots=True)
@@ -215,171 +208,76 @@ class PlanActTask(ToolAgentTask):
 
     Fields
     ------
-    pending : list[list[ToolStatement]]
-        Every not-yet-executed dependency batch compiled from the current
-        generation -- the whole one-shot draft (or, after a granted repair,
-        the whole freshly regenerated tail) is parsed and batch-compiled in
-        a single pass, so this can hold several batches at once even though
-        there is only ever one generation per round. The front batch
-        (``pending[0]``) is the next one act() runs; once it fully
-        executes, its slots move into ``completed`` and it is popped from
-        this list.
+    pending : list[Statement]
+        The statements compiled from the current generation that have not run
+        yet -- the whole one-shot draft (or, after a granted repair, the
+        whole freshly regenerated tail). Statements leave it as they run:
+        done ones move to ``completed``, failed ones to ``failed_statements``.
+        Whatever is left after a failure is reported as not run.
 
     needs_repair : bool
-        Set only by ``prepare()``/``_apply_batch_results()``, only on a
-        real resolution or execution failure that ``fail_fast``/
-        ``replanning_limit`` grants a repair round for -- there is no
-        model-authored way to set this anymore (no ``# PAUSE``, no
-        if-cutoff). Cleared by ``think()``/``async_think()``, right after
-        generating the granted repair round's fresh content -- the flag's
-        only job is telling ``act()``'s and ``_apply_batch_results``'s
-        own empty-``pending`` checks "stopped, needs a repair round" (leave
-        the task incomplete for ``think()`` to regenerate next) apart from
-        "genuinely finished" (finalize via ``_finalize_without_continuation``
-        right there); once that regeneration has actually happened, leaving
-        it set would permanently block both methods' natural-completion
-        checks for the rest of the invoke.
+        Set only on a real resolution or execution failure that
+        ``fail_fast``/``replanning_limit`` grants a repair round for -- there
+        is no model-authored way to set this. Cleared by ``think()``/
+        ``async_think()`` right after generating the granted repair round's
+        fresh content; its only job is telling "stopped, needs a repair
+        round" apart from "genuinely finished" in the empty-``pending`` checks.
 
     repair_rounds_used : int
         Count of framework-granted repair rounds so far this invoke --
-        never counts the free initial plan. Incremented
-        only in ``prepare()``/``_apply_batch_results()``, at the exact
-        point a repair round is granted -- never in ``think()``, which has
-        no budget awareness at all anymore. Checked against
-        ``self._replanning_limit`` at those same two sites before granting
-        another.
+        never counts the free initial plan. Checked against
+        ``replanning_limit`` before granting another.
 
     repair_batch_start : int
-        Index into ``failed_statements`` marking where the batch that most
-        recently triggered (or attempted to trigger) a repair round began.
-        Set alongside ``needs_repair = True``, in the same
-        ``prepare()``/``_apply_batch_results()`` branch that extends
-        ``failed_statements`` with this round's failures. Consumed (read,
-        not cleared) by ``_render_task_messages`` to slice
-        ``failed_statements[repair_batch_start:]`` -- exactly this round's
-        fresh failures, not the whole accumulated history -- mirrors
-        ``ReActTask.last_call_failed``'s own "show what you're reacting to"
-        precedent. There is no separately-maintained note string; rendering
-        derives everything from this slice plus each slot's own
-        ``.exception``.
-
-    resolved_args : list[dict[str, Any]]
-        Positionally matched to ``pending[0]``'s slots -- the resolved
-        kwargs ``prepare()`` computed for the batch ``act()`` is about to
-        run. Reset to ``[]`` by ``act()`` once that batch is fully consumed
-        (or by ``prepare()``'s empty-``pending`` guard). Empty whenever
-        there is nothing currently prepared to execute.
-
-    batch_counter : int
-        Running total of batches compiled so far this invoke, across every
-        generation round -- never reset mid-run. Passed to
-        ``compile_batches`` as ``start_batch_index`` each time it's called,
-        then advanced by the number of batches that call produced, so
-        ``ToolStatement.batch_index`` values stay globally unique across a
-        whole invoke. Note: ``failed_statements`` (inherited from
-        ``ToolAgentTask``; see that class's own docstring) is populated by
-        BOTH ``prepare()`` (a resolution/binding failure, ``slot.exception``
-        set to a synthesized ``ToolAgentError``) and ``_apply_batch_results`` (a
-        real dispatch failure, ``slot.exception`` set to the actual raised
-        value). ``repair_batch_start`` marks where each triggering batch's
-        own slice into it begins.
+        Index into ``failed_statements`` marking where the failures of the
+        round that most recently triggered (or attempted to trigger) a repair
+        began; the repair message renders ``failed_statements[repair_batch_start:]``
+        -- exactly this round's fresh failures, not the accumulated history.
     """
-    pending: list[list[ToolStatement]] = field(default_factory=list)
-    resolved_args: list[dict[str, Any]] = field(default_factory=list)
+    pending: list[Statement] = field(default_factory=list)
     needs_repair: bool = False
     repair_rounds_used: int = 0
     repair_batch_start: int = 0
-    batch_counter: int = 0
 
 
 @dataclass(slots=True)
 class ReActTask(ToolAgentTask):
     """
     ReActAgent-flavored task: one Python statement generated, validated and
-    run per round -- the per-step sibling to ``PlanActTask``'s
-    one-shot plan. ``completed``/``failed_statements``/
-    ``tool_calls_used`` are all inherited from ``ToolAgentTask`` -- only
-    ``generated_step``/``resolved_args``/``last_call_failed`` are genuinely
-    ``ReActAgent``-specific. Result bindings live in ``task.context``
-    (written through ``Agent._write_context``).
+    run per round -- the per-step sibling to ``PlanActTask``'s one-shot plan.
+    ``completed``/``failed_statements``/``tool_calls_used`` are inherited from
+    ``ToolAgentTask``; only the fields below are ``ReActAgent``-specific.
+    Result bindings live in ``task.context`` (written through
+    ``Agent._write_context``).
 
     No fixed-size preallocated board and no observability-decay window --
-    every round renders the full ``completed`` call log (plus the last
-    failure) as the steps block, and the bound values through the context
-    block.
-    No ``pending: list[list[ToolStatement]]`` batch
-    field either -- unlike ``PlanActTask``, this family dispatches
-    exactly one call per round, never a concurrency batch. No ``__post_init__`` --
-    matches every other ``*Task`` in this family: an in-flight,
-    internal-only object, not a real construction-time boundary.
-
-    A resolution failure (a name that doesn't resolve, or a
-    resolved value's type mismatching the target tool's parameter contract)
-    never reaches ``failed_statements`` at all under this family's design --
-    both are caught and fed back for regeneration inside ``think()``'s own
-    retry loop, before a call is ever accepted as this round's decision.
-    Only a real dispatch failure (the tool itself raised once actually
-    invoked) lands there -- which is also why the inherited
-    ``tool_calls_used`` formula (gating both ``completed`` and
-    ``failed_statements`` through ``is_dispatched``) holds correctly here
-    too: every entry in either list is guaranteed to be a real dispatch
-    attempt regardless.
+    every round renders the full ``history`` (plus the last failure) as the
+    steps block, and the bound values through the context block. No
+    ``__post_init__`` -- an in-flight, internal-only object, not a real
+    construction-time boundary.
 
     Fields
     ------
-    generated_step : ToolStatement | None
-        The one call ``think()`` validated and resolved this round -- set
-        only once ``utils.agents.resolve_statement_args``
-        succeeds against it, ``None``
-        before that and after ``act()`` consumes it. ``None`` is the
-        idiomatic "not yet decided" value for a field genuinely typed
-        ``Optional[ToolStatement]``, so no ``NO_VAL`` sentinel is needed
-        here.
-
-    resolved_args : dict[str, Any] | None
-        The resolved keyword-argument dict for ``generated_step``
-        (``tool._args_kwargs_to_dict``-ready), computed inside ``think()``'s
-        own retry loop -- never a later ``prepare()`` step, since
-        ``prepare()`` is a documented no-op for this family (both
-        ``think()`` and ``prepare()`` operate on the same single call;
-        nothing is deferred to a later loop iteration the way a multi-batch
-        plan requires). Singular: there is no batch to index into.
-
-    last_call_failed : bool
-        Set by ``act()``/``async_act()`` at the end of every round --
-        ``True`` on a tolerated (``fail_fast=False``) dispatch failure,
-        ``False`` on success. Exists because ``completed``/
-        ``failed_statements`` are two separate append-only lists with no
-        shared chronological index between them -- without this flag, a
-        later round's rendering can't tell whether the round that just
-        finished succeeded or failed, only that some historical failure
-        exists somewhere in ``failed_statements``. The failed call itself
-        is always ``task.failed_statements[-1]`` when this is ``True`` --
-        no duplicate reference stored.
-
-    pending : list[ToolStatement]
-        ``ReActAgent`` only: the validated slot queue for this round,
-        ``[hoisted calls..., own slot]``. ``think()`` sets it; ``act()`` drains
-        it from the front and clears it on a failure. Empty between rounds.
+    statement : Statement | None
+        The statement this round compiled (``compile_statements(limit=1)``).
+        ``think()`` sets it; ``act()`` runs it, files the result under
+        ``completed`` or ``failed_statements`` and clears it. ``None``
+        between rounds.
 
     source : str
-        ``ReActAgent`` only: the current statement as the model wrote it.
-        ``think()`` sets it; ``act()`` appends it to ``history`` or builds
-        ``failure_note`` from it.
+        The current statement as the model wrote it. ``think()`` sets it;
+        ``act()`` appends it to ``history`` or builds ``failure_note`` from it.
 
     history : list[str]
-        ``ReActAgent`` only: the source of every fully completed statement,
-        in order -- what the steps block renders.
+        The source of every fully completed statement, in order -- what the
+        steps block renders.
 
     failure_note : str
-        ``ReActAgent`` only: the model-facing description of the last failed
-        statement (the statement, the failing sub-step and the sub-steps that
-        already ran); ``""`` when the last statement succeeded.
+        The model-facing description of the last failed statement (the
+        statement, the failing sub-step and the sub-steps that already ran);
+        ``""`` when the last statement succeeded.
     """
-    generated_step: Optional[ToolStatement] = None
-    resolved_args: Optional[dict[str, Any]] = None
-    last_call_failed: bool = False
-    pending: list[ToolStatement] = field(default_factory=list)
+    statement: Optional[Statement] = None
     source: str = ""
     history: list[str] = field(default_factory=list)
     failure_note: str = ""

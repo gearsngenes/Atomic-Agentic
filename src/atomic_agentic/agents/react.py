@@ -40,18 +40,10 @@ from dataclasses import replace
 from typing import Any, Callable, Mapping, Optional
 
 from .toolagent import ToolAgent
-from .tools import attr_call_tool, builtin_call_tool
 from ..a2a import A2AClientHub
-from ..constants.agents import (
-    ATTR_CALL_ALIAS,
-    PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
-    SUB_NAME_PREFIX,
-)
-from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, REACTOR_PROMPT
+from ..constants.agents import RETURN_ALIAS, SUB_NAME_PREFIX
+from ..constants.prompts import DEFAULT_PRE_INVOKE, REACTOR_PROMPT
 from ..exceptions import (
-    AgentInvocationError,
     BlackboardParseError,
     ToolAgentError,
     ToolInvocationError,
@@ -64,16 +56,13 @@ from ..models.agents.records import LLMRecord, ToolAgentRecord
 from ..models.agents.tasks import ReActTask
 from ..utils.agents import (
     check_call_bindings,
-    extract_identifiers,
     is_dispatched,
     resolve_statement_args,
 )
 from ..utils.script import (
-    check_script_tool_name,
     dispatch_inputs,
     parse_first_statement,
     rewrite_builtin_calls,
-    script_context_clashes,
     validate_references,
 )
 
@@ -110,9 +99,8 @@ class ReActAgent(ToolAgent):
         fail_fast: bool = False,
     ) -> None:
         """
-        Everything but ``fail_fast`` forwards to ``ToolAgent.__init__``; the
-        concurrency limit is fixed at ``1`` (one statement per round).
-        ``tool_calls_limit`` defaults to ``25`` (the only run-level stop, since
+        Everything forwards to ``ToolAgent.__init__`` (one statement runs per
+        round, so there is no concurrency knob). ``tool_calls_limit`` defaults to ``25`` (the only run-level stop, since
         ``regeneration_limit`` restarts each round) and ``fail_fast`` to
         ``False`` (redirecting on failure is this family's point).
         """
@@ -123,7 +111,7 @@ class ReActAgent(ToolAgent):
             record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
-            tool_concurrency_limit=1,
+            fail_fast=fail_fast,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             inputs_to_context=inputs_to_context,
@@ -134,80 +122,6 @@ class ReActAgent(ToolAgent):
             tools=tools,
             instructions=instructions,
         )
-
-        if not isinstance(fail_fast, bool):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
-            )
-        self._fail_fast = fail_fast
-
-    @property
-    def fail_fast(self) -> bool:
-        """``True`` raises at the first failed statement; ``False`` (default)
-        records it and shows it next round so the model can redirect."""
-        return self._fail_fast
-
-    def to_dict(self) -> dict[str, Any]:
-        """Extends ``ToolAgent.to_dict()`` with ``fail_fast``."""
-        d = super().to_dict()
-        d["fail_fast"] = self._fail_fast
-        return d
-
-    # ------------------------------------------------------------------ #
-    # Shared Python-grammar hooks (same checks as PlanActAgent)
-    # ------------------------------------------------------------------ #
-    def _render_actions(self) -> str:
-        """The tools frame body plus the permitted Python builtins text."""
-        return f"{super()._render_actions()}\n\n{BUILTINS_PREAMBLE}"
-
-    def _validate_tool_name(self, name: str) -> None:
-        """Rejects names a statement could never reach."""
-        super()._validate_tool_name(name)
-        check_script_tool_name(name)
-
-    def _seed_task(self, task: ReActTask) -> None:
-        """Adds the ``task_result_i`` entries, then rejects any context
-        variable name a statement could not use unambiguously."""
-        super()._seed_task(task)
-        clashes = script_context_clashes(task.context, self._toolbox)
-        if clashes:
-            detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
-            raise AgentInvocationError(
-                f"{type(self).__name__}.{self.name}: context variable name(s) "
-                f"unusable in a script: {detail}. Rename or forget the "
-                "variable, or rename the tool with to_tool."
-            )
-
-    @staticmethod
-    def _action_cost(slot: ToolStatement) -> int:
-        """
-        Actions one slot spends. A dispatched slot (tool, builtin, method)
-        costs 1. A pure assignment costs 1 only when its value references no
-        hoisted ``_SUB_`` name (a statement with calls is charged on its call
-        slots, so the expression around them is free). A ``return`` is free.
-        """
-        if is_dispatched(slot):
-            return 1
-        if slot.tool == RHS_ASSIGN_ALIAS:
-            names = extract_identifiers(slot.kwargs["val"])
-            return 0 if any(n.startswith(SUB_NAME_PREFIX) for n in names) else 1
-        return 0
-
-    def _actions_used(self, task: ReActTask) -> int:
-        """Actions spent this run: ``_action_cost`` over every completed and
-        failed slot."""
-        return sum(
-            self._action_cost(s) for s in (*task.completed, *task.failed_statements)
-        )
-
-    def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
-        """The invokable that runs a dispatched slot: a builtin or attribute
-        dispatcher, else the registered tool."""
-        if tool_id == PY_BUILTIN_ALIAS:
-            return builtin_call_tool
-        if tool_id == ATTR_CALL_ALIAS:
-            return attr_call_tool
-        return self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Rendering

@@ -4,26 +4,19 @@ import ast
 
 import pytest
 
-from atomic_agentic.constants.agents import (
-    ATTR_CALL_ALIAS,
-    KWARGS_UNPACK_KEY,
-    PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
-)
-from atomic_agentic.exceptions import BlackboardParseError
-from atomic_agentic.models.agents.blackboard_models import ToolStatement
-from atomic_agentic.utils.agents import (
-    compile_batches,
-    extract_identifiers,
-    is_dispatched,
-    resolve_statement_args,
-)
+from atomic_agentic.agents.tools import builtin_call_tool
+from atomic_agentic.constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS
+from atomic_agentic.exceptions import BlackboardParseError, ToolRegistrationError
+from atomic_agentic.models.agents.blackboard_models import Statement, Step
+from atomic_agentic.tools import Tool
+from atomic_agentic.utils.agents import extract_identifiers
 from atomic_agentic.utils.script import (
+    check_script_tool_name,
+    dispatch_inputs,
+    parse_first_statement,
     parse_generation,
-    parse_statement_to_slots,
-    render_completed_as_python,
-    rewrite_builtin_calls,
+    parse_statement,
+    script_context_clashes,
     validate_references,
 )
 
@@ -36,21 +29,23 @@ def _const(value: object) -> ast.Constant:
     return ast.Constant(value=value)
 
 
-class TestParseStatementToSlotsAssignment:
-    def test_plain_assignment_produces_rhs_assign_slot(self) -> None:
-        slots = parse_statement_to_slots("x = 5")
+def _own(statement: Statement) -> Step:
+    return statement.steps[-1]
 
-        assert len(slots) == 1
-        slot = slots[0]
-        assert slot.identifier == "x"
-        assert slot.tool == RHS_ASSIGN_ALIAS
-        assert isinstance(slot.kwargs["val"], ast.Constant)
-        assert slot.kwargs["val"].value == 5
+
+class TestParseStatementAssignment:
+    def test_plain_assignment_produces_an_eval_step(self) -> None:
+        statement = parse_statement("x = 5")
+
+        assert statement.kind == "assign" and statement.target == "x"
+        assert statement.source == "x = 5"
+        assert len(statement.steps) == 1
+        step = _own(statement)
+        assert step.kind == "eval" and step.tool is None and step.name is None
+        assert isinstance(step.args[0], ast.Constant) and step.args[0].value == 5
 
     def test_constant_expression_is_not_folded(self) -> None:
-        slot = parse_statement_to_slots("x = 5 * 1.5")[0]
-
-        assert isinstance(slot.kwargs["val"], ast.BinOp)
+        assert isinstance(_own(parse_statement("x = 5 * 1.5")).args[0], ast.BinOp)
 
     @pytest.mark.parametrize(
         "statement",
@@ -65,204 +60,205 @@ class TestParseStatementToSlotsAssignment:
     )
     def test_illegal_target_shapes_raise(self, statement: str) -> None:
         with pytest.raises(BlackboardParseError):
-            parse_statement_to_slots(statement)
+            parse_statement(statement)
 
     def test_reserved_sub_name_prefix_on_target_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="_SUB_"):
-            parse_statement_to_slots("_SUB_0 = 1")
+            parse_statement("_SUB_0 = 1")
 
     def test_reserved_task_result_prefix_on_target_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="task_result_"):
-            parse_statement_to_slots("task_result_0 = 1")
+            parse_statement("task_result_0 = 1")
 
     def test_constant_expression_that_fails_to_evaluate_raises(self) -> None:
         with pytest.raises(BlackboardParseError) as exc_info:
-            parse_statement_to_slots("x = 1 / 0")
+            parse_statement("x = 1 / 0")
 
         assert isinstance(exc_info.value.__cause__, ZeroDivisionError)
 
     def test_dependency_bearing_expression_is_not_dry_evaluated(self) -> None:
-        slot = parse_statement_to_slots("x = y + 1")[0]
+        step = _own(parse_statement("x = y + 1"))
 
-        assert slot.tool == RHS_ASSIGN_ALIAS
-        assert "y" in extract_identifiers(slot.kwargs)
+        assert step.kind == "eval"
+        assert "y" in extract_identifiers(step.args)
+
+    def test_ordinal_is_recorded(self) -> None:
+        assert parse_statement("x = 1", ordinal=7).ordinal == 7
 
 
-class TestParseStatementToSlotsCallShapes:
+class TestParseStatementCallShapes:
     def test_assigned_call(self) -> None:
-        slot = parse_statement_to_slots("y = add(1, 2)")[0]
+        statement = parse_statement("y = add(1, 2)")
+        step = _own(statement)
 
-        assert slot.identifier == "y"
-        assert slot.tool == "add"
-        assert [a.value for a in slot.args] == [1, 2]
+        assert statement.kind == "assign" and statement.target == "y"
+        assert step.kind == "tool" and step.tool == "add" and step.name is None
+        assert [a.value for a in step.args] == [1, 2]
 
     def test_bare_unassigned_call(self) -> None:
-        slots = parse_statement_to_slots("add(1, 2)")
+        statement = parse_statement("add(1, 2)")
 
-        assert len(slots) == 1
-        assert slots[0].identifier is None
-        assert slots[0].tool == "add"
+        assert statement.kind == "call" and statement.target is None
+        assert len(statement.steps) == 1 and _own(statement).tool == "add"
 
     def test_return_with_value(self) -> None:
-        slot = parse_statement_to_slots("return 5")[0]
+        statement = parse_statement("return 5")
+        step = _own(statement)
 
-        assert slot.identifier is None
-        assert slot.tool == RETURN_ALIAS
-        assert slot.kwargs["val"].value == 5
+        assert statement.kind == "return" and statement.target is None
+        assert step.kind == "eval" and step.args[0].value == 5
 
     def test_bare_return_treated_as_return_none(self) -> None:
-        slot = parse_statement_to_slots("return")[0]
+        step = _own(parse_statement("return"))
 
-        assert isinstance(slot.kwargs["val"], ast.Constant)
-        assert slot.kwargs["val"].value is None
+        assert isinstance(step.args[0], ast.Constant) and step.args[0].value is None
+
+    def test_return_of_a_call_hoists_it(self) -> None:
+        statement = parse_statement("return add(1, 2)")
+
+        assert statement.kind == "return"
+        assert [s.kind for s in statement.steps] == ["tool", "eval"]
+        assert statement.steps[0].name == "_SUB_0"
 
     def test_return_of_constant_that_fails_to_evaluate_raises(self) -> None:
         with pytest.raises(BlackboardParseError) as exc_info:
-            parse_statement_to_slots("return 1 / 0")
+            parse_statement("return 1 / 0")
 
         assert isinstance(exc_info.value.__cause__, ZeroDivisionError)
 
     def test_keyword_arguments(self) -> None:
-        slot = parse_statement_to_slots("y = add(a=1, b=2)")[0]
+        step = _own(parse_statement("y = add(a=1, b=2)"))
 
-        assert set(slot.kwargs.keys()) == {"a", "b"}
-        assert slot.kwargs["a"].value == 1
-        assert slot.kwargs["b"].value == 2
+        assert set(step.kwargs) == {"a", "b"}
+        assert step.kwargs["a"].value == 1 and step.kwargs["b"].value == 2
 
-    def test_single_nested_call_is_hoisted_before_the_final_slot(self) -> None:
-        slots = parse_statement_to_slots("y = add(inner(1), 2)")
+    def test_single_nested_call_is_hoisted_before_the_own_step(self) -> None:
+        statement = parse_statement("y = add(inner(1), 2)")
 
-        assert len(slots) == 2
-        hoisted, final = slots
-        assert hoisted.identifier == "_SUB_0"
-        assert hoisted.tool == "inner"
-        assert final.identifier == "y"
-        assert final.tool == "add"
-        assert isinstance(final.args[0], ast.Name) and final.args[0].id == "_SUB_0"
+        assert len(statement.steps) == 2
+        hoisted, own = statement.steps
+        assert hoisted.name == "_SUB_0" and hoisted.tool == "inner"
+        assert statement.target == "y" and own.name is None and own.tool == "add"
+        assert isinstance(own.args[0], ast.Name) and own.args[0].id == "_SUB_0"
 
     def test_doubly_nested_calls_flatten_bottom_up_in_discovery_order(self) -> None:
-        slots = parse_statement_to_slots("y = add(inner(mid(1)), 2)")
+        statement = parse_statement("y = add(inner(mid(1)), 2)")
 
-        # Append order is bottom-up (mid's own slot must fully resolve
-        # before inner's ToolStatement can be built, so it lands in the
-        # list first) -- but _SUB_N numbering follows outer-to-inner
-        # discovery order (a call's own counter slot is reserved before its
-        # arguments are ever recursed into), so the innermost call (mid)
-        # ends up numbered HIGHER despite appearing FIRST in the list.
-        assert [s.identifier for s in slots] == ["_SUB_1", "_SUB_0", "y"]
-        assert slots[0].tool == "mid"
-        assert slots[1].tool == "inner"
-        assert isinstance(slots[1].args[0], ast.Name) and slots[1].args[0].id == "_SUB_1"
+        # Append order is bottom-up (mid must resolve before inner is built),
+        # but _SUB_N numbering follows outer-to-inner discovery order, so the
+        # innermost call is numbered higher despite coming first.
+        assert [s.name for s in statement.steps] == ["_SUB_1", "_SUB_0", None]
+        assert statement.steps[0].tool == "mid"
+        assert statement.steps[1].tool == "inner"
+        assert statement.steps[1].args[0].id == "_SUB_1"
 
     def test_start_index_offsets_hoisted_names(self) -> None:
-        slots = parse_statement_to_slots("y = add(inner(1), 2)", start_index=5)
+        statement = parse_statement("y = add(inner(1), 2)", start_index=5)
 
-        assert slots[0].identifier == "_SUB_5"
+        assert statement.steps[0].name == "_SUB_5"
+
+    def test_allowed_builtin_call_dispatches_through_the_builtin_sentinel(self) -> None:
+        step = _own(parse_statement("n = len(x)"))
+
+        assert step.tool == PY_BUILTIN_ALIAS and step.args[0] == "len"
+        assert isinstance(step.args[1], ast.Name) and step.args[1].id == "x"
+
+    @pytest.mark.parametrize("tool", ["eval", "__loader__", "object"])
+    def test_disallowed_builtin_is_left_as_a_plain_tool_name(self, tool: str) -> None:
+        assert _own(parse_statement(f"y = {tool}(x)")).tool == tool
+
+    def test_non_builtin_tool_name_is_untouched(self) -> None:
+        assert _own(parse_statement("y = my_registered_tool(1)")).tool == "my_registered_tool"
 
 
-class TestParseStatementToSlotsAttributeCalls:
+class TestParseStatementAttributeCalls:
     def test_attribute_call_shape(self) -> None:
-        slot = parse_statement_to_slots("y = obj.get(1)")[0]
+        step = _own(parse_statement("y = obj.get(1)"))
 
-        assert slot.tool == ATTR_CALL_ALIAS
-        obj_expr, method_name, *rest = slot.args
+        assert step.tool == ATTR_CALL_ALIAS
+        obj_expr, method_name, *rest = step.args
         assert isinstance(obj_expr, ast.Name) and obj_expr.id == "obj"
         assert method_name == "get"
         assert [a.value for a in rest] == [1]
 
     def test_attribute_call_keyword_argument_stored_plainly(self) -> None:
-        slot = parse_statement_to_slots("y = obj.get(x=1)")[0]
+        step = _own(parse_statement("y = obj.get(x=1)"))
 
-        assert slot.tool == ATTR_CALL_ALIAS
-        assert slot.kwargs["x"].value == 1
+        assert step.tool == ATTR_CALL_ALIAS and step.kwargs["x"].value == 1
 
     def test_call_free_object_chain_passes_through_unchanged(self) -> None:
-        slots = parse_statement_to_slots("y = obj.attr.get(1)")
+        statement = parse_statement("y = obj.attr.get(1)")
 
-        assert len(slots) == 1
-        final = slots[0]
-        obj_expr = final.args[0]
-        assert isinstance(obj_expr, ast.Attribute)
-        assert ast.unparse(obj_expr) == "obj.attr"
+        assert len(statement.steps) == 1
+        assert ast.unparse(_own(statement).args[0]) == "obj.attr"
 
     def test_embedded_call_in_object_position_is_hoisted(self) -> None:
-        slots = parse_statement_to_slots("y = obj.strip().attr.get(1)")
+        statement = parse_statement("y = obj.strip().attr.get(1)")
 
-        assert len(slots) == 2
-        hoisted, final = slots
-        assert hoisted.identifier == "_SUB_0"
-        assert hoisted.tool == ATTR_CALL_ALIAS
-        assert final.tool == ATTR_CALL_ALIAS
-        obj_expr = final.args[0]
-        assert ast.unparse(obj_expr) == "_SUB_0.attr"
+        assert len(statement.steps) == 2
+        hoisted, own = statement.steps
+        assert hoisted.name == "_SUB_0" and hoisted.tool == ATTR_CALL_ALIAS
+        assert own.tool == ATTR_CALL_ALIAS
+        assert ast.unparse(own.args[0]) == "_SUB_0.attr"
 
     @pytest.mark.parametrize("method", ["format", "format_map", "ljust", "encode", "no_such_method"])
     def test_method_in_no_permitted_class_raises_at_parse_time(self, method: str) -> None:
         with pytest.raises(BlackboardParseError, match="not an allowed method call"):
-            parse_statement_to_slots(f"y = obj.{method}(1)")
+            parse_statement(f"y = obj.{method}(1)")
 
-    def test_dunder_method_call_raises_via_build_call_slot(self) -> None:
+    def test_dunder_method_call_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="dunder"):
-            parse_statement_to_slots("y = obj.__reduce__()")
+            parse_statement("y = obj.__reduce__()")
 
-    def test_bare_dunder_access_raises_via_hoist_calls_walk(self) -> None:
+    def test_bare_dunder_access_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="dunder"):
-            parse_statement_to_slots("y = obj.__class__")
+            parse_statement("y = obj.__class__")
 
     def test_mid_chain_dunder_access_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="dunder"):
-            parse_statement_to_slots("y = obj.__class__.attr")
+            parse_statement("y = obj.__class__.attr")
 
     def test_constant_object_expression_that_fails_to_evaluate_raises(self) -> None:
-        # The attribute-call object sub-expression gets the same
-        # dependency-free dry-eval check every other argument category
-        # already gets.
         with pytest.raises(BlackboardParseError) as exc_info:
-            parse_statement_to_slots("y = (1/0).to_bytes(2, 'big')")
+            parse_statement("y = (1/0).to_bytes(2, 'big')")
 
         assert isinstance(exc_info.value.__cause__, ZeroDivisionError)
 
     def test_dependency_bearing_object_expression_is_not_dry_evaluated(self) -> None:
-        # The dry-eval check only fires when extract_identifiers(obj_expr)
-        # is empty -- a plain dependency-bearing object expression parses fine.
-        slot = parse_statement_to_slots("y = obj.get(1)")[0]
-
-        assert slot.tool == ATTR_CALL_ALIAS
+        assert _own(parse_statement("y = obj.get(1)")).tool == ATTR_CALL_ALIAS
 
 
-class TestParseStatementToSlotsRejectedForms:
+class TestParseStatementRejectedForms:
     def test_ternary_call_in_body_branch_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="conditional expression"):
-            parse_statement_to_slots("y = f() if flag else 2")
+            parse_statement("y = f() if flag else 2")
 
     def test_ternary_call_in_orelse_branch_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="conditional expression"):
-            parse_statement_to_slots("y = 1 if flag else g()")
+            parse_statement("y = 1 if flag else g()")
 
     def test_ternary_call_in_both_branches_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="conditional expression"):
-            parse_statement_to_slots("y = f() if True else g()")
+            parse_statement("y = f() if True else g()")
 
     def test_ternary_with_no_call_anywhere_is_legal(self) -> None:
-        slot = parse_statement_to_slots("y = 1 if flag else 2")[0]
+        step = _own(parse_statement("y = 1 if flag else 2"))
 
-        assert slot.tool == RHS_ASSIGN_ALIAS
-        assert isinstance(slot.kwargs["val"], ast.IfExp)
+        assert step.kind == "eval" and isinstance(step.args[0], ast.IfExp)
 
     def test_ternary_call_only_in_condition_is_legal_and_hoisted(self) -> None:
-        slots = parse_statement_to_slots("y = 1 if cond() else 2")
+        statement = parse_statement("y = 1 if cond() else 2")
 
-        assert len(slots) == 2
-        assert slots[0].identifier == "_SUB_0"
-        assert slots[0].tool == "cond"
+        assert len(statement.steps) == 2
+        assert statement.steps[0].name == "_SUB_0" and statement.steps[0].tool == "cond"
 
     def test_await_in_assignment_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="await"):
-            parse_statement_to_slots("y = await f()")
+            parse_statement("y = await f()")
 
     def test_bare_top_level_await_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="await"):
-            parse_statement_to_slots("await f()")
+            parse_statement("await f()")
 
     @pytest.mark.parametrize(
         "statement",
@@ -276,66 +272,93 @@ class TestParseStatementToSlotsRejectedForms:
     )
     def test_comprehensions_and_lambdas_raise(self, statement: str) -> None:
         with pytest.raises(BlackboardParseError):
-            parse_statement_to_slots(statement)
+            parse_statement(statement)
 
     def test_lambda_used_directly_as_a_calls_own_callee_raises(self) -> None:
-        """
-        Regression test: a lambda used directly as a call's own callee
-        (`(lambda x: x)(1)`) is rejected the same as a lambda anywhere else
-        (see test_comprehensions_and_lambdas_raise). Previously
-        _build_call_slot's plain-tool branch never ran the rejection scan
-        over `call_node.func` itself (only over each argument, via
-        `_process_call_args`) -- fixed by having that branch call the
-        shared `_reject_unsupported_forms` helper on `call_node.func`
-        before treating it as a tool id.
-        """
         with pytest.raises(BlackboardParseError, match="lambda"):
-            parse_statement_to_slots("y = (lambda x: x)(1)")
+            parse_statement("y = (lambda x: x)(1)")
 
     def test_if_statement_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="expected an assignment"):
-            parse_statement_to_slots("if True:\n    pass")
+            parse_statement("if True:\n    pass")
 
     def test_for_statement_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="expected an assignment"):
-            parse_statement_to_slots("for i in range(3):\n    pass")
+            parse_statement("for i in range(3):\n    pass")
 
     def test_multiple_statements_raises(self) -> None:
         with pytest.raises(BlackboardParseError, match="exactly one statement"):
-            parse_statement_to_slots("x = 1\ny = 2")
+            parse_statement("x = 1\ny = 2")
 
     def test_genuine_syntax_error_raises(self) -> None:
         with pytest.raises(BlackboardParseError):
-            parse_statement_to_slots("x = 1 +")
+            parse_statement("x = 1 +")
+
+
+class TestParseFirstStatement:
+    def test_returns_the_first_statement_and_the_dropped_count(self) -> None:
+        statement, dropped = parse_first_statement("a = add(1, 2)\nb = add(3, 4)\nreturn b")
+
+        assert statement.source == "a = add(1, 2)" and dropped == 2
+
+    def test_ordinal_and_start_index_are_forwarded(self) -> None:
+        statement, _ = parse_first_statement("y = add(inner(1), 2)", ordinal=3, start_index=4)
+
+        assert statement.ordinal == 3 and statement.steps[0].name == "_SUB_4"
+
+    def test_leading_notes_are_skipped(self) -> None:
+        statement, dropped = parse_first_statement('"thinking"\nx = add(1, 2)')
+
+        assert statement.source == "x = add(1, 2)" and dropped == 0
+
+    def test_only_notes_is_an_error(self) -> None:
+        with pytest.raises(BlackboardParseError, match="no statement"):
+            parse_first_statement('"just a note"')
+
+    @pytest.mark.parametrize("text", ["x = a or b", "x = 1 if a else 2"])
+    def test_boolop_and_ternary_are_rejected(self, text: str) -> None:
+        with pytest.raises(BlackboardParseError):
+            parse_first_statement(text)
+
+    def test_fence_is_stripped(self) -> None:
+        statement, _ = parse_first_statement("```python\nx = add(1, 2)\n```")
+
+        assert statement.source == "x = add(1, 2)"
 
 
 class TestParseGeneration:
     """
-    No pause marker of any kind exists anymore (Pass 8 dropped # PAUSE
-    entirely -- ScriptActAgent is repair-on-failure only now), so
-    parse_generation returns a flat list[ToolStatement] directly, never a
-    (slots, continue_planning) tuple, and an ast.If node always raises --
-    there is no silent-truncation tolerance left for it.
+    A flat list of ``Statement``s; a ``return`` terminates the generation and an
+    ``ast.If`` always raises (there is no silent-truncation tolerance).
     """
 
     def test_return_terminates_the_generation(self) -> None:
-        slots = parse_generation("x = add(1, 2)\nreturn x")
+        statements = parse_generation("x = add(1, 2)\nreturn x")
 
-        assert len(slots) == 2
-        assert slots[-1].tool == RETURN_ALIAS
+        assert len(statements) == 2
+        assert statements[-1].kind == "return"
+
+    def test_ordinals_run_from_start_ordinal(self) -> None:
+        statements = parse_generation("x = add(1, 2)\nreturn x", start_ordinal=4)
+
+        assert [s.ordinal for s in statements] == [4, 5]
+
+    def test_hoisted_names_do_not_collide_across_statements(self) -> None:
+        statements = parse_generation("a = add(f(1), 2)\nb = add(g(1), 2)")
+
+        names = [s.name for st in statements for s in st.steps if s.name is not None]
+        assert len(names) == len(set(names)) == 2
 
     def test_return_terminates_before_anything_that_follows_is_processed(self) -> None:
-        # Whatever follows a return, if anything, is never even processed --
-        # an ast.If after the return would otherwise always raise.
-        slots = parse_generation("return 1\nif True:\n    y = 1")
+        statements = parse_generation("return 1\nif True:\n    y = 1")
 
-        assert len(slots) == 1
+        assert len(statements) == 1
 
     def test_reasoning_string_anywhere_is_skipped(self) -> None:
-        slots = parse_generation('"thinking about this"\nx = add(1, 2)')
+        statements = parse_generation('"thinking about this"\nx = add(1, 2)')
 
-        assert len(slots) == 1
-        assert slots[0].tool == "add"
+        assert len(statements) == 1
+        assert _own(statements[0]).tool == "add"
 
     def test_if_statement_always_raises_with_prior_work(self) -> None:
         text = "x = add(1, 2)\nif x > 0:\n    y = add(1, 2)"
@@ -348,29 +371,25 @@ class TestParseGeneration:
             parse_generation("if True:\n    y = 1")
 
     def test_falling_off_the_end_with_no_return_simply_means_plan_is_done(self) -> None:
-        slots = parse_generation("x = add(1, 2)\ny = add(x, 1)")
+        statements = parse_generation("x = add(1, 2)\ny = add(x, 1)")
 
-        assert len(slots) == 2
-        assert all(slot.tool != RETURN_ALIAS for slot in slots)
+        assert len(statements) == 2
+        assert all(st.kind != "return" for st in statements)
 
     def test_fence_wrapped_generation_parses_like_unfenced(self) -> None:
-        text = "```python\nx = add(1, 2)\nreturn x\n```"
-        slots = parse_generation(text)
+        statements = parse_generation("```python\nx = add(1, 2)\nreturn x\n```")
 
-        assert len(slots) == 2
+        assert len(statements) == 2
 
     def test_unmatched_leading_fence_is_still_stripped(self) -> None:
-        text = "```python\nx = add(1, 2)\nreturn x"
-        slots = parse_generation(text)
-
-        assert len(slots) == 2
+        assert len(parse_generation("```python\nx = add(1, 2)\nreturn x")) == 2
 
     def test_prose_around_a_single_fenced_block_is_ignored(self) -> None:
         text = "Here is the plan:\n```python\nx = add(1, 2)\nreturn x\n```\nHope that helps!"
-        slots = parse_generation(text)
+        statements = parse_generation(text)
 
-        assert len(slots) == 2
-        assert slots[-1].tool == RETURN_ALIAS
+        assert len(statements) == 2
+        assert statements[-1].kind == "return"
 
     def test_two_fenced_blocks_are_rejected_not_merged(self) -> None:
         text = "```python\nx = add(1, 2)\n```\nthen\n```python\nreturn x\n```"
@@ -380,9 +399,8 @@ class TestParseGeneration:
 
     def test_backticks_inside_a_string_do_not_close_the_fence(self) -> None:
         text = "```python\nx = add('```', 2)\nreturn x\n```"
-        slots = parse_generation(text)
 
-        assert len(slots) == 2
+        assert len(parse_generation(text)) == 2
 
     def test_empty_generation(self) -> None:
         assert parse_generation("") == []
@@ -407,9 +425,7 @@ class TestParseGeneration:
             parse_generation("x = add(1, 2)\n__debug__ = 1")
 
     def test_error_after_return_is_not_reported(self) -> None:
-        slots = parse_generation("return 1\nz += 1\nx = add(a=1, a=2)")
-
-        assert len(slots) == 1
+        assert len(parse_generation("return 1\nz += 1\nx = add(a=1, a=2)")) == 1
 
     def test_compile_gate_skipped_when_a_statement_error_exists(self) -> None:
         text = "await add(1, 2)\nx = add(a=1, a=2)"
@@ -430,400 +446,176 @@ class TestParseGeneration:
             parse_generation("x = yield 1")
 
 
-class TestIsDispatched:
-    def test_rhs_assign_and_return_are_not_dispatched(self) -> None:
-        rhs_slot = ToolStatement(identifier="y", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
-        return_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)})
+class TestDispatchInputs:
+    def test_registered_tool_splats_positional_and_keyword(self) -> None:
+        def add(a: int, b: int = 0) -> int:
+            return a + b
 
-        assert is_dispatched(rhs_slot) is False
-        assert is_dispatched(return_slot) is False
+        tool = Tool(function=add, name="add", description="Adds.")
+        step = Step(kind="tool", tool="add")
 
-    @pytest.mark.parametrize("tool", ["add", PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS])
-    def test_everything_else_is_dispatched(self, tool: str) -> None:
-        slot = ToolStatement(identifier="y", tool=tool)
+        assert dispatch_inputs(step, tool, [1], {"b": 2}) == {"a": 1, "b": 2}
 
-        assert is_dispatched(slot) is True
+    def test_builtin_step_packs_the_real_arguments(self) -> None:
+        step = Step(kind="tool", tool=PY_BUILTIN_ALIAS)
 
-
-class TestRewriteBuiltinCalls:
-    def test_eligible_builtin_is_rewritten(self) -> None:
-        slot = ToolStatement(identifier="y", tool="len", args=(_name("x"),))
-
-        rewrite_builtin_calls([slot])
-
-        assert slot.tool == PY_BUILTIN_ALIAS
-        assert slot.args[0] == "len"
-        assert isinstance(slot.args[1], ast.Name) and slot.args[1].id == "x"
-
-    @pytest.mark.parametrize("tool", ["eval", "__loader__", "object"])
-    def test_disallowed_builtin_is_left_unrewritten(self, tool: str) -> None:
-        slot = ToolStatement(identifier="y", tool=tool, args=(_name("x"),))
-
-        rewrite_builtin_calls([slot])
-
-        assert slot.tool == tool
-
-    @pytest.mark.parametrize("tool", ["eval", "__loader__"])
-    def test_validate_references_reports_disallowed_builtin(self, tool: str) -> None:
-        slot = ToolStatement(identifier="y", tool=tool)
-
-        issues = validate_references([slot], frozenset(), frozenset(), frozenset(), None)
-
-        assert len(issues) == 1
-        assert "not an allowed builtin" in issues[0]
-
-    def test_non_builtin_tool_name_is_untouched(self) -> None:
-        slot = ToolStatement(identifier="y", tool="my_registered_tool")
-
-        rewrite_builtin_calls([slot])
-
-        assert slot.tool == "my_registered_tool"
-
-    def test_rhs_assign_and_return_slots_are_skipped_unconditionally(self) -> None:
-        rhs_slot = ToolStatement(identifier="y", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
-        return_slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)})
-
-        rewrite_builtin_calls([rhs_slot, return_slot])
-
-        assert rhs_slot.tool == RHS_ASSIGN_ALIAS
-        assert return_slot.tool == RETURN_ALIAS
-
-    def test_mixed_batch_only_mutates_and_reports_the_relevant_slots(self) -> None:
-        eligible = ToolStatement(identifier="a", tool="len", args=(_name("x"),))
-        excluded = ToolStatement(identifier="b", tool="exec", args=(_name("x"),))
-        untouched = ToolStatement(identifier="c", tool="my_tool")
-
-        rewrite_builtin_calls([eligible, excluded, untouched])
-
-        assert eligible.tool == PY_BUILTIN_ALIAS
-        assert excluded.tool == "exec"
-        assert untouched.tool == "my_tool"
-
-
-class TestResolveStatementArgs:
-    def test_positional_and_keyword_resolution(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_name("x"),), kwargs={"a": _name("x")})
-
-        positional, keyword = resolve_statement_args(slot, {"x": 5})
-
-        assert positional == [5]
-        assert keyword == {"a": 5}
-
-    def test_starred_positional_splices_iterable(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(ast.Starred(value=_name("nums"), ctx=ast.Load()),))
-
-        positional, _ = resolve_statement_args(slot, {"nums": (1, 2, 3)})
-
-        assert positional == [1, 2, 3]
-
-    def test_starred_positional_resolving_to_non_iterable_raises(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(ast.Starred(value=_const(5), ctx=ast.Load()),))
-
-        with pytest.raises(TypeError):
-            resolve_statement_args(slot, {})
-
-    def test_kwargs_unpack_merges_in(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", kwargs={KWARGS_UNPACK_KEY: _name("kw")})
-
-        _, keyword = resolve_statement_args(slot, {"kw": {"a": 1}})
-
-        assert keyword == {"a": 1}
-
-    def test_kwargs_unpack_collision_raises_type_error(self) -> None:
-        slot = ToolStatement(
-            identifier="y", tool="add",
-            kwargs={"a": _const(1), KWARGS_UNPACK_KEY: _name("kw")},
+        assert dispatch_inputs(step, builtin_call_tool, ["len", [1]], {}) == (
+            builtin_call_tool._args_kwargs_to_dict("len", ([1],), {})
         )
 
-        with pytest.raises(TypeError, match="multiple values"):
-            resolve_statement_args(slot, {"kw": {"a": 2}})
 
-    def test_already_plain_value_passes_through_unchanged(self) -> None:
-        slot = ToolStatement(identifier="y", tool=PY_BUILTIN_ALIAS, args=("len", _name("x")))
+class TestToolNameAndContextChecks:
+    def test_registrable_name_passes(self) -> None:
+        check_script_tool_name("add")
 
-        positional, _ = resolve_statement_args(slot, {"x": [1, 2]})
+    @pytest.mark.parametrize("name", [PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS, "len", "class"])
+    def test_sentinel_builtin_and_keyword_names_are_rejected(self, name: str) -> None:
+        with pytest.raises(ToolRegistrationError):
+            check_script_tool_name(name)
 
-        assert positional[0] == "len"
-        assert positional[1] == [1, 2]
+    def test_return_is_a_keyword_so_it_is_still_rejected(self) -> None:
+        with pytest.raises(ToolRegistrationError):
+            check_script_tool_name("return")
+
+    def test_context_clashes_name_keywords_and_tool_ids(self) -> None:
+        clashes = script_context_clashes(["class", "add", "ok"], {"add"})
+
+        assert set(clashes) == {"class", "add"}
+
+
+def _stmt(kind: str, target, *steps: Step) -> Statement:
+    return Statement(ordinal=0, source="", kind=kind, target=target, steps=steps)
+
+
+def _eval(expr: ast.expr) -> Step:
+    return Step(kind="eval", args=(expr,))
+
+
+def _issues(statements, tools=(), context=(), readonly=()) -> list[str]:
+    return validate_references(
+        statements, frozenset(tools), frozenset(context), frozenset(readonly),
+    )
 
 
 class TestValidateReferences:
     def test_unregistered_tool_reference_is_an_issue(self) -> None:
-        slot = ToolStatement(identifier="y", tool="unknown_tool")
+        st = _stmt("assign", "y", Step(kind="tool", tool="unknown_tool"))
 
-        issues = validate_references([slot], frozenset(), frozenset(), frozenset(), None)
+        issues = _issues([st])
 
         assert len(issues) == 1
-        assert "unregistered tool" in issues[0]
-        assert "unknown_tool" in issues[0]
+        assert "unregistered tool" in issues[0] and "unknown_tool" in issues[0]
 
     def test_undefined_name_reference_is_an_issue(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_name("z"),))
+        st = _stmt("assign", "y", Step(kind="tool", tool="add", args=(_name("z"),)))
 
-        issues = validate_references([slot], frozenset({"add"}), frozenset(), frozenset(), None)
+        issues = _issues([st], tools={"add"})
 
         assert len(issues) == 1
         assert "undefined name 'z'" in issues[0]
 
-    def test_reference_to_earlier_bound_identifier_is_fine(self) -> None:
-        first = ToolStatement(identifier="x", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
-        second = ToolStatement(identifier="y", tool="add", args=(_name("x"),))
+    def test_reference_to_an_earlier_target_is_fine(self) -> None:
+        first = _stmt("assign", "x", _eval(_const(1)))
+        second = _stmt("assign", "y", Step(kind="tool", tool="add", args=(_name("x"),)))
 
-        issues = validate_references([first, second], frozenset({"add"}), frozenset(), frozenset(), None)
+        assert _issues([first, second], tools={"add"}) == []
 
-        assert issues == []
+    def test_reference_to_a_hoisted_name_within_a_statement_is_fine(self) -> None:
+        hoisted = Step(kind="tool", tool="inner", name="_SUB_0")
+        own = Step(kind="tool", tool="add", args=(_name("_SUB_0"),))
+
+        assert _issues([_stmt("assign", "y", hoisted, own)], tools={"add", "inner"}) == []
 
     def test_reference_to_a_context_name_is_fine(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_name("PI"), _name("task_result_0")))
+        st = _stmt("assign", "y", Step(kind="tool", tool="add", args=(_name("PI"), _name("task_result_0"))))
 
-        issues = validate_references(
-            [slot], frozenset({"add"}), frozenset({"PI", "task_result_0"}), frozenset({"PI"}), None
-        )
-
-        assert issues == []
+        assert _issues([st], tools={"add"}, context={"PI", "task_result_0"}, readonly={"PI"}) == []
 
     def test_assigning_to_a_readonly_context_name_is_rejected(self) -> None:
-        slot = ToolStatement(identifier="PI", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+        issues = _issues([_stmt("assign", "PI", _eval(_const(1)))], context={"PI"}, readonly={"PI"})
 
-        issues = validate_references([slot], frozenset(), frozenset({"PI"}), frozenset({"PI"}), None)
-
-        assert len(issues) == 1
-        assert "read-only context variable" in issues[0]
+        assert len(issues) == 1 and "read-only context variable" in issues[0]
 
     def test_assigning_to_a_tool_id_is_rejected(self) -> None:
-        slot = ToolStatement(identifier="add", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+        issues = _issues([_stmt("assign", "add", _eval(_const(1)))], tools={"add"})
 
-        issues = validate_references([slot], frozenset({"add"}), frozenset(), frozenset(), None)
-
-        assert len(issues) == 1
-        assert "registered tool id" in issues[0]
+        assert len(issues) == 1 and "registered tool id" in issues[0]
 
     def test_assigning_to_a_writable_context_name_is_allowed(self) -> None:
-        slot = ToolStatement(identifier="notes", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
+        assert _issues([_stmt("assign", "notes", _eval(_const(1)))], context={"notes"}) == []
 
-        issues = validate_references(
-            [slot], frozenset(), frozenset({"notes"}), frozenset(), None
-        )
+    def test_disallowed_builtin_is_reported_specifically(self) -> None:
+        issues = _issues([_stmt("assign", "y", Step(kind="tool", tool="eval"))])
 
-        assert issues == []
+        assert len(issues) == 1 and "not an allowed builtin" in issues[0]
 
-    def test_tool_call_budget_exceeded_is_reported(self) -> None:
-        slots = [
-            ToolStatement(identifier="a", tool="add"),
-            ToolStatement(identifier="b", tool=PY_BUILTIN_ALIAS, args=("len", _name("a"))),
-            ToolStatement(identifier="c", tool="add"),
-        ]
+    def test_builtin_and_method_steps_are_not_checked_against_the_toolbox(self) -> None:
+        st = _stmt("assign", "y", Step(kind="tool", tool=PY_BUILTIN_ALIAS, args=("len", _const(1))))
 
-        issues = validate_references(slots, frozenset({"add"}), frozenset(), frozenset(), 2)
-
-        budget_issues = [i for i in issues if "exceeding the configured limit" in i]
-        assert len(budget_issues) == 1
-        assert "3" in budget_issues[0]
-
-    def test_no_budget_issue_when_limit_is_none(self) -> None:
-        slots = [ToolStatement(identifier="a", tool="add") for _ in range(5)]
-
-        issues = validate_references(slots, frozenset({"add"}), frozenset(), frozenset(), None)
-
-        assert issues == []
+        assert _issues([st]) == []
 
     def test_registered_tool_name_used_as_a_value_is_rejected(self) -> None:
-        # A bare tool name used as a value (e.g. the object of an
-        # attribute call) is rejected with its own specific message, not
-        # silently treated as "known".
-        slot = ToolStatement(
-            identifier="y", tool=ATTR_CALL_ALIAS, args=(_name("sometool"), "attr"),
-        )
+        step = Step(kind="tool", tool=ATTR_CALL_ALIAS, args=(_name("sometool"), "attr"))
 
-        issues = validate_references([slot], frozenset({"sometool"}), frozenset(), frozenset(), None)
+        issues = _issues([_stmt("assign", "y", step)], tools={"sometool"})
 
         assert len(issues) == 1
-        assert "as a value" in issues[0]
-        assert "sometool" in issues[0]
+        assert "as a value" in issues[0] and "sometool" in issues[0]
 
     def test_comprehensive_not_fail_fast(self) -> None:
-        slots = [
-            ToolStatement(identifier="y", tool="unknown_tool", args=(_name("z"),)),
-            ToolStatement(identifier="w", tool="add"),
+        statements = [
+            _stmt("assign", "y", Step(kind="tool", tool="unknown_tool", args=(_name("z"),))),
+            _stmt("assign", "w", Step(kind="tool", tool="add", args=(_name("q"),))),
         ]
 
-        issues = validate_references(slots, frozenset({"add"}), frozenset(), frozenset(), 0)
+        issues = _issues(statements, tools={"add"})
 
         assert any("unregistered tool" in i for i in issues)
         assert any("undefined name 'z'" in i for i in issues)
-        assert any("exceeding the configured limit" in i for i in issues)
+        assert any("undefined name 'q'" in i for i in issues)
 
+    def test_an_unassigned_statement_is_labelled_as_such(self) -> None:
+        issues = _issues([_stmt("call", None, Step(kind="tool", tool="nope"))])
 
-class TestCompileBatches:
-    def test_independent_slots_share_a_batch(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-
-        batches = compile_batches([a, b])
-
-        assert batches == [[a, b]]
-        assert a.batch_index == 0 and b.batch_index == 0
-
-    def test_dependent_slot_starts_a_new_batch(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b", args=(_name("a"),))
-
-        batches = compile_batches([a, b])
-
-        assert batches == [[a], [b]]
-        assert a.batch_index == 0 and b.batch_index == 1
-
-    def test_dependency_on_an_already_closed_batch_does_not_force_a_new_close(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b", args=(_name("a"),))
-        c = ToolStatement(identifier="c", tool="tool_c", args=(_name("a"),))
-
-        batches = compile_batches([a, b, c])
-
-        assert batches == [[a], [b, c]]
-
-    def test_max_concurrency_forces_separate_batches(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-
-        batches = compile_batches([a, b], max_concurrency=1)
-
-        assert batches == [[a], [b]]
-
-    def test_no_concurrency_cap_batches_independent_slots_together(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-
-        batches = compile_batches([a, b], max_concurrency=None)
-
-        assert batches == [[a, b]]
-
-    def test_return_always_lands_alone_in_its_own_batch(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-        b = ToolStatement(identifier="b", tool="tool_b")
-        ret = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)})
-
-        batches = compile_batches([a, b, ret])
-
-        assert batches == [[a, b], [ret]]
-
-    def test_start_batch_index_offsets_stamped_indices(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a")
-
-        compile_batches([a], start_batch_index=5)
-
-        assert a.batch_index == 5
-
-    def test_rhs_assign_slots_never_count_toward_concurrency_cap(self) -> None:
-        slots = [
-            ToolStatement(identifier=f"x{i}", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(i)})
-            for i in range(5)
-        ]
-
-        batches = compile_batches(slots, max_concurrency=1)
-
-        assert batches == [slots]
-
-
-class TestRenderCompletedAsPython:
-    def test_empty_completed(self) -> None:
-        assert render_completed_as_python([]) == ""
-
-    def test_binop_renders_as_written_not_precomputed(self) -> None:
-        slot = ToolStatement(identifier="name", tool=RHS_ASSIGN_ALIAS, kwargs={"val": ast.parse("5 * 1.5", mode="eval").body})
-
-        assert render_completed_as_python([slot]) == "name = 5 * 1.5"
-
-    def test_return_slot(self) -> None:
-        slot = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(5)})
-
-        assert render_completed_as_python([slot]) == "return 5"
-
-    def test_registered_tool_call_with_identifier(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", args=(_const(1), _const(2)))
-
-        assert render_completed_as_python([slot]) == "y = add(1, 2)"
-
-    def test_bare_call_has_no_leading_identifier(self) -> None:
-        slot = ToolStatement(identifier=None, tool="log", args=(_const("hi"),))
-
-        assert render_completed_as_python([slot]) == "log('hi')"
-
-    def test_py_builtin_unsplices_to_natural_call_syntax(self) -> None:
-        slot = ToolStatement(identifier="y", tool=PY_BUILTIN_ALIAS, args=("len", _name("x")))
-
-        assert render_completed_as_python([slot]) == "y = len(x)"
-
-    def test_attr_call_unsplices_to_dotted_call_syntax(self) -> None:
-        slot = ToolStatement(identifier="y", tool=ATTR_CALL_ALIAS, args=(_name("obj"), "method", _const(1)))
-
-        assert render_completed_as_python([slot]) == "y = obj.method(1)"
-
-    def test_starred_positional_arg_renders_with_star_prefix(self) -> None:
-        slot = ToolStatement(
-            identifier="y", tool="add",
-            args=(ast.Starred(value=_name("nums"), ctx=ast.Load()),),
-        )
-
-        assert render_completed_as_python([slot]) == "y = add(*nums)"
-
-    def test_kwargs_unpack_renders_with_double_star_prefix(self) -> None:
-        slot = ToolStatement(identifier="y", tool="add", kwargs={KWARGS_UNPACK_KEY: _name("kw")})
-
-        assert render_completed_as_python([slot]) == "y = add(**kw)"
-
-    def test_show_batches_groups_by_batch_index_with_headers(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a", batch_index=0)
-        b = ToolStatement(identifier="b", tool="tool_b", batch_index=1)
-
-        rendered = render_completed_as_python([a, b], show_batches=True)
-
-        assert "# Batch 0:" in rendered
-        assert "# Batch 1:" in rendered
-
-        unrendered = render_completed_as_python([a, b], show_batches=False)
-        assert "# Batch" not in unrendered
+        assert "(unassigned)" in issues[0]
 
 
 class TestValidateReferencesMutatorsOnReadonly:
     @staticmethod
-    def _issues(script: str, readonly: frozenset[str] = frozenset({"ro"})) -> list[str]:
-        slots = []
-        for line in script.splitlines():
-            slots.extend(parse_statement_to_slots(line, start_index=len(slots)))
+    def _check(script: str, readonly: frozenset[str] = frozenset({"ro"})) -> list[str]:
         return validate_references(
-            slots, frozenset(), frozenset({"ro", "rw"}) | readonly, readonly, None
+            parse_generation(script), frozenset(), frozenset({"ro", "rw"}) | readonly, readonly,
         )
 
     def test_direct_mutator_on_a_readonly_name_is_flagged(self) -> None:
-        issues = self._issues("ro.append(1)")
+        issues = self._check("ro.append(1)")
 
         assert any("mutating method 'append'" in i and "'ro'" in i for i in issues)
 
     def test_mutator_on_an_attribute_chain_of_a_readonly_name_is_flagged(self) -> None:
-        assert any("mutating method" in i for i in self._issues("ro.items.append(1)"))
+        assert any("mutating method" in i for i in self._check("ro.items.append(1)"))
 
     def test_non_mutating_methods_and_writable_names_pass(self) -> None:
-        issues = self._issues("a = ro.get(1)\nb = ro.copy()\nrw.append(1)")
+        issues = self._check("a = ro.get(1)\nb = ro.copy()\nrw.append(1)")
 
         assert all("mutating" not in i for i in issues)
 
     def test_alias_by_assignment_is_protected(self) -> None:
-        issues = self._issues("a = ro\na.append(1)")
+        issues = self._check("a = ro\na.append(1)")
 
         assert any("mutating method 'append'" in i and "'a'" in i for i in issues)
 
     def test_reassigning_an_alias_to_a_new_value_clears_protection(self) -> None:
-        issues = self._issues("a = ro\na = [1]\na.append(2)")
+        issues = self._check("a = ro\na = [1]\na.append(2)")
 
         assert all("mutating" not in i for i in issues)
 
     def test_alias_by_get_is_protected(self) -> None:
-        issues = self._issues("v = ro.get(0)\nv.append(1)")
+        issues = self._check("v = ro.get(0)\nv.append(1)")
 
         assert any("mutating method" in i and "'v'" in i for i in issues)
 
     def test_copy_and_new_builtin_objects_are_not_protected(self) -> None:
         for setup in ("c = ro.copy()", "c = list(ro)", "c = ro.split(',')"):
-            issues = self._issues(setup + "\nc.append(1)")
+            issues = self._check(setup + "\nc.append(1)")
             assert all("mutating" not in i for i in issues), setup

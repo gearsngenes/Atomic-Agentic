@@ -107,14 +107,13 @@ DEFAULT_PRE_INVOKE: str = "{prompt}"
 # - agents/planact.py: PlanActAgent's one-shot planning prompt
 #
 # Teaches PlanActAgent's native Python-statement grammar (utils/script.py:
-# parse_statement_to_slots/parse_generation/validate_references/
-# compile_batches) -- real AST evaluation against a real namespace, not a
+# parse_statement/parse_generation/validate_references) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, not a placeholder-substitution sigil. The text is static (no fields): ToolAgent._render_system_message
 # frames it as TOOL-CALLING INSTRUCTIONS, then adds the AVAILABLE TOOLS frame
-# (TOOLS_PREAMBLE, the tool list, and for this family BUILTINS_PREAMBLE, all in
-# this module). No budget text: validate_references still enforces
-# the tool-call limit as a hard backstop, but the model sees it via the
+# (TOOLS_PREAMBLE, the tool list and BUILTINS_PREAMBLE, all in this module).
+# No budget text: check_statements still enforces the action limit as a hard
+# backstop, but the model sees it via the
 # per-round task directive, not the system prompt.
 
 ONESHOT_PLANNER_PROMPT: str = """\

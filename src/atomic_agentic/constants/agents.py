@@ -88,44 +88,35 @@ RUNTIME_PARAM: ParamSpec = ParamSpec(
     type=("Any",),
 )
 
-# RETURN_VALUE_FIELD is the kwargs key of a RETURN_ALIAS / RHS_ASSIGN_ALIAS
-# slot's value (utils/script.py builds it; utils/agents.py's
-# resolve_statement_args and ToolStatement.to_code read it).
-RETURN_VALUE_FIELD = "val"
-
-
 # =============================================================================
 # PlanActAgent code-statement reserved literals
 # =============================================================================
 # Used by:
-# - models/agents/blackboard_models.py: ToolStatement.tool default alias
-# - utils/script.py: parse_statement_to_slots hoisting/rhs_assign/return/
+# - models/agents/blackboard_models.py: Step.text rendering
+# - utils/script.py: parse_statement hoisting/assignment/return/
 #   task-result-reference logic
 # - agents/toolagent.py: ToolAgent.render_turn cross-invocation result
 #   addressing (TASK_RESULT_PREFIX); agents/toolagent.py: _seed_task
 #   seeds the same addressing as task_result_i context entries
 #
-# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/
-# ATTR_CALL_ALIAS can never be real registered tool names; SUB_NAME_PREFIX/
+# Reserved namespaces: PY_BUILTIN_ALIAS/ATTR_CALL_ALIAS can never be real
+# registered tool names; SUB_NAME_PREFIX/
 # TASK_RESULT_PREFIX can never be a model-chosen identifier. Enforcement
 # points live outside this file's scope.
 
-RHS_ASSIGN_ALIAS = "rhs_assign"
 SUB_NAME_PREFIX = "_SUB_"
-RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
 
 PY_BUILTIN_ALIAS = "py_builtin"
-"""Reserved ToolStatement.tool sentinel for a rewritten Python builtin call
--- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
-name may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_name,
+"""Reserved Step.tool sentinel for a Python builtin call -- a name no real
+registered tool name may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_name,
 extended by agents/planact.py's PlanActAgent._validate_tool_name).
 Unlike
 those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
 
 ATTR_CALL_ALIAS = "attr_call"
-"""Reserved ToolStatement.tool sentinel for an attribute/method call
+"""Reserved Step.tool sentinel for an attribute/method call
 (`obj.method(...)`) on a value the plan already holds -- same treatment as
 PY_BUILTIN_ALIAS: reserved from real tool names, dispatches through a real
 Tool (agents.tools.attr_call_tool), counts toward tool-call budget
@@ -144,13 +135,13 @@ ALLOWED_PY_BUILTINS: frozenset[str] = frozenset(
 """The only builtins PlanActAgent's py_builtin dispatch will call -- an
 explicit allowlist of value-in/value-out functions, never a blocklist over
 ``dir(builtins)`` (which also holds ``__loader__``, ``__spec__`` and the like).
-Checked by utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
+Checked by utils/script.py's _build_call_step (parse-time eligibility) and
 agents/tools.py's call_python_builtin (runtime enforcement -- the authoritative
 gate; the parse-time check exists so a real-but-disallowed builtin name gets a
 specific regen-repair message instead of the generic "unregistered tool" one).
 ``type`` is single-argument only (enforced at dispatch)."""
 
-# Reserved ToolStatement.kwargs key marking a `**expr` unpack in a real call.
+# Reserved Step.kwargs key marking a `**expr` unpack in a real call.
 # "**" is never a valid Python identifier, so it can never collide with a
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
@@ -183,7 +174,7 @@ EMBEDDED_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(
 # Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
 # Rejected unconditionally by utils/agents.py's reject_unsupported_forms
 # (for a bare `ast.Attribute` anywhere in an expression -- PlanActAgent's
-# own code-statement grammar) and utils/script.py's _build_call_slot (for
+# own code-statement grammar) and utils/script.py's _build_call_step (for
 # a method-call's own method name, the one position
 # reject_unsupported_forms's own walk never scans) -- closes the classic
 # attribute-chaining sandbox-escape class
@@ -268,9 +259,7 @@ __all__ = [
     # Built-in agent parameters
     "RUNTIME_PARAM",
     # PlanActAgent code-statement reserved literals
-    "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",
-    "RETURN_ALIAS",
     "TASK_RESULT_PREFIX",
     "PY_BUILTIN_ALIAS",
     "ATTR_CALL_ALIAS",
@@ -283,5 +272,4 @@ __all__ = [
     "ALLOWED_ATTR_METHODS",
     "MUTATING_ATTR_METHODS",
     "UNSUPPORTED_EXPR_LABELS",
-    "RETURN_VALUE_FIELD",
 ]

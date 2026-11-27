@@ -7,21 +7,15 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.constants.agents import (
-    ATTR_CALL_ALIAS,
-    PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
-)
+from atomic_agentic.constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS
 from atomic_agentic.models.agents.records import (
     AgentRecord,
     LLMRecord,
-    ScriptActAgentRecord,
-    ScriptActAgentToolUsage,
+    PlanActAgentRecord,
     ThinkingAgentRecord,
     ToolAgentRecord,
 )
-from atomic_agentic.models.agents.blackboard_models import ToolStatement
+from atomic_agentic.models.agents.blackboard_models import Statement, Step
 from atomic_agentic.models.agents.context import ContextVariable
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
@@ -419,10 +413,32 @@ class TestAgentRecord:
         assert record.to_dict()["child_ids"] == [child.run_id]
 
 
+def _name(identifier: str) -> ast.Name:
+    return ast.Name(id=identifier, ctx=ast.Load())
+
+
+def _const(value: object) -> ast.Constant:
+    return ast.Constant(value=value)
+
+
+def _statement(
+    tool: str = "add", target: str | None = "x", *, ordinal: int = 0, status: str = "ran",
+    args: tuple = (), error: Exception | None = None,
+) -> Statement:
+    """A one-step tool statement in the given status (a failed one carries ``error``)."""
+    step = Step(kind="tool", tool=tool, args=args, status=status, error=error)
+    kind = "assign" if target is not None else "call"
+    return Statement(ordinal=ordinal, source="", kind=kind, target=target, steps=(step,))
+
+
+def _failed(tool: str = "add", target: str | None = "y", *, ordinal: int = 1) -> Statement:
+    return _statement(tool, target, ordinal=ordinal, status="failed", error=ValueError("boom"))
+
+
 class TestToolAgentRecord:
     def test_is_an_agent_record(self) -> None:
-        statements = (ToolStatement(identifier="x", tool="add"),)
-        failed = (ToolStatement(identifier="y", tool="add", exception=ValueError("boom")),)
+        statements = (_statement(),)
+        failed = (_failed(),)
         record = ToolAgentRecord(
             run_id="run-29",
             user_prompt="run tools",
@@ -444,20 +460,20 @@ class TestToolAgentRecord:
         assert record.regenerations_used == 0
 
     def test_statements_normalized_to_tuple(self) -> None:
-        statements = [ToolStatement(identifier="x", tool="add")]
+        statements = [_statement()]
         record = ToolAgentRecord(run_id="run-31", user_prompt="run", generated_response=1, statements=statements)
 
         assert isinstance(record.statements, tuple)
 
-    def test_rejects_non_tool_statement_in_statements(self) -> None:
-        with pytest.raises(TypeError, match="ToolStatement"):
+    def test_rejects_non_statement_in_statements(self) -> None:
+        with pytest.raises(TypeError, match="Statement"):
             ToolAgentRecord(
                 run_id="run-32",
                 user_prompt="run", generated_response=1, statements=("not a statement",)  # type: ignore[arg-type]
             )
 
-    def test_rejects_non_tool_statement_in_failed_statements(self) -> None:
-        with pytest.raises(TypeError, match="ToolStatement"):
+    def test_rejects_non_statement_in_failed_statements(self) -> None:
+        with pytest.raises(TypeError, match="Statement"):
             ToolAgentRecord(
                 run_id="run-33",
                 user_prompt="run", generated_response=1,
@@ -465,7 +481,7 @@ class TestToolAgentRecord:
             )
 
     def test_to_dict_includes_statements_and_regenerations_used(self) -> None:
-        statements = (ToolStatement(identifier="x", tool="add", args=(_const(1), _const(2))),)
+        statements = (_statement(args=(_const(1), _const(2))),)
         record = ToolAgentRecord(
             run_id="run-34",
             user_prompt="run tools", generated_response=42, statements=statements, regenerations_used=1,
@@ -484,22 +500,33 @@ class TestToolAgentRecord:
         with pytest.raises(FrozenInstanceError):
             record.regenerations_used = 1  # type: ignore[misc]
 
-    def test_render_as_code_groups_by_batch(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a", batch_index=0)
-        b = ToolStatement(identifier="b", tool="tool_b", batch_index=1)
-        record = ToolAgentRecord(run_id="run-37", user_prompt="do it", generated_response=None, statements=(a, b))
-
-        rendered = record.render_as_code()
-
-        assert "# Batch 0:" in rendered
-        assert "# Batch 1:" in rendered
-
-    def test_usage_report_counts_dispatched_calls_by_tool_identity(self) -> None:
-        statements = (
-            ToolStatement(identifier="a", tool="add"),
-            ToolStatement(identifier="b", tool="add"),
+    def test_render_as_code_merges_done_and_failed_in_source_order(self) -> None:
+        done = Statement(
+            ordinal=0, source="a = add(1, 2)", kind="assign", target="a",
+            steps=(Step(kind="tool", tool="add", status="ran"),),
         )
-        failed = (ToolStatement(identifier="c", tool="add", exception=ValueError("boom")),)
+        failed = Statement(
+            ordinal=1, source="b = boom(1)", kind="assign", target="b",
+            steps=(Step(kind="tool", tool="boom", status="failed", error=ValueError("bad")),),
+        )
+        later = Statement(
+            ordinal=2, source="c = add(a, 1)", kind="assign", target="c",
+            steps=(Step(kind="tool", tool="add", status="ran"),),
+        )
+        record = ToolAgentRecord(
+            run_id="run-37", user_prompt="do it", generated_response=None,
+            statements=(done, later), failed_statements=(failed,),
+        )
+
+        lines = record.render_as_code().split("\n")
+
+        assert lines[0] == "a = add(1, 2)"
+        assert lines[1].startswith("b = boom(1)  # FAILED")
+        assert lines[2] == "c = add(a, 1)"
+
+    def test_usage_report_counts_ran_and_failed_tool_steps_by_identity(self) -> None:
+        statements = (_statement(target="a"), _statement(target="b", ordinal=1))
+        failed = (_failed(target="c", ordinal=2),)
         record = ToolAgentRecord(
             run_id="run-38",
             user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
@@ -511,12 +538,15 @@ class TestToolAgentRecord:
         assert report.total_failed == 1
         assert report.by_tool == (ToolUsageRecord(tool_name="add", call_count=3),)
 
-    def test_usage_report_excludes_return_alias(self) -> None:
-        statements = (
-            ToolStatement(identifier="a", tool="add"),
-            ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _const(1)}),
+    def test_usage_report_excludes_eval_steps(self) -> None:
+        ret = Statement(
+            ordinal=1, source="return 1", kind="return", target=None,
+            steps=(Step(kind="eval", args=(_const(1),), status="ran"),),
         )
-        record = ToolAgentRecord(run_id="run-39", user_prompt="do it", generated_response=1, statements=statements)
+        record = ToolAgentRecord(
+            run_id="run-39", user_prompt="do it", generated_response=1,
+            statements=(_statement(target="a"), ret),
+        )
 
         report = record.usage_report()
 
@@ -526,15 +556,15 @@ class TestToolAgentRecord:
     def test_usage_report_is_build_usage_report_over_the_record_statements(self) -> None:
         from atomic_agentic.utils.agents import build_usage_report
 
-        statements = (ToolStatement(identifier="a", tool="add"),)
-        failed = (ToolStatement(identifier="b", tool="sub", exception=ValueError("boom")),)
+        statements = (_statement(target="a"),)
+        failed = (_failed("sub", "b"),)
         record = ToolAgentRecord(
             run_id="run-40",
             user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
         )
 
-        assert record.usage_report() == build_usage_report(statements, failed)
-        assert build_usage_report([], []).by_tool == ()
+        assert record.usage_report() == build_usage_report((*statements, *failed))
+        assert build_usage_report([]).by_tool == ()
 
 
 class TestThinkingAgentRecord:
@@ -606,221 +636,45 @@ class TestThinkingAgentRecord:
             record.thoughts = ("x",)  # type: ignore[misc]
 
 
-def _name(identifier: str) -> ast.Name:
-    return ast.Name(id=identifier, ctx=ast.Load())
-
-
-def _const(value: object) -> ast.Constant:
-    return ast.Constant(value=value)
-
-
-class TestToolStatement:
-    """
-    Covers ToolStatement's own construction/validation/serialization --
-    the unified replacement for the pre-toolstatement-unification
-    BlackboardSlot (no separate status string, no step_dependencies stored
-    field, no copy()/from_dict() -- dependencies are derived on demand via
-    extract_identifiers, and a ToolStatement is never reconstructed from a
-    plain dict the way a BlackboardSlot once was).
-    """
-
-    def test_defaults(self) -> None:
-        stmt = ToolStatement(identifier=None, tool="add")
-
-        assert stmt.identifier is None
-        assert stmt.tool == "add"
-        assert stmt.args == ()
-        assert stmt.kwargs == {}
-        assert stmt.batch_index is None
-        assert stmt.result is None
-        assert stmt.exception is None
-
-    def test_args_normalized_to_tuple(self) -> None:
-        stmt = ToolStatement(identifier=None, tool="add", args=[_const(1), _const(2)])
-
-        assert isinstance(stmt.args, tuple)
-
-    def test_rejects_invalid_identifier(self) -> None:
-        with pytest.raises(ValueError, match="identifier"):
-            ToolStatement(identifier="not an identifier", tool="add")
-
-    def test_rejects_empty_tool(self) -> None:
-        with pytest.raises(ValueError, match="tool"):
-            ToolStatement(identifier=None, tool="")
-
-    def test_rejects_non_sequence_args(self) -> None:
-        with pytest.raises(TypeError, match="args"):
-            ToolStatement(identifier=None, tool="add", args="not a sequence")  # type: ignore[arg-type]
-
-    def test_rejects_non_dict_kwargs(self) -> None:
-        with pytest.raises(TypeError, match="kwargs"):
-            ToolStatement(identifier=None, tool="add", kwargs=["not a dict"])  # type: ignore[arg-type]
-
-    def test_to_dict_renders_ast_expr_args_as_source_text(self) -> None:
-        stmt = ToolStatement(identifier="y", tool="add", args=(_name("x"), _const(2)))
-
-        d = stmt.to_dict()
-
-        assert d["args"] == ["x", "2"]
-        assert d["identifier"] == "y"
-        assert d["tool"] == "add"
-        assert d["result"] is None
-        assert d["exception"] is None
-
-    def test_to_dict_renders_exception_as_repr(self) -> None:
-        stmt = ToolStatement(identifier="f", tool="add", exception=ValueError("boom"))
-
-        assert stmt.to_dict()["exception"] == repr(ValueError("boom"))
-
-    def test_to_code_renders_a_plain_call(self) -> None:
-        stmt = ToolStatement(identifier="y", tool="add", args=(_name("x"), _const(2)))
-
-        assert stmt.to_code() == "y = add(x, 2)"
-
-    def test_to_code_renders_return_from_kwargs(self) -> None:
-        stmt = ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _name("w")})
-
-        assert stmt.to_code() == "return w"
-
-    def test_to_code_renders_return_from_positional_args(self) -> None:
-        # ReActAgent's real, model-authored return call may supply its one
-        # argument positionally instead of by keyword.
-        stmt = ToolStatement(identifier=None, tool=RETURN_ALIAS, args=(_name("w"),))
-
-        assert stmt.to_code() == "return w"
-
-    def test_to_code_renders_rhs_assign(self) -> None:
-        stmt = ToolStatement(identifier="x", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)})
-
-        assert stmt.to_code() == "x = 1"
-
-
-class TestScriptActAgentRecordSerialization:
-    def test_to_dict_handles_every_slot_shape_without_crashing(self) -> None:
-        # Regression guard for the documented slots=True-under-inheritance
-        # super() gotcha (bare super() raises for a slotted dataclass in an
-        # inheritance chain) -- exercises ToolStatement.to_dict() across
-        # every slot shape, plus ScriptActAgentRecord.to_dict()'s own super()
-        # call.
-        statements = (
-            ToolStatement(identifier="x", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
-            ToolStatement(identifier="y", tool="add", args=(_name("x"), _const(2))),
-            ToolStatement(identifier="z", tool=PY_BUILTIN_ALIAS, args=("len", _name("y"))),
-            ToolStatement(identifier="w", tool=ATTR_CALL_ALIAS, args=(_name("y"), "method")),
-            ToolStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _name("w")}),
+class TestPlanActAgentRecord:
+    def test_is_a_tool_agent_record_with_repair_rounds(self) -> None:
+        record = PlanActAgentRecord(
+            run_id="run-48", user_prompt="do it", generated_response=5,
+            statements=(_statement(),), repair_rounds_used=2,
         )
-        failed = (ToolStatement(identifier="f", tool="add", exception=ValueError("boom")),)
-        record = ScriptActAgentRecord(
-            run_id="run-48",
+
+        assert isinstance(record, ToolAgentRecord)
+        assert record.repair_rounds_used == 2
+        assert PlanActAgentRecord(run_id="run-48b", user_prompt="x", generated_response=1).repair_rounds_used == 0
+
+    def test_to_dict_handles_every_step_shape_without_crashing(self) -> None:
+        # Regression guard for the documented slots=True-under-inheritance
+        # super() gotcha -- exercises Statement.to_dict() across every step
+        # shape, plus PlanActAgentRecord.to_dict()'s own super() call.
+        statements = (
+            Statement(
+                ordinal=0, source="x = 1", kind="assign", target="x",
+                steps=(Step(kind="eval", args=(_const(1),), output=1, status="ran"),),
+            ),
+            _statement("add", "y", ordinal=1, args=(_name("x"), _const(2))),
+            _statement(PY_BUILTIN_ALIAS, "z", ordinal=2, args=("len", _name("y"))),
+            _statement(ATTR_CALL_ALIAS, "w", ordinal=3, args=(_name("y"), "method")),
+            Statement(
+                ordinal=4, source="return w", kind="return", target=None,
+                steps=(Step(kind="eval", args=(_name("w"),), output=5, status="ran"),),
+            ),
+        )
+        failed = (_failed("add", "f", ordinal=5),)
+        record = PlanActAgentRecord(
+            run_id="run-49",
             user_prompt="do it", generated_response=5, statements=statements, failed_statements=failed,
+            repair_rounds_used=1,
         )
 
         d = record.to_dict()
 
         assert len(d["statements"]) == 5
         assert len(d["failed_statements"]) == 1
-        assert d["failed_statements"][0]["exception"] == repr(ValueError("boom"))
-
-    def test_to_dict_renders_py_builtin_args_as_json_serializable(self) -> None:
-        slot = ToolStatement(identifier="z", tool=PY_BUILTIN_ALIAS, args=("len", _name("y")))
-
-        d = slot.to_dict()
-
-        assert d["args"] == ["len", "y"]
-
-    def test_to_dict_renders_attr_call_args_with_unparsed_object_source(self) -> None:
-        slot = ToolStatement(identifier="w", tool=ATTR_CALL_ALIAS, args=(_name("y"), "method", _const(1)))
-
-        d = slot.to_dict()
-
-        # Every entry still an ast.expr node -- including a plain
-        # ast.Constant -- is rendered via ast.unparse (source text, not the
-        # raw value); only method_name (already a bare str, args[1]) passes
-        # through unchanged.
-        assert d["args"] == ["y", "method", "1"]
-
-    def test_render_as_code_groups_by_batch(self) -> None:
-        a = ToolStatement(identifier="a", tool="tool_a", batch_index=0)
-        b = ToolStatement(identifier="b", tool="tool_b", batch_index=1)
-        record = ScriptActAgentRecord(run_id="run-49", user_prompt="do it", generated_response=None, statements=(a, b))
-
-        rendered = record.render_as_code()
-
-        assert "# Batch 0:" in rendered
-        assert "# Batch 1:" in rendered
-
-
-class TestScriptActAgentToolUsage:
-    def test_computes_all_five_metrics_from_statements(self) -> None:
-        binop_val = ast.parse("1 + 2", mode="eval").body
-        statements = (
-            ToolStatement(identifier="a", tool="add"),
-            ToolStatement(identifier="b", tool="add"),
-            ToolStatement(identifier="c", tool=PY_BUILTIN_ALIAS, args=("len", _name("a"))),
-            ToolStatement(identifier="d", tool=ATTR_CALL_ALIAS, args=(_name("a"), "method")),
-            ToolStatement(identifier="e", tool=RHS_ASSIGN_ALIAS, kwargs={"val": binop_val}),
-            ToolStatement(identifier="f", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
-        )
-        record = ScriptActAgentRecord(run_id="run-50", user_prompt="do it", generated_response=None, statements=statements)
-
-        usage = record.dispatch_breakdown()
-
-        assert usage == ScriptActAgentToolUsage(
-            registered_tool_calls=2, builtin_calls=1, attribute_calls=1,
-            binop_count=1, rhs_assignment_count=2,
-        )
-
-    def test_failed_registered_tool_call_is_counted(self) -> None:
-        # tool_usage() must count a failed dispatched call (from
-        # failed_statements) the same as a succeeded one, since
-        # tool_calls_used counted it unconditionally when it ran.
-        statements = (ToolStatement(identifier="a", tool="add"),)
-        failed = (ToolStatement(identifier="b", tool="add", exception=RuntimeError("boom")),)
-        record = ScriptActAgentRecord(
-            run_id="run-51",
-            user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
-        )
-
-        usage = record.dispatch_breakdown()
-
-        assert usage.registered_tool_calls == 2
-
-    def test_failed_builtin_and_attr_calls_are_counted(self) -> None:
-        failed = (
-            ToolStatement(identifier="a", tool=PY_BUILTIN_ALIAS, args=("len", _name("x")), exception=ValueError()),
-            ToolStatement(identifier="b", tool=ATTR_CALL_ALIAS, args=(_name("x"), "m"), exception=ValueError()),
-        )
-        record = ScriptActAgentRecord(run_id="run-52", user_prompt="do it", generated_response=None, failed_statements=failed)
-
-        usage = record.dispatch_breakdown()
-
-        assert usage.builtin_calls == 1
-        assert usage.attribute_calls == 1
-
-    def test_failed_statements_never_affect_binop_or_rhs_assignment_counts(self) -> None:
-        statements = (
-            ToolStatement(identifier="a", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
-        )
-        without_failures = ScriptActAgentRecord(
-            run_id="run-53",
-            user_prompt="do it", generated_response=None, statements=statements,
-        )
-        with_failures = ScriptActAgentRecord(
-            run_id="run-54",
-            user_prompt="do it", generated_response=None, statements=statements,
-            failed_statements=(ToolStatement(identifier="b", tool="add", exception=ValueError()),),
-        )
-
-        assert without_failures.dispatch_breakdown().binop_count == with_failures.dispatch_breakdown().binop_count
-        assert (
-            without_failures.dispatch_breakdown().rhs_assignment_count
-            == with_failures.dispatch_breakdown().rhs_assignment_count
-        )
-
-    def test_empty_record_has_all_zero_metrics(self) -> None:
-        record = ScriptActAgentRecord(run_id="run-55", user_prompt="do it", generated_response=None)
-
-        assert record.dispatch_breakdown() == ScriptActAgentToolUsage(
-            registered_tool_calls=0, builtin_calls=0, attribute_calls=0,
-            binop_count=0, rhs_assignment_count=0,
-        )
+        assert d["failed_statements"][0]["steps"][0]["error"] == repr(ValueError("boom"))
+        assert d["repair_rounds_used"] == 1
+        assert "dispatch_breakdown" not in dir(record)

@@ -10,8 +10,14 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.agents.toolagent import ToolAgent
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
-from atomic_agentic.agents.scriptact import ScriptActAgent
-from atomic_agentic.exceptions import ToolAgentError, ToolDefinitionError, ToolRegistrationError
+from atomic_agentic.agents.tools import attr_call_tool, builtin_call_tool
+from atomic_agentic.constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS
+from atomic_agentic.exceptions import (
+    AgentInvocationError,
+    ToolAgentError,
+    ToolDefinitionError,
+    ToolRegistrationError,
+)
 from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.invokables.prompt_template import PromptTemplate
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
@@ -32,27 +38,6 @@ from .conftest import StubToolAgent, add, make_stub_tool_agent, multiply
 # the concrete stand-in used throughout. It registers no tools of its own, so
 # tests register "add"/"multiply" themselves under bare names.
 # --------------------------------------------------------------------------- #
-class _SigilStub(StubToolAgent):
-    """A stub whose family references context variables with a ``$`` prefix."""
-
-    _CONTEXT_NAME_PREFIX = "$"
-
-
-class _ReservedStub(StubToolAgent):
-    """A stub with one reserved tool id, seeded the sanctioned way."""
-
-    _RESERVED_TOOL_NAMES = frozenset({"locked"})
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._seed_reserved_tool(add, "locked")
-
-
-class _PreambleStub(StubToolAgent):
-    def _render_actions(self) -> str:
-        return f"{super()._render_actions()}\n\nCustom builtins preamble."
-
-
 def _build(cls: type[StubToolAgent], **overrides: Any) -> StubToolAgent:
     kwargs: dict[str, Any] = {
         "name": "tests",
@@ -173,20 +158,24 @@ class TestToolAgentConstruction:
         with pytest.raises(AttributeError):
             agent.regeneration_limit = 1  # type: ignore[misc]
 
-    @pytest.mark.parametrize("value", [None, 1, 5])
-    def test_tool_concurrency_limit_accepts_none_and_positive_int(self, value: int | None) -> None:
-        agent = make_stub_tool_agent(tool_concurrency_limit=value)
-        assert agent.tool_concurrency_limit == value
+    def test_tool_concurrency_limit_is_no_longer_a_base_parameter(self) -> None:
+        with pytest.raises(TypeError):
+            make_stub_tool_agent(tool_concurrency_limit=1)
+        assert not hasattr(StubToolAgent, "tool_concurrency_limit")
 
-    @pytest.mark.parametrize("value", [0, -1, "1", 1.5])
-    def test_tool_concurrency_limit_rejects_zero_negative_or_non_int(self, value: Any) -> None:
-        with pytest.raises(ToolAgentError, match="tool_concurrency_limit"):
-            make_stub_tool_agent(tool_concurrency_limit=value)
-
-    def test_tool_concurrency_limit_setter_validates_after_construction(self) -> None:
+    def test_fail_fast_defaults_to_false_and_is_read_only(self) -> None:
         agent = make_stub_tool_agent()
-        with pytest.raises(ToolAgentError, match="tool_concurrency_limit"):
-            agent.tool_concurrency_limit = 0
+        assert agent.fail_fast is False
+        with pytest.raises(AttributeError):
+            agent.fail_fast = True  # type: ignore[misc]
+
+    def test_fail_fast_accepts_a_bool(self) -> None:
+        assert make_stub_tool_agent(fail_fast=True).fail_fast is True
+
+    @pytest.mark.parametrize("value", ["yes", 1, None])
+    def test_fail_fast_rejects_a_non_bool(self, value: Any) -> None:
+        with pytest.raises(ToolAgentError, match="fail_fast"):
+            make_stub_tool_agent(fail_fast=value)
 
     def test_tools_construction_kwarg_registers_via_register_tools(self) -> None:
         agent = make_stub_tool_agent(tools=[add, multiply])
@@ -474,25 +463,19 @@ class TestToolRegistration:
         assert agent.remove_tool("add") is True
         assert agent.remove_tool("add") is False
 
-    def test_remove_reserved_tool_raises(self) -> None:
-        agent = _build(_ReservedStub)
-        with pytest.raises(ToolRegistrationError, match="reserved"):
-            agent.remove_tool("locked")
+    @pytest.mark.parametrize("name", [PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS, "len", "sorted"])
+    def test_names_a_statement_could_never_reach_are_rejected(self, name: str) -> None:
+        agent = make_stub_tool_agent()
+        with pytest.raises(ToolRegistrationError):
+            agent.register_tool(Tool(function=add, name=name, description="Adds."))
+        assert not agent.has_tool(name)
 
-    def test_register_reserved_tool_name_raises(self) -> None:
-        agent = _build(_ReservedStub)
-        with pytest.raises(ToolRegistrationError, match="reserved"):
-            agent.register_tool(Tool(function=add, name="locked", description="Adds."))
+    def test_resolve_dispatch_tool_picks_the_dispatcher_or_the_registered_tool(self) -> None:
+        agent = make_stub_tool_agent(tools=[add])
 
-    def test_clear_tools_keeps_reserved_tools_only(self) -> None:
-        agent = _build(_ReservedStub)
-        agent.register_tool(add)
-        agent.register_tool(multiply)
-
-        agent.clear_tools()
-
-        remaining = agent.list_tools()
-        assert set(remaining) == {"locked"}
+        assert agent._resolve_dispatch_tool(PY_BUILTIN_ALIAS) is builtin_call_tool
+        assert agent._resolve_dispatch_tool(ATTR_CALL_ALIAS) is attr_call_tool
+        assert agent._resolve_dispatch_tool("add") is agent.get_tool("add")
 
     def test_list_tools_returns_shallow_copy(self) -> None:
         agent = make_stub_tool_agent()
@@ -671,15 +654,13 @@ class TestDocstringBlockRendering:
 
 
 class TestFamilyToolInstructions:
-    @pytest.mark.parametrize("cls", [PlanActAgent, ReActAgent, ScriptActAgent])
+    @pytest.mark.parametrize("cls", [PlanActAgent, ReActAgent])
     def test_each_family_sets_plain_string_tool_instructions(self, cls: type) -> None:
         assert isinstance(cls.TOOL_INSTRUCTIONS, str)
         assert cls.TOOL_INSTRUCTIONS
 
-    def test_scriptact_appends_builtins_after_the_tool_list(self) -> None:
-        agent = ScriptActAgent(
-            name="tests", description="d", llm_engine=FakeLLMEngine([])
-        )
+    def test_the_base_appends_builtins_after_the_tool_list(self) -> None:
+        agent = make_stub_tool_agent()
         agent.register_tool(add)
 
         assert agent._render_actions() == (
@@ -688,11 +669,13 @@ class TestFamilyToolInstructions:
 
 
 class TestSystemMessageRendering:
-    def test_default_actions_are_the_preamble_and_the_tool_list(self) -> None:
+    def test_default_actions_are_the_preamble_the_tool_list_and_the_builtins(self) -> None:
         agent = make_stub_tool_agent()
         agent.register_tool(add)
 
-        assert agent._render_actions() == f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}"
+        assert agent._render_actions() == (
+            f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}\n\n{BUILTINS_PREAMBLE}"
+        )
 
     def test_contract_and_tools_are_framed_in_order(self) -> None:
         agent = make_stub_tool_agent()
@@ -765,14 +748,14 @@ class TestSystemMessageRendering:
         assert make_stub_tool_agent().to_dict()["instructions"] is None
 
     def test_builtins_preamble_follows_the_tool_list_in_the_tools_frame(self) -> None:
-        agent = _build(_PreambleStub)
+        agent = make_stub_tool_agent()
         agent.register_tool(add)
         task = agent.create_task({"prompt": "p"})
 
         content = agent._render_system_message(task)[0]["content"]
 
         expected = frame_content(
-            f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}\n\nCustom builtins preamble.",
+            f"{TOOLS_PREAMBLE}\n\n{agent.actions_context()}\n\n{BUILTINS_PREAMBLE}",
             "AVAILABLE TOOLS",
         )
         assert expected in content
@@ -1014,13 +997,17 @@ class TestTaskResultEntries:
         assert "name: task_result_0\ntype: str\nreadonly: yes\nvalue hidden" in block
         assert "secret-value" not in block
 
-    def test_prefix_applies_to_the_rendered_entry_name(self) -> None:
-        agent = _build(_SigilStub)
-        _commit(agent, "x")
+    def test_a_context_name_that_is_a_registered_tool_id_is_rejected(self) -> None:
+        agent = make_stub_tool_agent(tools=[add], inputs_to_context={"prompt": "add"})
 
-        block = agent._render_task_block(_new_task(agent))
+        with pytest.raises(AgentInvocationError, match="add"):
+            _new_task(agent)
 
-        assert "name: $task_result_0" in block
+    def test_a_context_name_that_is_a_python_keyword_is_rejected(self) -> None:
+        agent = make_stub_tool_agent(inputs_to_context={"prompt": "class"})
+
+        with pytest.raises(AgentInvocationError, match="Python keyword"):
+            _new_task(agent)
 
     def test_user_stored_readonly_variable_renders_with_value_and_is_passed_by_reference(self) -> None:
         agent = make_stub_tool_agent()
@@ -1069,14 +1056,6 @@ class TestRenderTurn:
         assert second[-1]["content"] == "task_result_1: int = 2"
         assert first[0]["content"] == "q0"
 
-    def test_render_turn_uses_the_context_name_prefix(self) -> None:
-        agent = _build(_SigilStub)
-        turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response=1)
-
-        messages = agent.render_turn(turn, index=0)
-
-        assert messages[-1]["content"] == "$task_result_0: int = 1"
-
     def test_render_turn_requires_index(self) -> None:
         agent = make_stub_tool_agent()
         turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response=1)
@@ -1087,20 +1066,20 @@ class TestRenderTurn:
 
 class TestRenderTurnMode:
     def test_render_turn_forwards_the_response_render_mode(self) -> None:
-        agent = _build(_SigilStub)
+        agent = make_stub_tool_agent()
         turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response={"a": 1})
 
         as_str = agent.render_turn(turn, index=0)
         as_json = agent.render_turn(turn, index=0, render_mode="j")
 
-        assert as_str[-1]["content"] == "$task_result_0: dict = {'a': 1}"
-        assert as_json[-1]["content"] == '$task_result_0: dict = {\n  "a": 1\n}'
+        assert as_str[-1]["content"] == "task_result_0: dict = {'a': 1}"
+        assert as_json[-1]["content"] == 'task_result_0: dict = {\n  "a": 1\n}'
         assert as_json[0]["content"] == "p"
 
 
 class TestRenderTurnLimits:
     def test_render_turn_forwards_limits_and_keeps_the_label(self) -> None:
-        agent = _build(_SigilStub)
+        agent = make_stub_tool_agent()
         turn = AgentRecord(run_id="run-0", user_prompt="p", generated_response="abcdefghij")
 
         messages = agent.render_turn(
@@ -1109,7 +1088,7 @@ class TestRenderTurnLimits:
 
         assert messages[0]["content"] == "value hidden"
         assert messages[-1]["content"] == (
-            "$task_result_0: str = abc...[truncated: 3 of 10 chars shown]"
+            "task_result_0: str = abc...[truncated: 3 of 10 chars shown]"
         )
 
     def test_summarize_applies_the_conversation_limit(self) -> None:
@@ -1128,14 +1107,15 @@ class TestRenderTurnLimits:
 class TestToolAgentToDict:
     def test_to_dict_includes_execution_knobs(self) -> None:
         agent = make_stub_tool_agent(
-            tool_calls_limit=3, regeneration_limit=2, tool_concurrency_limit=4
+            tool_calls_limit=3, regeneration_limit=2, fail_fast=True
         )
 
         d = agent.to_dict()
 
         assert d["tool_calls_limit"] == 3
         assert d["regeneration_limit"] == 2
-        assert d["tool_concurrency_limit"] == 4
+        assert d["fail_fast"] is True
+        assert "tool_concurrency_limit" not in d
 
     def test_to_dict_includes_tools_mapping(self) -> None:
         agent = make_stub_tool_agent()
@@ -1179,15 +1159,14 @@ class TestToolAgentInvokeSmoke:
 
 class TestResultClassWiring:
     def test_each_family_selects_its_result_class(self) -> None:
-        from atomic_agentic.models.results.agents import ScriptActAgentResult, ToolAgentResult
+        from atomic_agentic.models.results.agents import PlanActAgentResult, ToolAgentResult
 
         assert ToolAgent.result_cls is ToolAgentResult
-        assert PlanActAgent.result_cls is ToolAgentResult
+        assert PlanActAgent.result_cls is PlanActAgentResult
         assert ReActAgent.result_cls is ToolAgentResult
-        assert ScriptActAgent.result_cls is ScriptActAgentResult
 
     def test_no_family_defines_build_result_from_task(self) -> None:
-        for cls in (ToolAgent, PlanActAgent, ReActAgent, ScriptActAgent):
+        for cls in (ToolAgent, PlanActAgent, ReActAgent):
             assert not hasattr(cls, "build_result_from_task")
 
 
@@ -1227,7 +1206,7 @@ class TestRegistrationKeyIsToolName:
         assert all(key == tool.name for key, tool in agent.list_tools().items())
 
     @pytest.mark.parametrize(
-        "agent_cls", ["ToolAgent", "PlanActAgent", "ReActAgent", "ScriptActAgent"]
+        "agent_cls", ["ToolAgent", "PlanActAgent", "ReActAgent"]
     )
     def test_record_enabled_defaults_to_true(self, agent_cls: str) -> None:
         import inspect

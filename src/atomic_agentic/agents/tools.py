@@ -47,8 +47,8 @@ def call_python_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 
     Raises ``ValueError`` for a name outside ``ALLOWED_PY_BUILTINS`` --
     the authoritative runtime gate; ``utils/script.py``'s
-    ``rewrite_builtin_calls`` already guarantees this can't happen for a
-    slot it rewrote, but this check doesn't trust that upstream guarantee.
+    ``_build_call_step`` already guarantees this can't happen for a
+    step it built, but this check doesn't trust that upstream guarantee.
     """
     if name not in ALLOWED_PY_BUILTINS:
         raise ValueError(f"python builtin {name!r} is not available here")
@@ -77,7 +77,7 @@ builtin_call_tool = Tool(
 
 def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for PlanActAgent's attribute/method-call slots
+    Dispatch body for PlanActAgent's attribute/method-call steps
     (``obj.method(...)``).
 
     ``args``/``kwargs`` are the real target method's own positional/keyword

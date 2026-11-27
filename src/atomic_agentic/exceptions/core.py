@@ -32,7 +32,7 @@ class ToolRegistrationError(ToolAgentError):
 
 
 class BlackboardParseError(RuntimeError):
-    """Raised when parsing one raw statement into ToolStatement object(s)
+    """Raised when parsing one raw statement into a Statement
     fails, or when the shared expression-parsing/rejection helpers in
     utils/agents.py (`evaluate_expr`, `reject_unsupported_forms`) reject an
     expression -- PlanActAgent's own statement-parsing mechanism.
@@ -43,7 +43,7 @@ class BlackboardParseError(RuntimeError):
     these. Deliberately not rooted in ToolAgentError: a statement that fails
     to parse is regeneration feedback, not an agent failure.
 
-    Unifies every rejection category from parse_statement_to_slots under one
+    Unifies every rejection category from parse_statement under one
     catchable type: genuine ast.parse SyntaxErrors, illegal assignment
     shapes (multiple targets, tuple/list-unpacking, augmented assignment, an
     attribute/subscript/starred LHS, positional or **-unpacked call
@@ -56,7 +56,7 @@ class BlackboardParseError(RuntimeError):
 
 class DependencyFailedError(Exception):
     """Raised (by a future prepare()-phase caller, not by this release's own
-    utils) when a ToolStatement's argument depends on another slot whose
+    utils) when a Step's argument depends on another step whose
     own resolution failed.
 
     Does not forward the upstream exception instance verbatim -- wraps it so

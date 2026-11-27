@@ -16,7 +16,7 @@ from atomic_agentic.exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
-from atomic_agentic.utils.script import parse_statement_to_slots
+from atomic_agentic.utils.script import parse_statement
 
 
 class TestLLMEngineErrors:
@@ -123,7 +123,7 @@ class TestBlackboardParseError:
 
     def test_chains_the_original_exception_via_cause(self) -> None:
         with pytest.raises(BlackboardParseError) as exc_info:
-            parse_statement_to_slots("x = 1 / 0")
+            parse_statement("x = 1 / 0")
 
         assert isinstance(exc_info.value.__cause__, ZeroDivisionError)
 

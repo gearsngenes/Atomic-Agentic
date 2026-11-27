@@ -88,6 +88,12 @@ def test_call_free_assignment_is_one_eval_step():
     st = one("y = a + 1")
     assert [s.kind for s in st.steps] == ["eval"]
     assert st.kind == "assign" and st.target == "y"
+    assert st.steps[0].tool is None and st.steps[0].text == "a + 1"
+
+
+def test_builtin_and_method_steps_render_as_written():
+    assert one("n = len(s)").steps[-1].text == "len(s)"
+    assert one("u = s.upper()").steps[-1].text == "s.upper()"
 
 
 def test_kinds_and_targets():
@@ -144,7 +150,10 @@ def test_check_clean_and_unknown_tool_and_undefined_name():
 def test_check_readonly_target_binding_and_budget():
     assert check("PI = add(1, 2)", context={"PI"}, readonly={"PI"})
     assert check("x = add(1, 2, 3)")
-    assert check("a = add(1, 2)\nb = add(a, 3)", budget=1)
+    over = check("a = add(1, 2)\nb = add(a, 3)", budget=1)
+    assert len(over) == 1 and "costs 2 action(s)" in over[0]
+    assert check("a = add(1, 2)\nb = add(a, 3)", budget=2) == []
+    assert check("a = add(1, 2)\nreturn a", budget=1) == []
 
 
 # ----------------------------------------------------------------------- #

@@ -14,7 +14,7 @@ from atomic_agentic.models.agents import Statement, Step
 
 def _step(**kw) -> Step:
     base = dict(
-        text="add(1, x)", kind="tool", tool="add",
+        kind="tool", tool="add",
         args=(ast.Constant(1), ast.Name("x", ast.Load())),
     )
     base.update(kw)
@@ -27,6 +27,20 @@ def test_step_defaults_are_unrun():
     assert s.output is NO_VAL and s.value is NO_VAL
     assert s.result is None and s.error is None
     assert s.name is None
+
+
+def _src(text: str) -> ast.expr:
+    return ast.parse(text, mode="eval").body
+
+
+def test_step_text_renders_each_step_shape():
+    assert _step().text == "add(1, x)"
+    assert _step(kwargs={"b": _src("y + 1")}).text == "add(1, x, b=y + 1)"
+    star = ast.Starred(value=ast.Name("xs", ast.Load()), ctx=ast.Load())
+    assert _step(args=(star,), kwargs={"**": _src("kw")}).text == "add(*xs, **kw)"
+    assert _step(tool="py_builtin", args=("len", _src("s"))).text == "len(s)"
+    assert _step(tool="attr_call", args=(_src("s"), "split", _src("','"))).text == "s.split(',')"
+    assert Step(kind="eval", args=(_src("a + 1"),)).text == "a + 1"
 
 
 def test_step_and_statement_are_frozen():
@@ -73,7 +87,7 @@ def test_statement_to_dict_nests_steps():
 
 def test_statement_status_and_value_are_derived_from_steps():
     hoisted = _step(name="_SUB_0", kind="eval")
-    own = _step(text="add(_SUB_0, 1)", kind="eval")
+    own = _step(kind="eval")
     st = Statement(ordinal=0, source="x = add(add(1, x), 1)", kind="assign", target="x", steps=(hoisted, own))
     assert st.status == "not_run" and st.value is NO_VAL
 

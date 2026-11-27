@@ -3,8 +3,10 @@ ToolAgent: shared ancestor for every tool-registering Agent family.
 
 Owns the surface that ``PlanActAgent`` and ``ReActAgent`` share: tool registration (keyed by tool name, ``register_tool``/``register_tools``),
 the optional user-defined ``instructions``, the execution knobs common to every
-grammar (``tool_calls_limit``, ``regeneration_limit``,
-``tool_concurrency_limit``), and the context-native task frame. There are no
+grammar (``tool_calls_limit``, ``regeneration_limit``, ``fail_fast``), the
+Python-grammar hooks both families share (the builtins preamble, tool-name and
+context-name checks, the dispatch-tool lookup), and the context-native task
+frame. There are no
 registered constants: a value the model may reference lives in
 ``task.context`` (conversation variables, runtime and input-bound values, and
 the ``task_result_i`` entries ``_seed_task`` adds), shown in the runtime
@@ -18,8 +20,9 @@ family supplies only the two string hooks (``_render_steps``,
 hooks stay ``@abstractmethod``, since each family's generation, resolution and
 dispatch logic genuinely differs.
 
-``fail_fast`` is deliberately NOT here: each concrete agent declares its own
-(what it governs differs).
+``fail_fast`` is validated and stored here, but what a failure does is each
+family's own: it raises at once instead of handing the failure to the model.
+The retry loops stay in the subclasses.
 """
 
 from __future__ import annotations
@@ -41,11 +44,17 @@ from ..models.agents.records import AgentRecord
 from ..models.agents.context import ContextVariable
 from ..models.agents.tasks import AgentTask, ToolAgentTask
 from ..exceptions import (
+    AgentInvocationError,
     ToolAgentError,
     ToolRegistrationError,
 )
-from ..constants.agents import TASK_RESULT_PREFIX
-from ..constants.prompts import DEFAULT_PRE_INVOKE, INSTRUCTIONS_PRECEDENCE, TOOLS_PREAMBLE
+from ..constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, TASK_RESULT_PREFIX
+from ..constants.prompts import (
+    BUILTINS_PREAMBLE,
+    DEFAULT_PRE_INVOKE,
+    INSTRUCTIONS_PRECEDENCE,
+    TOOLS_PREAMBLE,
+)
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..adapters import to_tool, to_tools
@@ -54,6 +63,8 @@ from ..a2a import A2AClientHub
 from ..models.results.agents import ToolAgentResult
 from ..utils.agents import build_usage_report
 from ..utils.rendering import frame_content
+from ..utils.script import check_script_tool_name, script_context_clashes
+from .tools import attr_call_tool, builtin_call_tool
 
 
 class ToolAgent(Agent, ABC):
@@ -68,28 +79,29 @@ class ToolAgent(Agent, ABC):
       tool's ``name``, never the dotted ``full_name``) and the read accessors
       (``list_tools``/``has_tool``/``get_tool``/``remove_tool``/
       ``clear_tools``/``actions_context``), plus a ``_validate_tool_name``
-      hook (default: accepts every name) a subclass with its own
-      additional naming constraints (e.g. ``PlanActAgent``'s parser
-      sentinels/real-builtin collision) extends via ``super()``.
+      check that rejects names a statement could never reach (parser
+      sentinels, allowed Python builtins, Python keywords).
     - ``instructions`` (construction-time only, read-only property returning
       the instructions invokable or ``None``): standing user guidance rendered once per
       invoke into ``task.instructions`` and placed after the tools frame inside
       a ``USER-DEFINED INSTRUCTIONS`` frame, only when instructions are set.
-    - Execution knobs: ``tool_calls_limit``, ``regeneration_limit``,
-      ``tool_concurrency_limit``.
+    - Execution knobs: ``tool_calls_limit`` (a cap on actions),
+      ``regeneration_limit`` and ``fail_fast``.
     - ``_seed_task``: one read-only ``task_result_i`` context entry per
-      visible prior turn. ``render_turn`` labels the history with the same
-      names.
+      visible prior turn (``render_turn`` labels the history with the same
+      names), then a check that no context name is one a statement could not
+      use.
+    - ``_resolve_dispatch_tool``: the invokable that runs a tool step.
     - The concrete ``_render_task_messages`` frame and the shared
       ``_render_system_message``: framed ``TOOL-CALLING INSTRUCTIONS``
       (the family's ``TOOL_INSTRUCTIONS``), framed ``AVAILABLE TOOLS``
-      (``_render_actions()``: ``TOOLS_PREAMBLE`` then the tool list), then the
-      framed user instructions.
+      (``_render_actions()``: ``TOOLS_PREAMBLE``, the tool list, then
+      ``BUILTINS_PREAMBLE``), then the framed user instructions.
     - ``to_dict()`` diagnostics for the above.
 
-    What it does not own: any lifecycle hook body, any reference-resolution
-    grammar, any retry loop, or record/result construction -- every concrete
-    family owns all of that itself.
+    What it does not own: any lifecycle hook body, any retry loop, or
+    record/result construction -- every concrete family owns all of that
+    itself.
 
     Phase contract (what each hook may do):
 
@@ -137,7 +149,7 @@ class ToolAgent(Agent, ABC):
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
-        tool_concurrency_limit: Optional[int] = None,
+        fail_fast: bool = False,
     ) -> None:
         """
         Parameters
@@ -165,21 +177,22 @@ class ToolAgent(Agent, ABC):
             Forwarded to ``Agent.__init__`` unchanged (``record_enabled``
             defaults to ``True``).
         tool_calls_limit : int | None
-            Maximum number of non-return action calls per invoke run.
-            ``None`` means unlimited. Must be ``>= 0`` if set.
+            Cap on the actions spent per invoke run. A statement costs
+            ``max(1, tool steps)`` (a ``return`` is exempt from the minimum, so
+            an agent at its limit can still finish). ``None`` means
+            unlimited. Must be ``>= 0`` if set.
         regeneration_limit : int
             Bounded-attempts ceiling for regenerating one generation's
             malformed/invalid draft before raising. Always a plain ``int``,
             never ``None``. Defaults to ``5``.
-        tool_concurrency_limit : int | None
-            Max dispatched calls allowed in a single concurrently-executed
-            batch. ``None`` means unlimited (default).
+        fail_fast : bool
+            ``True``: the first statement failure raises at the failure site.
+            ``False`` (default): the family hands the failure to the model to
+            repair, and raises only once its budget is spent. Read-only.
 
-        ``fail_fast`` is intentionally not a parameter here -- each concrete
-        subclass that needs it declares and validates its own. A removed
-        parameter (``constants``, ``constant_aliases``,
-        ``constant_descriptions``, ``tool_instructions``) is rejected by
-        Python with ``TypeError``.
+        A removed parameter (``constants``, ``constant_aliases``,
+        ``constant_descriptions``, ``tool_instructions``,
+        ``tool_concurrency_limit``) is rejected by Python with ``TypeError``.
         """
         # Set before super().__init__(): _extra_parameter_sources reads it there.
         self._instructions: Optional[AtomicInvokable] = (
@@ -214,7 +227,11 @@ class ToolAgent(Agent, ABC):
             )
         self._regeneration_limit = regeneration_limit
 
-        self.tool_concurrency_limit = tool_concurrency_limit
+        if not isinstance(fail_fast, bool):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
+            )
+        self._fail_fast = fail_fast
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
@@ -227,7 +244,9 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     @property
     def tool_calls_limit(self) -> Optional[int]:
-        """Max allowed non-return tool calls per invoke() run. None means unlimited."""
+        """Cap on the actions spent per invoke() run (a statement costs
+        ``max(1, tool steps)``; a ``return`` is exempt from the minimum).
+        None means unlimited."""
         return self._tool_calls_limit
 
     @tool_calls_limit.setter
@@ -247,19 +266,10 @@ class ToolAgent(Agent, ABC):
         return self._regeneration_limit
 
     @property
-    def tool_concurrency_limit(self) -> Optional[int]:
-        """Max dispatched (real tool) calls allowed in a single
-        concurrently-executed batch. ``None`` means unlimited."""
-        return self._tool_concurrency_limit
-
-    @tool_concurrency_limit.setter
-    def tool_concurrency_limit(self, value: Optional[int]) -> None:
-        if value is not None and (type(value) is not int or value < 1):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: tool_concurrency_limit "
-                f"must be None or an int >= 1; got {value!r}."
-            )
-        self._tool_concurrency_limit = value
+    def fail_fast(self) -> bool:
+        """``True``: the first statement failure raises at the failure site.
+        ``False``: the family hands it to the model to repair. Read-only."""
+        return self._fail_fast
 
     @property
     def instructions(self) -> Optional[AtomicInvokable]:
@@ -331,13 +341,20 @@ class ToolAgent(Agent, ABC):
         """
         Validate a tool's name -- the toolbox key -- before it is ever added
         (called from ``register_tool``/``register_tools`` for every
-        candidate).
-
-        The default accepts every name; a subclass with additional naming
-        constraints (e.g. parser sentinels or real-builtin-name collisions)
-        overrides this, calling ``super()._validate_tool_name(...)`` first and
-        adding its own checks after.
+        candidate). Rejects a name a statement could never reach: a parser
+        sentinel, an allowed Python builtin (it always resolves first) or a
+        Python keyword.
         """
+        check_script_tool_name(name)
+
+    def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
+        """The invokable that runs a tool step: the builtin or method
+        dispatcher, else the registered tool."""
+        if tool_id == PY_BUILTIN_ALIAS:
+            return builtin_call_tool
+        if tool_id == ATTR_CALL_ALIAS:
+            return attr_call_tool
+        return self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Tool registration
@@ -538,11 +555,11 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     def _render_actions(self) -> str:
         """
-        The ``AVAILABLE TOOLS`` body: ``TOOLS_PREAMBLE`` then
-        ``actions_context()`` (an empty tool list drops its part). A family that
-        adds text after the tool list overrides this, calling ``super()``.
+        The ``AVAILABLE TOOLS`` body: ``TOOLS_PREAMBLE``, ``actions_context()``
+        (an empty tool list drops its part), then the permitted Python builtins
+        text.
         """
-        parts = (TOOLS_PREAMBLE, self.actions_context())
+        parts = (TOOLS_PREAMBLE, self.actions_context(), BUILTINS_PREAMBLE)
         return "\n\n".join(part for part in parts if part)
 
     def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
@@ -635,6 +652,9 @@ class ToolAgent(Agent, ABC):
         2. Written straight into ``task.context``, not through
            ``_write_context``: the entries stay out of ``task.changed_context``
            and are never persisted.
+        3. Any context name a statement could not use unambiguously (a Python
+           keyword, or a registered tool id) raises ``AgentInvocationError``
+           before any model call.
         """
         for i, turn in enumerate(task.turns):
             value = turn.generated_response
@@ -646,13 +666,21 @@ class ToolAgent(Agent, ABC):
             task.context[name] = ContextVariable(
                 name=name, value=value, readonly=True, preview_limit=0
             )
+        clashes = script_context_clashes(task.context, self._toolbox)
+        if clashes:
+            detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
+            raise AgentInvocationError(
+                f"{type(self).__name__}.{self.name}: context variable name(s) "
+                f"unusable in a script: {detail}. Rename or forget the "
+                "variable, or rename the tool with to_tool."
+            )
 
     def result_payload_from_task(self, task: ToolAgentTask, result: Any) -> dict[str, Any]:
         """Base payload plus the tool-agent fields (usage report, failed-call
         count, regenerations)."""
         payload = super().result_payload_from_task(task, result)
         payload.update(
-            usage_report=build_usage_report(task.completed, task.failed_statements),
+            usage_report=build_usage_report((*task.completed, *task.failed_statements)),
             failed_call_count=len(task.failed_statements),
             regenerations_used=task.regenerations_used,
         )
@@ -704,14 +732,12 @@ class ToolAgent(Agent, ABC):
         """Return a diagnostic snapshot of this ToolAgent.
 
         Extends the base Agent snapshot with tool/knob diagnostics.
-        No ``fail_fast`` key here — that lives on each concrete subclass's
-        own ``to_dict()`` override instead.
         """
         d = super().to_dict()
         d.update({
             "tool_calls_limit": self.tool_calls_limit,
             "regeneration_limit": self.regeneration_limit,
-            "tool_concurrency_limit": self.tool_concurrency_limit,
+            "fail_fast": self.fail_fast,
             "instructions": (
                 None if self._instructions is None else self._instructions.to_dict()
             ),

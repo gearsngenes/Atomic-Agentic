@@ -8,8 +8,7 @@ from ..mcp.mcp_client_hub import MCPClientHub
 from ..a2a.a2a_client_hub import A2AClientHub
 
 from .toolagent import ToolAgent
-from ..constants.prompts import BUILTINS_PREAMBLE, DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
-from .tools import attr_call_tool, builtin_call_tool
+from ..constants.prompts import DEFAULT_PRE_INVOKE, ONESHOT_PLANNER_PROMPT
 from ..invokables.atomic_invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import ToolStatement
@@ -17,14 +16,8 @@ from ..models.agents.records import LLMRecord, PlanActAgentRecord
 from ..models.agents.tasks import PlanActTask
 from ..models.results.agents import PlanActAgentResult
 from ..constants.core import NO_VAL
-from ..constants.agents import (
-    ATTR_CALL_ALIAS,
-    PY_BUILTIN_ALIAS,
-    RETURN_ALIAS,
-    RHS_ASSIGN_ALIAS,
-)
+from ..constants.agents import RETURN_ALIAS, RHS_ASSIGN_ALIAS
 from ..exceptions import (
-    AgentInvocationError,
     BlackboardParseError,
     ToolAgentError,
     ToolInvocationError,
@@ -32,13 +25,11 @@ from ..exceptions import (
 from ..utils.agents import check_call_bindings, compile_batches, is_dispatched, resolve_statement_args
 from ..utils.core import run_coro_sync
 from ..utils.script import (
-    check_script_tool_name,
     dispatch_inputs,
     parse_generation,
     render_completed_as_python,
     render_failed_as_python,
     rewrite_builtin_calls,
-    script_context_clashes,
     validate_references,
 )
 
@@ -88,12 +79,10 @@ class PlanActAgent(ToolAgent):
     persist (see ``Agent.record``).
 
     Tool registration, ``instructions``, shared rendering, and the
-    tool_calls_limit/tool_concurrency_limit/regeneration_limit knobs are
-    all inherited from ``ToolAgent`` unchanged -- this class owns only its
-    own generation/execution grammar and the ``replanning_limit``/
-    ``fail_fast`` knobs, neither of which has an equivalent on the shared
-    base (``fail_fast`` is independently declared here and on ``ReActAgent``,
-    with different semantics).
+    tool_calls_limit/regeneration_limit/fail_fast knobs and the Python-grammar
+    hooks are all inherited from ``ToolAgent`` unchanged -- this class owns only
+    its own generation/execution grammar and the ``replanning_limit`` and
+    ``statement_concurrency_limit`` knobs.
     """
 
     _TASK_CLS = PlanActTask
@@ -118,23 +107,24 @@ class PlanActAgent(ToolAgent):
         *,
         tool_calls_limit: Optional[int] = None,
         regeneration_limit: int = 5,
-        tool_concurrency_limit: Optional[int] = None,
+        statement_concurrency_limit: Optional[int] = 1,
         replanning_limit: int = 2,
         fail_fast: bool = False,
     ) -> None:
         """
         ``super().__init__`` reaches ``ToolAgent`` (tool registry init,
-        ``instructions``, regeneration_limit/tool_calls_limit/
-        tool_concurrency_limit validation+storage, construction-time tools
-        registration all happen there) -- this ``__init__`` only handles what's
-        genuinely local to this class: ``replanning_limit`` and ``fail_fast``
-        (the planning prompt is the class attribute ``TOOL_INSTRUCTIONS``).
-        ``replanning_limit`` defaults
-        to ``2`` -- a repairs-only budget never has to cover the free
-        initial plan, so it doesn't need a large ceiling.
-        ``fail_fast`` defaults to ``False`` -- repair is the normal path
-        this class exists to offer; ``True`` is the opt-out for strict
-        one-shot-or-die behavior.
+        ``instructions``, regeneration_limit/tool_calls_limit/fail_fast
+        validation+storage, construction-time tools registration all happen
+        there) -- this ``__init__`` only handles what's genuinely local to this
+        class: ``statement_concurrency_limit`` and ``replanning_limit`` (the
+        planning prompt is the class attribute ``TOOL_INSTRUCTIONS``).
+        ``statement_concurrency_limit`` is how many independent statements may
+        run at once: ``1`` (default) is sequential, ``None`` unlimited.
+        ``replanning_limit`` defaults to ``2`` -- a repairs-only budget never
+        has to cover the free initial plan, so it doesn't need a large ceiling.
+        ``fail_fast`` (on ``ToolAgent``) defaults to ``False`` -- repair is the
+        normal path this class exists to offer; ``True`` is the opt-out for
+        strict one-shot-or-die behavior.
         """
         super().__init__(
             name=name,
@@ -143,7 +133,7 @@ class PlanActAgent(ToolAgent):
             record_enabled=record_enabled,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
-            tool_concurrency_limit=tool_concurrency_limit,
+            fail_fast=fail_fast,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             inputs_to_context=inputs_to_context,
@@ -156,16 +146,7 @@ class PlanActAgent(ToolAgent):
         )
 
         self.replanning_limit = replanning_limit
-
-        if not isinstance(fail_fast, bool):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
-            )
-        self._fail_fast = fail_fast
-
-    def _render_actions(self) -> str:
-        """The tools frame body plus the permitted Python builtins text."""
-        return f"{super()._render_actions()}\n\n{BUILTINS_PREAMBLE}"
+        self.statement_concurrency_limit = statement_concurrency_limit
 
     # ------------------------------------------------------------------ #
     # Construction-time / mutable knobs
@@ -179,7 +160,7 @@ class PlanActAgent(ToolAgent):
         case, now that continuation is never voluntary. Minimum ``0`` --
         a real, legal value meaning "one-shot only, zero tolerance for
         failure," not an edge case to special-case around. Mutable, like
-        ``tool_calls_limit``/``tool_concurrency_limit`` on ``ToolAgent``."""
+        ``tool_calls_limit`` on ``ToolAgent``."""
         return self._replanning_limit
 
     @replanning_limit.setter
@@ -192,63 +173,27 @@ class PlanActAgent(ToolAgent):
         self._replanning_limit = value
 
     @property
-    def fail_fast(self) -> bool:
-        """``True``: the first resolution or execution failure raises
-        immediately, at the failure site -- no repair attempted,
-        ``replanning_limit`` irrelevant in this mode. ``False`` (default):
-        up to ``replanning_limit`` repair rounds are attempted first; if
-        the budget is exhausted without recovering, raises the same way
-        ``True`` would have -- there is no silent partial-success path
-        either way. Read-only after construction (no setter), like
-        ``ReActAgent``'s own ``fail_fast`` -- different semantics (this one
-        governs repair-round budget exhaustion, not single-statement
-        tolerance)."""
-        return self._fail_fast
+    def statement_concurrency_limit(self) -> Optional[int]:
+        """Max statements that may run at once in one wave. ``1`` is
+        sequential; ``None`` means unlimited."""
+        return self._statement_concurrency_limit
+
+    @statement_concurrency_limit.setter
+    def statement_concurrency_limit(self, value: Optional[int]) -> None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: statement_concurrency_limit "
+                f"must be None or an int >= 1; got {value!r}."
+            )
+        self._statement_concurrency_limit = value
 
     def to_dict(self) -> dict[str, Any]:
         """Extends ``ToolAgent.to_dict()`` with this class's own
-        ``fail_fast``/``replanning_limit``."""
+        ``statement_concurrency_limit``/``replanning_limit``."""
         d = super().to_dict()
-        d["fail_fast"] = self._fail_fast
+        d["statement_concurrency_limit"] = self._statement_concurrency_limit
         d["replanning_limit"] = self._replanning_limit
         return d
-
-    # ------------------------------------------------------------------ #
-    # Tool registration -- naming-constraint hook override only
-    # ------------------------------------------------------------------ #
-    def _validate_tool_name(self, name: str) -> None:
-        """
-        Extends ``ToolAgent``'s naming hook with this family's own
-        sentinel/real-Python-builtin collision rules. Never a
-        reserved parser sentinel (``RHS_ASSIGN_ALIAS``/``RETURN_ALIAS``/
-        ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``), and never a real,
-        allowed Python builtin name -- an allowed builtin always resolves first
-        (see ``utils/script.py``'s ``rewrite_builtin_calls``), so a tool
-        registered under a colliding name would be permanently, silently
-        unreachable rather than raising here. Nor a Python keyword: a script
-        could never call it.
-        """
-        super()._validate_tool_name(name)
-        check_script_tool_name(name)
-
-    def _seed_task(self, task: PlanActTask) -> None:
-        """
-        Adds the hidden ``task_result_i`` entries (``ToolAgent``), then
-        rejects any context variable a script could not use unambiguously: a
-        Python keyword (cannot be written as a name) or a registered tool id
-        (a name in call position would resolve to the tool). Builtin and
-        sentinel names are not clashes (value and call positions differ).
-        Runs inside ``create_task``, before any model call.
-        """
-        super()._seed_task(task)
-        clashes = script_context_clashes(task.context, self._toolbox)
-        if clashes:
-            detail = "; ".join(f"{n!r} is {why}" for n, why in clashes.items())
-            raise AgentInvocationError(
-                f"{type(self).__name__}.{self.name}: context variable name(s) "
-                f"unusable in a script: {detail}. Rename or forget the "
-                "variable, or rename the tool with to_tool."
-            )
 
     # ------------------------------------------------------------------ #
     # Record construction
@@ -359,7 +304,7 @@ class PlanActAgent(ToolAgent):
 
         pending = compile_batches(
             flat_slots,
-            max_concurrency=self._tool_concurrency_limit,
+            max_concurrency=self._statement_concurrency_limit,
             start_batch_index=task.batch_counter,
         )
         task.batch_counter += len(pending)
@@ -510,16 +455,6 @@ class PlanActAgent(ToolAgent):
         task.needs_repair = False
         task.task_messages.clear()
         return task
-
-    def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
-        """Resolve a slot's ``tool`` id to the actual invokable to dispatch
-        -- the shared ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``-vs-registered-
-        tool selection used by ``prepare()`` and ``_gather_batch_results``."""
-        if tool_id == PY_BUILTIN_ALIAS:
-            return builtin_call_tool
-        if tool_id == ATTR_CALL_ALIAS:
-            return attr_call_tool
-        return self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Prepare next batch

@@ -1,38 +1,17 @@
 from __future__ import annotations
 
-import ast
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
-from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import ToolUsageReport
 from ..results.llm import LLMResult
-from .blackboard_models import ToolStatement
-
-# is_dispatched/tool_identity/render_completed_as_python are imported
-# locally inside the methods that use them (ToolAgentRecord.render_as_code/
-# usage_report, PlanActAgentRecord.dispatch_breakdown below), not at module
-# level -- utils.agents/utils.script themselves import ToolStatement from
-# .blackboard_models (a sibling in this same models.agents package), and
-# models/agents/__init__.py imports this module before blackboard_models.
-# A module-level import here would make loading utils.agents/utils.script
-# first (before anything else touches models.agents) deadlock: their own
-# import of models.agents.blackboard_models triggers this package's
-# __init__.py, which re-enters this module, which would need utils.agents/
-# utils.script to already be fully initialized -- they aren't yet, since
-# we're still inside their own top-level import statement. Deferring to
-# call time breaks the cycle with no behavior change (every such function is
-# only ever invoked well after import time). ToolUsageReport (imported at
-# module level above) is a different, proven-safe case -- it comes from
-# ..results.agents, which never imports back into models.agents at all, so
-# no cycle exists for it.
+from .blackboard_models import Statement
 
 __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
     "PlanActAgentRecord",
-    "PlanActAgentToolUsage",
     "ThinkingAgentRecord",
 ]
 
@@ -229,19 +208,21 @@ class ToolAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed ToolAgent invocation.
 
-    ``statements``/``failed_statements`` as ``ToolStatement`` tuples, no
+    ``statements``/``failed_statements`` as ``Statement`` tuples, no
     blackboard span of any kind. Shared directly by ``ReActAgent``
     (no further subclass needed -- it would add zero fields beyond what's
     here); ``PlanActAgentRecord`` is a real subclass of this class.
 
     Fields
     ------
-    statements : tuple[ToolStatement, ...]
-        Every call the task's ``completed`` accumulated this run
-        (``RETURN_ALIAS`` included once it executes).
+    statements : tuple[Statement, ...]
+        Every statement the task's ``completed`` accumulated this run
+        (status ``done``, ``return`` included once it ran).
 
-    failed_statements : tuple[ToolStatement, ...]
-        Every call whose dispatch actually raised this run.
+    failed_statements : tuple[Statement, ...]
+        Every statement that failed this run (status ``failed``), with the
+        steps that ran and the failing step's error. Statements that never ran
+        are not recorded.
 
     regenerations_used : int
         Total regeneration attempts consumed across this run's generation
@@ -249,8 +230,8 @@ class ToolAgentRecord(AgentRecord):
         at commit time.
     """
 
-    statements: tuple[ToolStatement, ...] = ()
-    failed_statements: tuple[ToolStatement, ...] = ()
+    statements: tuple[Statement, ...] = ()
+    failed_statements: tuple[Statement, ...] = ()
     regenerations_used: int = 0
 
     def __post_init__(self) -> None:
@@ -260,34 +241,20 @@ class ToolAgentRecord(AgentRecord):
         # CPython gotcha for slotted-dataclass inheritance chains).
         super(ToolAgentRecord, self).__post_init__()
 
-        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
-            raise TypeError(
-                "ToolAgentRecord.statements must be a list or tuple of "
-                f"ToolStatement instances; got {type(self.statements).__name__!r}."
-            )
-        for index, call in enumerate(self.statements):
-            if not isinstance(call, ToolStatement):
+        for label in ("statements", "failed_statements"):
+            value = getattr(self, label)
+            if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
                 raise TypeError(
-                    f"ToolAgentRecord.statements[{index}] must be a "
-                    f"ToolStatement instance; got {type(call).__name__!r}."
+                    f"ToolAgentRecord.{label} must be a list or tuple of "
+                    f"Statement instances; got {type(value).__name__!r}."
                 )
-
-        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
-            self.failed_statements, (list, tuple)
-        ):
-            raise TypeError(
-                "ToolAgentRecord.failed_statements must be a list or "
-                f"tuple of ToolStatement instances; got {type(self.failed_statements).__name__!r}."
-            )
-        for index, call in enumerate(self.failed_statements):
-            if not isinstance(call, ToolStatement):
-                raise TypeError(
-                    f"ToolAgentRecord.failed_statements[{index}] must be a "
-                    f"ToolStatement instance; got {type(call).__name__!r}."
-                )
-
-        object.__setattr__(self, "statements", tuple(self.statements))
-        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
+            for index, statement in enumerate(value):
+                if not isinstance(statement, Statement):
+                    raise TypeError(
+                        f"ToolAgentRecord.{label}[{index}] must be a "
+                        f"Statement instance; got {type(statement).__name__!r}."
+                    )
+            object.__setattr__(self, label, tuple(value))
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -301,89 +268,27 @@ class ToolAgentRecord(AgentRecord):
 
     def render_as_code(self) -> str:
         """
-        Reconstruct this run's statements as source-formatted text, grouped
-        by concurrent batch (``show_batches=True`` -- a standalone,
-        human-only view). Works for any origin since ``ToolStatement.to_code()``
-        is shared, with no grammar-specific branching needed. Named
+        Reconstruct this run's statements as source-formatted text, in source
+        order (done and failed statements merged by ordinal; a failed one
+        carries its failure note). A standalone, human-only view. Named
         generically ("code", not "python") since the underlying grammar
         isn't guaranteed to stay Python-syntax-specific forever.
         """
-        from ...utils.script import render_completed_as_python
+        from ...utils.statements import render_statements
 
-        return render_completed_as_python(self.statements, show_batches=True)
+        ordered = sorted((*self.statements, *self.failed_statements), key=lambda st: st.ordinal)
+        return render_statements(ordered)
 
     def usage_report(self) -> ToolUsageReport:
         """
-        Compute per-tool call-count accounting for this run -- one
-        ``ToolUsageRecord`` per distinct real tool identity actually
-        dispatched, ordered by first-call order, ``call_count >= 1`` each
-        (an identity with zero dispatched calls never produces an entry) --
-        plus ``total_dispatched``/``total_failed`` summary counts, bundled
-        into a single ``ToolUsageReport``.
-
-        Walks ``self.statements`` then ``self.failed_statements``, in that
-        order, counting only dispatched calls (``is_dispatched``) under
-        their real identity (``tool_identity`` -- correctly unsplices
-        ``PlanActAgent``'s ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``
-        sentinels; a no-op for a ``PlanActAgent``/``ReActAgent``-sourced
-        statement, whose ``tool`` is already the real identity).
+        Per-tool call-count accounting for this run -- one ``ToolUsageRecord``
+        per distinct real tool identity among the tool steps that ran or
+        failed (``build_usage_report``), plus ``total_dispatched`` and
+        ``total_failed`` counts, bundled into a ``ToolUsageReport``.
         """
         from ...utils.agents import build_usage_report
 
-        return build_usage_report(self.statements, self.failed_statements)
-
-
-@dataclass(frozen=True, slots=True)
-class PlanActAgentToolUsage:
-    """
-    Five orthogonal counts derived from one completed ``PlanActAgentRecord``'s
-    ``statements``, for debugging/observability only -- never used to
-    reconstruct or re-plan. ``registered_tool_calls`` + ``builtin_calls`` +
-    ``attribute_calls`` is the same total already enforced (silently)
-    against ``tool_calls_limit``; this just slices it three ways instead of
-    one. ``binop_count`` is a subset of ``rhs_assignment_count``, not
-    double-counted against the other three.
-
-    Fields
-    ------
-    registered_tool_calls : int
-        Dispatched slots that are neither a builtin nor an attribute/method
-        call -- a real registered-tool invocation. Counted across both
-        ``statements`` and ``failed_statements`` -- a dispatched call that
-        raised still counted against ``tool_calls_used`` when it ran, so it
-        must still be counted here for the totals to actually match.
-
-    builtin_calls : int
-        Slots dispatched through the approved-Python-builtin path
-        (``PY_BUILTIN_ALIAS``). Counted across both ``statements`` and
-        ``failed_statements``, same as ``registered_tool_calls``.
-
-    attribute_calls : int
-        Slots dispatched through the attribute/method-call path
-        (``ATTR_CALL_ALIAS``). Counted across both ``statements`` and
-        ``failed_statements``, same as ``registered_tool_calls``.
-
-    binop_count : int
-        Bare-expression (``RHS_ASSIGN_ALIAS``) slots whose stored value is
-        still an ``ast.expr`` containing an ``ast.BinOp`` anywhere --
-        constant expressions are never folded before commit (only
-        dry-run-validated at parse time), so this is a plain post-hoc walk,
-        not a count tracked separately during parsing.
-
-    rhs_assignment_count : int
-        Total ``RHS_ASSIGN_ALIAS`` slot count, independent of whether it
-        contains a binop.
-    """
-
-    registered_tool_calls: int
-    builtin_calls: int
-    attribute_calls: int
-    binop_count: int
-    rhs_assignment_count: int
-
-    def to_dict(self) -> dict[str, int]:
-        """Return the explicit serialized dictionary representation."""
-        return asdict(self)
+        return build_usage_report((*self.statements, *self.failed_statements))
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,12 +297,11 @@ class PlanActAgentRecord(ToolAgentRecord):
     Canonical memory record for one completed PlanActAgent invocation, a
     ``ToolAgentRecord`` subclass. ``statements``/``failed_statements``/
     ``regenerations_used``/``render_as_code()`` are all inherited; only
-    ``repair_rounds_used`` and the 5-category dispatch-mechanism breakdown
-    (``dispatch_breakdown()``) remain genuinely ``PlanActAgent``-specific.
+    ``repair_rounds_used`` remains genuinely ``PlanActAgent``-specific.
 
     No agent-level global blackboard for this family -- each record owns
-    its own slots outright, with no blackboard_start/blackboard_end span to
-    index into.
+    its own statements outright, with no blackboard_start/blackboard_end span
+    to index into.
 
     Fields
     ------
@@ -418,58 +322,6 @@ class PlanActAgentRecord(ToolAgentRecord):
         # type" here). Targets ToolAgentRecord now -- it already validates/
         # normalizes statements/failed_statements, inherited unchanged.
         super(PlanActAgentRecord, self).__post_init__()
-
-    def dispatch_breakdown(self) -> PlanActAgentToolUsage:
-        """
-        Compute a ``PlanActAgentToolUsage`` snapshot from ``self.statements``
-        and ``self.failed_statements`` in one pass. Pure/derived -- not
-        stored, recomputed on each call. Named apart from the inherited
-        ``ToolAgentRecord.usage_report()`` because the two measure different
-        things: this measures dispatch *mechanism* (5 categories), that
-        measures *tool identity* -- genuinely different things, both kept.
-        """
-        from ...utils.agents import is_dispatched
-
-        registered_tool_calls = 0
-        builtin_calls = 0
-        attribute_calls = 0
-        binop_count = 0
-        rhs_assignment_count = 0
-
-        # One combined pass over both -- a slot's classification doesn't
-        # depend on whether it ultimately succeeded or failed. A
-        # RHS_ASSIGN_ALIAS slot can fail here too (not just a dispatched
-        # call): resolve_statement_args evaluates its `val` expression against
-        # already-bound names, so e.g. `avg = total / count` fails exactly
-        # like a real dispatched call whenever `count` resolves to `0` --
-        # it's just as real an rhs-assignment "use" as a successful one.
-        # RETURN_ALIAS is excluded from every count on both sides -- it's
-        # the plan's terminal, not a use of any of these five categories.
-        # tool_calls_used counts a dispatched call whether it succeeded or
-        # raised, so this snapshot must too, or its own sum-equals-budget
-        # claim would be false whenever any call failed.
-        for slot in (*self.statements, *self.failed_statements):
-            if slot.tool == PY_BUILTIN_ALIAS:
-                builtin_calls += 1
-            elif slot.tool == ATTR_CALL_ALIAS:
-                attribute_calls += 1
-            elif slot.tool == RHS_ASSIGN_ALIAS:
-                rhs_assignment_count += 1
-                value = slot.kwargs["val"]
-                if isinstance(value, ast.expr) and any(
-                    isinstance(node, ast.BinOp) for node in ast.walk(value)
-                ):
-                    binop_count += 1
-            elif is_dispatched(slot):
-                registered_tool_calls += 1
-
-        return PlanActAgentToolUsage(
-            registered_tool_calls=registered_tool_calls,
-            builtin_calls=builtin_calls,
-            attribute_calls=attribute_calls,
-            binop_count=binop_count,
-            rhs_assignment_count=rhs_assignment_count,
-        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation --
