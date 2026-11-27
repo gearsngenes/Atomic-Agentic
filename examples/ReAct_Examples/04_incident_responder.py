@@ -12,13 +12,12 @@ Unlike 01 (deterministic math, no failures), 02 (delegating to two LLM
 sub-agents), and 03 (cross-turn memory), this example is the first to
 exercise `fail_fast=False`'s actual reason for existing: a tool call that
 fails for a real, in-context business reason, which the model must read
-(`YOUR LAST CALL FAILED`) and route around -- never a model mistake, and
+(`YOUR LAST STATEMENT FAILED`) and route around -- never a model mistake, and
 never something a fixed upfront plan could have anticipated, since which
 service is actually broken and whether a fix is even allowed right now
 are both only knowable by looking.
 """
 import logging
-from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
 
@@ -145,9 +144,8 @@ task = (
     "a service once you've identified which one is actually unhealthy.\n\n"
     "If a restart fails, do not retry it -- page the on-call engineer instead, explaining what "
     "you found and why you couldn't fix it directly.\n\n"
-    "When you're done, call return with one plain sentence you write yourself, summarizing what "
-    "was wrong and how it was resolved -- do not try to combine several bound values into one "
-    "value with '+'; just describe the outcome in your own words."
+    "When you're done, write `return` with one plain sentence you write yourself, summarizing what "
+    "was wrong and how it was resolved, describing the outcome in your own words."
 )
 
 final_result = responder.invoke({"prompt": task})
@@ -155,9 +153,11 @@ final_result = responder.invoke({"prompt": task})
 print(f"\nIncident summary: {final_result.result}")
 
 record = responder.get_conversation().records[-1]
-print("\nCalls made:")
+print("\nStatements run:")
 print(record.render_as_code())
 
 if record.failed_statements:
-    print("\nCalls that failed (and were reacted to, not retried):")
-    pprint(record.failed_statements)
+    print("\nStatements that failed (and were reacted to, not retried):")
+    for statement in record.failed_statements:
+        failed = next(step for step in statement.steps if step.status == "failed")
+        print(f"  {statement.source}  # {failed.error!r}")

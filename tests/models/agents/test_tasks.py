@@ -222,8 +222,6 @@ class TestReActTask:
         task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
         assert task.statement is None
-        assert task.source == ""
-        assert task.history == []
         assert task.failure_note == ""
         assert not hasattr(task, "cache")
         assert not hasattr(task, "constant_values")
@@ -237,7 +235,9 @@ class TestReActTask:
     def test_no_json_only_fields(self) -> None:
         task = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
-        for removed in ("generated_step", "resolved_args", "last_call_failed", "pending"):
+        for removed in (
+            "generated_step", "resolved_args", "last_call_failed", "pending", "source", "history",
+        ):
             assert not hasattr(task, removed)
 
     def test_no_step_meta_or_next_step_index_fields(self) -> None:
@@ -247,13 +247,13 @@ class TestReActTask:
         assert not hasattr(task, "next_step_index")
         assert not hasattr(task, "step_meta")
 
-    def test_history_is_independent_per_instance(self) -> None:
+    def test_completed_is_independent_per_instance(self) -> None:
         first = ReActTask(turns=[], inputs={}, user_prompt="hi")
         second = ReActTask(turns=[], inputs={}, user_prompt="hi")
 
-        first.history.append("x = add(1, 2)")
+        first.completed.append(_statement())
 
-        assert second.history == []
+        assert second.completed == []
 
 
 class TestThinkingTask:

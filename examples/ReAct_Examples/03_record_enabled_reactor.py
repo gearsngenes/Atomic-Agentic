@@ -6,13 +6,12 @@ Type a task, get an answer, then ask follow-ups that can refer to prior
 turns' results.
 
 Analogous to PlanAct_Examples/06_record_enabled_planner.py but using a
-ReActAgent: one tool call is generated, resolved, and dispatched per
+ReActAgent: one Python statement is generated, checked and run per
 round -- reacting to each result before deciding the next -- rather than
 a whole plan written upfront, so the number of LLM calls varies per run
 instead of being fixed at one.
 """
 import logging
-from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
 
@@ -49,9 +48,11 @@ while True:
 
     record = reactor.get_conversation().records[-1]
     print(f"LLM calls this turn: {len(record.llm_records)}")
-    print("Executed calls:")
-    pprint(record.statements)
+    print("Executed statements:")
+    print(record.render_as_code())
     if record.failed_statements:
-        print("Failed calls:")
-        pprint(record.failed_statements)
+        print("Failed statements:")
+        for statement in record.failed_statements:
+            failed = next(step for step in statement.steps if step.status == "failed")
+            print(f"  {statement.source}  # {failed.error!r}")
     print("-" * 40 + "\n")

@@ -2,14 +2,14 @@
 
 ReActAgent iteratively orchestrating two BasicAgent sub-agents (a code
 builder and a code reviewer) through a build -> review -> revise loop --
-deciding one tool call per round rather than a fixed upfront sequence, so
+deciding one statement per round rather than a fixed upfront sequence, so
 it can stop as soon as the reviewer's grade clears the bar instead of
 always running a fixed number of cycles.
 
 `AgenticOrchestrator`'s conversation sets `context_preview_limit` below so
 draft code and review dicts truncate in the runtime-context block each round
 -- without it, the full values are always visible, leaving the model no real
-incentive to reference an earlier result by "$name" instead of retyping it.
+incentive to reference an earlier result by its name instead of retyping it.
 
 "approval_status" is deliberately the first key in CodeReviewer's schema,
 before "feedback": OpenAI's structured output fills object fields in

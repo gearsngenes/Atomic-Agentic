@@ -251,8 +251,8 @@ class ReActTask(ToolAgentTask):
     ``Agent._write_context``).
 
     No fixed-size preallocated board and no observability-decay window --
-    every round renders the full ``history`` (plus the last failure) as the
-    steps block, and the bound values through the context block. No
+    every round renders the sources of ``completed`` (plus the last failure)
+    as the steps block, and the bound values through the context block. No
     ``__post_init__`` -- an in-flight, internal-only object, not a real
     construction-time boundary.
 
@@ -264,22 +264,13 @@ class ReActTask(ToolAgentTask):
         ``completed`` or ``failed_statements`` and clears it. ``None``
         between rounds.
 
-    source : str
-        The current statement as the model wrote it. ``think()`` sets it;
-        ``act()`` appends it to ``history`` or builds ``failure_note`` from it.
-
-    history : list[str]
-        The source of every fully completed statement, in order -- what the
-        steps block renders.
-
     failure_note : str
         The model-facing description of the last failed statement (the
         statement, the failing sub-step and the sub-steps that already ran);
-        ``""`` when the last statement succeeded.
+        ``""`` when the last statement succeeded, so a non-empty note means
+        the last statement failed.
     """
     statement: Optional[Statement] = None
-    source: str = ""
-    history: list[str] = field(default_factory=list)
     failure_note: str = ""
 
 

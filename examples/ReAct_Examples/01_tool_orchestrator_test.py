@@ -1,11 +1,11 @@
 """01_tool_orchestrator_test.py
 
 ReActAgent iteratively orchestrating math + console tools to solve a
-multi-step arithmetic task: one tool call generated, resolved, and
-dispatched per round, reacting to each result before deciding the next.
+multi-step arithmetic task: one Python statement generated, checked and
+run per round, reacting to each result before deciding the next.
 
 Analogous to PlanAct_Examples/00_plan_test.py, but no upfront plan is ever
-written -- each round's single best next call is decided fresh against
+written -- each round's single best next statement is decided fresh against
 everything completed so far this run.
 """
 import logging
@@ -27,7 +27,7 @@ orchestrator = ReActAgent(
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
     llm_engine=llm_engine,
     records_window=20,    # send-window (turns) to the model
-    tool_calls_limit=15,  # max *non-return* tool calls per run
+    tool_calls_limit=15,  # max actions per run (a statement costs max(1, its calls); return is free)
     record_enabled=True,
     
 )
@@ -36,7 +36,7 @@ orchestrator.register_tools(BASIC_MATH_TOOLS)
 orchestrator.register_tools(CONSOLE_TOOLS)
 orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below needs both
 
-# A fixed value the model may reference as $PI: a readonly context variable
+# A fixed value the model may reference as PI: a readonly context variable
 # on the agent's conversation.
 orchestrator.get_conversation().remember(
     "PI", math.pi, "The mathematical constant pi.", readonly=True,
@@ -58,5 +58,5 @@ final_result = orchestrator.invoke({"prompt": task})
 
 print(f"\nFinal Result: {final_result.result}")
 
-print("\nExecuted calls:\n")
+print("\nExecuted statements:\n")
 print(orchestrator.get_conversation().records[-1].render_as_code())
